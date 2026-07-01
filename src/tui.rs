@@ -2,7 +2,7 @@ use std::{io, time::Duration};
 
 use color_eyre::eyre::{Result, bail};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -35,6 +35,7 @@ struct KeyBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct KeyPress {
     code: KeyCode,
+    modifiers: KeyModifiers,
     label: String,
 }
 
@@ -61,12 +62,105 @@ enum Action {
     Comment,
     SubmitComment,
     CancelComment,
+    InsertNewline,
     DeleteChar,
 }
 
 enum Mode {
     Normal,
-    CommentInput(String),
+    CommentInput(CommentEditor),
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommentEditor {
+    text: String,
+    cursor: usize,
+}
+
+impl CommentEditor {
+    fn insert_char(&mut self, ch: char) {
+        self.text.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let Some((previous, ch)) = self.text[..self.cursor].char_indices().last() else {
+            return;
+        };
+        self.text.drain(previous..self.cursor);
+        self.cursor -= ch.len_utf8();
+    }
+
+    fn move_left(&mut self) {
+        if let Some((previous, _)) = self.text[..self.cursor].char_indices().last() {
+            self.cursor = previous;
+        }
+    }
+
+    fn move_right(&mut self) {
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let ch = self.text[self.cursor..].chars().next().unwrap();
+        self.cursor += ch.len_utf8();
+    }
+
+    fn line_col(&self) -> (usize, usize) {
+        let before = &self.text[..self.cursor];
+        let line = before.chars().filter(|ch| *ch == '\n').count();
+        let col = before
+            .rsplit_once('\n')
+            .map(|(_, tail)| tail.chars().count())
+            .unwrap_or_else(|| before.chars().count());
+        (line, col)
+    }
+
+    fn set_line_col(&mut self, target_line: usize, target_col: usize) {
+        let mut line = 0;
+        let mut col = 0;
+        for (index, ch) in self.text.char_indices() {
+            if line == target_line && col == target_col {
+                self.cursor = index;
+                return;
+            }
+            if ch == '\n' {
+                if line == target_line {
+                    self.cursor = index;
+                    return;
+                }
+                line += 1;
+                col = 0;
+            } else {
+                col += 1;
+            }
+        }
+        self.cursor = self.text.len();
+    }
+
+    fn move_up(&mut self) {
+        let (line, col) = self.line_col();
+        if line > 0 {
+            self.set_line_col(line - 1, col);
+        }
+    }
+
+    fn move_down(&mut self) {
+        let (line, col) = self.line_col();
+        if line + 1 < self.text.lines().count().max(1) {
+            self.set_line_col(line + 1, col);
+        }
+    }
+
+    fn into_text(self) -> String {
+        self.text
+    }
 }
 
 pub fn run(session: &mut ReviewSession, keybindings: &KeybindingsConfig) -> Result<()> {
@@ -114,12 +208,12 @@ fn run_loop(
                     break;
                 }
             }
-            Mode::CommentInput(buffer) => {
+            Mode::CommentInput(editor) => {
                 let mut leave_comment_input = false;
-                if let Some(action) = keymap.action_for(&key) {
-                    leave_comment_input = handle_comment_action(action, session, buffer);
-                } else if let KeyCode::Char(ch) = key.code {
-                    buffer.push(ch);
+                if let Some(action) = keymap.comment_action_for(&key) {
+                    leave_comment_input = handle_comment_action(action, session, editor);
+                } else {
+                    handle_comment_key(key, editor);
                 }
                 if leave_comment_input {
                     *mode = Mode::Normal;
@@ -168,26 +262,45 @@ fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut 
                 session.expand_tree_node();
             }
         }
-        Action::Comment => *mode = Mode::CommentInput(String::new()),
-        Action::SubmitComment | Action::CancelComment | Action::DeleteChar => {}
+        Action::Comment => *mode = Mode::CommentInput(CommentEditor::default()),
+        Action::SubmitComment
+        | Action::CancelComment
+        | Action::InsertNewline
+        | Action::DeleteChar => {}
     }
     false
 }
 
-fn handle_comment_action(action: Action, session: &mut ReviewSession, buffer: &mut String) -> bool {
+fn handle_comment_action(
+    action: Action,
+    session: &mut ReviewSession,
+    editor: &mut CommentEditor,
+) -> bool {
     match action {
         Action::CancelComment => return true,
         Action::SubmitComment => {
-            let body = std::mem::take(buffer);
+            let body = std::mem::take(editor).into_text();
             session.add_comment(body);
             return true;
         }
+        Action::InsertNewline => editor.insert_newline(),
         Action::DeleteChar => {
-            buffer.pop();
+            editor.backspace();
         }
         _ => {}
     }
     false
+}
+
+fn handle_comment_key(key: KeyEvent, editor: &mut CommentEditor) {
+    match key.code {
+        KeyCode::Char(ch) => editor.insert_char(ch),
+        KeyCode::Left => editor.move_left(),
+        KeyCode::Right => editor.move_right(),
+        KeyCode::Up => editor.move_up(),
+        KeyCode::Down => editor.move_down(),
+        _ => {}
+    }
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode, keymap: &KeyMap) {
@@ -204,8 +317,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode, ke
     draw_diff(frame, body[1], session);
     draw_footer(frame, main[1], session, mode, keymap);
 
-    if let Mode::CommentInput(buffer) = mode {
-        draw_comment_popup(frame, frame.area(), buffer);
+    if let Mode::CommentInput(editor) = mode {
+        draw_comment_popup(frame, frame.area(), editor);
     }
 }
 
@@ -400,7 +513,8 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::CommentInput(_) => format!(
-            "type comment · {submit} save · {cancel} cancel",
+            "type comment · {newline} newline · {submit} save · {cancel} cancel",
+            newline = keymap.hint(Action::InsertNewline),
             submit = keymap.hint(Action::SubmitComment),
             cancel = keymap.hint(Action::CancelComment),
         ),
@@ -450,6 +564,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
         add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
+        add_bindings(&mut bindings, Action::InsertNewline, &config.insert_newline)?;
         add_bindings(&mut bindings, Action::DeleteChar, &config.delete_char)?;
         Ok(Self { bindings })
     }
@@ -459,7 +574,23 @@ impl KeyMap {
     fn action_for(&self, key: &KeyEvent) -> Option<Action> {
         self.bindings
             .iter()
-            .find(|binding| binding.key.code == key.code)
+            .find(|binding| binding.key.matches(key))
+            .map(|binding| binding.action)
+    }
+
+    fn comment_action_for(&self, key: &KeyEvent) -> Option<Action> {
+        self.bindings
+            .iter()
+            .find(|binding| {
+                binding.key.matches(key)
+                    && matches!(
+                        binding.action,
+                        Action::SubmitComment
+                            | Action::CancelComment
+                            | Action::InsertNewline
+                            | Action::DeleteChar
+                    )
+            })
             .map(|binding| binding.action)
     }
 
@@ -469,6 +600,12 @@ impl KeyMap {
             .find(|binding| binding.action == action)
             .map(|binding| binding.key.label.as_str())
             .unwrap_or("?")
+    }
+}
+
+impl KeyPress {
+    fn matches(&self, key: &KeyEvent) -> bool {
+        self.code == key.code && self.modifiers == key.modifiers
     }
 }
 
@@ -484,7 +621,20 @@ fn add_bindings(bindings: &mut Vec<KeyBinding>, action: Action, keys: &[String])
 
 fn parse_key(raw: &str) -> Result<KeyPress> {
     let normalized = raw.trim().to_ascii_lowercase();
-    let code = match normalized.as_str() {
+    if matches!(normalized.as_str(), "page-up" | "page-down") {
+        return Ok(KeyPress {
+            code: if normalized == "page-up" {
+                KeyCode::PageUp
+            } else {
+                KeyCode::PageDown
+            },
+            modifiers: KeyModifiers::empty(),
+            label: raw.to_owned(),
+        });
+    }
+    let parts: Vec<_> = normalized.split(['-', '+']).collect();
+    let (modifiers, key_name) = parse_key_parts(&parts, raw)?;
+    let code = match key_name {
         "esc" | "escape" => KeyCode::Esc,
         "enter" | "return" => KeyCode::Enter,
         "tab" => KeyCode::Tab,
@@ -496,24 +646,55 @@ fn parse_key(raw: &str) -> Result<KeyPress> {
         "pageup" | "page-up" | "pgup" => KeyCode::PageUp,
         "pagedown" | "page-down" | "pgdn" => KeyCode::PageDown,
         "space" => KeyCode::Char(' '),
-        _ if raw.chars().count() == 1 => KeyCode::Char(raw.chars().next().unwrap()),
+        _ if key_name.chars().count() == 1 => {
+            KeyCode::Char(if modifiers.is_empty() && raw.trim().chars().count() == 1 {
+                raw.trim().chars().next().unwrap()
+            } else {
+                key_name.chars().next().unwrap()
+            })
+        }
         _ => bail!("unsupported keybinding `{raw}`"),
     };
     Ok(KeyPress {
         code,
+        modifiers,
         label: raw.to_owned(),
     })
 }
 
-fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, buffer: &str) {
-    let popup = centered_rect(70, 20, area);
+fn parse_key_parts<'a>(parts: &'a [&'a str], raw: &str) -> Result<(KeyModifiers, &'a str)> {
+    let Some((key_name, modifiers)) = parts.split_last() else {
+        bail!("unsupported keybinding `{raw}`");
+    };
+    let mut parsed = KeyModifiers::empty();
+    for modifier in modifiers {
+        match *modifier {
+            "ctrl" | "control" => parsed |= KeyModifiers::CONTROL,
+            "alt" => parsed |= KeyModifiers::ALT,
+            "shift" => parsed |= KeyModifiers::SHIFT,
+            _ => bail!("unsupported keybinding `{raw}`"),
+        }
+    }
+    Ok((parsed, key_name))
+}
+
+fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &CommentEditor) {
+    let popup = centered_rect(70, 40, area);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(buffer.to_owned())
+        Paragraph::new(editor.text.clone())
             .block(Block::default().borders(Borders::ALL).title("comment"))
             .wrap(Wrap { trim: false }),
         popup,
     );
+
+    let (line, col) = editor.line_col();
+    let inner_x = popup.x.saturating_add(1);
+    let inner_y = popup.y.saturating_add(1);
+    frame.set_cursor_position((
+        inner_x.saturating_add(col as u16),
+        inner_y.saturating_add(line as u16),
+    ));
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -543,13 +724,22 @@ mod tests {
     fn parses_named_and_character_keys() {
         assert_eq!(parse_key("down").unwrap().code, KeyCode::Down);
         assert_eq!(parse_key("pagedown").unwrap().code, KeyCode::PageDown);
+        assert_eq!(parse_key("page-down").unwrap().code, KeyCode::PageDown);
         assert_eq!(parse_key("N").unwrap().code, KeyCode::Char('N'));
         assert_eq!(parse_key("space").unwrap().code, KeyCode::Char(' '));
     }
 
     #[test]
+    fn parses_modified_keys() {
+        let key = parse_key("ctrl-s").unwrap();
+
+        assert_eq!(key.code, KeyCode::Char('s'));
+        assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+    }
+
+    #[test]
     fn rejects_unsupported_key_names() {
-        assert!(parse_key("ctrl-x").is_err());
+        assert!(parse_key("hyper-space").is_err());
     }
 
     #[test]
@@ -582,5 +772,51 @@ mod tests {
             keymap.action_for(&KeyEvent::from(KeyCode::Right)),
             Some(Action::ExpandFold)
         );
+    }
+
+    #[test]
+    fn comment_mode_uses_comment_actions_only() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.comment_action_for(&KeyEvent::from(KeyCode::Down)),
+            None
+        );
+        assert_eq!(
+            keymap.comment_action_for(&KeyEvent::from(KeyCode::Enter)),
+            Some(Action::InsertNewline)
+        );
+        assert_eq!(
+            keymap.comment_action_for(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+            Some(Action::SubmitComment)
+        );
+    }
+
+    #[test]
+    fn comment_editor_inserts_multiline_text() {
+        let mut editor = CommentEditor::default();
+        for ch in "hello".chars() {
+            editor.insert_char(ch);
+        }
+        editor.insert_newline();
+        for ch in "world".chars() {
+            editor.insert_char(ch);
+        }
+
+        assert_eq!(editor.text, "hello\nworld");
+        assert_eq!(editor.line_col(), (1, 5));
+    }
+
+    #[test]
+    fn comment_editor_backspace_merges_lines() {
+        let mut editor = CommentEditor {
+            text: "hello\nworld".to_owned(),
+            cursor: "hello\n".len(),
+        };
+
+        editor.backspace();
+
+        assert_eq!(editor.text, "helloworld");
+        assert_eq!(editor.line_col(), (0, 5));
     }
 }

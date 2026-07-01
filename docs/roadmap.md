@@ -53,7 +53,7 @@ Status: started.
 ## Milestone 4: comments and artifacts
 
 - [x] line-level comments
-- [ ] multiline editor widget
+- [x] multiline editor widget
 - [x] comment navigation
 - [ ] comment list pane
 - [ ] comment states: draft/resolved/todo

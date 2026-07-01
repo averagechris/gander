@@ -86,6 +86,8 @@ toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
 comment = ["c"]
+insert-newline = ["enter"]
+submit-comment = ["ctrl-s"]
 quit = ["q", "esc"]
 ```
 
@@ -154,6 +156,8 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
 | `c` | add a file comment in file focus or line comment in diff focus |
+| Enter in comment editor | insert newline |
+| Ctrl-S in comment editor | save comment |
 | `q` / Esc | quit and save state |
 
 ## Architecture
@@ -176,6 +180,5 @@ The design goal is to keep jj interaction, parsing, review state, rendering, and
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
 1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
-2. multiline comment editor
-3. better jj revision/range semantics and support for reviewing stacks
-4. snapshot tests for parser, artifact, and TUI rendering
+2. better jj revision/range semantics and support for reviewing stacks
+3. snapshot tests for parser, artifact, and TUI rendering

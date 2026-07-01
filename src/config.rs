@@ -52,6 +52,7 @@ pub struct KeybindingsConfig {
     pub comment: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
+    pub insert_newline: Vec<String>,
     pub delete_char: Vec<String>,
 }
 
@@ -108,6 +109,7 @@ struct KeybindingsConfigPatch {
     comment: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
+    insert_newline: Option<Vec<String>>,
     delete_char: Option<Vec<String>>,
 }
 
@@ -149,8 +151,9 @@ impl Default for KeybindingsConfig {
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
             comment: keys(["c"]),
-            submit_comment: keys(["enter"]),
+            submit_comment: keys(["ctrl-s"]),
             cancel_comment: keys(["esc"]),
+            insert_newline: keys(["enter"]),
             delete_char: keys(["backspace"]),
         }
     }
@@ -251,6 +254,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.comment, patch.comment);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
+        apply_optional(&mut self.insert_newline, patch.insert_newline);
         apply_optional(&mut self.delete_char, patch.delete_char);
     }
 }
@@ -331,6 +335,8 @@ quit = ["q"]
 toggle-fold = ["f"]
 collapse-fold = ["h"]
 expand-fold = ["l"]
+insert-newline = ["enter"]
+submit-comment = ["ctrl-s"]
 "#,
         )
         .unwrap();
@@ -348,6 +354,8 @@ expand-fold = ["l"]
         assert_eq!(config.keybindings.toggle_fold, ["f"]);
         assert_eq!(config.keybindings.collapse_fold, ["h"]);
         assert_eq!(config.keybindings.expand_fold, ["l"]);
+        assert_eq!(config.keybindings.insert_newline, ["enter"]);
+        assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
         assert_eq!(
             config
                 .artifact
@@ -381,6 +389,8 @@ expand-fold = ["l"]
         assert_eq!(config.keybindings.toggle_fold, ["space"]);
         assert_eq!(config.keybindings.collapse_fold, ["left"]);
         assert_eq!(config.keybindings.expand_fold, ["right"]);
+        assert_eq!(config.keybindings.insert_newline, ["enter"]);
+        assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
     }
 
     #[test]
