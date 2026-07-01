@@ -19,6 +19,9 @@ use crate::{
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
+/// Rough number of diff rows kept visible below the cursor when auto-scrolling.
+const DIFF_CURSOR_SCROLL_MARGIN: usize = 15;
+
 #[derive(Debug, Clone)]
 pub struct ReviewSession {
     pub repo: PathBuf,
@@ -521,6 +524,25 @@ impl ReviewSession {
         };
     }
 
+    /// Scroll near the end of the diff instead of past it, and keep the cursor
+    /// on the last commentable row so diff-focus actions still make sense.
+    pub fn scroll_diff_to_bottom(&mut self) {
+        let rows = self.diff_rows_for_selected_file();
+        if rows.is_empty() {
+            self.diff_scroll = 0;
+            return;
+        }
+        if self.focus == Focus::Diff
+            && let Some(last_anchor) = rows.iter().rposition(|row| row.anchor.is_some())
+        {
+            self.diff_cursor = last_anchor;
+        }
+        self.diff_scroll = rows
+            .len()
+            .saturating_sub(DIFF_CURSOR_SCROLL_MARGIN)
+            .min(u16::MAX as usize) as u16;
+    }
+
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Files => Focus::Diff,
@@ -549,8 +571,8 @@ impl ReviewSession {
         self.diff_cursor = cursor;
         if self.diff_cursor < self.diff_scroll as usize {
             self.diff_scroll = self.diff_cursor as u16;
-        } else if self.diff_cursor > self.diff_scroll as usize + 15 {
-            self.diff_scroll = self.diff_cursor.saturating_sub(15) as u16;
+        } else if self.diff_cursor > self.diff_scroll as usize + DIFF_CURSOR_SCROLL_MARGIN {
+            self.diff_scroll = self.diff_cursor.saturating_sub(DIFF_CURSOR_SCROLL_MARGIN) as u16;
         }
     }
 
@@ -1582,6 +1604,22 @@ diff --git a/src/c.rs b/src/c.rs
         session.move_to_unviewed(1);
 
         assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+    }
+
+    #[test]
+    fn scroll_diff_to_bottom_stays_within_content() {
+        let mut session = multi_line_session();
+        session.toggle_focus();
+
+        session.scroll_diff_to_bottom();
+
+        let rows = session.diff_rows_for_selected_file();
+        assert!((session.diff_scroll as usize) < rows.len());
+        assert!(rows[session.diff_cursor].anchor.is_some());
+        assert_eq!(
+            session.diff_cursor,
+            rows.iter().rposition(|row| row.anchor.is_some()).unwrap()
+        );
     }
 
     #[test]

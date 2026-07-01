@@ -513,7 +513,7 @@ fn handle_normal_action(
         },
         Action::ToggleFocus => session.toggle_focus(),
         Action::DiffTop => session.diff_scroll = 0,
-        Action::DiffBottom => session.diff_scroll = u16::MAX / 2,
+        Action::DiffBottom => session.scroll_diff_to_bottom(),
         Action::CompareTrunk => load_review_target(
             review_loader,
             session,
@@ -651,11 +651,11 @@ fn handle_target_chooser_key(
             }
             true
         }
-        KeyCode::Char('g') => {
+        KeyCode::Home => {
             chooser.select_first();
             false
         }
-        KeyCode::Char('G') => {
+        KeyCode::End => {
             chooser.select_last();
             false
         }
@@ -667,7 +667,7 @@ fn handle_target_chooser_key(
             chooser.pop_query_char();
             false
         }
-        KeyCode::Char(ch) if key.modifiers.is_empty() => {
+        KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             chooser.push_query_char(ch);
             false
         }
@@ -2438,6 +2438,56 @@ diff --git a/README.md b/README.md
         assert_eq!(chooser.selecting, TargetPickerSide::Tip);
         assert_eq!(chooser.selected, 1);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("base", "tip")));
+    }
+
+    #[test]
+    fn target_chooser_filter_accepts_g_and_shifted_characters() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: Ok(String::new()),
+            summaries: Vec::new(),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "abc".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: "feature work".to_owned(),
+                },
+                JjChangeSummary {
+                    change_id: "def".to_owned(),
+                    bookmarks: String::new(),
+                    description: "generated Goo".to_owned(),
+                },
+            ],
+            "abc",
+            "@",
+        );
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        for key in [
+            KeyEvent::from(KeyCode::Char('g')),
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+        ] {
+            assert!(!handle_target_chooser_key(
+                key,
+                &mut chooser,
+                &mut session,
+                &keymap,
+                &loader,
+                &mut tui_state,
+            ));
+        }
+
+        assert_eq!(chooser.query, "gG");
+        assert_eq!(chooser.filtered, vec![1]);
     }
 
     #[test]
