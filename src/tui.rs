@@ -85,6 +85,19 @@ enum Mode {
 #[derive(Debug, Default)]
 struct TuiState {
     diff_drag: Option<DiffDrag>,
+    notice: Option<UiNotice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UiNotice {
+    level: UiNoticeLevel,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiNoticeLevel {
+    Info,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,14 +263,16 @@ fn run_loop(
     tui_state: &mut TuiState,
 ) -> Result<()> {
     loop {
-        terminal.draw(|frame| draw(frame, session, mode, keymap))?;
+        terminal.draw(|frame| draw(frame, session, mode, keymap, tui_state.notice.as_ref()))?;
 
         if !event::poll(Duration::from_millis(150))? {
             continue;
         }
 
         match event::read()? {
-            Event::Key(key) if handle_key_event(key, session, mode, keymap, review_loader)? => {
+            Event::Key(key)
+                if handle_key_event(key, session, mode, keymap, review_loader, tui_state)? =>
+            {
                 break;
             }
             Event::Key(_) => {}
@@ -276,6 +291,7 @@ fn handle_key_event(
     mode: &mut Mode,
     keymap: &KeyMap,
     review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
 ) -> Result<bool> {
     if key.kind != KeyEventKind::Press {
         return Ok(false);
@@ -284,7 +300,7 @@ fn handle_key_event(
     match mode {
         Mode::Normal => {
             if let Some(action) = keymap.action_for(&key)
-                && handle_normal_action(action, session, mode, review_loader)?
+                && handle_normal_action(action, session, mode, review_loader, tui_state)?
             {
                 return Ok(true);
             }
@@ -309,6 +325,7 @@ fn handle_normal_action(
     session: &mut ReviewSession,
     mode: &mut Mode,
     review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
 ) -> Result<bool> {
     match action {
         Action::Quit => return Ok(true),
@@ -323,8 +340,18 @@ fn handle_normal_action(
         Action::ToggleFocus => session.toggle_focus(),
         Action::DiffTop => session.diff_scroll = 0,
         Action::DiffBottom => session.diff_scroll = u16::MAX / 2,
-        Action::CompareTrunk => review_loader.load(session, ReviewTarget::trunk_to_current())?,
-        Action::CompareParent => review_loader.load(session, ReviewTarget::parent_to_current())?,
+        Action::CompareTrunk => load_review_target(
+            review_loader,
+            session,
+            ReviewTarget::trunk_to_current(),
+            tui_state,
+        ),
+        Action::CompareParent => load_review_target(
+            review_loader,
+            session,
+            ReviewTarget::parent_to_current(),
+            tui_state,
+        ),
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::NextComment => session.move_to_comment(1),
@@ -380,6 +407,28 @@ impl ReviewLoader<'_> {
     }
 }
 
+fn load_review_target(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    target: ReviewTarget,
+    tui_state: &mut TuiState,
+) {
+    match review_loader.load(session, target.clone()) {
+        Ok(()) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!("loaded {target}"),
+            });
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load {target}: {error:?}"),
+            });
+        }
+    }
+}
+
 fn handle_comment_action(
     action: Action,
     session: &mut ReviewSession,
@@ -412,12 +461,18 @@ fn handle_comment_key(key: KeyEvent, editor: &mut CommentEditor) {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode, keymap: &KeyMap) {
+fn draw(
+    frame: &mut ratatui::Frame<'_>,
+    session: &ReviewSession,
+    mode: &Mode,
+    keymap: &KeyMap,
+    notice: Option<&UiNotice>,
+) {
     let layout = ui_layout(frame.area());
 
     draw_files(frame, layout.files, session);
     draw_diff(frame, layout.diff, session);
-    draw_footer(frame, layout.footer, session, mode, keymap);
+    draw_footer(frame, layout.footer, session, mode, keymap, notice);
 
     if let Mode::CommentInput(editor) = mode {
         draw_comment_popup(frame, frame.area(), editor);
@@ -556,6 +611,20 @@ fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut 
 
 fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
     let tree = session.file_tree();
+    if tree.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("No changed files"),
+                Line::from(""),
+                Line::from("Try t for trunk, p for parent, or adjust --base/--rev/--ignore."),
+            ])
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title("files"))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
     let items: Vec<ListItem<'_>> = tree
         .rows
         .iter()
@@ -627,7 +696,25 @@ fn render_file_row(
 
 fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
     if session.selected_file().is_none() {
-        frame.render_widget(Paragraph::new("No changed files"), area);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No changed files",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(format!("Current target: {}", session.target)),
+                Line::from(""),
+                Line::from("Use t for trunk()..@, p for @-..@, or pass --base/--rev."),
+                Line::from("If files disappeared unexpectedly, check --ignore filters."),
+            ])
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title("diff"))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
         return;
     }
 
@@ -801,6 +888,7 @@ fn draw_footer(
     session: &ReviewSession,
     mode: &Mode,
     keymap: &KeyMap,
+    notice: Option<&UiNotice>,
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
@@ -852,9 +940,19 @@ fn draw_footer(
             cancel = keymap.hint(Action::CancelComment),
         ),
     };
+    let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
+    if let Some(notice) = notice {
+        let (label, style) = match notice.level {
+            UiNoticeLevel::Info => ("info", Style::default().fg(Color::Blue)),
+            UiNoticeLevel::Error => ("error", Style::default().fg(Color::Red)),
+        };
+        lines[1] = Line::from(vec![
+            Span::styled(format!("{label}: "), style.add_modifier(Modifier::BOLD)),
+            Span::styled(notice.message.clone(), style),
+        ]);
+    }
     frame.render_widget(
-        Paragraph::new(format!("{}\n{}", session.summary_line(), mode_text))
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(lines).style(Style::default().fg(Color::DarkGray)),
         area,
     );
 }
@@ -1077,13 +1175,16 @@ mod tests {
 
     struct MockJjBackend {
         calls: RefCell<Vec<ReviewTarget>>,
-        diff_text: String,
+        diff_text: Result<String, String>,
     }
 
     impl JjBackend for MockJjBackend {
         fn diff(&self, _repo: &Path, target: &ReviewTarget) -> Result<String> {
             self.calls.borrow_mut().push(target.clone());
-            Ok(self.diff_text.clone())
+            match &self.diff_text {
+                Ok(diff_text) => Ok(diff_text.clone()),
+                Err(error) => bail!(error.clone()),
+            }
         }
     }
 
@@ -1108,7 +1209,7 @@ mod tests {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
         terminal
-            .draw(|frame| draw(frame, session, mode, &keymap))
+            .draw(|frame| draw(frame, session, mode, &keymap, None))
             .unwrap();
 
         buffer_text(terminal.backend().buffer())
@@ -1125,7 +1226,7 @@ mod tests {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
         terminal
-            .draw(|frame| draw(frame, session, mode, &keymap))
+            .draw(|frame| draw(frame, session, mode, &keymap, None))
             .unwrap();
 
         buffer_style_runs(terminal.backend().buffer())
@@ -1248,6 +1349,13 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn tui_snapshot_empty_state() {
+        let session = snapshot_session("");
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 14));
+    }
+
+    #[test]
     fn tui_snapshot_selected_and_range_styles() {
         let mut session = snapshot_session(
             r#"diff --git a/src/app.rs b/src/app.rs
@@ -1280,14 +1388,14 @@ diff --git a/README.md b/README.md
         );
         let backend = MockJjBackend {
             calls: RefCell::new(Vec::new()),
-            diff_text: r#"diff --git a/new.rs b/new.rs
+            diff_text: Ok(r#"diff --git a/new.rs b/new.rs
 --- a/new.rs
 +++ b/new.rs
 @@ -1 +1 @@
 -old
 +new
 "#
-            .to_owned(),
+            .to_owned()),
         };
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -1304,6 +1412,33 @@ diff --git a/README.md b/README.md
             [ReviewTarget::parent_to_current()]
         );
         assert_eq!(session.selected_file().unwrap().path, "new.rs");
+    }
+
+    #[test]
+    fn compare_errors_become_tui_notices() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: Err("boom".to_owned()),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+
+        load_review_target(
+            &loader,
+            &mut session,
+            ReviewTarget::trunk_to_current(),
+            &mut tui_state,
+        );
+
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("failed to load trunk()..@"));
+        assert!(notice.message.contains("boom"));
     }
 
     #[test]
