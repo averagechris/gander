@@ -64,6 +64,8 @@ enum Action {
     ToggleFold,
     CollapseFold,
     ExpandFold,
+    RangeComment,
+    CancelRangeComment,
     Comment,
     SubmitComment,
     CancelComment,
@@ -290,6 +292,12 @@ fn handle_normal_action(
                 session.expand_tree_node();
             }
         }
+        Action::RangeComment => {
+            if session.focus == Focus::Diff {
+                session.toggle_diff_range_selection();
+            }
+        }
+        Action::CancelRangeComment => session.clear_diff_range_selection(),
         Action::Comment => *mode = Mode::CommentInput(CommentEditor::default()),
         Action::SubmitComment
         | Action::CancelComment
@@ -448,7 +456,8 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
         .enumerate()
         .map(|(index, row)| {
             let selected = session.focus == Focus::Diff && session.diff_cursor == index;
-            let style = diff_row_style(row.kind, selected);
+            let in_range = session.diff_row_in_active_range(index);
+            let style = diff_row_style(row.kind, selected, in_range);
             let lineno = row
                 .new_lineno
                 .or(row.old_lineno)
@@ -457,9 +466,9 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             let comment_mark = row
                 .anchor
                 .as_ref()
-                .filter(|anchor| session.comments_for_anchor(anchor) > 0)
+                .filter(|anchor| session.comments_for_diff_row_anchor(anchor) > 0)
                 .map(|_| "*")
-                .unwrap_or(" ");
+                .unwrap_or(if in_range { "|" } else { " " });
 
             match row.kind {
                 DiffRowKind::FileHeader => Line::from(Span::styled(
@@ -498,7 +507,7 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     frame.render_widget(paragraph, area);
 }
 
-fn diff_row_style(kind: DiffRowKind, selected: bool) -> Style {
+fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
     let style = match kind {
         DiffRowKind::DiffLine(crate::diff::DiffLineKind::Context) => {
             Style::default().fg(Color::Gray)
@@ -517,6 +526,8 @@ fn diff_row_style(kind: DiffRowKind, selected: bool) -> Style {
 
     if selected {
         style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else if in_range {
+        style.bg(Color::Blue)
     } else {
         style
     }
@@ -549,10 +560,17 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "{} · focus diff · {down}/{up} line · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} line comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff{} · {down}/{up} line · {range} range · {cancel_range} cancel · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
             session.target,
+            if session.has_active_diff_range() {
+                " (range active)"
+            } else {
+                ""
+            },
             down = keymap.hint(Action::MoveDown),
             up = keymap.hint(Action::MoveUp),
+            range = keymap.hint(Action::RangeComment),
+            cancel_range = keymap.hint(Action::CancelRangeComment),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
             next_unviewed = keymap.hint(Action::NextUnviewed),
@@ -616,6 +634,12 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::ToggleFold, &config.toggle_fold)?;
         add_bindings(&mut bindings, Action::CollapseFold, &config.collapse_fold)?;
         add_bindings(&mut bindings, Action::ExpandFold, &config.expand_fold)?;
+        add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
+        add_bindings(
+            &mut bindings,
+            Action::CancelRangeComment,
+            &config.cancel_range_comment,
+        )?;
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
         add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
@@ -886,6 +910,20 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('p'))),
             Some(Action::CompareParent)
+        );
+    }
+
+    #[test]
+    fn default_range_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('r'))),
+            Some(Action::RangeComment)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            Some(Action::CancelRangeComment)
         );
     }
 }

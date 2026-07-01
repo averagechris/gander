@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `2`.
+Current schema version: `3`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool format; Markdown is rendered for humans.
 
@@ -8,7 +8,7 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",

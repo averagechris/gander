@@ -39,7 +39,7 @@ pub struct FileArtifact<'a> {
 impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
     fn from(session: &'a ReviewSession) -> Self {
         Self {
-            version: 2,
+            version: 3,
             generated_at: Utc::now(),
             repo: &session.repo,
             base: &session.target.base,
@@ -158,6 +158,31 @@ fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
             out.push_str(line_text);
             out.push_str("\n```\n\n");
         }
+        Some(CommentAnchor::Range {
+            path,
+            start_line,
+            end_line,
+            lines,
+            diff_fingerprint,
+            range_fingerprint,
+            ..
+        }) => {
+            out.push_str(&format!("### `{path}`:range:{start_line}-{end_line}\n\n"));
+            out.push_str(&format!("Diff fingerprint: `{diff_fingerprint}`\n"));
+            out.push_str(&format!("Range fingerprint: `{range_fingerprint}`\n\n"));
+            out.push_str("```diff\n");
+            for line in lines {
+                out.push_str(match line.line_kind.as_str() {
+                    "added" => "+",
+                    "removed" => "-",
+                    _ => " ",
+                });
+                out.push_str(&format!("{:>4} ", line.line));
+                out.push_str(&line.line_text);
+                out.push('\n');
+            }
+            out.push_str("```\n\n");
+        }
         Some(CommentAnchor::File { path, .. }) => out.push_str(&format!("### `{path}`\n\n")),
         None => match comment.line {
             Some(line) => out.push_str(&format!("### `{}`:{}\n\n", comment.path, line)),
@@ -248,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_version_is_2() {
+    fn artifact_version_is_3() {
         let diff = DiffSet::parse(
             r#"diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -268,7 +293,7 @@ mod tests {
 
         let artifact = ReviewArtifact::from(&session);
 
-        assert_eq!(artifact.version, 2);
+        assert_eq!(artifact.version, 3);
     }
 
     #[test]
@@ -351,5 +376,38 @@ mod tests {
         let markdown = to_markdown(&artifact);
 
         assert!(markdown.contains("`a.txt` — mod [generated/noisy]"));
+    }
+
+    #[test]
+    fn markdown_contains_range_anchor() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,3 @@
+-old
++new
++extra
+ same
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.toggle_focus();
+        session.toggle_diff_range_selection();
+        session.move_diff_cursor(2);
+        session.add_comment("Range note".into());
+
+        let artifact = ReviewArtifact::from(&session);
+        let markdown = to_markdown(&artifact);
+
+        assert!(markdown.contains(":range:"));
+        assert!(markdown.contains("Range fingerprint"));
+        assert!(markdown.contains("Range note"));
     }
 }

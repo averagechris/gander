@@ -7,7 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    anchor::{CommentAnchor, DiffSide, fingerprint_line},
+    anchor::{CommentAnchor, DiffSide, RangeLineAnchor, fingerprint_line, fingerprint_range},
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
@@ -25,6 +25,7 @@ pub struct ReviewSession {
     pub diff_cursor: usize,
     pub focus: Focus,
     pub collapsed_dirs: BTreeSet<String>,
+    pub diff_range_selection: Option<DiffRangeSelection>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
 }
@@ -39,6 +40,13 @@ struct FileViewport {
 pub enum Focus {
     Files,
     Diff,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRangeSelection {
+    pub file_path: String,
+    pub file_fingerprint: String,
+    pub start_cursor: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +109,7 @@ impl ReviewSession {
             diff_cursor: 0,
             focus: Focus::Files,
             collapsed_dirs: BTreeSet::new(),
+            diff_range_selection: None,
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
         };
@@ -209,6 +218,7 @@ impl ReviewSession {
             return;
         }
         self.save_current_viewport();
+        self.clear_diff_range_selection();
         self.selected = index;
         self.restore_current_viewport();
     }
@@ -405,6 +415,50 @@ impl ReviewSession {
         }
     }
 
+    pub fn toggle_diff_range_selection(&mut self) {
+        if self.focus != Focus::Diff || self.selected_line_anchor().is_none() {
+            return;
+        }
+        if self.diff_range_selection.is_some() {
+            self.diff_range_selection = None;
+            return;
+        }
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+        self.diff_range_selection = Some(DiffRangeSelection {
+            file_path: file.path.clone(),
+            file_fingerprint: file.fingerprint.clone(),
+            start_cursor: self.diff_cursor,
+        });
+    }
+
+    pub fn clear_diff_range_selection(&mut self) {
+        self.diff_range_selection = None;
+    }
+
+    pub fn has_active_diff_range(&self) -> bool {
+        self.diff_range_bounds().is_some()
+    }
+
+    pub fn diff_range_bounds(&self) -> Option<(usize, usize)> {
+        let selection = self.diff_range_selection.as_ref()?;
+        let file = self.selected_file()?;
+        if selection.file_path != file.path || selection.file_fingerprint != file.fingerprint {
+            return None;
+        }
+        Some((
+            selection.start_cursor.min(self.diff_cursor),
+            selection.start_cursor.max(self.diff_cursor),
+        ))
+    }
+
+    pub fn diff_row_in_active_range(&self, row_index: usize) -> bool {
+        self.diff_range_bounds()
+            .map(|(start, end)| row_index >= start && row_index <= end)
+            .unwrap_or(false)
+    }
+
     pub fn diff_rows_for_selected_file(&self) -> Vec<DiffRow> {
         let Some(file) = self.selected_file() else {
             return Vec::new();
@@ -489,10 +543,100 @@ impl ReviewSession {
             .and_then(|row| row.anchor.clone())
     }
 
+    pub fn selected_comment_anchor(&self) -> Option<CommentAnchor> {
+        self.selected_range_anchor()
+            .or_else(|| self.selected_line_anchor())
+    }
+
+    pub fn selected_range_anchor(&self) -> Option<CommentAnchor> {
+        let (start, end) = self.diff_range_bounds()?;
+        let file = self.selected_file()?;
+        let rows = self.diff_rows_for_selected_file();
+        let mut range_lines = Vec::new();
+        for (row_index, row) in rows.iter().enumerate().take(end + 1).skip(start) {
+            if let Some(CommentAnchor::Line {
+                side,
+                line,
+                old_line,
+                new_line,
+                hunk_header,
+                hunk_index,
+                line_index,
+                line_kind,
+                line_text,
+                line_fingerprint,
+                ..
+            }) = row.anchor.clone()
+            {
+                range_lines.push(RangeLineAnchor {
+                    side,
+                    line,
+                    old_line,
+                    new_line,
+                    hunk_header,
+                    hunk_index,
+                    line_index,
+                    row_index,
+                    line_kind,
+                    line_text,
+                    line_fingerprint,
+                });
+            }
+        }
+        match range_lines.as_slice() {
+            [] => None,
+            [single] => rows
+                .get(single.row_index)
+                .and_then(|row| row.anchor.clone()),
+            _ => {
+                let start_line = range_lines.first()?.line;
+                let end_line = range_lines.last()?.line;
+                let line_fingerprints: Vec<_> = range_lines
+                    .iter()
+                    .map(|line| line.line_fingerprint.clone())
+                    .collect();
+                Some(CommentAnchor::Range {
+                    path: file.path.clone(),
+                    old_path: file.old_path.clone(),
+                    start_line,
+                    end_line,
+                    start_row_index: range_lines.first()?.row_index,
+                    end_row_index: range_lines.last()?.row_index,
+                    lines: range_lines,
+                    diff_fingerprint: file.fingerprint.clone(),
+                    range_fingerprint: fingerprint_range(
+                        &file.path,
+                        &file.fingerprint,
+                        &line_fingerprints,
+                    ),
+                })
+            }
+        }
+    }
+
     pub fn comments_for_anchor(&self, anchor: &CommentAnchor) -> usize {
         self.comments
             .iter()
             .filter(|comment| comment.anchor.as_ref() == Some(anchor))
+            .count()
+    }
+
+    pub fn comments_for_diff_row_anchor(&self, anchor: &CommentAnchor) -> usize {
+        let row_fingerprint = match anchor {
+            CommentAnchor::Line {
+                line_fingerprint, ..
+            } => line_fingerprint,
+            _ => return self.comments_for_anchor(anchor),
+        };
+        self.comments
+            .iter()
+            .filter(|comment| match comment.anchor.as_ref() {
+                Some(existing) if existing == anchor => true,
+                Some(CommentAnchor::Range { lines, .. }) => lines
+                    .iter()
+                    .any(|line| &line.line_fingerprint == row_fingerprint),
+                _ => false,
+            })
             .count()
     }
 
@@ -515,8 +659,9 @@ impl ReviewSession {
         match self.focus {
             Focus::Files => self.add_file_comment(body),
             Focus::Diff => {
-                if let Some(anchor) = self.selected_line_anchor() {
+                if let Some(anchor) = self.selected_comment_anchor() {
                     self.add_comment_with_anchor(body, anchor);
+                    self.clear_diff_range_selection();
                 }
             }
         }
@@ -547,6 +692,9 @@ impl ReviewSession {
             ),
             path: anchor.path().to_owned(),
             line: anchor.line(),
+            end_line: anchor
+                .end_line()
+                .filter(|end_line| Some(*end_line) != anchor.line()),
             anchor: Some(anchor),
             body,
             created_at,
@@ -780,6 +928,28 @@ diff --git a/src/c.rs b/src/c.rs
         )
     }
 
+    fn multi_line_session() -> ReviewSession {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,3 +1,4 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        )
+        .unwrap();
+        ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        )
+    }
+
     #[test]
     fn move_selection_uses_tree_file_order() {
         let mut session = session();
@@ -901,6 +1071,38 @@ diff --git a/src/c.rs b/src/c.rs
         session.add_comment("Line note".into());
 
         assert_eq!(session.comments_for_anchor(&anchor), 1);
+    }
+
+    #[test]
+    fn range_selection_builds_range_anchor() {
+        let mut session = multi_line_session();
+        session.toggle_focus();
+        session.toggle_diff_range_selection();
+        session.move_diff_cursor(2);
+
+        let anchor = session.selected_range_anchor().unwrap();
+
+        assert!(matches!(anchor, CommentAnchor::Range { .. }));
+        if let CommentAnchor::Range { lines, .. } = anchor {
+            assert!(lines.len() > 1);
+        }
+    }
+
+    #[test]
+    fn range_comment_records_end_line_and_clears_selection() {
+        let mut session = multi_line_session();
+        session.toggle_focus();
+        session.toggle_diff_range_selection();
+        session.move_diff_cursor(2);
+
+        session.add_comment("Range note".into());
+
+        assert!(matches!(
+            session.comments[0].anchor,
+            Some(CommentAnchor::Range { .. })
+        ));
+        assert!(session.comments[0].end_line.is_some());
+        assert!(session.diff_range_selection.is_none());
     }
 
     #[test]

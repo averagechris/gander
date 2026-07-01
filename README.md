@@ -187,6 +187,8 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
+| `r` in diff focus | start/cancel a range selection for a multi-line comment |
+| Ctrl-G | cancel active range selection |
 | Enter | mark selected file viewed and advance to the next unviewed file |
 | `v` | toggle selected file viewed/unviewed |
 | `a` | mark all visible files viewed |
@@ -194,7 +196,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `d` / PageDown | scroll diff down |
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
-| `c` | add a file comment in file focus or line comment in diff focus |
+| `c` | add a file comment in file focus, or line/range comment in diff focus |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
 | `q` / Esc | quit and save state |

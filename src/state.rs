@@ -24,6 +24,8 @@ pub struct Comment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<CommentAnchor>,
     pub body: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
