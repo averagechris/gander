@@ -145,6 +145,9 @@ which resolves through `$PATH`. Set it to an absolute path when you want a
 specific binary, for example from a Nix store path or a project-local wrapper.
 If the configured binary is missing, the app falls back to `jj` on `$PATH`; if no
 usable `jj` can be found, startup fails with an actionable install/config hint.
+The startup probe closes stdin and times out, which guards against accidentally
+selecting non-Jujutsu packages such as `nixpkgs#jj`; in Nix configs, prefer
+`nixpkgs#jujutsu`.
 
 Generated/noisy presets are opt-in and can be configured with `[generated]` or
 CLI flags:

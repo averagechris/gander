@@ -1,7 +1,8 @@
 use std::{
     fmt, io,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::{Result, bail, eyre};
@@ -65,6 +66,7 @@ impl JjCommand {
             .arg("--git")
             .arg("--color=never")
             .arg("--no-pager")
+            .stdin(Stdio::null())
             .current_dir(&self.repo)
             .output()?;
 
@@ -124,16 +126,51 @@ binary = \"/nix/store/.../bin/jj\"",
 }
 
 fn can_run_jj(binary: &Path) -> io::Result<bool> {
-    Command::new(binary)
+    can_run_jj_with_timeout(binary, Duration::from_secs(2))
+}
+
+fn can_run_jj_with_timeout(binary: &Path, timeout: Duration) -> io::Result<bool> {
+    let mut child = Command::new(binary)
         .arg("--version")
-        .output()
-        .map(|output| output.status.success())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            return Ok(output.status.success()
+                && version_output_looks_like_jj(&String::from_utf8_lossy(&output.stdout)));
+        }
+        if started.elapsed() >= timeout {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "jj binary '{}' did not respond to --version within {}ms; this may be the wrong package (for Nix, use nixpkgs#jujutsu, not nixpkgs#jj)",
+                    binary.display(),
+                    timeout.as_millis()
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn version_output_looks_like_jj(output: &str) -> bool {
+    output.trim_start().starts_with("jj ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::BTreeMap, io::ErrorKind};
+    use std::{collections::BTreeMap, fs, io::ErrorKind};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn resolve_binary_uses_configured_binary_when_available() {
@@ -187,5 +224,28 @@ mod tests {
         .to_string();
 
         assert!(error.contains("did not behave like jj"));
+    }
+
+    #[test]
+    fn version_output_must_look_like_jujutsu() {
+        assert!(version_output_looks_like_jj("jj 0.42.0\n"));
+        assert!(!version_output_looks_like_jj("json-join 1.0.0\n"));
+        assert!(!version_output_looks_like_jj(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn can_run_jj_times_out_for_blocking_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("jj-blocks");
+        fs::write(&script, "#!/bin/sh\nsleep 10\n").unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let error = can_run_jj_with_timeout(&script, Duration::from_millis(25)).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(error.to_string().contains("nixpkgs#jujutsu"));
     }
 }

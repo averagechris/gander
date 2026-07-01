@@ -9,6 +9,11 @@ configured path is missing, the app falls back to `jj` on `$PATH`. If neither is
 available, it exits with an actionable error explaining how to install jj or set
 `[jj].binary` to an absolute path.
 
+The probe closes stdin and has a short timeout so accidentally selecting a
+different `jj` package that waits for input cannot hang startup. In Nix configs,
+use `nixpkgs#jujutsu`; `nixpkgs#jj` is a different project and can block on
+stdin.
+
 Current command shape:
 
 ```sh
