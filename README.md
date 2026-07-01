@@ -39,6 +39,20 @@ If you do not want to enter the shell:
 nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test
 ```
 
+## Releases
+
+Releases are cut with Nix flake apps and published to SourceHut (canonical
+`vX.Y.Z` tags, a Pages downloads site, and an optional builds.sr.ht Linux
+build):
+
+```sh
+nix run .#release -- --version X.Y.Z
+```
+
+See [docs/release.md](docs/release.md) for the full process and the individual
+`prepare-release`, `release-tag`, `release-artifact`, `build-pages`, and
+`publish-pages` stages.
+
 ## Usage
 
 Launch the TUI for the current stack compared to `trunk()`:

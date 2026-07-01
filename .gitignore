@@ -4,3 +4,5 @@
 /.gander/
 *.swp
 *.swo
+/result-release-artifact
+/dist/
