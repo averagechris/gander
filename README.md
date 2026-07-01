@@ -9,6 +9,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - shows a navigable hierarchical file tree + diff pane in a Ratatui TUI
 - persists per-file viewed state keyed by a content fingerprint
 - auto-restores viewed state only when the file's diff is unchanged
+- preserves each file's diff cursor and scroll position while navigating
 - supports repeated `--ignore <glob>` filters for noisy generated files
 - records lightweight file-level and line-level comments from the TUI
 - exports review artifacts as JSON or Markdown

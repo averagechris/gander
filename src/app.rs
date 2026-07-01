@@ -20,6 +20,13 @@ pub struct ReviewSession {
     pub diff_scroll: u16,
     pub diff_cursor: usize,
     pub focus: Focus,
+    viewport_by_path: BTreeMap<String, FileViewport>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FileViewport {
+    diff_scroll: u16,
+    diff_cursor: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +91,7 @@ impl ReviewSession {
             diff_scroll: 0,
             diff_cursor: 0,
             focus: Focus::Files,
+            viewport_by_path: BTreeMap::new(),
         };
         session.apply_state_files(&files);
         session
@@ -114,9 +122,7 @@ impl ReviewSession {
             return;
         }
         if let Some(next) = self.file_tree().next_file_index(self.selected, delta) {
-            self.selected = next;
-            self.diff_scroll = 0;
-            self.diff_cursor = 0;
+            self.select_file_index(next);
         }
     }
 
@@ -151,12 +157,41 @@ impl ReviewSession {
             };
             let candidate = file_indices[position];
             if !self.files[candidate].viewed {
-                self.selected = candidate;
-                self.diff_scroll = 0;
-                self.diff_cursor = 0;
+                self.select_file_index(candidate);
                 return;
             }
         }
+    }
+
+    fn select_file_index(&mut self, index: usize) {
+        if index == self.selected || index >= self.files.len() {
+            return;
+        }
+        self.save_current_viewport();
+        self.selected = index;
+        self.restore_current_viewport();
+    }
+
+    fn save_current_viewport(&mut self) {
+        let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
+            return;
+        };
+        self.viewport_by_path.insert(
+            path,
+            FileViewport {
+                diff_scroll: self.diff_scroll,
+                diff_cursor: self.diff_cursor,
+            },
+        );
+    }
+
+    fn restore_current_viewport(&mut self) {
+        let viewport = self
+            .selected_file()
+            .and_then(|file| self.viewport_by_path.get(&file.path).copied())
+            .unwrap_or_default();
+        self.diff_scroll = viewport.diff_scroll;
+        self.diff_cursor = viewport.diff_cursor;
     }
 
     pub fn file_tree(&self) -> FileTreeView {
@@ -554,5 +589,27 @@ diff --git a/README.md b/README.md
         session.move_to_unviewed(1);
 
         assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+    }
+
+    #[test]
+    fn preserves_diff_viewport_per_file() {
+        let mut session = session();
+        session.diff_scroll = 7;
+        session.diff_cursor = 3;
+
+        session.move_selection(1);
+        session.diff_scroll = 2;
+        session.diff_cursor = 1;
+        session.move_selection(-1);
+
+        assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+        assert_eq!(session.diff_scroll, 7);
+        assert_eq!(session.diff_cursor, 3);
+
+        session.move_selection(1);
+
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+        assert_eq!(session.diff_scroll, 2);
+        assert_eq!(session.diff_cursor, 1);
     }
 }

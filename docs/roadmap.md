@@ -38,7 +38,7 @@ Status: started.
 - [ ] fuzzy file search
 - [ ] viewed/unviewed filters
 - [x] jump to next unviewed file
-- [ ] preserve cursor and scroll position per file
+- [x] preserve cursor and scroll position per file
 
 ## Milestone 3: syntax-aware reviewing
 
