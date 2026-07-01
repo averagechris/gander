@@ -1479,7 +1479,8 @@ fn draw_target_chooser_popup(
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 5usize;
     let list_height = inner_height.saturating_sub(fixed_lines).max(1);
-    let list_offset = picker_scroll_offset(chooser.selected, chooser.filtered.len(), list_height);
+    let visible_window =
+        picker_visible_window(chooser.selected, chooser.filtered.len(), list_height);
 
     let mut lines = vec![
         Line::from(vec![
@@ -1513,27 +1514,21 @@ fn draw_target_chooser_popup(
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        let show_above = list_offset > 0;
-        if show_above {
+        if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
-                format!("  ↑ {} more", list_offset),
+                format!("  ↑ {} more", visible_window.hidden_above),
                 Style::default().fg(Color::DarkGray),
             )));
-        }
-        let mut data_rows = list_height.saturating_sub(usize::from(show_above));
-        let remaining = chooser.filtered.len().saturating_sub(list_offset);
-        if remaining > data_rows && data_rows > 1 {
-            data_rows -= 1;
         }
         lines.extend(
             chooser
                 .filtered
                 .iter()
-                .skip(list_offset)
-                .take(data_rows)
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
                 .enumerate()
                 .map(|(visible_index, row_index)| {
-                    let index = list_offset + visible_index;
+                    let index = visible_window.start + visible_index;
                     let row = &chooser.rows[*row_index];
                     base_picker_row(
                         row,
@@ -1542,13 +1537,9 @@ fn draw_target_chooser_popup(
                     )
                 }),
         );
-        let hidden_below = chooser
-            .filtered
-            .len()
-            .saturating_sub(list_offset + data_rows);
-        if hidden_below > 0 {
+        if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
-                format!("  ↓ {hidden_below} more"),
+                format!("  ↓ {} more", visible_window.hidden_below),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -1567,12 +1558,68 @@ fn draw_target_chooser_popup(
     );
 }
 
-fn picker_scroll_offset(selected: usize, total: usize, height: usize) -> usize {
-    if total <= height || height == 0 {
-        return 0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PickerVisibleWindow {
+    start: usize,
+    end: usize,
+    hidden_above: usize,
+    hidden_below: usize,
+}
+
+fn picker_visible_window(selected: usize, total: usize, height: usize) -> PickerVisibleWindow {
+    if total == 0 || height == 0 {
+        return PickerVisibleWindow {
+            start: 0,
+            end: 0,
+            hidden_above: 0,
+            hidden_below: 0,
+        };
     }
-    let half = height / 2;
-    selected.saturating_sub(half).min(total - height)
+    if total <= height {
+        return PickerVisibleWindow {
+            start: 0,
+            end: total,
+            hidden_above: 0,
+            hidden_below: 0,
+        };
+    }
+
+    let selected = selected.min(total - 1);
+    let mut best: Option<(usize, usize, usize)> = None;
+    for start in 0..=selected {
+        let show_above = usize::from(start > 0);
+        let Some(mut data_capacity) = height.checked_sub(show_above) else {
+            continue;
+        };
+        if data_capacity == 0 {
+            continue;
+        }
+        if start + data_capacity < total {
+            if data_capacity == 1 {
+                continue;
+            }
+            data_capacity -= 1;
+        }
+        let end = (start + data_capacity).min(total);
+        if selected >= end {
+            continue;
+        }
+        let ideal_start = selected.saturating_sub(data_capacity / 2);
+        let distance = start.abs_diff(ideal_start);
+        let visible_rows = end - start;
+        let score = height.saturating_sub(visible_rows) * 1000 + distance;
+        if best.is_none_or(|(_, _, best_score)| score < best_score) {
+            best = Some((start, end, score));
+        }
+    }
+
+    let (start, end, _) = best.unwrap_or((selected, selected + 1, 0));
+    PickerVisibleWindow {
+        start,
+        end,
+        hidden_above: start,
+        hidden_below: total.saturating_sub(end),
+    }
 }
 
 fn base_picker_row(row: &JjChangeSummary, selected: bool, current_base: bool) -> Line<'static> {
@@ -2292,10 +2339,37 @@ diff --git a/README.md b/README.md
 
     #[test]
     fn target_picker_scrolls_selected_row_into_view() {
-        assert_eq!(picker_scroll_offset(0, 20, 5), 0);
-        assert_eq!(picker_scroll_offset(6, 20, 5), 4);
-        assert_eq!(picker_scroll_offset(19, 20, 5), 15);
-        assert_eq!(picker_scroll_offset(2, 3, 5), 0);
+        assert_eq!(
+            picker_visible_window(0, 20, 5),
+            PickerVisibleWindow {
+                start: 0,
+                end: 4,
+                hidden_above: 0,
+                hidden_below: 16,
+            }
+        );
+        let middle = picker_visible_window(6, 20, 5);
+        assert!(middle.start <= 6 && 6 < middle.end);
+        assert!(middle.hidden_above > 0);
+        assert!(middle.hidden_below > 0);
+        assert_eq!(
+            picker_visible_window(19, 20, 5),
+            PickerVisibleWindow {
+                start: 16,
+                end: 20,
+                hidden_above: 16,
+                hidden_below: 0,
+            }
+        );
+        assert_eq!(
+            picker_visible_window(2, 3, 5),
+            PickerVisibleWindow {
+                start: 0,
+                end: 3,
+                hidden_above: 0,
+                hidden_below: 0,
+            }
+        );
     }
 
     #[test]
