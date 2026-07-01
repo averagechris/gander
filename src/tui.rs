@@ -947,69 +947,98 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     }
 
     let rows = session.diff_rows_for_selected_file();
-    let lines: Vec<_> = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let selected = session.focus == Focus::Diff && session.diff_cursor == index;
-            let in_range = session.diff_row_in_active_range(index);
-            let style = diff_row_style(row.kind, selected, in_range);
-            let lineno = row
-                .new_lineno
-                .or(row.old_lineno)
-                .map(|n| format!("{n:>4}"))
-                .unwrap_or_else(|| "    ".to_owned());
-            let comment_mark = row
-                .anchor
-                .as_ref()
-                .filter(|anchor| session.comments_for_diff_row_anchor(anchor) > 0)
-                .map(|_| "*")
-                .unwrap_or(if in_range { "|" } else { " " });
-
-            match row.kind {
-                DiffRowKind::FileHeader => Line::from(Span::styled(
-                    row.text.clone(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                DiffRowKind::SyntaxSummary => Line::from(Span::styled(
-                    row.text.clone(),
-                    Style::default().fg(Color::Magenta),
-                )),
-                DiffRowKind::HunkHeader => Line::from(Span::styled(
-                    row.text.clone(),
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                DiffRowKind::Raw => Line::from(row.text.clone()),
-                DiffRowKind::DiffLine(_) => {
-                    let mut spans = vec![
-                        Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
-                        Span::styled(lineno, Style::default().fg(Color::DarkGray)),
-                        Span::raw(" "),
-                        Span::styled(row.prefix, style),
-                        Span::raw(" "),
-                    ];
-                    spans.extend(diff_text_spans(
-                        row,
-                        style,
-                        selected,
-                        in_range,
-                        &session.syntax.theme,
-                    ));
-                    Line::from(spans)
-                }
+    let mut lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let selected = session.focus == Focus::Diff && session.diff_cursor == index;
+        let in_range = session.diff_row_in_active_range(index);
+        let style = diff_row_style(row.kind, selected, in_range);
+        let lineno = row
+            .new_lineno
+            .or(row.old_lineno)
+            .map(|n| format!("{n:>4}"))
+            .unwrap_or_else(|| "    ".to_owned());
+        let comment_count = row
+            .anchor
+            .as_ref()
+            .map(|anchor| session.comments_for_diff_row_anchor(anchor))
+            .unwrap_or(0);
+        let comment_mark = if comment_count > 0 {
+            match comment_count {
+                1..=9 => comment_count.to_string(),
+                _ => "+".to_owned(),
             }
-        })
-        .collect();
+        } else if in_range {
+            "|".to_owned()
+        } else {
+            " ".to_owned()
+        };
+
+        let line = match row.kind {
+            DiffRowKind::FileHeader => Line::from(Span::styled(
+                row.text.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            DiffRowKind::SyntaxSummary => Line::from(Span::styled(
+                row.text.clone(),
+                Style::default().fg(Color::Magenta),
+            )),
+            DiffRowKind::HunkHeader => Line::from(Span::styled(
+                row.text.clone(),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            DiffRowKind::Raw => Line::from(row.text.clone()),
+            DiffRowKind::DiffLine(_) => {
+                let mut spans = vec![
+                    Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
+                    Span::styled(lineno, Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(row.prefix, style),
+                    Span::raw(" "),
+                ];
+                spans.extend(diff_text_spans(
+                    row,
+                    style,
+                    selected,
+                    in_range,
+                    &session.syntax.theme,
+                ));
+                Line::from(spans)
+            }
+        };
+        lines.push(line);
+        if let Some(anchor) = row.anchor.as_ref() {
+            for comment in session.comments_for_diff_row_anchor_details(anchor) {
+                lines.push(comment_summary_line(comment));
+            }
+        }
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("diff"))
         .scroll((session.diff_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn comment_summary_line(comment: &crate::state::Comment) -> Line<'static> {
+    let summary = comment
+        .body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("(empty comment)")
+        .trim();
+    Line::from(vec![
+        Span::styled("      ↳ ", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{} ", comment.id),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(summary.to_owned(), Style::default().fg(Color::Yellow)),
+    ])
 }
 
 fn diff_text_spans<'a>(
@@ -1494,7 +1523,7 @@ mod tests {
     use crate::{
         diff::DiffSet,
         jj::{JjBackend, ReviewTarget},
-        state::ReviewState,
+        state::{Comment, ReviewState},
         syntax::{HighlightKind, SyntaxConfig, SyntaxSpan, SyntaxThemeConfig},
     };
 
@@ -1871,6 +1900,45 @@ diff --git a/README.md b/README.md
             keymap.action_for(&KeyEvent::from(KeyCode::Char('x'))),
             Some(Action::DeleteComment)
         );
+    }
+
+    #[test]
+    fn diff_renders_multiple_comments_for_anchor() {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.toggle_focus();
+        let anchor = session.selected_line_anchor().unwrap();
+        session.comments.push(Comment {
+            id: "c1".to_owned(),
+            path: anchor.path().to_owned(),
+            line: anchor.line(),
+            end_line: None,
+            anchor: Some(anchor.clone()),
+            body: "first note".to_owned(),
+            created_at: chrono::Utc::now(),
+        });
+        session.comments.push(Comment {
+            id: "c2".to_owned(),
+            path: anchor.path().to_owned(),
+            line: anchor.line(),
+            end_line: None,
+            anchor: Some(anchor),
+            body: "second note".to_owned(),
+            created_at: chrono::Utc::now(),
+        });
+
+        let rendered = render_tui_text(&session, &Mode::Normal, 100, 16);
+
+        assert!(rendered.contains("2   1 - old"));
+        assert!(rendered.contains("↳ c1 first note"));
+        assert!(rendered.contains("↳ c2 second note"));
     }
 
     #[test]

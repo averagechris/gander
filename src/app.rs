@@ -31,6 +31,7 @@ pub struct ReviewSession {
     pub hide_generated: bool,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
+    selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
@@ -167,6 +168,7 @@ impl ReviewSession {
             hide_generated: false,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
+            selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
@@ -813,30 +815,38 @@ impl ReviewSession {
         }
     }
 
-    pub fn comments_for_anchor(&self, anchor: &CommentAnchor) -> usize {
+    pub fn comments_for_diff_row_anchor_details(&self, anchor: &CommentAnchor) -> Vec<&Comment> {
         self.comments
             .iter()
-            .filter(|comment| comment.anchor.as_ref() == Some(anchor))
-            .count()
+            .filter(|comment| self.comment_matches_diff_row_anchor(comment, anchor))
+            .collect()
     }
 
     pub fn comments_for_diff_row_anchor(&self, anchor: &CommentAnchor) -> usize {
+        self.comments
+            .iter()
+            .filter(|comment| self.comment_matches_diff_row_anchor(comment, anchor))
+            .count()
+    }
+
+    fn comment_matches_diff_row_anchor(&self, comment: &Comment, anchor: &CommentAnchor) -> bool {
         let row_fingerprint = match anchor {
             CommentAnchor::Line {
                 line_fingerprint, ..
-            } => line_fingerprint,
-            _ => return self.comments_for_anchor(anchor),
+            } => Some(line_fingerprint),
+            _ => None,
         };
-        self.comments
-            .iter()
-            .filter(|comment| match comment.anchor.as_ref() {
-                Some(existing) if existing == anchor => true,
-                Some(CommentAnchor::Range { lines, .. }) => lines
-                    .iter()
-                    .any(|line| &line.line_fingerprint == row_fingerprint),
-                _ => false,
-            })
-            .count()
+        match comment.anchor.as_ref() {
+            Some(existing) if existing == anchor => true,
+            Some(CommentAnchor::Range { lines, .. }) => {
+                row_fingerprint.is_some_and(|fingerprint| {
+                    lines
+                        .iter()
+                        .any(|line| &line.line_fingerprint == fingerprint)
+                })
+            }
+            _ => false,
+        }
     }
 
     pub fn move_to_comment(&mut self, delta: isize) {
@@ -860,28 +870,37 @@ impl ReviewSession {
     }
 
     pub fn selected_comment_index(&self) -> Option<usize> {
+        if let Some(selected_id) = &self.selected_comment_id
+            && let Some(index) = self.comments.iter().position(|comment| {
+                comment.id == *selected_id && self.comment_matches_current_selection(comment)
+            })
+        {
+            return Some(index);
+        }
+
         match self.focus {
             Focus::Diff => self.selected_line_anchor().and_then(|anchor| {
-                let row_fingerprint = match &anchor {
-                    CommentAnchor::Line {
-                        line_fingerprint, ..
-                    } => Some(line_fingerprint),
-                    _ => None,
-                };
-                self.comments.iter().position(|comment| {
-                    comment.anchor.as_ref() == Some(&anchor)
-                        || matches!(
-                            (comment.anchor.as_ref(), row_fingerprint),
-                            (Some(CommentAnchor::Range { lines, .. }), Some(fingerprint))
-                                if lines.iter().any(|line| &line.line_fingerprint == fingerprint)
-                        )
-                })
+                self.comments
+                    .iter()
+                    .position(|comment| self.comment_matches_diff_row_anchor(comment, &anchor))
             }),
             Focus::Files => self.selected_file().and_then(|file| {
                 self.comments.iter().position(|comment| {
                     comment.path == file.path
                         && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
                 })
+            }),
+        }
+    }
+
+    fn comment_matches_current_selection(&self, comment: &Comment) -> bool {
+        match self.focus {
+            Focus::Diff => self
+                .selected_line_anchor()
+                .is_some_and(|anchor| self.comment_matches_diff_row_anchor(comment, &anchor)),
+            Focus::Files => self.selected_file().is_some_and(|file| {
+                comment.path == file.path
+                    && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
             }),
         }
     }
@@ -902,6 +921,9 @@ impl ReviewSession {
             return false;
         };
         self.comments.remove(index);
+        if self.selected_comment_id.as_deref() == Some(id) {
+            self.selected_comment_id = None;
+        }
         true
     }
 
@@ -959,6 +981,7 @@ impl ReviewSession {
         let Some(comment) = self.comments.get(index).cloned() else {
             return;
         };
+        self.selected_comment_id = Some(comment.id.clone());
         let target_path = comment
             .anchor
             .as_ref()
@@ -977,6 +1000,21 @@ impl ReviewSession {
                     .iter()
                     .position(|row| row.anchor.as_ref() == Some(&anchor))
                 {
+                    self.diff_cursor = row_index;
+                    self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                }
+            }
+            Some(CommentAnchor::Range { lines, .. }) => {
+                self.focus = Focus::Diff;
+                if let Some(row_index) = self.diff_rows_for_selected_file().iter().position(|row| {
+                    row.anchor.as_ref().is_some_and(|anchor| {
+                        matches!(
+                            anchor,
+                            CommentAnchor::Line { line_fingerprint, .. }
+                                if lines.iter().any(|line| &line.line_fingerprint == line_fingerprint)
+                        )
+                    })
+                }) {
                     self.diff_cursor = row_index;
                     self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
                 }
@@ -1449,14 +1487,14 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn comments_for_anchor_matches_existing_line_comment() {
+    fn comments_for_diff_row_anchor_matches_existing_line_comment() {
         let mut session = session();
         session.toggle_focus();
         let anchor = session.selected_line_anchor().unwrap();
 
         session.add_comment("Line note".into());
 
-        assert_eq!(session.comments_for_anchor(&anchor), 1);
+        assert_eq!(session.comments_for_diff_row_anchor(&anchor), 1);
     }
 
     #[test]
@@ -1567,6 +1605,20 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(session.focus, Focus::Diff);
         assert_eq!(session.selected_line_anchor(), Some(line_anchor));
+    }
+
+    #[test]
+    fn move_to_comment_cycles_comments_on_same_anchor() {
+        let mut session = session();
+        session.toggle_focus();
+        session.add_comment("First".into());
+        session.add_comment("Second".into());
+
+        session.move_to_comment(1);
+        assert_eq!(session.selected_comment().unwrap().body, "Second");
+
+        session.move_to_comment(1);
+        assert_eq!(session.selected_comment().unwrap().body, "First");
     }
 
     #[test]
