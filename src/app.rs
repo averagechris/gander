@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
 };
@@ -13,7 +14,7 @@ use crate::{
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
     state::{Comment, FileState, ReviewState},
-    syntax::SyntaxConfig,
+    syntax::{HighlightOutcome, SyntaxConfig, SyntaxSpan, SyntaxSummary},
 };
 
 #[derive(Debug, Clone)]
@@ -29,8 +30,34 @@ pub struct ReviewSession {
     pub syntax: SyntaxConfig,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
+    syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SyntaxCacheKey {
+    path: String,
+    fingerprint: String,
+    config_key: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SyntaxFileCache {
+    summary: Option<SyntaxSummary>,
+    new_lines: BTreeMap<(usize, usize), Vec<SyntaxSpan>>,
+    old_lines: BTreeMap<(usize, usize), Vec<SyntaxSpan>>,
+    new_status: SyntaxCacheStatus,
+    old_status: SyntaxCacheStatus,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SyntaxCacheStatus {
+    #[default]
+    Disabled,
+    Unsupported,
+    Highlighted,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -72,7 +99,7 @@ pub struct DiffRow {
     pub new_lineno: Option<usize>,
     pub prefix: &'static str,
     pub text: String,
-    pub syntax: Vec<crate::syntax::SyntaxSpan>,
+    pub syntax: Vec<SyntaxSpan>,
     pub kind: DiffRowKind,
     pub anchor: Option<CommentAnchor>,
 }
@@ -136,6 +163,7 @@ impl ReviewSession {
             syntax,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
+            syntax_cache: RefCell::new(BTreeMap::new()),
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
         };
@@ -536,22 +564,14 @@ impl ReviewSession {
 
         let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
         let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
-        let new_highlights = syntax_highlights_by_diff_line(
-            &file.path,
+        let syntax_cache = self.syntax_cache_for_file(
+            file,
             &new_source,
             &new_line_indices,
-            &self.syntax,
-        );
-        let old_highlights = syntax_highlights_by_diff_line(
-            &file.path,
             &old_source,
             &old_line_indices,
-            &self.syntax,
         );
-        let added_source = new_source;
-        if let Some(summary) =
-            crate::syntax::summarize_with_config(&file.path, &added_source, &self.syntax)
-        {
+        if let Some(summary) = syntax_cache.summary.clone() {
             rows.push(DiffRow {
                 old_lineno: None,
                 new_lineno: None,
@@ -560,6 +580,19 @@ impl ReviewSession {
                     "tree-sitter: {} root={} errors={}",
                     summary.language, summary.root_kind, summary.has_error
                 ),
+                syntax: Vec::new(),
+                kind: DiffRowKind::SyntaxSummary,
+                anchor: None,
+            });
+        }
+        if syntax_cache.new_status == SyntaxCacheStatus::Failed
+            || syntax_cache.old_status == SyntaxCacheStatus::Failed
+        {
+            rows.push(DiffRow {
+                old_lineno: None,
+                new_lineno: None,
+                prefix: " ",
+                text: "tree-sitter: highlighting unavailable".to_owned(),
                 syntax: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
@@ -584,11 +617,13 @@ impl ReviewSession {
                     DiffLineKind::Meta => "\\",
                 };
                 let syntax = match line.kind {
-                    DiffLineKind::Added | DiffLineKind::Context => new_highlights
+                    DiffLineKind::Added | DiffLineKind::Context => syntax_cache
+                        .new_lines
                         .get(&(hunk_index, line_index))
                         .cloned()
                         .unwrap_or_default(),
-                    DiffLineKind::Removed => old_highlights
+                    DiffLineKind::Removed => syntax_cache
+                        .old_lines
                         .get(&(hunk_index, line_index))
                         .cloned()
                         .unwrap_or_default(),
@@ -619,6 +654,39 @@ impl ReviewSession {
         }
 
         rows
+    }
+
+    fn syntax_cache_for_file(
+        &self,
+        file: &ReviewFile,
+        new_source: &str,
+        new_line_indices: &[(usize, usize)],
+        old_source: &str,
+        old_line_indices: &[(usize, usize)],
+    ) -> SyntaxFileCache {
+        let key = SyntaxCacheKey {
+            path: file.path.clone(),
+            fingerprint: file.fingerprint.clone(),
+            config_key: self.syntax.cache_key(),
+        };
+        if let Some(cached) = self.syntax_cache.borrow().get(&key).cloned() {
+            return cached;
+        }
+
+        let (new_lines, new_status) =
+            syntax_highlights_by_diff_line(&file.path, new_source, new_line_indices, &self.syntax);
+        let (old_lines, old_status) =
+            syntax_highlights_by_diff_line(&file.path, old_source, old_line_indices, &self.syntax);
+
+        let computed = SyntaxFileCache {
+            summary: crate::syntax::summarize_with_config(&file.path, new_source, &self.syntax),
+            new_lines,
+            old_lines,
+            new_status,
+            old_status,
+        };
+        self.syntax_cache.borrow_mut().insert(key, computed.clone());
+        computed
     }
 
     pub fn selected_line_anchor(&self) -> Option<CommentAnchor> {
@@ -954,13 +1022,20 @@ fn syntax_highlights_by_diff_line(
     source: &str,
     line_indices: &[(usize, usize)],
     config: &SyntaxConfig,
-) -> BTreeMap<(usize, usize), Vec<crate::syntax::SyntaxSpan>> {
-    crate::syntax::highlight_with_config(path, source, config)
-        .unwrap_or_default()
-        .into_iter()
-        .zip(line_indices.iter())
-        .map(|(line, index)| (*index, line.spans))
-        .collect()
+) -> (BTreeMap<(usize, usize), Vec<SyntaxSpan>>, SyntaxCacheStatus) {
+    match crate::syntax::highlight_outcome(path, source, config) {
+        HighlightOutcome::Highlighted { lines, .. } => (
+            lines
+                .into_iter()
+                .zip(line_indices.iter())
+                .map(|(line, index)| (*index, line.spans))
+                .collect(),
+            SyntaxCacheStatus::Highlighted,
+        ),
+        HighlightOutcome::Disabled => (BTreeMap::new(), SyntaxCacheStatus::Disabled),
+        HighlightOutcome::Unsupported => (BTreeMap::new(), SyntaxCacheStatus::Unsupported),
+        HighlightOutcome::Failed { .. } => (BTreeMap::new(), SyntaxCacheStatus::Failed),
+    }
 }
 
 fn parent_dir_for_path(path: &str) -> Option<String> {
@@ -1256,6 +1331,28 @@ diff --git a/src/c.rs b/src/c.rs
                 .iter()
                 .any(|row| matches!(row.kind, DiffRowKind::SyntaxSummary))
         );
+    }
+
+    #[test]
+    fn syntax_highlights_are_cached_per_file() {
+        let session = rust_syntax_session();
+
+        assert_eq!(session.syntax_cache.borrow().len(), 0);
+        session.diff_rows_for_selected_file();
+        assert_eq!(session.syntax_cache.borrow().len(), 1);
+        session.diff_rows_for_selected_file();
+        assert_eq!(session.syntax_cache.borrow().len(), 1);
+    }
+
+    #[test]
+    fn syntax_cache_key_tracks_config_changes() {
+        let mut session = rust_syntax_session();
+
+        session.diff_rows_for_selected_file();
+        session.syntax.languages = vec!["python".to_owned()];
+        session.diff_rows_for_selected_file();
+
+        assert_eq!(session.syntax_cache.borrow().len(), 2);
     }
 
     #[test]

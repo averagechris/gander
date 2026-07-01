@@ -112,6 +112,13 @@ name = "python"
 extensions = ["custompy"]
 filenames = ["SConstruct"]
 
+[syntax.theme]
+keyword = "magenta bold"
+function = "blue"
+string = "green"
+comment = "dark-gray"
+type = "yellow"
+
 [keybindings]
 move-down = ["j", "down"]
 move-up = ["k", "up"]
@@ -147,6 +154,34 @@ CSS, Go, HTML, JavaScript/JSX, JSON, Markdown, Nix, Python, Rust, TOML,
 TypeScript/TSX, and YAML. Use `[syntax].languages` as an allow-list, set
 `[syntax].enabled = false` to disable highlighting, or add `[[syntax.mappings]]`
 entries to map extra extensions/filenames to an existing built-in grammar.
+Highlight theme values are simple space-separated style specs: a foreground
+color such as `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `gray`, or
+`dark-gray`, plus optional modifiers like `bold`, `italic`, `dim`, and
+`underline`.
+
+Built-in language detection:
+
+| Language | Extensions / filenames |
+| --- | --- |
+| Bash/Shell | `.bash`, `.bats`, `.sh`, `.zsh`, `.bashrc`, `.envrc`, `.profile`, `.zshrc` |
+| CSS | `.css` |
+| Go | `.go` |
+| HTML | `.htm`, `.html` |
+| JavaScript | `.cjs`, `.js`, `.mjs` |
+| JSX | `.jsx` |
+| JSON | `.json`, `.jsonc` |
+| Markdown | `.markdown`, `.md`, `.mdown`, `.mkd` |
+| Nix | `.nix` |
+| Python | `.py`, `.pyi`, `.pyw` |
+| Rust | `.rs` |
+| TOML | `.toml` |
+| TypeScript | `.cts`, `.mts`, `.ts` |
+| TSX | `.tsx` |
+| YAML | `.yaml`, `.yml` |
+
+Syntax highlights are cached by file path, diff fingerprint, and syntax matching
+config. Unsupported files remain plain text, and supported-language highlight
+failures fall back to unhighlighted text without interrupting review.
 
 This repo's `.gitignore` excludes `.jj-change-viewer/`, so you can keep
 personal project-local keybindings there without committing them. For example,

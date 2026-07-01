@@ -416,6 +416,10 @@ name = "python"
 extensions = ["custompy"]
 filenames = ["SConstruct"]
 
+[syntax.theme]
+keyword = "red bold"
+string = "green italic"
+
 [keybindings]
 move-down = ["s", "down"]
 quit = ["q"]
@@ -448,6 +452,8 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.syntax.mappings[0].name, "python");
         assert_eq!(config.syntax.mappings[0].extensions, ["custompy"]);
         assert_eq!(config.syntax.mappings[0].filenames, ["SConstruct"]);
+        assert_eq!(config.syntax.theme.keyword, "red bold");
+        assert_eq!(config.syntax.theme.string, "green italic");
         assert_eq!(config.keybindings.move_down, ["s", "down"]);
         assert_eq!(config.keybindings.quit, ["q"]);
         assert_eq!(config.keybindings.toggle_fold, ["f"]);

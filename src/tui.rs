@@ -25,7 +25,7 @@ use crate::{
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     generated::GeneratedMatcher,
     jj::{JjCommand, ReviewTarget},
-    syntax::{HighlightKind, SyntaxSpan},
+    syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
 #[derive(Debug, Clone)]
@@ -674,7 +674,13 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                         Span::styled(row.prefix, style),
                         Span::raw(" "),
                     ];
-                    spans.extend(diff_text_spans(row, style, selected, in_range));
+                    spans.extend(diff_text_spans(
+                        row,
+                        style,
+                        selected,
+                        in_range,
+                        &session.syntax.theme,
+                    ));
                     Line::from(spans)
                 }
             }
@@ -693,6 +699,7 @@ fn diff_text_spans<'a>(
     fallback_style: Style,
     selected: bool,
     in_range: bool,
+    theme: &SyntaxThemeConfig,
 ) -> Vec<Span<'a>> {
     if row.syntax.is_empty() {
         return vec![Span::styled(row.text.clone(), fallback_style)];
@@ -702,28 +709,31 @@ fn diff_text_spans<'a>(
         .map(|span| {
             Span::styled(
                 span.text.clone(),
-                syntax_span_style(span, selected, in_range),
+                syntax_span_style(span, selected, in_range, theme),
             )
         })
         .collect()
 }
 
-fn syntax_span_style(span: &SyntaxSpan, selected: bool, in_range: bool) -> Style {
+fn syntax_span_style(
+    span: &SyntaxSpan,
+    selected: bool,
+    in_range: bool,
+    theme: &SyntaxThemeConfig,
+) -> Style {
     let style = match span.kind {
-        Some(HighlightKind::Attribute) => Style::default().fg(Color::Magenta),
-        Some(HighlightKind::Comment) => Style::default().fg(Color::DarkGray),
-        Some(HighlightKind::Constant) => Style::default().fg(Color::Cyan),
-        Some(HighlightKind::Function) => Style::default().fg(Color::Blue),
-        Some(HighlightKind::Keyword) => Style::default()
-            .fg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
-        Some(HighlightKind::Number) => Style::default().fg(Color::Cyan),
-        Some(HighlightKind::Operator) => Style::default().fg(Color::Gray),
-        Some(HighlightKind::Property) => Style::default().fg(Color::Cyan),
-        Some(HighlightKind::Punctuation) => Style::default().fg(Color::DarkGray),
-        Some(HighlightKind::String) => Style::default().fg(Color::Green),
-        Some(HighlightKind::Type) => Style::default().fg(Color::Yellow),
-        Some(HighlightKind::Variable) | None => Style::default().fg(Color::Gray),
+        Some(HighlightKind::Attribute) => syntax_style_spec(&theme.attribute),
+        Some(HighlightKind::Comment) => syntax_style_spec(&theme.comment),
+        Some(HighlightKind::Constant) => syntax_style_spec(&theme.constant),
+        Some(HighlightKind::Function) => syntax_style_spec(&theme.function),
+        Some(HighlightKind::Keyword) => syntax_style_spec(&theme.keyword),
+        Some(HighlightKind::Number) => syntax_style_spec(&theme.number),
+        Some(HighlightKind::Operator) => syntax_style_spec(&theme.operator),
+        Some(HighlightKind::Property) => syntax_style_spec(&theme.property),
+        Some(HighlightKind::Punctuation) => syntax_style_spec(&theme.punctuation),
+        Some(HighlightKind::String) => syntax_style_spec(&theme.string),
+        Some(HighlightKind::Type) => syntax_style_spec(&theme.r#type),
+        Some(HighlightKind::Variable) | None => syntax_style_spec(&theme.variable),
     };
 
     if selected {
@@ -733,6 +743,27 @@ fn syntax_span_style(span: &SyntaxSpan, selected: bool, in_range: bool) -> Style
     } else {
         style
     }
+}
+
+fn syntax_style_spec(spec: &str) -> Style {
+    spec.split_whitespace()
+        .fold(Style::default(), |style, token| match token {
+            "black" => style.fg(Color::Black),
+            "blue" => style.fg(Color::Blue),
+            "cyan" => style.fg(Color::Cyan),
+            "dark-gray" | "dark-grey" => style.fg(Color::DarkGray),
+            "gray" | "grey" => style.fg(Color::Gray),
+            "green" => style.fg(Color::Green),
+            "magenta" => style.fg(Color::Magenta),
+            "red" => style.fg(Color::Red),
+            "white" => style.fg(Color::White),
+            "yellow" => style.fg(Color::Yellow),
+            "bold" => style.add_modifier(Modifier::BOLD),
+            "dim" => style.add_modifier(Modifier::DIM),
+            "italic" => style.add_modifier(Modifier::ITALIC),
+            "underlined" | "underline" => style.add_modifier(Modifier::UNDERLINED),
+            _ => style,
+        })
 }
 
 fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
@@ -1047,6 +1078,32 @@ mod tests {
     #[test]
     fn rejects_unsupported_key_names() {
         assert!(parse_key("hyper-space").is_err());
+    }
+
+    #[test]
+    fn parses_syntax_style_specs() {
+        let style = syntax_style_spec("yellow bold underline");
+
+        assert_eq!(style.fg, Some(Color::Yellow));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn syntax_span_style_uses_theme() {
+        let theme = SyntaxThemeConfig {
+            keyword: "red italic".to_owned(),
+            ..SyntaxThemeConfig::default()
+        };
+        let span = SyntaxSpan {
+            text: "fn".to_owned(),
+            kind: Some(HighlightKind::Keyword),
+        };
+
+        let style = syntax_span_style(&span, false, false, &theme);
+
+        assert_eq!(style.fg, Some(Color::Red));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

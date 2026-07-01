@@ -12,6 +12,7 @@ pub struct SyntaxConfig {
     pub languages: Vec<String>,
     /// Extra file detection rules for built-in grammars.
     pub mappings: Vec<SyntaxLanguageMapping>,
+    pub theme: SyntaxThemeConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -20,6 +21,23 @@ pub struct SyntaxLanguageMapping {
     pub name: String,
     pub extensions: Vec<String>,
     pub filenames: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct SyntaxThemeConfig {
+    pub attribute: String,
+    pub comment: String,
+    pub constant: String,
+    pub function: String,
+    pub keyword: String,
+    pub number: String,
+    pub operator: String,
+    pub property: String,
+    pub punctuation: String,
+    pub string: String,
+    pub r#type: String,
+    pub variable: String,
 }
 
 /// Small tree-sitter integration point used by the TUI today and intended to grow into
@@ -77,6 +95,19 @@ pub struct HighlightedLine {
     pub spans: Vec<SyntaxSpan>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HighlightOutcome {
+    Disabled,
+    Unsupported,
+    Highlighted {
+        language: BuiltinLanguage,
+        lines: Vec<HighlightedLine>,
+    },
+    Failed {
+        language: BuiltinLanguage,
+    },
+}
+
 const BUILTIN_LANGUAGES: &[BuiltinLanguage] = &[
     BuiltinLanguage::Bash,
     BuiltinLanguage::Css,
@@ -119,6 +150,26 @@ impl Default for SyntaxConfig {
                 .map(str::to_owned)
                 .collect(),
             mappings: Vec::new(),
+            theme: SyntaxThemeConfig::default(),
+        }
+    }
+}
+
+impl Default for SyntaxThemeConfig {
+    fn default() -> Self {
+        Self {
+            attribute: "magenta".to_owned(),
+            comment: "dark-gray".to_owned(),
+            constant: "cyan".to_owned(),
+            function: "blue".to_owned(),
+            keyword: "magenta bold".to_owned(),
+            number: "cyan".to_owned(),
+            operator: "gray".to_owned(),
+            property: "cyan".to_owned(),
+            punctuation: "dark-gray".to_owned(),
+            string: "green".to_owned(),
+            r#type: "yellow".to_owned(),
+            variable: "gray".to_owned(),
         }
     }
 }
@@ -292,13 +343,31 @@ pub fn highlight(path: &str, source: &str) -> Option<Vec<HighlightedLine>> {
     highlight_with_config(path, source, &SyntaxConfig::default())
 }
 
+#[cfg(test)]
 pub fn highlight_with_config(
     path: &str,
     source: &str,
     config: &SyntaxConfig,
 ) -> Option<Vec<HighlightedLine>> {
-    let language = language_for_path_with_config(path, config)?;
-    highlight_language(language, source).ok()
+    match highlight_outcome(path, source, config) {
+        HighlightOutcome::Highlighted { lines, .. } => Some(lines),
+        HighlightOutcome::Disabled
+        | HighlightOutcome::Unsupported
+        | HighlightOutcome::Failed { .. } => None,
+    }
+}
+
+pub fn highlight_outcome(path: &str, source: &str, config: &SyntaxConfig) -> HighlightOutcome {
+    if !config.enabled {
+        return HighlightOutcome::Disabled;
+    }
+    let Some(language) = language_for_path_with_config(path, config) else {
+        return HighlightOutcome::Unsupported;
+    };
+    match highlight_language(language, source) {
+        Ok(lines) => HighlightOutcome::Highlighted { language, lines },
+        Err(_) => HighlightOutcome::Failed { language },
+    }
 }
 
 fn highlight_language(
@@ -341,6 +410,28 @@ impl BuiltinLanguage {
 }
 
 impl SyntaxConfig {
+    pub fn cache_key(&self) -> String {
+        let mappings = self
+            .mappings
+            .iter()
+            .map(|mapping| {
+                format!(
+                    "{}:{}:{}",
+                    mapping.name,
+                    mapping.extensions.join(","),
+                    mapping.filenames.join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        format!(
+            "enabled={};languages={};mappings={}",
+            self.enabled,
+            self.languages.join(","),
+            mappings
+        )
+    }
+
     fn language_enabled(&self, name: &str) -> bool {
         self.languages.iter().any(|language| language == name)
     }
@@ -526,6 +617,18 @@ mod tests {
 
         assert_eq!(language_for_path_with_config("src/main.rs", &config), None);
         assert!(highlight_with_config("src/main.rs", "fn main() {}\n", &config).is_none());
+        assert_eq!(
+            highlight_outcome("src/main.rs", "fn main() {}\n", &config),
+            HighlightOutcome::Disabled
+        );
+    }
+
+    #[test]
+    fn unsupported_syntax_reports_unsupported_outcome() {
+        assert_eq!(
+            highlight_outcome("README.unknown", "plain text\n", &SyntaxConfig::default()),
+            HighlightOutcome::Unsupported
+        );
     }
 
     #[test]
