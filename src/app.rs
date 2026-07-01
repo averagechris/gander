@@ -28,6 +28,7 @@ pub struct ReviewSession {
     pub diff_cursor: usize,
     pub focus: Focus,
     pub syntax: SyntaxConfig,
+    pub hide_generated: bool,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
@@ -161,6 +162,7 @@ impl ReviewSession {
             diff_cursor: 0,
             focus: Focus::Files,
             syntax,
+            hide_generated: false,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
@@ -207,6 +209,10 @@ impl ReviewSession {
         self.files.get(self.selected)
     }
 
+    pub fn selected_visible_file(&self) -> Option<&ReviewFile> {
+        self.selected_file().filter(|file| self.file_visible(file))
+    }
+
     pub fn selected_file_mut(&mut self) -> Option<&mut ReviewFile> {
         self.files.get_mut(self.selected)
     }
@@ -217,6 +223,11 @@ impl ReviewSession {
         if let Some(row_index) = tree.next_row_index(current, delta) {
             self.select_tree_row(&tree, row_index);
         }
+    }
+
+    pub fn toggle_generated_visibility(&mut self) {
+        self.hide_generated = !self.hide_generated;
+        self.ensure_selected_file_visible();
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {
@@ -336,6 +347,7 @@ impl ReviewSession {
             .files
             .iter()
             .enumerate()
+            .filter(|(_, file)| self.file_visible(file))
             .map(|(index, file)| FileTreeInput {
                 index,
                 path: &file.path,
@@ -350,6 +362,7 @@ impl ReviewSession {
             .files
             .iter()
             .enumerate()
+            .filter(|(_, file)| self.file_visible(file))
             .map(|(index, file)| FileTreeInput {
                 index,
                 path: &file.path,
@@ -360,6 +373,15 @@ impl ReviewSession {
     }
 
     pub fn selected_tree_row(&self, tree: &FileTreeView) -> Option<usize> {
+        if self
+            .selected_file()
+            .is_none_or(|file| !self.file_visible(file))
+        {
+            return self
+                .tree_cursor
+                .as_ref()
+                .and_then(|cursor| tree.row_for_id(cursor));
+        }
         self.tree_cursor
             .as_ref()
             .and_then(|cursor| tree.row_for_id(cursor))
@@ -447,6 +469,28 @@ impl ReviewSession {
     pub fn annotate_generated_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
         for file in &mut self.files {
             file.generated = predicate(file);
+        }
+        self.ensure_selected_file_visible();
+    }
+
+    fn file_visible(&self, file: &ReviewFile) -> bool {
+        !self.hide_generated || !file.generated
+    }
+
+    fn ensure_selected_file_visible(&mut self) {
+        if self
+            .selected_file()
+            .is_some_and(|file| self.file_visible(file))
+        {
+            return;
+        }
+        if let Some(index) = self.files.iter().position(|file| self.file_visible(file)) {
+            self.select_file_index(index);
+        } else {
+            self.tree_cursor = None;
+            self.diff_cursor = 0;
+            self.diff_scroll = 0;
+            self.clear_diff_range_selection();
         }
     }
 
@@ -548,7 +592,7 @@ impl ReviewSession {
     }
 
     pub fn diff_rows_for_selected_file(&self) -> Vec<DiffRow> {
-        let Some(file) = self.selected_file() else {
+        let Some(file) = self.selected_visible_file() else {
             return Vec::new();
         };
 
@@ -1468,6 +1512,34 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert!(!session.files[0].generated);
         assert!(session.files[1].generated);
+    }
+
+    #[test]
+    fn hiding_generated_filters_file_tree_and_moves_selection() {
+        let mut session = three_file_session();
+        session.files[0].generated = true;
+
+        session.toggle_generated_visibility();
+
+        assert!(session.hide_generated);
+        assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
+        assert!(session.file_tree().rows.iter().all(|row| {
+            !matches!(row.kind, FlatTreeRowKind::File { file_index } if file_index == 0)
+        }));
+    }
+
+    #[test]
+    fn hiding_all_generated_files_clears_visible_diff_rows() {
+        let mut session = session();
+        for file in &mut session.files {
+            file.generated = true;
+        }
+
+        session.toggle_generated_visibility();
+
+        assert!(session.selected_visible_file().is_none());
+        assert!(session.diff_rows_for_selected_file().is_empty());
+        assert!(session.file_tree().rows.is_empty());
     }
 
     #[test]

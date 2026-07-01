@@ -70,6 +70,7 @@ pub struct KeybindingsConfig {
     pub mark_viewed: Vec<String>,
     pub toggle_viewed: Vec<String>,
     pub mark_all_viewed: Vec<String>,
+    pub toggle_generated: Vec<String>,
     pub toggle_fold: Vec<String>,
     pub collapse_fold: Vec<String>,
     pub expand_fold: Vec<String>,
@@ -156,6 +157,7 @@ struct KeybindingsConfigPatch {
     mark_viewed: Option<Vec<String>>,
     toggle_viewed: Option<Vec<String>>,
     mark_all_viewed: Option<Vec<String>>,
+    toggle_generated: Option<Vec<String>>,
     toggle_fold: Option<Vec<String>>,
     collapse_fold: Option<Vec<String>>,
     expand_fold: Option<Vec<String>>,
@@ -213,6 +215,7 @@ impl Default for KeybindingsConfig {
             mark_viewed: keys(["enter"]),
             toggle_viewed: keys(["v"]),
             mark_all_viewed: keys(["a"]),
+            toggle_generated: keys(["h"]),
             toggle_fold: keys(["space"]),
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
@@ -345,6 +348,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);
         apply_optional(&mut self.toggle_viewed, patch.toggle_viewed);
         apply_optional(&mut self.mark_all_viewed, patch.mark_all_viewed);
+        apply_optional(&mut self.toggle_generated, patch.toggle_generated);
         apply_optional(&mut self.toggle_fold, patch.toggle_fold);
         apply_optional(&mut self.collapse_fold, patch.collapse_fold);
         apply_optional(&mut self.expand_fold, patch.expand_fold);
@@ -526,6 +530,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.quit, ["q", "esc"]);
         assert_eq!(config.keybindings.compare_trunk, ["t"]);
         assert_eq!(config.keybindings.compare_parent, ["p"]);
+        assert_eq!(config.keybindings.toggle_generated, ["h"]);
         assert_eq!(config.keybindings.toggle_fold, ["space"]);
         assert_eq!(config.keybindings.collapse_fold, ["left"]);
         assert_eq!(config.keybindings.expand_fold, ["right"]);

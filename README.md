@@ -128,6 +128,7 @@ move-up = ["k", "up"]
 toggle-focus = ["tab"]
 compare-trunk = ["t"]
 compare-parent = ["p"]
+toggle-generated = ["h"]
 toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
@@ -269,6 +270,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
+| `h` | hide/show generated/noisy files in the TUI |
 | `r` in diff focus | start/cancel a range selection for a multi-line comment |
 | Ctrl-G | cancel active range selection |
 | Enter | mark selected file viewed and advance to the next unviewed file |

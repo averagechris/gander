@@ -65,6 +65,7 @@ enum Action {
     MarkViewed,
     ToggleViewed,
     MarkAllViewed,
+    ToggleGenerated,
     ToggleFold,
     CollapseFold,
     ExpandFold,
@@ -361,6 +362,7 @@ fn handle_normal_action(
         Action::MarkViewed => session.mark_selected_viewed(),
         Action::ToggleViewed => session.toggle_viewed(),
         Action::MarkAllViewed => session.mark_all_viewed(),
+        Action::ToggleGenerated => session.toggle_generated_visibility(),
         Action::ToggleFold => {
             if session.focus == Focus::Files {
                 session.toggle_tree_fold();
@@ -695,7 +697,12 @@ fn render_file_row(
 }
 
 fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
-    if session.selected_file().is_none() {
+    if session.selected_visible_file().is_none() {
+        let generated_hint = if session.hide_generated {
+            "Generated/noisy files are hidden. Press the generated toggle to show them."
+        } else {
+            "If files disappeared unexpectedly, check --ignore filters."
+        };
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
@@ -708,7 +715,7 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                 Line::from(format!("Current target: {}", session.target)),
                 Line::from(""),
                 Line::from("Use t for trunk()..@, p for @-..@, or pass --base/--rev."),
-                Line::from("If files disappeared unexpectedly, check --ignore filters."),
+                Line::from(generated_hint),
             ])
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("diff"))
@@ -892,11 +899,17 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "{} · focus files · {down}/{up} tree · {fold} fold · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
             session.target,
+            if session.hide_generated {
+                " (generated hidden)"
+            } else {
+                ""
+            },
             down = keymap.hint(Action::MoveDown),
             up = keymap.hint(Action::MoveUp),
             fold = keymap.hint(Action::ToggleFold),
+            generated = keymap.hint(Action::ToggleGenerated),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
             next_unviewed = keymap.hint(Action::NextUnviewed),
@@ -910,10 +923,15 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "{} · focus diff{} · {down}/{up} line · {range} range · {cancel_range} cancel · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
             session.target,
             if session.has_active_diff_range() {
                 " (range active)"
+            } else {
+                ""
+            },
+            if session.hide_generated {
+                " (generated hidden)"
             } else {
                 ""
             },
@@ -921,6 +939,7 @@ fn draw_footer(
             up = keymap.hint(Action::MoveUp),
             range = keymap.hint(Action::RangeComment),
             cancel_range = keymap.hint(Action::CancelRangeComment),
+            generated = keymap.hint(Action::ToggleGenerated),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
             next_unviewed = keymap.hint(Action::NextUnviewed),
@@ -990,6 +1009,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::MarkAllViewed,
             &config.mark_all_viewed,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleGenerated,
+            &config.toggle_generated,
         )?;
         add_bindings(&mut bindings, Action::ToggleFold, &config.toggle_fold)?;
         add_bindings(&mut bindings, Action::CollapseFold, &config.collapse_fold)?;
@@ -1518,6 +1542,16 @@ diff --git a/README.md b/README.md
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Right)),
             Some(Action::ExpandFold)
+        );
+    }
+
+    #[test]
+    fn default_generated_keybinding_maps_to_action() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('h'))),
+            Some(Action::ToggleGenerated)
         );
     }
 
