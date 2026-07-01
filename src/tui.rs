@@ -57,6 +57,8 @@ enum Action {
     CompareTrunk,
     CompareParent,
     TargetChooser,
+    TargetPickerMoveDown,
+    TargetPickerMoveUp,
     NextUnviewed,
     PreviousUnviewed,
     NextComment,
@@ -93,7 +95,10 @@ enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetChooserState {
     rows: Vec<JjChangeSummary>,
+    filtered: Vec<usize>,
     selected: usize,
+    query: String,
+    current_base: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,31 +235,88 @@ impl TargetChooserState {
     fn new(rows: Vec<JjChangeSummary>, current_base: &str) -> Self {
         let selected = rows
             .iter()
-            .position(|row| {
-                row.change_id == current_base
-                    || row
-                        .bookmarks
-                        .split_whitespace()
-                        .any(|bookmark| bookmark.trim_end_matches('*') == current_base)
-            })
+            .position(|row| row.matches_base(current_base))
             .unwrap_or(0);
-        Self { rows, selected }
+        let filtered = (0..rows.len()).collect();
+        Self {
+            rows,
+            filtered,
+            selected,
+            query: String::new(),
+            current_base: current_base.to_owned(),
+        }
     }
 
     fn target(&self) -> Option<ReviewTarget> {
         self.rows
-            .get(self.selected)
+            .get(*self.filtered.get(self.selected)?)
             .map(|row| ReviewTarget::new(row.change_id.clone(), "@"))
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.rows.is_empty() {
+        if self.filtered.is_empty() {
             self.selected = 0;
             return;
         }
-        let max = self.rows.len() as isize - 1;
+        let max = self.filtered.len() as isize - 1;
         self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
     }
+
+    fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    fn select_last(&mut self) {
+        self.selected = self.filtered.len().saturating_sub(1);
+    }
+
+    fn push_query_char(&mut self, ch: char) {
+        self.query.push(ch);
+        self.apply_filter();
+    }
+
+    fn pop_query_char(&mut self) {
+        self.query.pop();
+        self.apply_filter();
+    }
+
+    fn apply_filter(&mut self) {
+        self.filtered = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| fuzzy_matches(row, &self.query).then_some(index))
+            .collect();
+        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+    }
+}
+
+impl JjChangeSummary {
+    fn matches_base(&self, base: &str) -> bool {
+        self.change_id == base
+            || self
+                .bookmarks
+                .split_whitespace()
+                .any(|bookmark| bookmark.trim_end_matches('*') == base)
+    }
+}
+
+fn fuzzy_matches(row: &JjChangeSummary, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let haystack = format!("{} {} {}", row.change_id, row.bookmarks, row.description);
+    fuzzy_contains(&haystack.to_ascii_lowercase(), &query.to_ascii_lowercase())
+}
+
+fn fuzzy_contains(haystack: &str, needle: &str) -> bool {
+    let mut haystack_chars = haystack.chars();
+    needle.chars().all(|needle_char| {
+        haystack_chars
+            .by_ref()
+            .any(|haystack_char| haystack_char == needle_char)
+    })
 }
 
 struct ReviewLoader<'a> {
@@ -357,7 +419,7 @@ fn handle_key_event(
             }
         }
         Mode::TargetChooser(chooser) => {
-            if handle_target_chooser_key(key, chooser, session, review_loader, tui_state) {
+            if handle_target_chooser_key(key, chooser, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -498,7 +560,9 @@ fn handle_normal_action(
         Action::SubmitComment
         | Action::CancelComment
         | Action::InsertNewline
-        | Action::DeleteChar => {}
+        | Action::DeleteChar
+        | Action::TargetPickerMoveDown
+        | Action::TargetPickerMoveUp => {}
     }
     Ok(false)
 }
@@ -507,9 +571,19 @@ fn handle_target_chooser_key(
     key: KeyEvent,
     chooser: &mut TargetChooserState,
     session: &mut ReviewSession,
+    keymap: &KeyMap,
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => chooser.move_selection(1),
+            Action::TargetPickerMoveUp => chooser.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
     match key.code {
         KeyCode::Esc => true,
         KeyCode::Enter => {
@@ -518,20 +592,20 @@ fn handle_target_chooser_key(
             }
             true
         }
-        KeyCode::Up => {
-            chooser.move_selection(-1);
-            false
-        }
-        KeyCode::Down => {
-            chooser.move_selection(1);
-            false
-        }
         KeyCode::Char('g') => {
-            chooser.selected = 0;
+            chooser.select_first();
             false
         }
         KeyCode::Char('G') => {
-            chooser.selected = chooser.rows.len().saturating_sub(1);
+            chooser.select_last();
+            false
+        }
+        KeyCode::Backspace => {
+            chooser.pop_query_char();
+            false
+        }
+        KeyCode::Char(ch) if key.modifiers.is_empty() => {
+            chooser.push_query_char(ch);
             false
         }
         _ => false,
@@ -1160,8 +1234,11 @@ fn draw_footer(
             cancel = keymap.hint(Action::CancelComment),
         ),
         Mode::TargetChooser(_) => {
-            "choose base for base..@ · ↑/↓ move · g/G top/bottom · enter load · esc cancel"
-                .to_owned()
+            format!(
+                "choose base for base..@ · type filter · {down}/{up} move · enter load · esc cancel",
+                down = keymap.hint(Action::TargetPickerMoveDown),
+                up = keymap.hint(Action::TargetPickerMoveUp),
+            )
         }
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
@@ -1195,6 +1272,16 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::CompareTrunk, &config.compare_trunk)?;
         add_bindings(&mut bindings, Action::CompareParent, &config.compare_parent)?;
         add_bindings(&mut bindings, Action::TargetChooser, &config.target_chooser)?;
+        add_bindings(
+            &mut bindings,
+            Action::TargetPickerMoveDown,
+            &config.target_picker_down,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::TargetPickerMoveUp,
+            &config.target_picker_up,
+        )?;
         add_bindings(&mut bindings, Action::NextUnviewed, &config.next_unviewed)?;
         add_bindings(
             &mut bindings,
@@ -1260,6 +1347,19 @@ impl KeyMap {
                             | Action::CancelComment
                             | Action::InsertNewline
                             | Action::DeleteChar
+                    )
+            })
+            .map(|binding| binding.action)
+    }
+
+    fn target_picker_action_for(&self, key: &KeyEvent) -> Option<Action> {
+        self.bindings
+            .iter()
+            .find(|binding| {
+                binding.key.matches(key)
+                    && matches!(
+                        binding.action,
+                        Action::TargetPickerMoveDown | Action::TargetPickerMoveUp
                     )
             })
             .map(|binding| binding.action)
@@ -1382,21 +1482,50 @@ fn draw_target_chooser_popup(
             Span::styled("base..@", Style::default().fg(Color::Yellow)),
             Span::styled(" (tip is @)", Style::default().fg(Color::DarkGray)),
         ]),
+        Line::from(vec![
+            Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if chooser.query.is_empty() {
+                    "type to fuzzy match".to_owned()
+                } else {
+                    chooser.query.clone()
+                },
+                if chooser.query.is_empty() {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::White)
+                },
+            ),
+        ]),
         Line::from(Span::styled(
-            "change id      bookmarks                 description",
+            "  change id      bookmarks                 description",
             Style::default().fg(Color::DarkGray),
         )),
     ];
-    lines.extend(
-        chooser
-            .rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| base_picker_row(row, index == chooser.selected)),
-    );
+    if chooser.filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching changes",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.extend(
+            chooser
+                .filtered
+                .iter()
+                .enumerate()
+                .map(|(index, row_index)| {
+                    let row = &chooser.rows[*row_index];
+                    base_picker_row(
+                        row,
+                        index == chooser.selected,
+                        row.matches_base(&chooser.current_base),
+                    )
+                }),
+        );
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ move · g/G top/bottom · enter use selected change as base · esc cancel",
+        "type fuzzy filter · backspace edit · ↑/↓ or ctrl-j/ctrl-k move · enter use base · esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1408,7 +1537,7 @@ fn draw_target_chooser_popup(
     );
 }
 
-fn base_picker_row(row: &JjChangeSummary, selected: bool) -> Line<'static> {
+fn base_picker_row(row: &JjChangeSummary, selected: bool, current_base: bool) -> Line<'static> {
     let style = if selected {
         Style::default()
             .fg(Color::Yellow)
@@ -1417,13 +1546,14 @@ fn base_picker_row(row: &JjChangeSummary, selected: bool) -> Line<'static> {
         Style::default().fg(Color::Gray)
     };
     let marker = if selected { "›" } else { " " };
+    let current = if current_base { "●" } else { " " };
     let description = if row.description.is_empty() {
         "(no description)"
     } else {
         &row.description
     };
     Line::from(vec![
-        Span::styled(format!("{marker} {:<13}", row.change_id), style),
+        Span::styled(format!("{marker}{current} {:<13}", row.change_id), style),
         Span::styled(
             format!("{:<26}", row.bookmarks),
             Style::default().fg(Color::Cyan),
@@ -2007,6 +2137,34 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn default_target_picker_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::from(KeyCode::Down)),
+            Some(Action::TargetPickerMoveDown)
+        );
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::new(
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL
+            )),
+            Some(Action::TargetPickerMoveDown)
+        );
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::from(KeyCode::Up)),
+            Some(Action::TargetPickerMoveUp)
+        );
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::new(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL
+            )),
+            Some(Action::TargetPickerMoveUp)
+        );
+    }
+
+    #[test]
     fn target_chooser_loads_selected_base_to_current_tip() {
         let mut session = snapshot_session("");
         let backend = MockJjBackend {
@@ -2028,11 +2186,13 @@ diff --git a/README.md b/README.md
             }],
             "trunk()",
         );
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
         assert!(handle_target_chooser_key(
             KeyEvent::from(KeyCode::Enter),
             &mut chooser,
             &mut session,
+            &keymap,
             &loader,
             &mut tui_state,
         ));
@@ -2063,6 +2223,32 @@ diff --git a/README.md b/README.md
         );
 
         assert_eq!(chooser.selected, 1);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
+    }
+
+    #[test]
+    fn target_chooser_fuzzy_filters_rows() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "abc".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: "feature work".to_owned(),
+                },
+                JjChangeSummary {
+                    change_id: "def".to_owned(),
+                    bookmarks: "topic".to_owned(),
+                    description: "bug fix".to_owned(),
+                },
+            ],
+            "abc",
+        );
+
+        for ch in "tp".chars() {
+            chooser.push_query_char(ch);
+        }
+
+        assert_eq!(chooser.filtered, vec![1]);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
     }
 
