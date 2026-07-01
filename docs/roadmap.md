@@ -53,6 +53,7 @@ Status: started.
 
 - [x] line-level comments
 - [ ] multiline editor widget
+- [x] comment navigation
 - [ ] comment list pane
 - [ ] comment states: draft/resolved/todo
 - [ ] artifact schema versioning

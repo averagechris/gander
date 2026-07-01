@@ -362,6 +362,21 @@ impl ReviewSession {
             .count()
     }
 
+    pub fn move_to_comment(&mut self, delta: isize) {
+        if self.comments.is_empty() {
+            return;
+        }
+
+        let current = self.current_comment_index();
+        let next = match (current, delta.is_negative()) {
+            (Some(index), false) => (index + 1) % self.comments.len(),
+            (Some(index), true) => (index + self.comments.len() - 1) % self.comments.len(),
+            (None, false) => 0,
+            (None, true) => self.comments.len() - 1,
+        };
+        self.select_comment(next);
+    }
+
     pub fn add_comment(&mut self, body: String) {
         match self.focus {
             Focus::Files => self.add_file_comment(body),
@@ -402,6 +417,52 @@ impl ReviewSession {
             body,
             created_at,
         });
+    }
+
+    fn current_comment_index(&self) -> Option<usize> {
+        match self.focus {
+            Focus::Diff => self.selected_line_anchor().and_then(|anchor| {
+                self.comments
+                    .iter()
+                    .position(|comment| comment.anchor.as_ref() == Some(&anchor))
+            }),
+            Focus::Files => self.selected_file().and_then(|file| {
+                self.comments.iter().position(|comment| {
+                    comment.path == file.path
+                        && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
+                })
+            }),
+        }
+    }
+
+    fn select_comment(&mut self, index: usize) {
+        let Some(comment) = self.comments.get(index).cloned() else {
+            return;
+        };
+        let target_path = comment
+            .anchor
+            .as_ref()
+            .map(CommentAnchor::path)
+            .unwrap_or(&comment.path);
+        let Some(file_index) = self.files.iter().position(|file| file.path == target_path) else {
+            return;
+        };
+
+        self.select_file_index(file_index);
+        match comment.anchor {
+            Some(anchor @ CommentAnchor::Line { .. }) => {
+                self.focus = Focus::Diff;
+                if let Some(row_index) = self
+                    .diff_rows_for_selected_file()
+                    .iter()
+                    .position(|row| row.anchor.as_ref() == Some(&anchor))
+                {
+                    self.diff_cursor = row_index;
+                    self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                }
+            }
+            _ => self.focus = Focus::Files,
+        }
     }
 
     fn ensure_diff_cursor_commentable(&mut self) {
@@ -611,5 +672,20 @@ diff --git a/README.md b/README.md
         assert_eq!(session.selected_file().unwrap().path, "README.md");
         assert_eq!(session.diff_scroll, 2);
         assert_eq!(session.diff_cursor, 1);
+    }
+
+    #[test]
+    fn move_to_comment_selects_line_comment_target() {
+        let mut session = session();
+        session.add_comment("File note".into());
+        session.toggle_focus();
+        let line_anchor = session.selected_line_anchor().unwrap();
+        session.add_comment("Line note".into());
+
+        session.focus = Focus::Files;
+        session.move_to_comment(1);
+
+        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(session.selected_line_anchor(), Some(line_anchor));
     }
 }

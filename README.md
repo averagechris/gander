@@ -108,6 +108,7 @@ Use `--state <path>` to override it.
 | `j` / Down | next file |
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |
+| `m` / `M` | next / previous comment |
 | Enter | mark selected file viewed |
 | `v` | toggle selected file viewed |
 | `a` | mark all visible files viewed |
@@ -139,6 +140,6 @@ See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value nex
 
 1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
 2. directory folding for the hierarchical file tree
-3. comment navigation and a multiline editor
+3. multiline comment editor
 4. better jj revision/range semantics and support for reviewing stacks
 5. snapshot tests for parser, artifact, and TUI rendering
