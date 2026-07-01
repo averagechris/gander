@@ -11,6 +11,7 @@ use serde::Deserialize;
 pub struct Config {
     pub ignore: IgnoreConfig,
     pub artifact: ArtifactConfig,
+    pub keybindings: KeybindingsConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -25,6 +26,30 @@ pub struct ArtifactConfig {
     pub format: ArtifactFormatConfig,
     pub output_dir: PathBuf,
     pub basename: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct KeybindingsConfig {
+    pub quit: Vec<String>,
+    pub move_down: Vec<String>,
+    pub move_up: Vec<String>,
+    pub toggle_focus: Vec<String>,
+    pub diff_top: Vec<String>,
+    pub diff_bottom: Vec<String>,
+    pub next_unviewed: Vec<String>,
+    pub previous_unviewed: Vec<String>,
+    pub next_comment: Vec<String>,
+    pub previous_comment: Vec<String>,
+    pub scroll_down: Vec<String>,
+    pub scroll_up: Vec<String>,
+    pub mark_viewed: Vec<String>,
+    pub toggle_viewed: Vec<String>,
+    pub mark_all_viewed: Vec<String>,
+    pub comment: Vec<String>,
+    pub submit_comment: Vec<String>,
+    pub cancel_comment: Vec<String>,
+    pub delete_char: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -42,6 +67,36 @@ impl Default for ArtifactConfig {
             basename: "review".to_owned(),
         }
     }
+}
+
+impl Default for KeybindingsConfig {
+    fn default() -> Self {
+        Self {
+            quit: keys(["q", "esc"]),
+            move_down: keys(["j", "down"]),
+            move_up: keys(["k", "up"]),
+            toggle_focus: keys(["tab"]),
+            diff_top: keys(["g"]),
+            diff_bottom: keys(["G"]),
+            next_unviewed: keys(["n"]),
+            previous_unviewed: keys(["N"]),
+            next_comment: keys(["m"]),
+            previous_comment: keys(["M"]),
+            scroll_down: keys(["d", "pagedown"]),
+            scroll_up: keys(["u", "pageup"]),
+            mark_viewed: keys(["enter"]),
+            toggle_viewed: keys(["v"]),
+            mark_all_viewed: keys(["a"]),
+            comment: keys(["c"]),
+            submit_comment: keys(["enter"]),
+            cancel_comment: keys(["esc"]),
+            delete_char: keys(["backspace"]),
+        }
+    }
+}
+
+fn keys<const N: usize>(keys: [&str; N]) -> Vec<String> {
+    keys.into_iter().map(str::to_owned).collect()
 }
 
 impl Config {
@@ -115,6 +170,10 @@ globs = ["Cargo.lock", "**/*.min.js"]
 format = "json"
 output_dir = "artifacts"
 basename = "review-current"
+
+[keybindings]
+move-down = ["s", "down"]
+quit = ["q"]
 "#,
         )
         .unwrap();
@@ -123,6 +182,8 @@ basename = "review-current"
 
         assert_eq!(config.ignore.globs, ["Cargo.lock", "**/*.min.js"]);
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
+        assert_eq!(config.keybindings.move_down, ["s", "down"]);
+        assert_eq!(config.keybindings.quit, ["q"]);
         assert_eq!(
             config
                 .artifact
@@ -144,5 +205,14 @@ basename = "review-current"
             artifact.output_path(repo.path(), ArtifactFormatConfig::Json),
             repo.path().join(".jj-change-viewer").join("review.json")
         );
+    }
+
+    #[test]
+    fn default_keybindings_include_vim_and_arrow_navigation() {
+        let config = Config::default();
+
+        assert_eq!(config.keybindings.move_down, ["j", "down"]);
+        assert_eq!(config.keybindings.move_up, ["k", "up"]);
+        assert_eq!(config.keybindings.quit, ["q", "esc"]);
     }
 }

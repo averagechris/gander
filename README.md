@@ -68,6 +68,13 @@ globs = ["Cargo.lock", "**/*.lock", "**/generated/**"]
 format = "markdown"
 output_dir = ".jj-change-viewer"
 basename = "review"
+
+[keybindings]
+move-down = ["j", "down"]
+move-up = ["k", "up"]
+toggle-focus = ["tab"]
+comment = ["c"]
+quit = ["q", "esc"]
 ```
 
 CLI `--ignore` values are appended to configured ignore globs. Use
@@ -102,6 +109,10 @@ Persistent state defaults to:
 Use `--state <path>` to override it.
 
 ## TUI keys
+
+The defaults below can be overridden in the `[keybindings]` config section.
+Key names support single characters plus `esc`, `enter`, `tab`, `backspace`,
+arrow keys, `pageup`, `pagedown`, and `space`.
 
 | Key | Action |
 | --- | --- |

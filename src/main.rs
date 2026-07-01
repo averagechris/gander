@@ -96,7 +96,7 @@ fn main() -> color_eyre::Result<()> {
 
     match cli.command.unwrap_or(Command::Tui) {
         Command::Tui => {
-            tui::run(&mut session)?;
+            tui::run(&mut session, &config.keybindings)?;
             state = session.into_state();
             state.save(&state_path)?;
         }

@@ -39,6 +39,7 @@ Status: started.
 - [ ] viewed/unviewed filters
 - [x] jump to next unviewed file
 - [x] preserve cursor and scroll position per file
+- [x] configurable keybindings
 
 ## Milestone 3: syntax-aware reviewing
 

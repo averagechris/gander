@@ -1,8 +1,8 @@
 use std::{io, time::Duration};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, bail};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -17,15 +17,57 @@ use ratatui::{
 
 use crate::{
     app::{DiffRowKind, Focus, ReviewSession},
+    config::KeybindingsConfig,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
 };
+
+#[derive(Debug, Clone)]
+pub struct KeyMap {
+    bindings: Vec<KeyBinding>,
+}
+
+#[derive(Debug, Clone)]
+struct KeyBinding {
+    key: KeyPress,
+    action: Action,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyPress {
+    code: KeyCode,
+    label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Quit,
+    MoveDown,
+    MoveUp,
+    ToggleFocus,
+    DiffTop,
+    DiffBottom,
+    NextUnviewed,
+    PreviousUnviewed,
+    NextComment,
+    PreviousComment,
+    ScrollDown,
+    ScrollUp,
+    MarkViewed,
+    ToggleViewed,
+    MarkAllViewed,
+    Comment,
+    SubmitComment,
+    CancelComment,
+    DeleteChar,
+}
 
 enum Mode {
     Normal,
     CommentInput(String),
 }
 
-pub fn run(session: &mut ReviewSession) -> Result<()> {
+pub fn run(session: &mut ReviewSession, keybindings: &KeybindingsConfig) -> Result<()> {
+    let keymap = KeyMap::try_from(keybindings)?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -33,7 +75,7 @@ pub fn run(session: &mut ReviewSession) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let mut mode = Mode::Normal;
 
-    let result = run_loop(&mut terminal, session, &mut mode);
+    let result = run_loop(&mut terminal, session, &mut mode, &keymap);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -45,9 +87,10 @@ fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &mut ReviewSession,
     mode: &mut Mode,
+    keymap: &KeyMap,
 ) -> Result<()> {
     loop {
-        terminal.draw(|frame| draw(frame, session, mode))?;
+        terminal.draw(|frame| draw(frame, session, mode, keymap))?;
 
         if !event::poll(Duration::from_millis(150))? {
             continue;
@@ -61,50 +104,75 @@ fn run_loop(
         }
 
         match mode {
-            Mode::Normal => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char('j') | KeyCode::Down => match session.focus {
-                    Focus::Files => session.move_selection(1),
-                    Focus::Diff => session.move_diff_cursor(1),
-                },
-                KeyCode::Char('k') | KeyCode::Up => match session.focus {
-                    Focus::Files => session.move_selection(-1),
-                    Focus::Diff => session.move_diff_cursor(-1),
-                },
-                KeyCode::Tab => session.toggle_focus(),
-                KeyCode::Char('g') => session.diff_scroll = 0,
-                KeyCode::Char('G') => session.diff_scroll = u16::MAX / 2,
-                KeyCode::Char('n') => session.move_to_unviewed(1),
-                KeyCode::Char('N') => session.move_to_unviewed(-1),
-                KeyCode::Char('m') => session.move_to_comment(1),
-                KeyCode::Char('M') => session.move_to_comment(-1),
-                KeyCode::Char('d') | KeyCode::PageDown => session.scroll_diff(12),
-                KeyCode::Char('u') | KeyCode::PageUp => session.scroll_diff(-12),
-                KeyCode::Enter => session.mark_selected_viewed(),
-                KeyCode::Char('v') => session.toggle_viewed(),
-                KeyCode::Char('a') => session.mark_all_viewed(),
-                KeyCode::Char('c') => *mode = Mode::CommentInput(String::new()),
-                _ => {}
-            },
-            Mode::CommentInput(buffer) => match key.code {
-                KeyCode::Esc => *mode = Mode::Normal,
-                KeyCode::Enter => {
-                    let body = std::mem::take(buffer);
-                    session.add_comment(body);
+            Mode::Normal => {
+                if let Some(action) = keymap.action_for(&key)
+                    && handle_normal_action(action, session, mode)
+                {
+                    break;
+                }
+            }
+            Mode::CommentInput(buffer) => {
+                let mut leave_comment_input = false;
+                if let Some(action) = keymap.action_for(&key) {
+                    leave_comment_input = handle_comment_action(action, session, buffer);
+                } else if let KeyCode::Char(ch) = key.code {
+                    buffer.push(ch);
+                }
+                if leave_comment_input {
                     *mode = Mode::Normal;
                 }
-                KeyCode::Backspace => {
-                    buffer.pop();
-                }
-                KeyCode::Char(ch) => buffer.push(ch),
-                _ => {}
-            },
+            }
         }
     }
     Ok(())
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode) {
+fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut Mode) -> bool {
+    match action {
+        Action::Quit => return true,
+        Action::MoveDown => match session.focus {
+            Focus::Files => session.move_selection(1),
+            Focus::Diff => session.move_diff_cursor(1),
+        },
+        Action::MoveUp => match session.focus {
+            Focus::Files => session.move_selection(-1),
+            Focus::Diff => session.move_diff_cursor(-1),
+        },
+        Action::ToggleFocus => session.toggle_focus(),
+        Action::DiffTop => session.diff_scroll = 0,
+        Action::DiffBottom => session.diff_scroll = u16::MAX / 2,
+        Action::NextUnviewed => session.move_to_unviewed(1),
+        Action::PreviousUnviewed => session.move_to_unviewed(-1),
+        Action::NextComment => session.move_to_comment(1),
+        Action::PreviousComment => session.move_to_comment(-1),
+        Action::ScrollDown => session.scroll_diff(12),
+        Action::ScrollUp => session.scroll_diff(-12),
+        Action::MarkViewed => session.mark_selected_viewed(),
+        Action::ToggleViewed => session.toggle_viewed(),
+        Action::MarkAllViewed => session.mark_all_viewed(),
+        Action::Comment => *mode = Mode::CommentInput(String::new()),
+        Action::SubmitComment | Action::CancelComment | Action::DeleteChar => {}
+    }
+    false
+}
+
+fn handle_comment_action(action: Action, session: &mut ReviewSession, buffer: &mut String) -> bool {
+    match action {
+        Action::CancelComment => return true,
+        Action::SubmitComment => {
+            let body = std::mem::take(buffer);
+            session.add_comment(body);
+            return true;
+        }
+        Action::DeleteChar => {
+            buffer.pop();
+        }
+        _ => {}
+    }
+    false
+}
+
+fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode, keymap: &KeyMap) {
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(2)])
@@ -116,7 +184,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode) {
 
     draw_files(frame, body[0], session);
     draw_diff(frame, body[1], session);
-    draw_footer(frame, main[1], session, mode);
+    draw_footer(frame, main[1], session, mode, keymap);
 
     if let Mode::CommentInput(buffer) = mode {
         draw_comment_popup(frame, frame.area(), buffer);
@@ -275,21 +343,143 @@ fn diff_row_style(kind: DiffRowKind, selected: bool) -> Style {
     }
 }
 
-fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession, mode: &Mode) {
+fn draw_footer(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    mode: &Mode,
+    keymap: &KeyMap,
+) {
     let mode_text = match mode {
-        Mode::Normal if session.focus == Focus::Files => {
-            "focus files · j/k file · n/N unviewed · m/M comments · tab diff · enter viewed · v toggle · c file comment · q quit"
-        }
-        Mode::Normal => {
-            "focus diff · j/k line · n/N unviewed · m/M comments · tab files · c line comment · u/d scroll · q quit"
-        }
-        Mode::CommentInput(_) => "type comment · enter save · esc cancel",
+        Mode::Normal if session.focus == Focus::Files => format!(
+            "focus files · {down}/{up} file · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            down = keymap.hint(Action::MoveDown),
+            up = keymap.hint(Action::MoveUp),
+            next_unviewed = keymap.hint(Action::NextUnviewed),
+            previous_unviewed = keymap.hint(Action::PreviousUnviewed),
+            next_comment = keymap.hint(Action::NextComment),
+            previous_comment = keymap.hint(Action::PreviousComment),
+            focus = keymap.hint(Action::ToggleFocus),
+            mark = keymap.hint(Action::MarkViewed),
+            toggle = keymap.hint(Action::ToggleViewed),
+            comment = keymap.hint(Action::Comment),
+            quit = keymap.hint(Action::Quit),
+        ),
+        Mode::Normal => format!(
+            "focus diff · {down}/{up} line · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} line comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            down = keymap.hint(Action::MoveDown),
+            up = keymap.hint(Action::MoveUp),
+            next_unviewed = keymap.hint(Action::NextUnviewed),
+            previous_unviewed = keymap.hint(Action::PreviousUnviewed),
+            next_comment = keymap.hint(Action::NextComment),
+            previous_comment = keymap.hint(Action::PreviousComment),
+            focus = keymap.hint(Action::ToggleFocus),
+            comment = keymap.hint(Action::Comment),
+            scroll_down = keymap.hint(Action::ScrollDown),
+            scroll_up = keymap.hint(Action::ScrollUp),
+            quit = keymap.hint(Action::Quit),
+        ),
+        Mode::CommentInput(_) => format!(
+            "type comment · {submit} save · {cancel} cancel",
+            submit = keymap.hint(Action::SubmitComment),
+            cancel = keymap.hint(Action::CancelComment),
+        ),
     };
     frame.render_widget(
         Paragraph::new(format!("{}\n{}", session.summary_line(), mode_text))
             .style(Style::default().fg(Color::DarkGray)),
         area,
     );
+}
+
+impl TryFrom<&KeybindingsConfig> for KeyMap {
+    type Error = color_eyre::Report;
+
+    fn try_from(config: &KeybindingsConfig) -> Result<Self> {
+        let mut bindings = Vec::new();
+        add_bindings(&mut bindings, Action::Quit, &config.quit)?;
+        add_bindings(&mut bindings, Action::MoveDown, &config.move_down)?;
+        add_bindings(&mut bindings, Action::MoveUp, &config.move_up)?;
+        add_bindings(&mut bindings, Action::ToggleFocus, &config.toggle_focus)?;
+        add_bindings(&mut bindings, Action::DiffTop, &config.diff_top)?;
+        add_bindings(&mut bindings, Action::DiffBottom, &config.diff_bottom)?;
+        add_bindings(&mut bindings, Action::NextUnviewed, &config.next_unviewed)?;
+        add_bindings(
+            &mut bindings,
+            Action::PreviousUnviewed,
+            &config.previous_unviewed,
+        )?;
+        add_bindings(&mut bindings, Action::NextComment, &config.next_comment)?;
+        add_bindings(
+            &mut bindings,
+            Action::PreviousComment,
+            &config.previous_comment,
+        )?;
+        add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
+        add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;
+        add_bindings(&mut bindings, Action::MarkViewed, &config.mark_viewed)?;
+        add_bindings(&mut bindings, Action::ToggleViewed, &config.toggle_viewed)?;
+        add_bindings(
+            &mut bindings,
+            Action::MarkAllViewed,
+            &config.mark_all_viewed,
+        )?;
+        add_bindings(&mut bindings, Action::Comment, &config.comment)?;
+        add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
+        add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
+        add_bindings(&mut bindings, Action::DeleteChar, &config.delete_char)?;
+        Ok(Self { bindings })
+    }
+}
+
+impl KeyMap {
+    fn action_for(&self, key: &KeyEvent) -> Option<Action> {
+        self.bindings
+            .iter()
+            .find(|binding| binding.key.code == key.code)
+            .map(|binding| binding.action)
+    }
+
+    fn hint(&self, action: Action) -> &str {
+        self.bindings
+            .iter()
+            .find(|binding| binding.action == action)
+            .map(|binding| binding.key.label.as_str())
+            .unwrap_or("?")
+    }
+}
+
+fn add_bindings(bindings: &mut Vec<KeyBinding>, action: Action, keys: &[String]) -> Result<()> {
+    for key in keys {
+        bindings.push(KeyBinding {
+            key: parse_key(key)?,
+            action,
+        });
+    }
+    Ok(())
+}
+
+fn parse_key(raw: &str) -> Result<KeyPress> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    let code = match normalized.as_str() {
+        "esc" | "escape" => KeyCode::Esc,
+        "enter" | "return" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "backspace" | "bs" => KeyCode::Backspace,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "pageup" | "page-up" | "pgup" => KeyCode::PageUp,
+        "pagedown" | "page-down" | "pgdn" => KeyCode::PageDown,
+        "space" => KeyCode::Char(' '),
+        _ if raw.chars().count() == 1 => KeyCode::Char(raw.chars().next().unwrap()),
+        _ => bail!("unsupported keybinding `{raw}`"),
+    };
+    Ok(KeyPress {
+        code,
+        label: raw.to_owned(),
+    })
 }
 
 fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, buffer: &str) {
@@ -320,4 +510,36 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_named_and_character_keys() {
+        assert_eq!(parse_key("down").unwrap().code, KeyCode::Down);
+        assert_eq!(parse_key("pagedown").unwrap().code, KeyCode::PageDown);
+        assert_eq!(parse_key("N").unwrap().code, KeyCode::Char('N'));
+        assert_eq!(parse_key("space").unwrap().code, KeyCode::Char(' '));
+    }
+
+    #[test]
+    fn rejects_unsupported_key_names() {
+        assert!(parse_key("ctrl-x").is_err());
+    }
+
+    #[test]
+    fn configured_key_overrides_default_action() {
+        let config = KeybindingsConfig {
+            move_down: vec!["s".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+
+        let key = KeyEvent::from(KeyCode::Char('s'));
+
+        assert_eq!(keymap.action_for(&key), Some(Action::MoveDown));
+        assert_eq!(keymap.hint(Action::MoveDown), "s");
+    }
 }
