@@ -1,6 +1,6 @@
 ---
 source: src/tui.rs
-assertion_line: 1683
+assertion_line: 1997
 expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -16,4 +16,4 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
-trunk()..@ · focus files · j/k tree · space fold · h generated · t/p/b target · n/N unviewed · m/M c
+trunk()..@ · focus files · j/k tree · space fold · h hide noisy · t/p/b target · n/N unviewed · m/M

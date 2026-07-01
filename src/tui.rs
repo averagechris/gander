@@ -996,7 +996,7 @@ fn render_file_row(
 fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
     if session.selected_visible_file().is_none() {
         let generated_hint = if session.hide_generated {
-            "Generated/noisy files are hidden. Press the generated toggle to show them."
+            "Noisy/generated files are hidden. Press the hide-noisy toggle to show them."
         } else {
             "If files disappeared unexpectedly, check --ignore filters."
         };
@@ -1227,10 +1227,10 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
+            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} {noisy_label} · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
             session.target,
             if session.hide_generated {
-                " (generated hidden)"
+                " (noisy hidden)"
             } else {
                 ""
             },
@@ -1238,6 +1238,7 @@ fn draw_footer(
             up = keymap.hint(Action::MoveUp),
             fold = keymap.hint(Action::ToggleFold),
             generated = keymap.hint(Action::ToggleGenerated),
+            noisy_label = noisy_toggle_label(session),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
             choose = keymap.hint(Action::TargetChooser),
@@ -1254,7 +1255,7 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} {noisy_label} · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
             session.target,
             if session.has_active_diff_range() {
                 " (range active)"
@@ -1262,7 +1263,7 @@ fn draw_footer(
                 ""
             },
             if session.hide_generated {
-                " (generated hidden)"
+                " (noisy hidden)"
             } else {
                 ""
             },
@@ -1271,6 +1272,7 @@ fn draw_footer(
             range = keymap.hint(Action::RangeComment),
             cancel_range = keymap.hint(Action::CancelRangeComment),
             generated = keymap.hint(Action::ToggleGenerated),
+            noisy_label = noisy_toggle_label(session),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
             choose = keymap.hint(Action::TargetChooser),
@@ -1319,6 +1321,14 @@ fn draw_footer(
         Paragraph::new(lines).style(Style::default().fg(Color::DarkGray)),
         area,
     );
+}
+
+fn noisy_toggle_label(session: &ReviewSession) -> &'static str {
+    if session.hide_generated {
+        "show noisy"
+    } else {
+        "hide noisy"
+    }
 }
 
 impl TryFrom<&KeybindingsConfig> for KeyMap {
