@@ -19,10 +19,16 @@ This repo is intentionally early, but the first vertical slice is in place:
 
 ```sh
 nix develop
+jj lint
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
+
+`jj lint` is the canonical full local verification suite. It runs Rust formatting,
+Clippy, tests, dependency/security checks, TOML checks, Alejandra Nix formatting,
+Nix static analysis, spellcheck, and flake validation through the Nix dev shell so
+it works even on hosts without Rust tools installed globally.
 
 If you do not want to enter the shell:
 

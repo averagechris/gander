@@ -1,0 +1,15 @@
+lints = [
+  { name = "cargo fmt", command = "nix develop --accept-flake-config -c cargo fmt --check" },
+  { name = "cargo clippy", command = "nix develop --accept-flake-config -c cargo clippy --all-targets -- -D warnings" },
+  { name = "cargo test", command = "nix develop --accept-flake-config -c cargo test" },
+  { name = "cargo audit", command = "nix develop --accept-flake-config -c cargo audit" },
+  { name = "cargo deny", command = "nix develop --accept-flake-config -c cargo deny check" },
+  { name = "cargo machete", command = "nix develop --accept-flake-config -c cargo machete" },
+  { name = "cargo sort", command = "nix develop --accept-flake-config -c cargo sort --check" },
+  { name = "taplo fmt", command = "nix develop --accept-flake-config -c taplo fmt --check Cargo.toml deny.toml rustfmt.toml .cargo/config.toml _typos.toml .jj-lint.toml" },
+  { name = "alejandra", command = "nix develop --accept-flake-config -c alejandra --check flake.nix" },
+  { name = "statix", command = "nix develop --accept-flake-config -c statix check flake.nix" },
+  { name = "deadnix", command = "nix develop --accept-flake-config -c deadnix --fail flake.nix" },
+  { name = "typos", command = "nix develop --accept-flake-config -c typos --exclude .direnv --exclude target ." },
+  { name = "nix flake check", command = "nix flake check --accept-flake-config" },
+]
