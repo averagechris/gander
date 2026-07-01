@@ -69,6 +69,7 @@ pub struct DiffRow {
     pub new_lineno: Option<usize>,
     pub prefix: &'static str,
     pub text: String,
+    pub syntax: Vec<crate::syntax::SyntaxSpan>,
     pub kind: DiffRowKind,
     pub anchor: Option<CommentAnchor>,
 }
@@ -503,19 +504,18 @@ impl ReviewSession {
             new_lineno: None,
             prefix: " ",
             text: format!("{}  +{} -{}", file.path, file.additions, file.deletions),
+            syntax: Vec::new(),
             kind: DiffRowKind::FileHeader,
             anchor: None,
         }];
 
-        let added_source = file
-            .diff
-            .hunks
-            .iter()
-            .flat_map(|hunk| &hunk.lines)
-            .filter(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Context))
-            .map(|line| line.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
+        let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
+        let new_highlights =
+            syntax_highlights_by_diff_line(&file.path, &new_source, &new_line_indices);
+        let old_highlights =
+            syntax_highlights_by_diff_line(&file.path, &old_source, &old_line_indices);
+        let added_source = new_source;
         if let Some(summary) = crate::syntax::summarize(&file.path, &added_source) {
             rows.push(DiffRow {
                 old_lineno: None,
@@ -525,6 +525,7 @@ impl ReviewSession {
                     "tree-sitter: {} root={} errors={}",
                     summary.language, summary.root_kind, summary.has_error
                 ),
+                syntax: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
             });
@@ -536,6 +537,7 @@ impl ReviewSession {
                 new_lineno: None,
                 prefix: " ",
                 text: hunk.header.clone(),
+                syntax: Vec::new(),
                 kind: DiffRowKind::HunkHeader,
                 anchor: None,
             });
@@ -546,11 +548,23 @@ impl ReviewSession {
                     DiffLineKind::Removed => "-",
                     DiffLineKind::Meta => "\\",
                 };
+                let syntax = match line.kind {
+                    DiffLineKind::Added | DiffLineKind::Context => new_highlights
+                        .get(&(hunk_index, line_index))
+                        .cloned()
+                        .unwrap_or_default(),
+                    DiffLineKind::Removed => old_highlights
+                        .get(&(hunk_index, line_index))
+                        .cloned()
+                        .unwrap_or_default(),
+                    DiffLineKind::Meta => Vec::new(),
+                };
                 rows.push(DiffRow {
                     old_lineno: line.old_lineno,
                     new_lineno: line.new_lineno,
                     prefix,
                     text: line.text.clone(),
+                    syntax,
                     kind: DiffRowKind::DiffLine(line.kind),
                     anchor: self.line_anchor(file, hunk_index, line_index),
                 });
@@ -563,6 +577,7 @@ impl ReviewSession {
                 new_lineno: None,
                 prefix: " ",
                 text: file.diff.raw.clone(),
+                syntax: Vec::new(),
                 kind: DiffRowKind::Raw,
                 anchor: None,
             });
@@ -873,6 +888,45 @@ impl ReviewSession {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SyntaxSide {
+    Old,
+    New,
+}
+
+fn syntax_source(file: &ReviewFile, side: SyntaxSide) -> (String, Vec<(usize, usize)>) {
+    let mut lines = Vec::new();
+    let mut indices = Vec::new();
+    for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            let included = match (side, line.kind) {
+                (SyntaxSide::New, DiffLineKind::Added | DiffLineKind::Context) => true,
+                (SyntaxSide::Old, DiffLineKind::Removed | DiffLineKind::Context) => true,
+                (_, DiffLineKind::Meta) => false,
+                _ => false,
+            };
+            if included {
+                lines.push(line.text.as_str());
+                indices.push((hunk_index, line_index));
+            }
+        }
+    }
+    (lines.join("\n"), indices)
+}
+
+fn syntax_highlights_by_diff_line(
+    path: &str,
+    source: &str,
+    line_indices: &[(usize, usize)],
+) -> BTreeMap<(usize, usize), Vec<crate::syntax::SyntaxSpan>> {
+    crate::syntax::highlight(path, source)
+        .unwrap_or_default()
+        .into_iter()
+        .zip(line_indices.iter())
+        .map(|(line, index)| (*index, line.spans))
+        .collect()
+}
+
 fn parent_dir_for_path(path: &str) -> Option<String> {
     path.rsplit_once('/')
         .map(|(directory, _)| directory.to_owned())
@@ -912,7 +966,12 @@ fn nearest_commentable_row(rows: &[DiffRow], target: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{diff::DiffSet, jj::ReviewTarget, state::ReviewState};
+    use crate::{
+        diff::DiffSet,
+        jj::ReviewTarget,
+        state::ReviewState,
+        syntax::{HighlightKind, SyntaxSpan},
+    };
 
     fn session() -> ReviewSession {
         let diff = DiffSet::parse(
@@ -980,6 +1039,27 @@ diff --git a/src/c.rs b/src/c.rs
 -    old();
 +    new();
 +    extra();
+ }
+"#,
+        )
+        .unwrap();
+        ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        )
+    }
+
+    fn rust_syntax_session() -> ReviewSession {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+-fn old() {
++fn new() {
+     println!("hi");
  }
 "#,
         )
@@ -1102,6 +1182,25 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(comment.path, "src/tui.rs");
         assert_eq!(comment.line, Some(1));
         assert!(matches!(comment.anchor, Some(CommentAnchor::Line { .. })));
+    }
+
+    #[test]
+    fn rust_diff_rows_include_syntax_spans() {
+        let session = rust_syntax_session();
+
+        let rows = session.diff_rows_for_selected_file();
+        let added_fn = rows.iter().find(|row| row.text == "fn new() {").unwrap();
+
+        assert!(added_fn.syntax.iter().any(|span| span
+            == &SyntaxSpan {
+                text: "fn".to_owned(),
+                kind: Some(HighlightKind::Keyword),
+            }));
+        assert!(added_fn.syntax.iter().any(|span| span
+            == &SyntaxSpan {
+                text: "new".to_owned(),
+                kind: Some(HighlightKind::Function),
+            }));
     }
 
     #[test]

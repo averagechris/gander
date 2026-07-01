@@ -15,7 +15,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - labels generated/noisy files in the TUI, summaries, and artifacts
 - records lightweight file-level and line-level comments from the TUI
 - exports review artifacts as JSON or Markdown
-- includes an initial tree-sitter Rust parse hook for syntax-aware diff context
+- syntax-highlights Rust diff lines with `tree-sitter-highlight`
 - is packaged with a Nix flake and dev shell
 
 ## Development
@@ -221,7 +221,7 @@ Current module layout:
 - `state`: persisted viewed-state and comments
 - `app`: review session/domain state manipulated by UI and commands
 - `tui`: Ratatui/Crossterm interface
-- `syntax`: tree-sitter integration point, currently Rust summaries only
+- `syntax`: language registry and tree-sitter highlighting, currently Rust-first
 - `artifact`: JSON/Markdown review artifact serialization
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.
@@ -230,6 +230,6 @@ The design goal is to keep jj interaction, parsing, review state, rendering, and
 
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
-1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
+1. extend syntax highlighting beyond Rust through the language registry
 2. better jj revision/range semantics and support for reviewing stacks
 3. snapshot tests for parser, artifact, and TUI rendering

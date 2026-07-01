@@ -25,6 +25,7 @@ use crate::{
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     generated::GeneratedMatcher,
     jj::{JjCommand, ReviewTarget},
+    syntax::{HighlightKind, SyntaxSpan},
 };
 
 #[derive(Debug, Clone)]
@@ -665,14 +666,17 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                         .add_modifier(Modifier::BOLD),
                 )),
                 DiffRowKind::Raw => Line::from(row.text.clone()),
-                DiffRowKind::DiffLine(_) => Line::from(vec![
-                    Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
-                    Span::styled(lineno, Style::default().fg(Color::DarkGray)),
-                    Span::raw(" "),
-                    Span::styled(row.prefix, style),
-                    Span::raw(" "),
-                    Span::styled(row.text.clone(), style),
-                ]),
+                DiffRowKind::DiffLine(_) => {
+                    let mut spans = vec![
+                        Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
+                        Span::styled(lineno, Style::default().fg(Color::DarkGray)),
+                        Span::raw(" "),
+                        Span::styled(row.prefix, style),
+                        Span::raw(" "),
+                    ];
+                    spans.extend(diff_text_spans(row, style, selected, in_range));
+                    Line::from(spans)
+                }
             }
         })
         .collect();
@@ -682,6 +686,53 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
         .scroll((session.diff_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn diff_text_spans<'a>(
+    row: &'a crate::app::DiffRow,
+    fallback_style: Style,
+    selected: bool,
+    in_range: bool,
+) -> Vec<Span<'a>> {
+    if row.syntax.is_empty() {
+        return vec![Span::styled(row.text.clone(), fallback_style)];
+    }
+    row.syntax
+        .iter()
+        .map(|span| {
+            Span::styled(
+                span.text.clone(),
+                syntax_span_style(span, selected, in_range),
+            )
+        })
+        .collect()
+}
+
+fn syntax_span_style(span: &SyntaxSpan, selected: bool, in_range: bool) -> Style {
+    let style = match span.kind {
+        Some(HighlightKind::Attribute) => Style::default().fg(Color::Magenta),
+        Some(HighlightKind::Comment) => Style::default().fg(Color::DarkGray),
+        Some(HighlightKind::Constant) => Style::default().fg(Color::Cyan),
+        Some(HighlightKind::Function) => Style::default().fg(Color::Blue),
+        Some(HighlightKind::Keyword) => Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        Some(HighlightKind::Number) => Style::default().fg(Color::Cyan),
+        Some(HighlightKind::Operator) => Style::default().fg(Color::Gray),
+        Some(HighlightKind::Property) => Style::default().fg(Color::Cyan),
+        Some(HighlightKind::Punctuation) => Style::default().fg(Color::DarkGray),
+        Some(HighlightKind::String) => Style::default().fg(Color::Green),
+        Some(HighlightKind::Type) => Style::default().fg(Color::Yellow),
+        Some(HighlightKind::Variable) | None => Style::default().fg(Color::Gray),
+    };
+
+    if selected {
+        style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else if in_range {
+        style.bg(Color::Blue)
+    } else {
+        style
+    }
 }
 
 fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
