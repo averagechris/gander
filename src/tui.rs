@@ -1,6 +1,6 @@
 use std::{io, time::Duration};
 
-use color_eyre::eyre::{Result, bail};
+use color_eyre::eyre::{Context, Result, bail};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -18,7 +18,10 @@ use ratatui::{
 use crate::{
     app::{DiffRowKind, Focus, ReviewSession},
     config::KeybindingsConfig,
+    diff::DiffSet,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
+    generated::GeneratedMatcher,
+    jj::{JjCommand, ReviewTarget},
 };
 
 #[derive(Debug, Clone)]
@@ -47,6 +50,8 @@ enum Action {
     ToggleFocus,
     DiffTop,
     DiffBottom,
+    CompareTrunk,
+    CompareParent,
     NextUnviewed,
     PreviousUnviewed,
     NextComment,
@@ -163,8 +168,23 @@ impl CommentEditor {
     }
 }
 
-pub fn run(session: &mut ReviewSession, keybindings: &KeybindingsConfig) -> Result<()> {
+#[derive(Debug, Clone)]
+struct ReviewLoader {
+    ignore_globs: Vec<String>,
+    generated_matcher: GeneratedMatcher,
+}
+
+pub fn run(
+    session: &mut ReviewSession,
+    keybindings: &KeybindingsConfig,
+    ignore_globs: Vec<String>,
+    generated_matcher: GeneratedMatcher,
+) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
+    let review_loader = ReviewLoader {
+        ignore_globs,
+        generated_matcher,
+    };
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -172,7 +192,7 @@ pub fn run(session: &mut ReviewSession, keybindings: &KeybindingsConfig) -> Resu
     let mut terminal = Terminal::new(backend)?;
     let mut mode = Mode::Normal;
 
-    let result = run_loop(&mut terminal, session, &mut mode, &keymap);
+    let result = run_loop(&mut terminal, session, &mut mode, &keymap, &review_loader);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -185,6 +205,7 @@ fn run_loop(
     session: &mut ReviewSession,
     mode: &mut Mode,
     keymap: &KeyMap,
+    review_loader: &ReviewLoader,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, session, mode, keymap))?;
@@ -203,7 +224,7 @@ fn run_loop(
         match mode {
             Mode::Normal => {
                 if let Some(action) = keymap.action_for(&key)
-                    && handle_normal_action(action, session, mode)
+                    && handle_normal_action(action, session, mode, review_loader)?
                 {
                     break;
                 }
@@ -224,9 +245,14 @@ fn run_loop(
     Ok(())
 }
 
-fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut Mode) -> bool {
+fn handle_normal_action(
+    action: Action,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    review_loader: &ReviewLoader,
+) -> Result<bool> {
     match action {
-        Action::Quit => return true,
+        Action::Quit => return Ok(true),
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => session.move_diff_cursor(1),
@@ -238,6 +264,8 @@ fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut 
         Action::ToggleFocus => session.toggle_focus(),
         Action::DiffTop => session.diff_scroll = 0,
         Action::DiffBottom => session.diff_scroll = u16::MAX / 2,
+        Action::CompareTrunk => review_loader.load(session, ReviewTarget::trunk_to_current())?,
+        Action::CompareParent => review_loader.load(session, ReviewTarget::parent_to_current())?,
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::NextComment => session.move_to_comment(1),
@@ -268,7 +296,22 @@ fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut 
         | Action::InsertNewline
         | Action::DeleteChar => {}
     }
-    false
+    Ok(false)
+}
+
+impl ReviewLoader {
+    fn load(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
+        let diff_text = JjCommand::new(session.repo.clone(), target.clone())
+            .diff()
+            .with_context(|| format!("failed to read jj diff for {target}"))?;
+        let mut diff = DiffSet::parse(&diff_text)
+            .with_context(|| format!("failed to parse jj diff for {target}"))?;
+        diff.apply_ignores(&self.ignore_globs)?;
+        session.replace_diff(target, diff);
+        session.annotate_generated_where(|file| self.generated_matcher.is_match(&file.path));
+        session.apply_viewed_state();
+        Ok(())
+    }
 }
 
 fn handle_comment_action(
@@ -488,10 +531,13 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "focus files · {down}/{up} tree · {fold} fold · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            "{} · focus files · {down}/{up} tree · {fold} fold · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            session.target,
             down = keymap.hint(Action::MoveDown),
             up = keymap.hint(Action::MoveUp),
             fold = keymap.hint(Action::ToggleFold),
+            trunk = keymap.hint(Action::CompareTrunk),
+            parent = keymap.hint(Action::CompareParent),
             next_unviewed = keymap.hint(Action::NextUnviewed),
             previous_unviewed = keymap.hint(Action::PreviousUnviewed),
             next_comment = keymap.hint(Action::NextComment),
@@ -503,9 +549,12 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "focus diff · {down}/{up} line · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} line comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff · {down}/{up} line · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} line comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            session.target,
             down = keymap.hint(Action::MoveDown),
             up = keymap.hint(Action::MoveUp),
+            trunk = keymap.hint(Action::CompareTrunk),
+            parent = keymap.hint(Action::CompareParent),
             next_unviewed = keymap.hint(Action::NextUnviewed),
             previous_unviewed = keymap.hint(Action::PreviousUnviewed),
             next_comment = keymap.hint(Action::NextComment),
@@ -541,6 +590,8 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::ToggleFocus, &config.toggle_focus)?;
         add_bindings(&mut bindings, Action::DiffTop, &config.diff_top)?;
         add_bindings(&mut bindings, Action::DiffBottom, &config.diff_bottom)?;
+        add_bindings(&mut bindings, Action::CompareTrunk, &config.compare_trunk)?;
+        add_bindings(&mut bindings, Action::CompareParent, &config.compare_parent)?;
         add_bindings(&mut bindings, Action::NextUnviewed, &config.next_unviewed)?;
         add_bindings(
             &mut bindings,
@@ -822,5 +873,19 @@ mod tests {
 
         assert_eq!(editor.text, "helloworld");
         assert_eq!(editor.line_col(), (0, 5));
+    }
+
+    #[test]
+    fn default_compare_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('t'))),
+            Some(Action::CompareTrunk)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('p'))),
+            Some(Action::CompareParent)
+        );
     }
 }

@@ -40,16 +40,18 @@ nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test
 
 ## Usage
 
-Launch the TUI for the current change:
+Launch the TUI for the current stack compared to `trunk()`:
 
 ```sh
 cargo run -- tui
 ```
 
-Review another jj revision:
+Review another jj revision or compare against a different base:
 
 ```sh
-cargo run -- --rev 'trunk()..@' tui
+cargo run -- --rev @ tui                  # default base is trunk()
+cargo run -- --base @- --rev @ tui        # equivalent to the old jj-show style parent diff
+cargo run -- --base 'trunk()' --rev @ tui # explicit stack-vs-trunk diff
 ```
 
 Hide generated/noisy files:
@@ -87,6 +89,8 @@ basename = "review"
 move-down = ["j", "down"]
 move-up = ["k", "up"]
 toggle-focus = ["tab"]
+compare-trunk = ["t"]
+compare-parent = ["p"]
 toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
@@ -171,6 +175,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `m` / `M` | next / previous comment |
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
+| `t` / `p` | compare `trunk()..@` / `@-..@` |
 | Enter | mark selected file viewed |
 | `v` | toggle selected file viewed |
 | `a` | mark all visible files viewed |

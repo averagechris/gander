@@ -11,6 +11,7 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
   "version": 2,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
+  "base": "trunk()",
   "revision": "@",
   "summary": "3 files (1/3 viewed), +10/-2, 1 comments",
   "files": [

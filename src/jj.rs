@@ -1,32 +1,64 @@
-use std::{path::PathBuf, process::Command};
+use std::{fmt, path::PathBuf, process::Command};
 
 use color_eyre::eyre::{Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct JjCommand {
     repo: PathBuf,
-    rev: String,
+    target: ReviewTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewTarget {
+    pub base: String,
+    pub rev: String,
+}
+
+impl ReviewTarget {
+    pub fn new(base: impl Into<String>, rev: impl Into<String>) -> Self {
+        Self {
+            base: base.into(),
+            rev: rev.into(),
+        }
+    }
+
+    pub fn trunk_to_current() -> Self {
+        Self::new("trunk()", "@")
+    }
+
+    pub fn parent_to_current() -> Self {
+        Self::new("@-", "@")
+    }
+}
+
+impl fmt::Display for ReviewTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}..{}", self.base, self.rev)
+    }
 }
 
 impl JjCommand {
-    pub fn new(repo: PathBuf, rev: String) -> Self {
-        Self { repo, rev }
+    pub fn new(repo: PathBuf, target: ReviewTarget) -> Self {
+        Self { repo, target }
     }
 
-    pub fn show(&self) -> Result<String> {
+    pub fn diff(&self) -> Result<String> {
         let output = Command::new("jj")
-            .arg("show")
+            .arg("diff")
+            .arg("--from")
+            .arg(&self.target.base)
+            .arg("--to")
+            .arg(&self.target.rev)
             .arg("--git")
             .arg("--color=never")
             .arg("--no-pager")
-            .arg("-r")
-            .arg(&self.rev)
             .current_dir(&self.repo)
             .output()?;
 
         if !output.status.success() {
             bail!(
-                "jj show failed with status {}:\n{}",
+                "jj diff failed for {} with status {}:\n{}",
+                self.target,
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );

@@ -13,7 +13,7 @@ mod tui;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use color_eyre::eyre::WrapErr;
+use color_eyre::eyre::Context;
 
 use crate::{
     app::ReviewSession,
@@ -21,7 +21,7 @@ use crate::{
     config::{ArtifactFormatConfig, Config},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
-    jj::JjCommand,
+    jj::{JjCommand, ReviewTarget},
     state::ReviewState,
 };
 
@@ -32,9 +32,13 @@ struct Cli {
     #[arg(long, global = true)]
     repo: Option<PathBuf>,
 
-    /// jj revision to review.
+    /// jj revision to review. Defaults to the working copy commit.
     #[arg(short, long, default_value = "@", global = true)]
     rev: String,
+
+    /// jj revision/revset to compare from. Defaults to trunk().
+    #[arg(short, long, default_value = "trunk()", global = true)]
+    base: String,
 
     /// Hide files matching this glob. Can be repeated.
     #[arg(long = "ignore", global = true)]
@@ -97,14 +101,15 @@ fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
-    let jj = JjCommand::new(repo.clone(), cli.rev.clone());
+    let target = ReviewTarget::new(cli.base, cli.rev);
+    let jj = JjCommand::new(repo.clone(), target.clone());
     let command = cli.command.unwrap_or(Command::Tui);
     let generated_policy = merge_generated(&config, cli.generated_preset, cli.generated_glob);
     let generated_matcher = GeneratedMatcher::new(&generated_policy)?;
 
     let diff_text = jj
-        .show()
-        .wrap_err("failed to read jj change with `jj show --git`")?;
+        .diff()
+        .with_context(|| format!("failed to read jj diff for {target}"))?;
     let mut diff = DiffSet::parse(&diff_text).wrap_err("failed to parse jj git diff")?;
     let ignore_globs = merge_ignores(&config, cli.ignore);
     if !matches!(command, Command::MarkGeneratedViewed) {
@@ -115,13 +120,18 @@ fn main() -> color_eyre::Result<()> {
         .state
         .unwrap_or_else(|| repo.join(".jj-change-viewer").join("state.json"));
     let mut state = ReviewState::load_or_default(&state_path)?;
-    let mut session = ReviewSession::new(repo.clone(), cli.rev, diff, state.clone());
+    let mut session = ReviewSession::new(repo.clone(), target, diff, state.clone());
     session.annotate_generated_where(|file| generated_matcher.is_match(&file.path));
     session.apply_viewed_state();
 
     match command {
         Command::Tui => {
-            tui::run(&mut session, &config.keybindings)?;
+            tui::run(
+                &mut session,
+                &config.keybindings,
+                ignore_globs,
+                generated_matcher,
+            )?;
             state = session.into_state();
             state.save(&state_path)?;
         }
@@ -147,6 +157,7 @@ fn main() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::Summary => {
+            println!("Reviewing {}", session.target);
             println!("{}", session.summary_line());
             for file in &session.files {
                 println!(

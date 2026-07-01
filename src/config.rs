@@ -47,6 +47,8 @@ pub struct KeybindingsConfig {
     pub toggle_focus: Vec<String>,
     pub diff_top: Vec<String>,
     pub diff_bottom: Vec<String>,
+    pub compare_trunk: Vec<String>,
+    pub compare_parent: Vec<String>,
     pub next_unviewed: Vec<String>,
     pub previous_unviewed: Vec<String>,
     pub next_comment: Vec<String>,
@@ -112,6 +114,8 @@ struct KeybindingsConfigPatch {
     toggle_focus: Option<Vec<String>>,
     diff_top: Option<Vec<String>>,
     diff_bottom: Option<Vec<String>>,
+    compare_trunk: Option<Vec<String>>,
+    compare_parent: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
     previous_unviewed: Option<Vec<String>>,
     next_comment: Option<Vec<String>>,
@@ -156,6 +160,8 @@ impl Default for KeybindingsConfig {
             toggle_focus: keys(["tab"]),
             diff_top: keys(["g"]),
             diff_bottom: keys(["G"]),
+            compare_trunk: keys(["t"]),
+            compare_parent: keys(["p"]),
             next_unviewed: keys(["n"]),
             previous_unviewed: keys(["N"]),
             next_comment: keys(["m"]),
@@ -273,6 +279,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_focus, patch.toggle_focus);
         apply_optional(&mut self.diff_top, patch.diff_top);
         apply_optional(&mut self.diff_bottom, patch.diff_bottom);
+        apply_optional(&mut self.compare_trunk, patch.compare_trunk);
+        apply_optional(&mut self.compare_parent, patch.compare_parent);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
         apply_optional(&mut self.previous_unviewed, patch.previous_unviewed);
         apply_optional(&mut self.next_comment, patch.next_comment);
@@ -429,6 +437,8 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.move_down, ["j", "down"]);
         assert_eq!(config.keybindings.move_up, ["k", "up"]);
         assert_eq!(config.keybindings.quit, ["q", "esc"]);
+        assert_eq!(config.keybindings.compare_trunk, ["t"]);
+        assert_eq!(config.keybindings.compare_parent, ["p"]);
         assert_eq!(config.keybindings.toggle_fold, ["space"]);
         assert_eq!(config.keybindings.collapse_fold, ["left"]);
         assert_eq!(config.keybindings.expand_fold, ["right"]);

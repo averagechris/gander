@@ -17,6 +17,7 @@ pub struct ReviewArtifact<'a> {
     pub version: u8,
     pub generated_at: chrono::DateTime<chrono::Utc>,
     pub repo: &'a Path,
+    pub base: &'a str,
     pub revision: &'a str,
     pub summary: String,
     pub files: Vec<FileArtifact<'a>>,
@@ -41,7 +42,8 @@ impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
             version: 2,
             generated_at: Utc::now(),
             repo: &session.repo,
-            revision: &session.revision,
+            base: &session.target.base,
+            revision: &session.target.rev,
             summary: session.summary_line(),
             files: session
                 .files
@@ -80,6 +82,7 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
     out.push_str("# jj change review\n\n");
     out.push_str(&format!("- Revision: `{}`\n", artifact.revision));
+    out.push_str(&format!("- Base: `{}`\n", artifact.base));
     out.push_str(&format!("- Repository: `{}`\n", artifact.repo.display()));
     out.push_str(&format!("- Generated: `{}`\n", artifact.generated_at));
     out.push_str(&format!("- Summary: {}\n\n", artifact.summary));
@@ -150,7 +153,7 @@ fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::ReviewSession, diff::DiffSet, state::ReviewState};
+    use crate::{app::ReviewSession, diff::DiffSet, jj::ReviewTarget, state::ReviewState};
 
     #[test]
     fn markdown_contains_files_and_comments() {
@@ -164,7 +167,12 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
         session.add_comment("Looks good".into());
         let artifact = ReviewArtifact::from(&session);
         let markdown = to_markdown(&artifact);
@@ -184,7 +192,12 @@ mod tests {
 "#,
         )
         .unwrap();
-        let session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
 
         let artifact = ReviewArtifact::from(&session);
 
@@ -203,7 +216,12 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
         session.toggle_focus();
         session.add_comment("Line note".into());
 
@@ -227,7 +245,12 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
         session.annotate_generated_where(|file| file.path == "a.txt");
 
         let artifact = ReviewArtifact::from(&session);
@@ -249,7 +272,12 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
         session.annotate_generated_where(|file| file.path == "a.txt");
 
         let artifact = ReviewArtifact::from(&session);

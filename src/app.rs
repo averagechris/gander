@@ -10,13 +10,14 @@ use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
+    jj::ReviewTarget,
     state::{Comment, FileState, ReviewState},
 };
 
 #[derive(Debug, Clone)]
 pub struct ReviewSession {
     pub repo: PathBuf,
-    pub revision: String,
+    pub target: ReviewTarget,
     pub files: Vec<ReviewFile>,
     pub comments: Vec<Comment>,
     pub selected: usize,
@@ -74,11 +75,11 @@ pub enum DiffRowKind {
 }
 
 impl ReviewSession {
-    pub fn new(repo: PathBuf, revision: String, diff: DiffSet, state: ReviewState) -> Self {
+    pub fn new(repo: PathBuf, target: ReviewTarget, diff: DiffSet, state: ReviewState) -> Self {
         let ReviewState { files, comments } = state;
         let mut session = Self {
             repo,
-            revision,
+            target,
             files: diff
                 .files
                 .into_iter()
@@ -105,6 +106,26 @@ impl ReviewSession {
         };
         session.apply_state_files(&files);
         session
+    }
+
+    pub fn replace_diff(&mut self, target: ReviewTarget, diff: DiffSet) {
+        let state = ReviewState {
+            files: self
+                .files
+                .iter()
+                .map(|file| {
+                    (
+                        file.path.clone(),
+                        FileState {
+                            fingerprint: file.fingerprint.clone(),
+                            viewed: file.viewed,
+                        },
+                    )
+                })
+                .collect(),
+            comments: self.comments.clone(),
+        };
+        *self = Self::new(self.repo.clone(), target, diff, state);
     }
 
     pub fn apply_viewed_state(&mut self) {
@@ -690,7 +711,7 @@ fn visible_ancestor_row(tree: &FileTreeView, path: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{diff::DiffSet, state::ReviewState};
+    use crate::{diff::DiffSet, jj::ReviewTarget, state::ReviewState};
 
     fn session() -> ReviewSession {
         let diff = DiffSet::parse(
@@ -709,7 +730,12 @@ diff --git a/README.md b/README.md
 "#,
         )
         .unwrap();
-        ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default())
+        ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        )
     }
 
     #[test]
