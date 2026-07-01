@@ -55,8 +55,10 @@ cargo run -- --base @- --rev @ tui        # equivalent to the old jj-show style 
 cargo run -- --base 'trunk()' --rev @ tui # explicit stack-vs-trunk diff
 ```
 
-Inside the TUI, press `b` to open the target chooser. It can reload the diff for
-`trunk()..@`, `@-..@`, or a custom base/rev pair without restarting the app.
+Inside the TUI, press `b` to open the picker-style target chooser. It can reload
+the diff for `trunk()..@`, `@-..@`, or a custom base/tip pair without restarting
+the app. The custom tip defaults to `@`; move to Base or Tip, type/backspace to
+edit, then press Enter to load.
 
 Hide generated/noisy files:
 

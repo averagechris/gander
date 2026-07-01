@@ -1,0 +1,29 @@
+---
+source: src/tui.rs
+assertion_line: 1765
+expression: "render_tui_text(&session, &mode, 100, 24)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│No changed files                          ││No changed files                                      │
+│                                          ││                                                      │
+│Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
+│target chooser, or adjust                 ││                                                      │
+│--base/--rev/--ignore.                    ││Use t for trunk()..@, p for @-..@, b for chooser, or  │
+│              ┌target──────────────────────────────────────────────────────────────┐              │
+│              │Choose the range to review:                                         │ --ignore     │
+│              │                                                                    │              │
+│              │  Stack  trunk()..@  review everything in the current stack         │              │
+│              │  Change @-..@       review only the working-copy change            │              │
+│              │                                                                    │              │
+│              │› Base  from trunk()                                                │              │
+│              │  Tip   to   @  (defaults to @)                                     │              │
+│              │  Load  trunk()..@                                                  │              │
+│              │                                                                    │              │
+│              │↑/↓ move · type/backspace edit · tab base/tip · enter load · esc    │              │
+│              └────────────────────────────────────────────────────────────────────┘              │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
+choose target · ↑/↓ move · type edit · tab base/tip · enter load · esc cancel

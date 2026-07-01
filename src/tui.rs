@@ -92,28 +92,23 @@ enum Mode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetChooserState {
-    selection: TargetChoice,
+    row: TargetChooserRow,
     custom: CustomTargetEditor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetChoice {
-    Trunk,
-    Parent,
-    Custom,
+enum TargetChooserRow {
+    Stack,
+    Change,
+    Base,
+    Tip,
+    LoadCustom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CustomTargetEditor {
     base: String,
     rev: String,
-    field: CustomTargetField,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomTargetField {
-    Base,
-    Rev,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,20 +244,19 @@ impl CommentEditor {
 impl TargetChooserState {
     fn from_current(target: &ReviewTarget) -> Self {
         Self {
-            selection: TargetChoice::Trunk,
+            row: TargetChooserRow::Base,
             custom: CustomTargetEditor {
                 base: target.base.clone(),
-                rev: target.rev.clone(),
-                field: CustomTargetField::Base,
+                rev: "@".to_owned(),
             },
         }
     }
 
     fn target(&self) -> Option<ReviewTarget> {
-        match self.selection {
-            TargetChoice::Trunk => Some(ReviewTarget::trunk_to_current()),
-            TargetChoice::Parent => Some(ReviewTarget::parent_to_current()),
-            TargetChoice::Custom => {
+        match self.row {
+            TargetChooserRow::Stack => Some(ReviewTarget::trunk_to_current()),
+            TargetChooserRow::Change => Some(ReviewTarget::parent_to_current()),
+            TargetChooserRow::Base | TargetChooserRow::Tip | TargetChooserRow::LoadCustom => {
                 let base = self.custom.base.trim();
                 let rev = self.custom.rev.trim();
                 if base.is_empty() || rev.is_empty() {
@@ -275,41 +269,48 @@ impl TargetChooserState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let index = match self.selection {
-            TargetChoice::Trunk => 0,
-            TargetChoice::Parent => 1,
-            TargetChoice::Custom => 2,
+        let index = match self.row {
+            TargetChooserRow::Stack => 0,
+            TargetChooserRow::Change => 1,
+            TargetChooserRow::Base => 2,
+            TargetChooserRow::Tip => 3,
+            TargetChooserRow::LoadCustom => 4,
         };
-        let next = (index as isize + delta).rem_euclid(3);
-        self.selection = match next {
-            0 => TargetChoice::Trunk,
-            1 => TargetChoice::Parent,
-            _ => TargetChoice::Custom,
+        let next = (index as isize + delta).rem_euclid(5);
+        self.row = match next {
+            0 => TargetChooserRow::Stack,
+            1 => TargetChooserRow::Change,
+            2 => TargetChooserRow::Base,
+            3 => TargetChooserRow::Tip,
+            _ => TargetChooserRow::LoadCustom,
         };
     }
 
     fn toggle_custom_field(&mut self) {
-        self.custom.field = match self.custom.field {
-            CustomTargetField::Base => CustomTargetField::Rev,
-            CustomTargetField::Rev => CustomTargetField::Base,
+        self.row = match self.row {
+            TargetChooserRow::Tip => TargetChooserRow::Base,
+            _ => TargetChooserRow::Tip,
         };
     }
 
-    fn active_custom_value_mut(&mut self) -> &mut String {
-        match self.custom.field {
-            CustomTargetField::Base => &mut self.custom.base,
-            CustomTargetField::Rev => &mut self.custom.rev,
+    fn active_custom_value_mut(&mut self) -> Option<&mut String> {
+        match self.row {
+            TargetChooserRow::Base => Some(&mut self.custom.base),
+            TargetChooserRow::Tip => Some(&mut self.custom.rev),
+            _ => None,
         }
     }
 
     fn insert_char(&mut self, ch: char) {
-        self.selection = TargetChoice::Custom;
-        self.active_custom_value_mut().push(ch);
+        if let Some(value) = self.active_custom_value_mut() {
+            value.push(ch);
+        }
     }
 
     fn backspace(&mut self) {
-        self.selection = TargetChoice::Custom;
-        self.active_custom_value_mut().pop();
+        if let Some(value) = self.active_custom_value_mut() {
+            value.pop();
+        }
     }
 }
 
@@ -573,7 +574,6 @@ fn handle_target_chooser_key(
             false
         }
         KeyCode::Tab => {
-            chooser.selection = TargetChoice::Custom;
             chooser.toggle_custom_field();
             false
         }
@@ -581,16 +581,22 @@ fn handle_target_chooser_key(
             chooser.backspace();
             false
         }
-        KeyCode::Char('1') if chooser.selection != TargetChoice::Custom => {
-            chooser.selection = TargetChoice::Trunk;
+        KeyCode::Char('1')
+            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
+        {
+            chooser.row = TargetChooserRow::Stack;
             false
         }
-        KeyCode::Char('2') if chooser.selection != TargetChoice::Custom => {
-            chooser.selection = TargetChoice::Parent;
+        KeyCode::Char('2')
+            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
+        {
+            chooser.row = TargetChooserRow::Change;
             false
         }
-        KeyCode::Char('3') if chooser.selection != TargetChoice::Custom => {
-            chooser.selection = TargetChoice::Custom;
+        KeyCode::Char('3')
+            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
+        {
+            chooser.row = TargetChooserRow::Base;
             false
         }
         KeyCode::Char(ch) => {
@@ -1219,7 +1225,8 @@ fn draw_footer(
             cancel = keymap.hint(Action::CancelComment),
         ),
         Mode::TargetChooser(_) => {
-            "choose target · ↑/↓ select · tab custom field · enter load · esc cancel".to_owned()
+            "choose target · ↑/↓ move · type edit · tab base/tip · enter load · esc cancel"
+                .to_owned()
         }
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
@@ -1431,11 +1438,11 @@ fn draw_target_chooser_popup(
     area: Rect,
     chooser: &TargetChooserState,
 ) {
-    let popup = centered_rect(64, 42, area);
+    let popup = centered_rect(70, 50, area);
     frame.render_widget(Clear, popup);
 
-    let selected = |choice| {
-        if chooser.selection == choice {
+    let row_style = |row| {
+        if chooser.row == row {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
@@ -1443,41 +1450,72 @@ fn draw_target_chooser_popup(
             Style::default().fg(Color::Gray)
         }
     };
-    let field_style = |field| {
-        if chooser.selection == TargetChoice::Custom && chooser.custom.field == field {
-            Style::default().fg(Color::Yellow)
+
+    let marker = |row| if chooser.row == row { "›" } else { " " };
+    let field_value_style = |row| {
+        if chooser.row == row {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(Color::White)
         }
     };
 
     let lines = vec![
-        Line::from("Pick a review target:"),
+        Line::from("Choose the range to review:"),
         Line::from(""),
-        Line::from(Span::styled(
-            "1  trunk()..@   current stack",
-            selected(TargetChoice::Trunk),
-        )),
-        Line::from(Span::styled(
-            "2  @-..@       current change",
-            selected(TargetChoice::Parent),
-        )),
-        Line::from(Span::styled(
-            "3  custom base/rev",
-            selected(TargetChoice::Custom),
-        )),
+        picker_row(
+            marker(TargetChooserRow::Stack),
+            "Stack",
+            "trunk()..@",
+            "review everything in the current stack",
+            row_style(TargetChooserRow::Stack),
+        ),
+        picker_row(
+            marker(TargetChooserRow::Change),
+            "Change",
+            "@-..@",
+            "review only the working-copy change",
+            row_style(TargetChooserRow::Change),
+        ),
         Line::from(""),
         Line::from(vec![
-            Span::styled("base: ", field_style(CustomTargetField::Base)),
-            Span::raw(chooser.custom.base.clone()),
+            Span::styled(
+                format!("{} Base  ", marker(TargetChooserRow::Base)),
+                row_style(TargetChooserRow::Base),
+            ),
+            Span::styled("from ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                chooser.custom.base.clone(),
+                field_value_style(TargetChooserRow::Base),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("rev:  ", field_style(CustomTargetField::Rev)),
-            Span::raw(chooser.custom.rev.clone()),
+            Span::styled(
+                format!("{} Tip   ", marker(TargetChooserRow::Tip)),
+                row_style(TargetChooserRow::Tip),
+            ),
+            Span::styled("to   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                chooser.custom.rev.clone(),
+                field_value_style(TargetChooserRow::Tip),
+            ),
+            Span::styled("  (defaults to @)", Style::default().fg(Color::DarkGray)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!("{} Load  ", marker(TargetChooserRow::LoadCustom)),
+                row_style(TargetChooserRow::LoadCustom),
+            ),
+            Span::styled(
+                format!("{}..{}", chooser.custom.base, chooser.custom.rev),
+                row_style(TargetChooserRow::LoadCustom),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "↑/↓ select · tab custom field · type to edit · enter load · esc cancel",
+            "↑/↓ move · type/backspace edit · tab base/tip · enter load · esc cancel",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1488,6 +1526,20 @@ fn draw_target_chooser_popup(
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn picker_row<'a>(
+    marker: &'a str,
+    label: &'a str,
+    target: &'a str,
+    hint: &'a str,
+    style: Style,
+) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(format!("{marker} {label:<7}"), style),
+        Span::styled(format!("{target:<12}"), style),
+        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+    ])
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1701,6 +1753,14 @@ diff --git a/README.md b/README.md
             },
             target: CommentInputTarget::New,
         };
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_target_chooser() {
+        let session = snapshot_session("");
+        let mode = Mode::TargetChooser(TargetChooserState::from_current(&session.target));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
@@ -2049,7 +2109,7 @@ diff --git a/README.md b/README.md
         };
         let mut tui_state = TuiState::default();
         let mut chooser = TargetChooserState::from_current(&session.target);
-        chooser.selection = TargetChoice::Custom;
+        chooser.row = TargetChooserRow::LoadCustom;
         chooser.custom.base = "main".to_owned();
         chooser.custom.rev = "feature".to_owned();
 
@@ -2066,6 +2126,15 @@ diff --git a/README.md b/README.md
             [ReviewTarget::new("main", "feature")]
         );
         assert_eq!(session.target, ReviewTarget::new("main", "feature"));
+    }
+
+    #[test]
+    fn target_chooser_defaults_tip_to_current_revision() {
+        let chooser = TargetChooserState::from_current(&ReviewTarget::new("@--", "feature"));
+
+        assert_eq!(chooser.row, TargetChooserRow::Base);
+        assert_eq!(chooser.custom.base, "@--");
+        assert_eq!(chooser.custom.rev, "@");
     }
 
     #[test]
