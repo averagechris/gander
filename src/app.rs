@@ -17,6 +17,8 @@ use crate::{
     syntax::{HighlightOutcome, SyntaxConfig, SyntaxSpan, SyntaxSummary},
 };
 
+const GENERATED_TREE_GROUP: &str = "generated/noisy";
+
 #[derive(Debug, Clone)]
 pub struct ReviewSession {
     pub repo: PathBuf,
@@ -357,6 +359,7 @@ impl ReviewSession {
                 index,
                 path: &file.path,
                 viewed: file.viewed,
+                group: self.tree_group_for_file(file),
             })
             .collect();
         FileTreeView::build(&inputs, &self.collapsed_dirs)
@@ -372,6 +375,7 @@ impl ReviewSession {
                 index,
                 path: &file.path,
                 viewed: file.viewed,
+                group: self.tree_group_for_file(file),
             })
             .collect();
         FileTreeView::build(&inputs, &BTreeSet::new())
@@ -393,8 +397,18 @@ impl ReviewSession {
             .or_else(|| tree.selected_row_for_file(self.selected))
             .or_else(|| {
                 self.selected_file()
-                    .and_then(|file| visible_ancestor_row(tree, &file.path))
+                    .and_then(|file| visible_ancestor_row(tree, &self.tree_path_for_file(file)))
             })
+    }
+
+    fn tree_group_for_file(&self, file: &ReviewFile) -> Option<&'static str> {
+        file.generated.then_some(GENERATED_TREE_GROUP)
+    }
+
+    fn tree_path_for_file(&self, file: &ReviewFile) -> String {
+        self.tree_group_for_file(file)
+            .map(|group| format!("{group}/{}", file.path))
+            .unwrap_or_else(|| file.path.clone())
     }
 
     pub fn toggle_tree_fold(&mut self) {
@@ -428,14 +442,14 @@ impl ReviewSession {
             return Some(directory.clone());
         }
         self.selected_file()
-            .and_then(|file| parent_dir_for_path(&file.path))
+            .and_then(|file| parent_dir_for_path(&self.tree_path_for_file(file)))
     }
 
     fn reveal_file_in_tree(&mut self, file_index: usize) {
-        let Some(path) = self.files.get(file_index).map(|file| file.path.clone()) else {
+        let Some(file) = self.files.get(file_index) else {
             return;
         };
-        for ancestor in ancestors_for_path(&path) {
+        for ancestor in ancestors_for_path(&self.tree_path_for_file(file)) {
             self.collapsed_dirs.remove(&ancestor);
         }
     }
@@ -1653,6 +1667,22 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(session.file_tree().rows.iter().all(|row| {
             !matches!(row.kind, FlatTreeRowKind::File { file_index } if file_index == 0)
         }));
+    }
+
+    #[test]
+    fn generated_files_are_grouped_when_visible() {
+        let mut session = session();
+        session.files[1].generated = true;
+
+        let labels: Vec<_> = session
+            .file_tree()
+            .rows
+            .into_iter()
+            .map(|row| (row.depth, row.label))
+            .collect();
+
+        assert_eq!(labels[0], (0, "generated/noisy".to_owned()));
+        assert!(labels.contains(&(1, "README.md".to_owned())));
     }
 
     #[test]

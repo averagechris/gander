@@ -21,6 +21,7 @@ pub struct FileTreeInput<'a> {
     pub index: usize,
     pub path: &'a str,
     pub viewed: bool,
+    pub group: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,10 +113,16 @@ impl TreeNode {
             self.stats.viewed += 1;
         }
 
-        let parts: Vec<_> = input
+        let path_parts = input
             .path
             .split('/')
             .filter(|part| !part.is_empty())
+            .map(str::to_owned);
+        let parts: Vec<String> = input
+            .group
+            .into_iter()
+            .map(str::to_owned)
+            .chain(path_parts)
             .collect();
         let Some((filename, directories)) = parts.split_last() else {
             return;
@@ -138,8 +145,8 @@ impl TreeNode {
 
         node.files.push(FileLeaf {
             index: input.index,
-            name: (*filename).to_owned(),
-            path: input.path.to_owned(),
+            name: filename.clone(),
+            path: parts.join("/"),
             viewed: input.viewed,
         });
         node.files.sort_by(|left, right| {
@@ -201,6 +208,21 @@ mod tests {
             index,
             path,
             viewed,
+            group: None,
+        }
+    }
+
+    fn grouped_input(
+        index: usize,
+        path: &'static str,
+        viewed: bool,
+        group: &'static str,
+    ) -> FileTreeInput<'static> {
+        FileTreeInput {
+            index,
+            path,
+            viewed,
+            group: Some(group),
         }
     }
 
@@ -256,6 +278,32 @@ mod tests {
 
         let labels: Vec<_> = tree.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(labels, ["src", "b.rs", "c.rs", "a.rs"]);
+    }
+
+    #[test]
+    fn groups_files_under_virtual_section() {
+        let tree = FileTreeView::build(
+            &[
+                input(0, "src/app.rs", false),
+                grouped_input(1, "Cargo.lock", false, "generated/noisy"),
+            ],
+            &BTreeSet::new(),
+        );
+
+        let labels: Vec<_> = tree
+            .rows
+            .iter()
+            .map(|row| (row.depth, row.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (0, "generated/noisy"),
+                (1, "Cargo.lock"),
+                (0, "src"),
+                (1, "app.rs"),
+            ]
+        );
     }
 
     #[test]

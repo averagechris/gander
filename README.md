@@ -157,7 +157,9 @@ selecting non-Jujutsu packages such as `nixpkgs#jj`; in Nix configs, prefer
 `nixpkgs#jujutsu`.
 
 Generated/noisy presets are opt-in and can be configured with `[generated]` or
-CLI flags:
+CLI flags. Matched files remain reviewable by default, but the TUI groups them
+under a `generated/noisy` section and marks them with a `gen` badge. Press `h`
+to hide or show that section while reviewing:
 
 ```sh
 cargo run -- --generated-preset lockfiles mark-generated-viewed
