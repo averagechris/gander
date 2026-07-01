@@ -116,6 +116,7 @@ fn main() -> color_eyre::Result<()> {
         .unwrap_or_else(|| repo.join(".jj-change-viewer").join("state.json"));
     let mut state = ReviewState::load_or_default(&state_path)?;
     let mut session = ReviewSession::new(repo.clone(), cli.rev, diff, state.clone());
+    session.annotate_generated_where(|file| generated_matcher.is_match(&file.path));
     session.apply_viewed_state();
 
     match command {
@@ -141,7 +142,7 @@ fn main() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::MarkGeneratedViewed => {
-            session.mark_files_viewed_where(|file| generated_matcher.is_match(&file.path));
+            session.mark_files_viewed_where(|file| file.generated);
             state = session.into_state();
             state.save(&state_path)?;
         }

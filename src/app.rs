@@ -47,6 +47,8 @@ pub struct ReviewFile {
     pub status: FileStatus,
     pub additions: usize,
     pub deletions: usize,
+    #[serde(default)]
+    pub generated: bool,
     pub viewed: bool,
     pub fingerprint: String,
     pub diff: FileDiff,
@@ -86,6 +88,7 @@ impl ReviewSession {
                     status: file.status,
                     additions: file.additions,
                     deletions: file.deletions,
+                    generated: false,
                     viewed: false,
                     fingerprint: file.fingerprint.clone(),
                     diff: file,
@@ -320,6 +323,12 @@ impl ReviewSession {
             if predicate(file) {
                 file.viewed = true;
             }
+        }
+    }
+
+    pub fn annotate_generated_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
+        for file in &mut self.files {
+            file.generated = predicate(file);
         }
     }
 
@@ -862,5 +871,15 @@ diff --git a/README.md b/README.md
 
         assert!(!session.files[0].viewed);
         assert!(session.files[1].viewed);
+    }
+
+    #[test]
+    fn annotates_generated_files_by_predicate() {
+        let mut session = session();
+
+        session.annotate_generated_where(|file| file.path == "README.md");
+
+        assert!(!session.files[0].generated);
+        assert!(session.files[1].generated);
     }
 }

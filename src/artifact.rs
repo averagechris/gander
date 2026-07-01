@@ -29,6 +29,7 @@ pub struct FileArtifact<'a> {
     pub old_path: Option<&'a str>,
     pub status: String,
     pub viewed: bool,
+    pub generated: bool,
     pub additions: usize,
     pub deletions: usize,
     pub fingerprint: &'a str,
@@ -50,6 +51,7 @@ impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
                     old_path: file.old_path.as_deref(),
                     status: file.status.to_string(),
                     viewed: file.viewed,
+                    generated: file.generated,
                     additions: file.additions,
                     deletions: file.deletions,
                     fingerprint: &file.fingerprint,
@@ -85,10 +87,15 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
     out.push_str("## Files\n\n");
     for file in &artifact.files {
         out.push_str(&format!(
-            "- [{}] `{}` — {} (+{}/-{})\n",
+            "- [{}] `{}` — {}{} (+{}/-{})\n",
             if file.viewed { "x" } else { " " },
             file.path,
             file.status,
+            if file.generated {
+                " [generated/noisy]"
+            } else {
+                ""
+            },
             file.additions,
             file.deletions
         ));
@@ -206,5 +213,48 @@ mod tests {
         assert!(markdown.contains("`a.txt`:old:1") || markdown.contains("`a.txt`:new:1"));
         assert!(markdown.contains("Anchor: `@@ -1 +1 @@`"));
         assert!(markdown.contains("Line note"));
+    }
+
+    #[test]
+    fn artifact_includes_generated_metadata() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        session.annotate_generated_where(|file| file.path == "a.txt");
+
+        let artifact = ReviewArtifact::from(&session);
+        let json = serde_json::to_value(&artifact).unwrap();
+
+        assert!(artifact.files[0].generated);
+        assert_eq!(json["files"][0]["generated"], true);
+    }
+
+    #[test]
+    fn markdown_marks_generated_files() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        session.annotate_generated_where(|file| file.path == "a.txt");
+
+        let artifact = ReviewArtifact::from(&session);
+        let markdown = to_markdown(&artifact);
+
+        assert!(markdown.contains("`a.txt` — mod [generated/noisy]"));
     }
 }
