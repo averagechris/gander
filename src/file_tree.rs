@@ -142,7 +142,11 @@ impl TreeNode {
             path: input.path.to_owned(),
             viewed: input.viewed,
         });
-        node.files.sort_by(|left, right| left.name.cmp(&right.name));
+        node.files.sort_by(|left, right| {
+            left.viewed
+                .cmp(&right.viewed)
+                .then_with(|| left.name.cmp(&right.name))
+        });
     }
 
     fn flatten(
@@ -237,6 +241,21 @@ mod tests {
             }
         );
         assert_eq!(tree.rows[0].stats.mark(), "◐");
+    }
+
+    #[test]
+    fn sorts_viewed_files_after_unviewed_files() {
+        let tree = FileTreeView::build(
+            &[
+                input(0, "src/a.rs", true),
+                input(1, "src/b.rs", false),
+                input(2, "src/c.rs", false),
+            ],
+            &BTreeSet::new(),
+        );
+
+        let labels: Vec<_> = tree.rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, ["src", "b.rs", "c.rs", "a.rs"]);
     }
 
     #[test]

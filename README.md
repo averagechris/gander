@@ -9,6 +9,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - shows a navigable hierarchical file tree + diff pane in a Ratatui TUI
 - persists per-file viewed state keyed by a content fingerprint
 - auto-restores viewed state only when the file's diff is unchanged
+- sorts viewed files below unviewed files and advances after marking viewed
 - preserves each file's diff cursor and scroll position while navigating
 - supports repeated `--ignore <glob>` filters for noisy generated files
 - labels generated/noisy files in the TUI, summaries, and artifacts
@@ -176,8 +177,8 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
-| Enter | mark selected file viewed |
-| `v` | toggle selected file viewed |
+| Enter | mark selected file viewed and advance to the next unviewed file |
+| `v` | toggle selected file viewed/unviewed |
 | `a` | mark all visible files viewed |
 | `u` / PageUp | scroll diff up |
 | `d` / PageDown | scroll diff down |

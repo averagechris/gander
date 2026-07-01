@@ -157,12 +157,18 @@ impl ReviewSession {
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {
+        if let Some(candidate) = self.next_unviewed_index(delta, None) {
+            self.select_file_index(candidate);
+        }
+    }
+
+    fn next_unviewed_index(&self, delta: isize, exclude: Option<usize>) -> Option<usize> {
         if self.files.is_empty() {
-            return;
+            return None;
         }
 
-        let tree = self.full_file_tree();
-        let file_indices: Vec<_> = tree
+        let file_indices: Vec<_> = self
+            .full_file_tree()
             .rows
             .iter()
             .filter_map(|row| match row.kind {
@@ -171,7 +177,7 @@ impl ReviewSession {
             })
             .collect();
         if file_indices.is_empty() {
-            return;
+            return None;
         }
 
         let current_position = file_indices
@@ -186,11 +192,11 @@ impl ReviewSession {
                 (current_position + file_indices.len() - offset) % file_indices.len()
             };
             let candidate = file_indices[position];
-            if !self.files[candidate].viewed {
-                self.select_file_index(candidate);
-                return;
+            if Some(candidate) != exclude && !self.files[candidate].viewed {
+                return Some(candidate);
             }
         }
+        None
     }
 
     fn select_file_index(&mut self, index: usize) {
@@ -328,8 +334,13 @@ impl ReviewSession {
     }
 
     pub fn mark_selected_viewed(&mut self) {
+        let selected = self.selected;
+        let next = self.next_unviewed_index(1, Some(selected));
         if let Some(file) = self.selected_file_mut() {
             file.viewed = true;
+        }
+        if let Some(next) = next {
+            self.select_file_index(next);
         }
     }
 
@@ -738,6 +749,37 @@ diff --git a/README.md b/README.md
         )
     }
 
+    fn three_file_session() -> ReviewSession {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/c.rs b/src/c.rs
+--- a/src/c.rs
++++ b/src/c.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        )
+    }
+
     #[test]
     fn move_selection_uses_tree_file_order() {
         let mut session = session();
@@ -800,6 +842,29 @@ diff --git a/README.md b/README.md
 
         assert_eq!(tree.rows[0].label, "src");
         assert_eq!(tree.rows[0].stats.viewed, 1);
+    }
+
+    #[test]
+    fn toggle_viewed_can_unmark_viewed_file() {
+        let mut session = session();
+
+        session.toggle_viewed();
+        assert!(session.selected_file().unwrap().viewed);
+
+        session.toggle_viewed();
+        assert!(!session.selected_file().unwrap().viewed);
+    }
+
+    #[test]
+    fn marking_viewed_advances_to_next_unviewed_file() {
+        let mut session = three_file_session();
+        session.move_selection(1);
+        assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
+
+        session.mark_selected_viewed();
+
+        assert_eq!(session.selected_file().unwrap().path, "src/c.rs");
+        assert!(session.files[1].viewed);
     }
 
     #[test]
