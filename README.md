@@ -73,6 +73,10 @@ Example config:
 [ignore]
 globs = ["Cargo.lock", "**/*.lock", "**/generated/**"]
 
+[generated]
+presets = ["lockfiles", "api-clients"]
+globs = ["schemas/*.json"]
+
 [artifact]
 format = "markdown"
 output_dir = ".jj-change-viewer"
@@ -93,6 +97,18 @@ quit = ["q", "esc"]
 
 CLI `--ignore` values are appended to configured ignore globs. Use
 `--config <path>` to load a specific config file.
+
+Generated/noisy presets are opt-in and can be configured with `[generated]` or
+CLI flags:
+
+```sh
+cargo run -- --generated-preset lockfiles mark-generated-viewed
+cargo run -- --generated-glob 'schemas/*.json' mark-generated-viewed
+```
+
+Available generated presets are `lockfiles`, `api-clients`, and
+`vendored-assets`. `mark-generated-viewed` intentionally runs before ignore
+filtering so hidden generated files can still have their viewed state updated.
 
 This repo's `.gitignore` excludes `.jj-change-viewer/`, so you can keep
 personal project-local keybindings there without committing them. For example,
@@ -116,6 +132,12 @@ Mark all visible files as viewed:
 
 ```sh
 cargo run -- --ignore 'Cargo.lock' mark-viewed
+```
+
+Mark generated/noisy files as viewed:
+
+```sh
+cargo run -- --generated-preset lockfiles mark-generated-viewed
 ```
 
 Export artifacts:

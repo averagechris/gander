@@ -315,6 +315,14 @@ impl ReviewSession {
         }
     }
 
+    pub fn mark_files_viewed_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
+        for file in &mut self.files {
+            if predicate(file) {
+                file.viewed = true;
+            }
+        }
+    }
+
     pub fn scroll_diff(&mut self, delta: i16) {
         self.diff_scroll = if delta.is_negative() {
             self.diff_scroll.saturating_sub(delta.unsigned_abs())
@@ -844,5 +852,15 @@ diff --git a/README.md b/README.md
 
         assert_eq!(session.focus, Focus::Diff);
         assert_eq!(session.selected_line_anchor(), Some(line_anchor));
+    }
+
+    #[test]
+    fn marks_files_viewed_by_predicate() {
+        let mut session = session();
+
+        session.mark_files_viewed_where(|file| file.path == "README.md");
+
+        assert!(!session.files[0].viewed);
+        assert!(session.files[1].viewed);
     }
 }

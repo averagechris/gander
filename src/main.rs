@@ -4,6 +4,7 @@ mod artifact;
 mod config;
 mod diff;
 mod file_tree;
+mod generated;
 mod jj;
 mod state;
 mod syntax;
@@ -19,6 +20,7 @@ use crate::{
     artifact::{ArtifactFormat, write_artifact},
     config::{ArtifactFormatConfig, Config},
     diff::DiffSet,
+    generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::JjCommand,
     state::ReviewState,
 };
@@ -37,6 +39,14 @@ struct Cli {
     /// Hide files matching this glob. Can be repeated.
     #[arg(long = "ignore", global = true)]
     ignore: Vec<String>,
+
+    /// Treat files matching this generated/noisy preset as generated. Can be repeated.
+    #[arg(long = "generated-preset", value_enum, global = true)]
+    generated_preset: Vec<GeneratedPresetArg>,
+
+    /// Treat files matching this glob as generated/noisy. Can be repeated.
+    #[arg(long = "generated-glob", global = true)]
+    generated_glob: Vec<String>,
 
     /// Path to the persistent review state file.
     #[arg(long, global = true)]
@@ -63,6 +73,8 @@ enum Command {
     },
     /// Mark all currently visible files as viewed without opening the TUI.
     MarkViewed,
+    /// Mark generated/noisy files as viewed without opening the TUI.
+    MarkGeneratedViewed,
     /// Print a terse summary of the current change.
     Summary,
 }
@@ -73,19 +85,31 @@ enum OutputFormat {
     Markdown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum GeneratedPresetArg {
+    Lockfiles,
+    ApiClients,
+    VendoredAssets,
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
     let jj = JjCommand::new(repo.clone(), cli.rev.clone());
+    let command = cli.command.unwrap_or(Command::Tui);
+    let generated_policy = merge_generated(&config, cli.generated_preset, cli.generated_glob);
+    let generated_matcher = GeneratedMatcher::new(&generated_policy)?;
 
     let diff_text = jj
         .show()
         .wrap_err("failed to read jj change with `jj show --git`")?;
     let mut diff = DiffSet::parse(&diff_text).wrap_err("failed to parse jj git diff")?;
     let ignore_globs = merge_ignores(&config, cli.ignore);
-    diff.apply_ignores(&ignore_globs)?;
+    if !matches!(command, Command::MarkGeneratedViewed) {
+        diff.apply_ignores(&ignore_globs)?;
+    }
 
     let state_path = cli
         .state
@@ -94,7 +118,7 @@ fn main() -> color_eyre::Result<()> {
     let mut session = ReviewSession::new(repo.clone(), cli.rev, diff, state.clone());
     session.apply_viewed_state();
 
-    match cli.command.unwrap_or(Command::Tui) {
+    match command {
         Command::Tui => {
             tui::run(&mut session, &config.keybindings)?;
             state = session.into_state();
@@ -116,6 +140,11 @@ fn main() -> color_eyre::Result<()> {
             state = session.into_state();
             state.save(&state_path)?;
         }
+        Command::MarkGeneratedViewed => {
+            session.mark_files_viewed_where(|file| generated_matcher.is_match(&file.path));
+            state = session.into_state();
+            state.save(&state_path)?;
+        }
         Command::Summary => {
             println!("{}", session.summary_line());
             for file in &session.files {
@@ -132,6 +161,19 @@ fn main() -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn merge_generated(
+    config: &Config,
+    cli_presets: Vec<GeneratedPresetArg>,
+    cli_globs: Vec<String>,
+) -> GeneratedPolicy {
+    let mut policy: GeneratedPolicy = config.generated.clone().into();
+    policy
+        .presets
+        .extend(cli_presets.into_iter().map(GeneratedPreset::from));
+    policy.globs.extend(cli_globs);
+    policy
 }
 
 fn merge_ignores(config: &Config, cli_ignores: Vec<String>) -> Vec<String> {
@@ -165,6 +207,16 @@ impl From<OutputFormat> for ArtifactFormatConfig {
         match value {
             OutputFormat::Json => Self::Json,
             OutputFormat::Markdown => Self::Markdown,
+        }
+    }
+}
+
+impl From<GeneratedPresetArg> for GeneratedPreset {
+    fn from(value: GeneratedPresetArg) -> Self {
+        match value {
+            GeneratedPresetArg::Lockfiles => Self::Lockfiles,
+            GeneratedPresetArg::ApiClients => Self::ApiClients,
+            GeneratedPresetArg::VendoredAssets => Self::VendoredAssets,
         }
     }
 }
@@ -215,5 +267,28 @@ mod tests {
             output,
             repo.path().join(".jj-change-viewer").join("review.json")
         );
+    }
+
+    #[test]
+    fn merge_generated_appends_cli_policy() {
+        let config = Config {
+            generated: crate::config::GeneratedConfig {
+                presets: vec![GeneratedPreset::Lockfiles],
+                globs: vec!["schemas/*.json".to_owned()],
+            },
+            ..Config::default()
+        };
+
+        let policy = merge_generated(
+            &config,
+            vec![GeneratedPresetArg::ApiClients],
+            vec!["dist/**".to_owned()],
+        );
+
+        assert_eq!(
+            policy.presets,
+            [GeneratedPreset::Lockfiles, GeneratedPreset::ApiClients]
+        );
+        assert_eq!(policy.globs, ["schemas/*.json", "dist/**"]);
     }
 }

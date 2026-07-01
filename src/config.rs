@@ -6,17 +6,27 @@ use std::{
 use color_eyre::eyre::{Context, Result};
 use serde::Deserialize;
 
+use crate::generated::{GeneratedPolicy, GeneratedPreset};
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Config {
     pub ignore: IgnoreConfig,
     pub artifact: ArtifactConfig,
     pub keybindings: KeybindingsConfig,
+    pub generated: GeneratedConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct IgnoreConfig {
+    pub globs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GeneratedConfig {
+    pub presets: Vec<GeneratedPreset>,
     pub globs: Vec<String>,
 }
 
@@ -69,11 +79,19 @@ struct ConfigPatch {
     ignore: IgnoreConfigPatch,
     artifact: ArtifactConfigPatch,
     keybindings: KeybindingsConfigPatch,
+    generated: GeneratedConfigPatch,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct IgnoreConfigPatch {
+    globs: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct GeneratedConfigPatch {
+    presets: Option<Vec<GeneratedPreset>>,
     globs: Option<Vec<String>>,
 }
 
@@ -228,6 +246,22 @@ impl Config {
         }
 
         self.keybindings.apply_patch(patch.keybindings);
+
+        if let Some(presets) = patch.generated.presets {
+            self.generated.presets = presets;
+        }
+        if let Some(globs) = patch.generated.globs {
+            self.generated.globs = globs;
+        }
+    }
+}
+
+impl From<GeneratedConfig> for GeneratedPolicy {
+    fn from(value: GeneratedConfig) -> Self {
+        Self {
+            presets: value.presets,
+            globs: value.globs,
+        }
     }
 }
 
@@ -324,6 +358,10 @@ mod tests {
 [ignore]
 globs = ["Cargo.lock", "**/*.min.js"]
 
+[generated]
+presets = ["lockfiles", "api-clients"]
+globs = ["schemas/*.json"]
+
 [artifact]
 format = "json"
 output_dir = "artifacts"
@@ -348,6 +386,11 @@ submit-comment = ["ctrl-s"]
         .unwrap();
 
         assert_eq!(config.ignore.globs, ["Cargo.lock", "**/*.min.js"]);
+        assert_eq!(
+            config.generated.presets,
+            [GeneratedPreset::Lockfiles, GeneratedPreset::ApiClients]
+        );
+        assert_eq!(config.generated.globs, ["schemas/*.json"]);
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
         assert_eq!(config.keybindings.move_down, ["s", "down"]);
         assert_eq!(config.keybindings.quit, ["q"]);
@@ -419,6 +462,9 @@ globs = ["Cargo.lock"]
 
 [artifact]
 basename = "project-review"
+
+[generated]
+presets = ["lockfiles"]
 "#,
         )
         .unwrap();
@@ -450,6 +496,7 @@ move-down = ["n", "down"]
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
         assert_eq!(config.artifact.basename, "project-review");
         assert_eq!(config.ignore.globs, ["Cargo.lock"]);
+        assert_eq!(config.generated.presets, [GeneratedPreset::Lockfiles]);
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
     }

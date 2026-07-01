@@ -71,7 +71,7 @@ Status: started.
 - [ ] review arbitrary revsets
 - [ ] review stack/change sequences
 - [ ] compare current change to prior operation for incremental re-review
-- [ ] command to mark generated files viewed by policy
+- [x] command to mark generated files viewed by policy
 - [ ] optional split/squash helper affordances that shell out to jj commands only after confirmation
 
 ## Milestone 6: performance and resilience
