@@ -57,8 +57,17 @@ Hide generated/noisy files:
 cargo run -- --ignore 'Cargo.lock' --ignore '**/*.lock' tui
 ```
 
-You can also configure default ignores and artifact output in
-`.jj-change-viewer/config.toml`:
+You can also configure default ignores, artifact output, and keys. Config is
+loaded in this order, with later files overriding earlier files field-by-field:
+
+1. built-in defaults
+2. XDG user config at `$XDG_CONFIG_HOME/jj-change-viewer/config.toml`, or
+   `~/.config/jj-change-viewer/config.toml` when `XDG_CONFIG_HOME` is unset
+3. shareable project config at `jj-change-viewer.toml`
+4. ignored project-local config at `.jj-change-viewer/config.toml`
+5. an explicit `--config <path>`, when provided
+
+Example config:
 
 ```toml
 [ignore]
@@ -79,6 +88,18 @@ quit = ["q", "esc"]
 
 CLI `--ignore` values are appended to configured ignore globs. Use
 `--config <path>` to load a specific config file.
+
+This repo's `.gitignore` excludes `.jj-change-viewer/`, so you can keep
+personal project-local keybindings there without committing them. For example,
+Colemak Mod-DH-friendly vertical movement can use:
+
+```toml
+[keybindings]
+move-down = ["n", "down"]
+move-up = ["e", "up"]
+next-unviewed = ["]"]
+previous-unviewed = ["["]
+```
 
 Print a non-interactive summary:
 
