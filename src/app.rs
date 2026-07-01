@@ -854,6 +854,57 @@ impl ReviewSession {
         self.select_comment(next);
     }
 
+    pub fn selected_comment(&self) -> Option<&Comment> {
+        self.selected_comment_index()
+            .and_then(|index| self.comments.get(index))
+    }
+
+    pub fn selected_comment_index(&self) -> Option<usize> {
+        match self.focus {
+            Focus::Diff => self.selected_line_anchor().and_then(|anchor| {
+                let row_fingerprint = match &anchor {
+                    CommentAnchor::Line {
+                        line_fingerprint, ..
+                    } => Some(line_fingerprint),
+                    _ => None,
+                };
+                self.comments.iter().position(|comment| {
+                    comment.anchor.as_ref() == Some(&anchor)
+                        || matches!(
+                            (comment.anchor.as_ref(), row_fingerprint),
+                            (Some(CommentAnchor::Range { lines, .. }), Some(fingerprint))
+                                if lines.iter().any(|line| &line.line_fingerprint == fingerprint)
+                        )
+                })
+            }),
+            Focus::Files => self.selected_file().and_then(|file| {
+                self.comments.iter().position(|comment| {
+                    comment.path == file.path
+                        && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
+                })
+            }),
+        }
+    }
+
+    pub fn update_comment_body(&mut self, id: &str, body: String) -> bool {
+        if body.trim().is_empty() {
+            return false;
+        }
+        let Some(comment) = self.comments.iter_mut().find(|comment| comment.id == id) else {
+            return false;
+        };
+        comment.body = body;
+        true
+    }
+
+    pub fn delete_comment(&mut self, id: &str) -> bool {
+        let Some(index) = self.comments.iter().position(|comment| comment.id == id) else {
+            return false;
+        };
+        self.comments.remove(index);
+        true
+    }
+
     pub fn add_comment(&mut self, body: String) {
         match self.focus {
             Focus::Files => self.add_file_comment(body),
@@ -901,19 +952,7 @@ impl ReviewSession {
     }
 
     fn current_comment_index(&self) -> Option<usize> {
-        match self.focus {
-            Focus::Diff => self.selected_line_anchor().and_then(|anchor| {
-                self.comments
-                    .iter()
-                    .position(|comment| comment.anchor.as_ref() == Some(&anchor))
-            }),
-            Focus::Files => self.selected_file().and_then(|file| {
-                self.comments.iter().position(|comment| {
-                    comment.path == file.path
-                        && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
-                })
-            }),
-        }
+        self.selected_comment_index()
     }
 
     fn select_comment(&mut self, index: usize) {
@@ -1450,6 +1489,32 @@ diff --git a/src/c.rs b/src/c.rs
         ));
         assert!(session.comments[0].end_line.is_some());
         assert!(session.diff_range_selection.is_none());
+    }
+
+    #[test]
+    fn selected_comment_matches_range_containing_cursor() {
+        let mut session = multi_line_session();
+        session.toggle_focus();
+        session.toggle_diff_range_selection();
+        session.move_diff_cursor(2);
+        session.add_comment("Range note".into());
+        session.move_diff_cursor(-1);
+
+        let selected = session.selected_comment().unwrap();
+
+        assert_eq!(selected.body, "Range note");
+    }
+
+    #[test]
+    fn can_update_and_delete_comment_by_id() {
+        let mut session = session();
+        session.add_comment("Old".into());
+        let id = session.comments[0].id.clone();
+
+        assert!(session.update_comment_body(&id, "New".into()));
+        assert_eq!(session.comments[0].body, "New");
+        assert!(session.delete_comment(&id));
+        assert!(session.comments.is_empty());
     }
 
     #[test]

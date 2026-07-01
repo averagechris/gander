@@ -77,6 +77,8 @@ pub struct KeybindingsConfig {
     pub range_comment: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
+    pub edit_comment: Vec<String>,
+    pub delete_comment: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
@@ -164,6 +166,8 @@ struct KeybindingsConfigPatch {
     range_comment: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
+    edit_comment: Option<Vec<String>>,
+    delete_comment: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
     insert_newline: Option<Vec<String>>,
@@ -222,6 +226,8 @@ impl Default for KeybindingsConfig {
             range_comment: keys(["r"]),
             cancel_range_comment: keys(["ctrl-g"]),
             comment: keys(["c"]),
+            edit_comment: keys(["e"]),
+            delete_comment: keys(["x"]),
             submit_comment: keys(["ctrl-s"]),
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
@@ -355,6 +361,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
+        apply_optional(&mut self.edit_comment, patch.edit_comment);
+        apply_optional(&mut self.delete_comment, patch.delete_comment);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
         apply_optional(&mut self.insert_newline, patch.insert_newline);
@@ -536,6 +544,8 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.expand_fold, ["right"]);
         assert_eq!(config.keybindings.range_comment, ["r"]);
         assert_eq!(config.keybindings.cancel_range_comment, ["ctrl-g"]);
+        assert_eq!(config.keybindings.edit_comment, ["e"]);
+        assert_eq!(config.keybindings.delete_comment, ["x"]);
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
         assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);

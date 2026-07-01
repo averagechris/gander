@@ -133,6 +133,8 @@ toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
 comment = ["c"]
+edit-comment = ["e"]
+delete-comment = ["x"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
 quit = ["q", "esc"]
@@ -293,6 +295,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
 | `c` | add a file comment in file focus, or line/range comment in diff focus |
+| `e` / `x` | edit / delete the selected comment |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
 | `q` / Esc | quit and save state |

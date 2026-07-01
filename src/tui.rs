@@ -72,6 +72,8 @@ enum Action {
     RangeComment,
     CancelRangeComment,
     Comment,
+    EditComment,
+    DeleteComment,
     SubmitComment,
     CancelComment,
     InsertNewline,
@@ -80,7 +82,16 @@ enum Action {
 
 enum Mode {
     Normal,
-    CommentInput(CommentEditor),
+    CommentInput {
+        editor: CommentEditor,
+        target: CommentInputTarget,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommentInputTarget {
+    New,
+    Edit { id: String },
 }
 
 #[derive(Debug, Default)]
@@ -306,10 +317,10 @@ fn handle_key_event(
                 return Ok(true);
             }
         }
-        Mode::CommentInput(editor) => {
+        Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
-                leave_comment_input = handle_comment_action(action, session, editor);
+                leave_comment_input = handle_comment_action(action, session, editor, target);
             } else {
                 handle_comment_key(key, editor);
             }
@@ -384,7 +395,44 @@ fn handle_normal_action(
             }
         }
         Action::CancelRangeComment => session.clear_diff_range_selection(),
-        Action::Comment => *mode = Mode::CommentInput(CommentEditor::default()),
+        Action::Comment => {
+            *mode = Mode::CommentInput {
+                editor: CommentEditor::default(),
+                target: CommentInputTarget::New,
+            };
+        }
+        Action::EditComment => {
+            if let Some(comment) = session.selected_comment() {
+                *mode = Mode::CommentInput {
+                    editor: CommentEditor {
+                        text: comment.body.clone(),
+                        cursor: comment.body.len(),
+                    },
+                    target: CommentInputTarget::Edit {
+                        id: comment.id.clone(),
+                    },
+                };
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no comment selected to edit".to_owned(),
+                });
+            }
+        }
+        Action::DeleteComment => {
+            if let Some(id) = session.selected_comment().map(|comment| comment.id.clone()) {
+                session.delete_comment(&id);
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "deleted comment".to_owned(),
+                });
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no comment selected to delete".to_owned(),
+                });
+            }
+        }
         Action::SubmitComment
         | Action::CancelComment
         | Action::InsertNewline
@@ -435,12 +483,18 @@ fn handle_comment_action(
     action: Action,
     session: &mut ReviewSession,
     editor: &mut CommentEditor,
+    target: &CommentInputTarget,
 ) -> bool {
     match action {
         Action::CancelComment => return true,
         Action::SubmitComment => {
             let body = std::mem::take(editor).into_text();
-            session.add_comment(body);
+            match target {
+                CommentInputTarget::New => session.add_comment(body),
+                CommentInputTarget::Edit { id } => {
+                    session.update_comment_body(id, body);
+                }
+            }
             return true;
         }
         Action::InsertNewline => editor.insert_newline(),
@@ -476,7 +530,7 @@ fn draw(
     draw_diff(frame, layout.diff, session);
     draw_footer(frame, layout.footer, session, mode, keymap, notice);
 
-    if let Mode::CommentInput(editor) = mode {
+    if let Mode::CommentInput { editor, .. } = mode {
         draw_comment_popup(frame, frame.area(), editor);
     }
 }
@@ -525,7 +579,7 @@ fn handle_mouse_event(
     mode: &mut Mode,
     tui_state: &mut TuiState,
 ) {
-    if matches!(mode, Mode::CommentInput(_)) {
+    if matches!(mode, Mode::CommentInput { .. }) {
         return;
     }
 
@@ -607,7 +661,10 @@ fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut 
         return;
     };
     if drag.saw_drag && session.selected_range_anchor().is_some() {
-        *mode = Mode::CommentInput(CommentEditor::default());
+        *mode = Mode::CommentInput {
+            editor: CommentEditor::default(),
+            target: CommentInputTarget::New,
+        };
     }
 }
 
@@ -899,7 +956,7 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
             session.target,
             if session.hide_generated {
                 " (generated hidden)"
@@ -920,10 +977,12 @@ fn draw_footer(
             mark = keymap.hint(Action::MarkViewed),
             toggle = keymap.hint(Action::ToggleViewed),
             comment = keymap.hint(Action::Comment),
+            edit = keymap.hint(Action::EditComment),
+            delete = keymap.hint(Action::DeleteComment),
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
             session.target,
             if session.has_active_diff_range() {
                 " (range active)"
@@ -948,12 +1007,18 @@ fn draw_footer(
             previous_comment = keymap.hint(Action::PreviousComment),
             focus = keymap.hint(Action::ToggleFocus),
             comment = keymap.hint(Action::Comment),
+            edit = keymap.hint(Action::EditComment),
+            delete = keymap.hint(Action::DeleteComment),
             scroll_down = keymap.hint(Action::ScrollDown),
             scroll_up = keymap.hint(Action::ScrollUp),
             quit = keymap.hint(Action::Quit),
         ),
-        Mode::CommentInput(_) => format!(
-            "type comment · {newline} newline · {submit} save · {cancel} cancel",
+        Mode::CommentInput { target, .. } => format!(
+            "{kind} comment · {newline} newline · {submit} save · {cancel} cancel",
+            kind = match target {
+                CommentInputTarget::New => "new",
+                CommentInputTarget::Edit { .. } => "edit",
+            },
             newline = keymap.hint(Action::InsertNewline),
             submit = keymap.hint(Action::SubmitComment),
             cancel = keymap.hint(Action::CancelComment),
@@ -1025,6 +1090,8 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &config.cancel_range_comment,
         )?;
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
+        add_bindings(&mut bindings, Action::EditComment, &config.edit_comment)?;
+        add_bindings(&mut bindings, Action::DeleteComment, &config.delete_comment)?;
         add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
         add_bindings(&mut bindings, Action::InsertNewline, &config.insert_newline)?;
@@ -1364,10 +1431,13 @@ diff --git a/README.md b/README.md
 +new
 "#,
         );
-        let mode = Mode::CommentInput(CommentEditor {
-            text: "Looks good\nexcept this line".to_owned(),
-            cursor: "Looks good\nexcept".len(),
-        });
+        let mode = Mode::CommentInput {
+            editor: CommentEditor {
+                text: "Looks good\nexcept this line".to_owned(),
+                cursor: "Looks good\nexcept".len(),
+            },
+            target: CommentInputTarget::New,
+        };
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
@@ -1553,6 +1623,50 @@ diff --git a/README.md b/README.md
             keymap.action_for(&KeyEvent::from(KeyCode::Char('h'))),
             Some(Action::ToggleGenerated)
         );
+    }
+
+    #[test]
+    fn default_comment_edit_delete_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('e'))),
+            Some(Action::EditComment)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('x'))),
+            Some(Action::DeleteComment)
+        );
+    }
+
+    #[test]
+    fn comment_editor_can_update_existing_comment() {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.add_comment("old body".into());
+        let id = session.comments[0].id.clone();
+        let mut editor = CommentEditor {
+            text: "new body".to_owned(),
+            cursor: "new body".len(),
+        };
+        let target = CommentInputTarget::Edit { id };
+
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &target
+        ));
+
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.comments[0].body, "new body");
     }
 
     #[test]
