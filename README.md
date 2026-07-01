@@ -56,6 +56,22 @@ Hide generated/noisy files:
 cargo run -- --ignore 'Cargo.lock' --ignore '**/*.lock' tui
 ```
 
+You can also configure default ignores and artifact output in
+`.jj-change-viewer/config.toml`:
+
+```toml
+[ignore]
+globs = ["Cargo.lock", "**/*.lock", "**/generated/**"]
+
+[artifact]
+format = "markdown"
+output_dir = ".jj-change-viewer"
+basename = "review"
+```
+
+CLI `--ignore` values are appended to configured ignore globs. Use
+`--config <path>` to load a specific config file.
+
 Print a non-interactive summary:
 
 ```sh
@@ -73,6 +89,7 @@ Export artifacts:
 ```sh
 cargo run -- export json --output review.json
 cargo run -- export markdown --output review.md
+cargo run -- export # uses configured artifact defaults
 ```
 
 Persistent state defaults to:

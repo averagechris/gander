@@ -24,7 +24,7 @@ Status: started.
 - [x] basic tree-sitter Rust parse hook
 - [x] unit tests for diff parsing, markdown export, and syntax hook
 - [ ] render diff snapshots in tests
-- [ ] add config file loading
+- [x] add config file loading
 
 ## Milestone 2: ergonomic review flow
 
