@@ -1476,6 +1476,11 @@ fn draw_target_chooser_popup(
     let popup = centered_rect(84, 64, area);
     frame.render_widget(Clear, popup);
 
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 5usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let list_offset = picker_scroll_offset(chooser.selected, chooser.filtered.len(), list_height);
+
     let mut lines = vec![
         Line::from(vec![
             Span::raw("Choose base for "),
@@ -1508,12 +1513,27 @@ fn draw_target_chooser_popup(
             Style::default().fg(Color::DarkGray),
         )));
     } else {
+        let show_above = list_offset > 0;
+        if show_above {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", list_offset),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let mut data_rows = list_height.saturating_sub(usize::from(show_above));
+        let remaining = chooser.filtered.len().saturating_sub(list_offset);
+        if remaining > data_rows && data_rows > 1 {
+            data_rows -= 1;
+        }
         lines.extend(
             chooser
                 .filtered
                 .iter()
+                .skip(list_offset)
+                .take(data_rows)
                 .enumerate()
-                .map(|(index, row_index)| {
+                .map(|(visible_index, row_index)| {
+                    let index = list_offset + visible_index;
                     let row = &chooser.rows[*row_index];
                     base_picker_row(
                         row,
@@ -1522,6 +1542,16 @@ fn draw_target_chooser_popup(
                     )
                 }),
         );
+        let hidden_below = chooser
+            .filtered
+            .len()
+            .saturating_sub(list_offset + data_rows);
+        if hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {hidden_below} more"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -1535,6 +1565,14 @@ fn draw_target_chooser_popup(
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn picker_scroll_offset(selected: usize, total: usize, height: usize) -> usize {
+    if total <= height || height == 0 {
+        return 0;
+    }
+    let half = height / 2;
+    selected.saturating_sub(half).min(total - height)
 }
 
 fn base_picker_row(row: &JjChangeSummary, selected: bool, current_base: bool) -> Line<'static> {
@@ -2250,6 +2288,14 @@ diff --git a/README.md b/README.md
 
         assert_eq!(chooser.filtered, vec![1]);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
+    }
+
+    #[test]
+    fn target_picker_scrolls_selected_row_into_view() {
+        assert_eq!(picker_scroll_offset(0, 20, 5), 0);
+        assert_eq!(picker_scroll_offset(6, 20, 5), 4);
+        assert_eq!(picker_scroll_offset(19, 20, 5), 15);
+        assert_eq!(picker_scroll_offset(2, 3, 5), 0);
     }
 
     #[test]
