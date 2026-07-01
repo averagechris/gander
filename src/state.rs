@@ -6,9 +6,21 @@ use serde::{Deserialize, Serialize};
 use crate::anchor::CommentAnchor;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ReviewState {
+    pub meta: ReviewStateMeta,
     pub files: BTreeMap<String, FileState>,
     pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewStateMeta {
+    pub version: u8,
+    pub base: Option<String>,
+    pub revision: Option<String>,
+    pub repo: Option<String>,
+    pub saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,5 +85,6 @@ mod tests {
 
         assert_eq!(state.comments[0].path, "src/main.rs");
         assert!(state.comments[0].anchor.is_none());
+        assert_eq!(state.meta.version, 0);
     }
 }

@@ -2,9 +2,13 @@ use std::{fs, io::Write, path::Path};
 
 use chrono::Utc;
 use color_eyre::eyre::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::{anchor::CommentAnchor, app::ReviewSession};
+use crate::{
+    anchor::CommentAnchor,
+    app::ReviewSession,
+    state::{Comment, ReviewState},
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ArtifactFormat {
@@ -34,6 +38,43 @@ pub struct FileArtifact<'a> {
     pub additions: usize,
     pub deletions: usize,
     pub fingerprint: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct OwnedReviewArtifact {
+    pub version: u8,
+    pub base: String,
+    pub revision: String,
+    pub files: Vec<OwnedFileArtifact>,
+    pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct OwnedFileArtifact {
+    pub path: String,
+    pub viewed: bool,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub viewed_files_imported: usize,
+    pub comments_imported: usize,
+    pub duplicate_comments_skipped: usize,
+}
+
+impl Default for OwnedReviewArtifact {
+    fn default() -> Self {
+        Self {
+            version: 3,
+            base: String::new(),
+            revision: String::new(),
+            files: Vec::new(),
+            comments: Vec::new(),
+        }
+    }
 }
 
 impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
@@ -71,6 +112,41 @@ pub fn write_artifact(session: &ReviewSession, format: ArtifactFormat, path: &Pa
 
     fs::write(path, render_artifact(session, format)?)?;
     Ok(())
+}
+
+pub fn import_json_artifact_into_state(
+    state: &mut ReviewState,
+    artifact: &OwnedReviewArtifact,
+) -> ImportSummary {
+    let mut summary = ImportSummary::default();
+
+    for file in &artifact.files {
+        let Some(existing) = state.files.get_mut(&file.path) else {
+            continue;
+        };
+        if existing.fingerprint == file.fingerprint {
+            let was_viewed = existing.viewed;
+            existing.viewed = file.viewed;
+            if file.viewed && !was_viewed {
+                summary.viewed_files_imported += 1;
+            }
+        }
+    }
+
+    for comment in &artifact.comments {
+        if state
+            .comments
+            .iter()
+            .any(|existing| existing.id == comment.id)
+        {
+            summary.duplicate_comments_skipped += 1;
+        } else {
+            state.comments.push(comment.clone());
+            summary.comments_imported += 1;
+        }
+    }
+
+    summary
 }
 
 pub fn render_artifact(session: &ReviewSession, format: ArtifactFormat) -> Result<String> {
@@ -194,7 +270,12 @@ fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::ReviewSession, diff::DiffSet, jj::ReviewTarget, state::ReviewState};
+    use crate::{
+        app::ReviewSession,
+        diff::DiffSet,
+        jj::ReviewTarget,
+        state::{FileState, ReviewState},
+    };
 
     #[test]
     fn markdown_contains_files_and_comments() {
@@ -409,5 +490,70 @@ mod tests {
         assert!(markdown.contains(":range:"));
         assert!(markdown.contains("Range fingerprint"));
         assert!(markdown.contains("Range note"));
+    }
+
+    #[test]
+    fn import_json_artifact_merges_matching_viewed_files_and_new_comments() {
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "src/main.rs".to_owned(),
+            FileState {
+                fingerprint: "abc".to_owned(),
+                viewed: false,
+            },
+        );
+        state.files.insert(
+            "src/stale.rs".to_owned(),
+            FileState {
+                fingerprint: "current".to_owned(),
+                viewed: false,
+            },
+        );
+        state.comments.push(crate::state::Comment {
+            id: "existing".to_owned(),
+            path: "src/main.rs".to_owned(),
+            line: None,
+            end_line: None,
+            anchor: None,
+            body: "already here".to_owned(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-06-30T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        });
+        let artifact: OwnedReviewArtifact = serde_json::from_str(
+            r#"{
+  "version": 3,
+  "base": "trunk()",
+  "revision": "@",
+  "files": [
+    { "path": "src/main.rs", "viewed": true, "fingerprint": "abc" },
+    { "path": "src/stale.rs", "viewed": true, "fingerprint": "old" }
+  ],
+  "comments": [
+    {
+      "id": "existing",
+      "path": "src/main.rs",
+      "body": "duplicate",
+      "created_at": "2026-06-30T00:00:00Z"
+    },
+    {
+      "id": "new",
+      "path": "src/main.rs",
+      "body": "new comment",
+      "created_at": "2026-06-30T00:00:00Z"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let summary = import_json_artifact_into_state(&mut state, &artifact);
+
+        assert_eq!(summary.viewed_files_imported, 1);
+        assert_eq!(summary.comments_imported, 1);
+        assert_eq!(summary.duplicate_comments_skipped, 1);
+        assert!(state.files["src/main.rs"].viewed);
+        assert!(!state.files["src/stale.rs"].viewed);
+        assert_eq!(state.comments.len(), 2);
     }
 }

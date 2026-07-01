@@ -17,7 +17,10 @@ use color_eyre::eyre::Context;
 
 use crate::{
     app::ReviewSession,
-    artifact::{ArtifactFormat, write_artifact, write_artifact_to},
+    artifact::{
+        ArtifactFormat, OwnedReviewArtifact, import_json_artifact_into_state, write_artifact,
+        write_artifact_to,
+    },
     config::{ArtifactFormatConfig, Config, TuiArtifactOnQuitConfig},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
@@ -86,6 +89,11 @@ enum Command {
         format: Option<OutputFormat>,
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// Import comments/viewed state from a JSON review artifact.
+    Import {
+        #[arg(value_name = "JSON_ARTIFACT")]
+        input: PathBuf,
     },
     /// Mark all currently visible files as viewed without opening the TUI.
     MarkViewed,
@@ -205,6 +213,27 @@ fn main() -> color_eyre::Result<()> {
                 },
                 &output,
             )?;
+        }
+        Command::Import { input } => {
+            let contents = std::fs::read_to_string(&input)
+                .with_context(|| format!("failed to read artifact {}", input.display()))?;
+            let artifact: OwnedReviewArtifact = serde_json::from_str(&contents)
+                .with_context(|| format!("failed to parse JSON artifact {}", input.display()))?;
+            if artifact.base != session.target.base || artifact.revision != session.target.rev {
+                eprintln!(
+                    "warning: importing artifact for {}..{} into current target {}",
+                    artifact.base, artifact.revision, session.target
+                );
+            }
+            state = session.clone().into_state();
+            let summary = import_json_artifact_into_state(&mut state, &artifact);
+            state.save(&state_path)?;
+            println!(
+                "Imported {} comments, skipped {} duplicates, restored {} viewed files",
+                summary.comments_imported,
+                summary.duplicate_comments_skipped,
+                summary.viewed_files_imported
+            );
         }
         Command::MarkViewed => {
             session.mark_all_viewed();

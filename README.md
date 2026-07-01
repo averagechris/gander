@@ -235,6 +235,16 @@ cargo run -- export # uses configured artifact defaults
 cargo run -- tui > review.md # TUI on stderr, Markdown artifact on stdout after quit
 ```
 
+Import comments/viewed state from a JSON artifact:
+
+```sh
+cargo run -- import review.json
+```
+
+Import is conservative: comments with duplicate IDs are skipped, and viewed
+state is restored only when a file path and diff fingerprint still match the
+current review target.
+
 By default, TUI artifact emission prints Markdown to stdout after the alternate
 screen is restored. The TUI itself renders to stderr, so stdout redirection
 captures only the artifact:
@@ -254,6 +264,8 @@ Persistent state defaults to:
 ```
 
 Use `--state <path>` to override it.
+State stores the last reviewed base/revision metadata alongside viewed files and
+comments so future resume/import behavior can detect target mismatches safely.
 
 ## TUI keys
 

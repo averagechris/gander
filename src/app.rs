@@ -13,7 +13,7 @@ use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
-    state::{Comment, FileState, ReviewState},
+    state::{Comment, FileState, ReviewState, ReviewStateMeta},
     syntax::{HighlightOutcome, SyntaxConfig, SyntaxSpan, SyntaxSummary},
 };
 
@@ -137,7 +137,9 @@ impl ReviewSession {
         state: ReviewState,
         syntax: SyntaxConfig,
     ) -> Self {
-        let ReviewState { files, comments } = state;
+        let ReviewState {
+            files, comments, ..
+        } = state;
         let mut session = Self {
             repo,
             target,
@@ -175,6 +177,7 @@ impl ReviewSession {
 
     pub fn replace_diff(&mut self, target: ReviewTarget, diff: DiffSet) {
         let state = ReviewState {
+            meta: ReviewStateMeta::default(),
             files: self
                 .files
                 .iter()
@@ -1004,6 +1007,13 @@ impl ReviewSession {
 
     pub fn into_state(self) -> ReviewState {
         ReviewState {
+            meta: ReviewStateMeta {
+                version: 1,
+                base: Some(self.target.base.clone()),
+                revision: Some(self.target.rev.clone()),
+                repo: Some(self.repo.display().to_string()),
+                saved_at: Some(Utc::now()),
+            },
             files: self
                 .files
                 .into_iter()
@@ -1548,5 +1558,18 @@ diff --git a/src/c.rs b/src/c.rs
         session.annotate_generated_where(|file| file.path == "README.md");
 
         assert!(session.summary_line().contains("1 generated/noisy"));
+    }
+
+    #[test]
+    fn into_state_records_session_metadata() {
+        let session = session();
+
+        let state = session.into_state();
+
+        assert_eq!(state.meta.version, 1);
+        assert_eq!(state.meta.base.as_deref(), Some("trunk()"));
+        assert_eq!(state.meta.revision.as_deref(), Some("@"));
+        assert!(state.meta.repo.is_some());
+        assert!(state.meta.saved_at.is_some());
     }
 }
