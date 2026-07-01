@@ -6,7 +6,10 @@ use std::{
 use color_eyre::eyre::{Context, Result};
 use serde::Deserialize;
 
-use crate::generated::{GeneratedPolicy, GeneratedPreset};
+use crate::{
+    generated::{GeneratedPolicy, GeneratedPreset},
+    syntax::SyntaxConfig,
+};
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -15,6 +18,7 @@ pub struct Config {
     pub artifact: ArtifactConfig,
     pub keybindings: KeybindingsConfig,
     pub generated: GeneratedConfig,
+    pub syntax: SyntaxConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -93,6 +97,7 @@ struct ConfigPatch {
     artifact: ArtifactConfigPatch,
     keybindings: KeybindingsConfigPatch,
     generated: GeneratedConfigPatch,
+    syntax: Option<SyntaxConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -279,6 +284,10 @@ impl Config {
         if let Some(globs) = patch.generated.globs {
             self.generated.globs = globs;
         }
+
+        if let Some(syntax) = patch.syntax {
+            self.syntax = syntax;
+        }
     }
 }
 
@@ -398,6 +407,15 @@ output_dir = "artifacts"
 basename = "review-current"
 on_tui_quit = "stdout"
 
+[syntax]
+enabled = true
+languages = ["rust", "python"]
+
+[[syntax.mappings]]
+name = "python"
+extensions = ["custompy"]
+filenames = ["SConstruct"]
+
 [keybindings]
 move-down = ["s", "down"]
 quit = ["q"]
@@ -424,6 +442,12 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.generated.globs, ["schemas/*.json"]);
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
         assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
+        assert!(config.syntax.enabled);
+        assert_eq!(config.syntax.languages, ["rust", "python"]);
+        assert_eq!(config.syntax.mappings.len(), 1);
+        assert_eq!(config.syntax.mappings[0].name, "python");
+        assert_eq!(config.syntax.mappings[0].extensions, ["custompy"]);
+        assert_eq!(config.syntax.mappings[0].filenames, ["SConstruct"]);
         assert_eq!(config.keybindings.move_down, ["s", "down"]);
         assert_eq!(config.keybindings.quit, ["q"]);
         assert_eq!(config.keybindings.toggle_fold, ["f"]);

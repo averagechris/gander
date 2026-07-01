@@ -15,7 +15,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - labels generated/noisy files in the TUI, summaries, and artifacts
 - records lightweight file-level and line-level comments from the TUI
 - exports review artifacts as JSON or Markdown
-- syntax-highlights Rust diff lines with `tree-sitter-highlight`
+- syntax-highlights common languages with a built-in tree-sitter registry
 - is packaged with a Nix flake and dev shell
 
 ## Development
@@ -87,6 +87,31 @@ output_dir = ".jj-change-viewer"
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
 
+[syntax]
+enabled = true
+languages = [
+  "bash",
+  "css",
+  "go",
+  "html",
+  "javascript",
+  "json",
+  "jsx",
+  "markdown",
+  "nix",
+  "python",
+  "rust",
+  "toml",
+  "tsx",
+  "typescript",
+  "yaml",
+]
+
+[[syntax.mappings]]
+name = "python"
+extensions = ["custompy"]
+filenames = ["SConstruct"]
+
 [keybindings]
 move-down = ["j", "down"]
 move-up = ["k", "up"]
@@ -116,6 +141,12 @@ cargo run -- --generated-glob 'schemas/*.json' mark-generated-viewed
 Available generated presets are `lockfiles`, `api-clients`, and
 `vendored-assets`. `mark-generated-viewed` intentionally runs before ignore
 filtering so hidden generated files can still have their viewed state updated.
+
+Syntax highlighting is enabled by default for built-in grammars: Bash/Shell,
+CSS, Go, HTML, JavaScript/JSX, JSON, Markdown, Nix, Python, Rust, TOML,
+TypeScript/TSX, and YAML. Use `[syntax].languages` as an allow-list, set
+`[syntax].enabled = false` to disable highlighting, or add `[[syntax.mappings]]`
+entries to map extra extensions/filenames to an existing built-in grammar.
 
 This repo's `.gitignore` excludes `.jj-change-viewer/`, so you can keep
 personal project-local keybindings there without committing them. For example,
@@ -221,7 +252,7 @@ Current module layout:
 - `state`: persisted viewed-state and comments
 - `app`: review session/domain state manipulated by UI and commands
 - `tui`: Ratatui/Crossterm interface
-- `syntax`: language registry and tree-sitter highlighting, currently Rust-first
+- `syntax`: built-in language registry and tree-sitter highlighting
 - `artifact`: JSON/Markdown review artifact serialization
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.
@@ -230,6 +261,6 @@ The design goal is to keep jj interaction, parsing, review state, rendering, and
 
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
-1. extend syntax highlighting beyond Rust through the language registry
+1. Helix-inspired external grammar/query loading for custom languages
 2. better jj revision/range semantics and support for reviewing stacks
 3. snapshot tests for parser, artifact, and TUI rendering

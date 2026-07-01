@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     anchor::{CommentAnchor, DiffSide, RangeLineAnchor, fingerprint_line, fingerprint_range},
+    config::Config,
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
     state::{Comment, FileState, ReviewState},
+    syntax::SyntaxConfig,
 };
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,7 @@ pub struct ReviewSession {
     pub diff_scroll: u16,
     pub diff_cursor: usize,
     pub focus: Focus,
+    pub syntax: SyntaxConfig,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     viewport_by_path: BTreeMap<String, FileViewport>,
@@ -84,7 +87,28 @@ pub enum DiffRowKind {
 }
 
 impl ReviewSession {
+    #[cfg(test)]
     pub fn new(repo: PathBuf, target: ReviewTarget, diff: DiffSet, state: ReviewState) -> Self {
+        Self::new_with_syntax(repo, target, diff, state, SyntaxConfig::default())
+    }
+
+    pub fn new_with_config(
+        repo: PathBuf,
+        target: ReviewTarget,
+        diff: DiffSet,
+        state: ReviewState,
+        config: &Config,
+    ) -> Self {
+        Self::new_with_syntax(repo, target, diff, state, config.syntax.clone())
+    }
+
+    fn new_with_syntax(
+        repo: PathBuf,
+        target: ReviewTarget,
+        diff: DiffSet,
+        state: ReviewState,
+        syntax: SyntaxConfig,
+    ) -> Self {
         let ReviewState { files, comments } = state;
         let mut session = Self {
             repo,
@@ -109,6 +133,7 @@ impl ReviewSession {
             diff_scroll: 0,
             diff_cursor: 0,
             focus: Focus::Files,
+            syntax,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             viewport_by_path: BTreeMap::new(),
@@ -135,7 +160,7 @@ impl ReviewSession {
                 .collect(),
             comments: self.comments.clone(),
         };
-        *self = Self::new(self.repo.clone(), target, diff, state);
+        *self = Self::new_with_syntax(self.repo.clone(), target, diff, state, self.syntax.clone());
     }
 
     pub fn apply_viewed_state(&mut self) {
@@ -511,12 +536,22 @@ impl ReviewSession {
 
         let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
         let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
-        let new_highlights =
-            syntax_highlights_by_diff_line(&file.path, &new_source, &new_line_indices);
-        let old_highlights =
-            syntax_highlights_by_diff_line(&file.path, &old_source, &old_line_indices);
+        let new_highlights = syntax_highlights_by_diff_line(
+            &file.path,
+            &new_source,
+            &new_line_indices,
+            &self.syntax,
+        );
+        let old_highlights = syntax_highlights_by_diff_line(
+            &file.path,
+            &old_source,
+            &old_line_indices,
+            &self.syntax,
+        );
         let added_source = new_source;
-        if let Some(summary) = crate::syntax::summarize(&file.path, &added_source) {
+        if let Some(summary) =
+            crate::syntax::summarize_with_config(&file.path, &added_source, &self.syntax)
+        {
             rows.push(DiffRow {
                 old_lineno: None,
                 new_lineno: None,
@@ -918,8 +953,9 @@ fn syntax_highlights_by_diff_line(
     path: &str,
     source: &str,
     line_indices: &[(usize, usize)],
+    config: &SyntaxConfig,
 ) -> BTreeMap<(usize, usize), Vec<crate::syntax::SyntaxSpan>> {
-    crate::syntax::highlight(path, source)
+    crate::syntax::highlight_with_config(path, source, config)
         .unwrap_or_default()
         .into_iter()
         .zip(line_indices.iter())
@@ -1201,6 +1237,25 @@ diff --git a/src/c.rs b/src/c.rs
                 text: "new".to_owned(),
                 kind: Some(HighlightKind::Function),
             }));
+    }
+
+    #[test]
+    fn disabled_syntax_config_skips_diff_row_spans() {
+        let mut session = rust_syntax_session();
+        session.syntax = SyntaxConfig {
+            enabled: false,
+            ..SyntaxConfig::default()
+        };
+
+        let rows = session.diff_rows_for_selected_file();
+        let added_fn = rows.iter().find(|row| row.text == "fn new() {").unwrap();
+
+        assert!(added_fn.syntax.is_empty());
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.kind, DiffRowKind::SyntaxSummary))
+        );
     }
 
     #[test]
