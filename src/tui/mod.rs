@@ -394,7 +394,6 @@ impl ReviewLoader<'_> {
         diff.apply_ignores(&self.ignore_globs)?;
         session.replace_diff(target, diff);
         session.annotate_generated_where(|file| self.generated_matcher.is_match(&file.path));
-        session.apply_viewed_state();
         Ok(())
     }
 }

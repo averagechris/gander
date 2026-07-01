@@ -56,7 +56,12 @@ impl ReviewState {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        // Write to a sibling temp file and rename so an interrupted save
+        // cannot truncate or corrupt existing review state.
+        let mut tmp = path.to_path_buf();
+        tmp.set_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 }
@@ -64,6 +69,26 @@ impl ReviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_round_trips_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("state.json");
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "src/main.rs".to_owned(),
+            FileState {
+                fingerprint: "abc".to_owned(),
+                viewed: true,
+            },
+        );
+
+        state.save(&path).unwrap();
+
+        let loaded = ReviewState::load_or_default(&path).unwrap();
+        assert!(loaded.files["src/main.rs"].viewed);
+        assert!(!path.with_extension("json.tmp").exists());
+    }
 
     #[test]
     fn loads_comment_without_anchor() {

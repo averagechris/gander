@@ -203,10 +203,6 @@ impl ReviewSession {
         *self = Self::new_with_syntax(self.repo.clone(), target, diff, state, self.syntax.clone());
     }
 
-    pub fn apply_viewed_state(&mut self) {
-        // Kept as an intentionally cheap hook for callers. State hydration happens in `new`.
-    }
-
     fn apply_state_files(&mut self, files: &BTreeMap<String, FileState>) {
         for file in &mut self.files {
             if let Some(saved) = files.get(&file.path) {
@@ -353,22 +349,16 @@ impl ReviewSession {
     }
 
     pub fn file_tree(&self) -> FileTreeView {
-        let inputs: Vec<_> = self
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| self.file_visible(file))
-            .map(|(index, file)| FileTreeInput {
-                index,
-                path: &file.path,
-                viewed: file.viewed,
-                group: self.tree_group_for_file(file),
-            })
-            .collect();
-        FileTreeView::build(&inputs, &self.collapsed_dirs)
+        self.build_file_tree(&self.collapsed_dirs)
     }
 
+    /// Tree with every directory expanded, used for stable file ordering
+    /// regardless of the user's current fold state.
     fn full_file_tree(&self) -> FileTreeView {
+        self.build_file_tree(&BTreeSet::new())
+    }
+
+    fn build_file_tree(&self, collapsed_dirs: &BTreeSet<String>) -> FileTreeView {
         let inputs: Vec<_> = self
             .files
             .iter()
@@ -381,7 +371,7 @@ impl ReviewSession {
                 group: self.tree_group_for_file(file),
             })
             .collect();
-        FileTreeView::build(&inputs, &BTreeSet::new())
+        FileTreeView::build(&inputs, collapsed_dirs)
     }
 
     pub fn selected_tree_row(&self, tree: &FileTreeView) -> Option<usize> {
