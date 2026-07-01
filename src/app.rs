@@ -647,10 +647,11 @@ impl ReviewSession {
 
     pub fn summary_line(&self) -> String {
         let viewed = self.files.iter().filter(|file| file.viewed).count();
+        let generated = self.files.iter().filter(|file| file.generated).count();
         let additions: usize = self.files.iter().map(|file| file.additions).sum();
         let deletions: usize = self.files.iter().map(|file| file.deletions).sum();
         format!(
-            "{} files ({viewed}/{} viewed), +{additions}/-{deletions}, {} comments",
+            "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {} comments",
             self.files.len(),
             self.files.len(),
             self.comments.len()
@@ -881,5 +882,13 @@ diff --git a/README.md b/README.md
 
         assert!(!session.files[0].generated);
         assert!(session.files[1].generated);
+    }
+
+    #[test]
+    fn summary_counts_generated_files() {
+        let mut session = session();
+        session.annotate_generated_where(|file| file.path == "README.md");
+
+        assert!(session.summary_line().contains("1 generated/noisy"));
     }
 }

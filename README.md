@@ -11,6 +11,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - auto-restores viewed state only when the file's diff is unchanged
 - preserves each file's diff cursor and scroll position while navigating
 - supports repeated `--ignore <glob>` filters for noisy generated files
+- labels generated/noisy files in the TUI, summaries, and artifacts
 - records lightweight file-level and line-level comments from the TUI
 - exports review artifacts as JSON or Markdown
 - includes an initial tree-sitter Rust parse hook for syntax-aware diff context

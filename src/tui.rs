@@ -385,6 +385,10 @@ fn render_file_row(
             Style::default().fg(Color::Cyan),
         ),
         Span::raw(" "),
+        Span::styled(
+            if file.generated { "gen " } else { "    " },
+            Style::default().fg(Color::Magenta),
+        ),
         Span::styled(row.label.clone(), style),
     ]))
 }

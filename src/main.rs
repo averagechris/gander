@@ -150,9 +150,10 @@ fn main() -> color_eyre::Result<()> {
             println!("{}", session.summary_line());
             for file in &session.files {
                 println!(
-                    "{mark} {status:>7} {path} (+{additions}/-{deletions})",
+                    "{mark} {status:>7} {generated:>5} {path} (+{additions}/-{deletions})",
                     mark = if file.viewed { "✓" } else { "•" },
                     status = file.status,
+                    generated = if file.generated { "gen" } else { "" },
                     path = file.path,
                     additions = file.additions,
                     deletions = file.deletions
