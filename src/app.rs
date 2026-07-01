@@ -233,6 +233,28 @@ impl ReviewSession {
         }
     }
 
+    pub fn select_visible_tree_row(&mut self, row_index: usize) {
+        let tree = self.file_tree();
+        self.select_tree_row(&tree, row_index);
+    }
+
+    pub fn select_diff_row(&mut self, row_index: usize) {
+        let rows = self.diff_rows_for_selected_file();
+        if rows.is_empty() {
+            self.diff_cursor = 0;
+            return;
+        }
+        self.focus = Focus::Diff;
+        let row_index = row_index.min(rows.len() - 1);
+        if rows[row_index].anchor.is_some() {
+            self.diff_cursor = row_index;
+        } else if let Some(nearest) = nearest_commentable_row(&rows, row_index) {
+            self.diff_cursor = nearest;
+        } else {
+            self.diff_cursor = row_index;
+        }
+    }
+
     fn save_current_viewport(&mut self) {
         let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
             return;
@@ -435,6 +457,18 @@ impl ReviewSession {
 
     pub fn clear_diff_range_selection(&mut self) {
         self.diff_range_selection = None;
+    }
+
+    pub fn set_diff_range_selection(&mut self, start_row: usize, current_row: usize) {
+        let Some(file) = self.selected_file() else {
+            return;
+        };
+        self.diff_range_selection = Some(DiffRangeSelection {
+            file_path: file.path.clone(),
+            file_fingerprint: file.fingerprint.clone(),
+            start_cursor: start_row,
+        });
+        self.select_diff_row(current_row);
     }
 
     pub fn has_active_diff_range(&self) -> bool {
@@ -865,6 +899,14 @@ fn visible_ancestor_row(tree: &FileTreeView, path: &str) -> Option<usize> {
         .into_iter()
         .rev()
         .find_map(|directory| tree.row_for_id(&TreeRowId::Directory(directory)))
+}
+
+fn nearest_commentable_row(rows: &[DiffRow], target: usize) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| row.anchor.is_some())
+        .min_by_key(|(index, _)| index.abs_diff(target))
+        .map(|(index, _)| index)
 }
 
 #[cfg(test)]

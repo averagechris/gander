@@ -2,7 +2,10 @@ use std::{io, time::Duration};
 
 use color_eyre::eyre::{Context, Result, bail};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -76,6 +79,25 @@ enum Action {
 enum Mode {
     Normal,
     CommentInput(CommentEditor),
+}
+
+#[derive(Debug, Default)]
+struct TuiState {
+    diff_drag: Option<DiffDrag>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiffDrag {
+    start_row: usize,
+    current_row: usize,
+    saw_drag: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiLayout {
+    files: Rect,
+    diff: Rect,
+    footer: Rect,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -189,15 +211,27 @@ pub fn run(
     };
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let mut mode = Mode::Normal;
 
-    let result = run_loop(&mut terminal, session, &mut mode, &keymap, &review_loader);
+    let mut tui_state = TuiState::default();
+    let result = run_loop(
+        &mut terminal,
+        session,
+        &mut mode,
+        &keymap,
+        &review_loader,
+        &mut tui_state,
+    );
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -208,6 +242,7 @@ fn run_loop(
     mode: &mut Mode,
     keymap: &KeyMap,
     review_loader: &ReviewLoader,
+    tui_state: &mut TuiState,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, session, mode, keymap))?;
@@ -216,35 +251,52 @@ fn run_loop(
             continue;
         }
 
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        match mode {
-            Mode::Normal => {
-                if let Some(action) = keymap.action_for(&key)
-                    && handle_normal_action(action, session, mode, review_loader)?
-                {
-                    break;
-                }
+        match event::read()? {
+            Event::Key(key) if handle_key_event(key, session, mode, keymap, review_loader)? => {
+                break;
             }
-            Mode::CommentInput(editor) => {
-                let mut leave_comment_input = false;
-                if let Some(action) = keymap.comment_action_for(&key) {
-                    leave_comment_input = handle_comment_action(action, session, editor);
-                } else {
-                    handle_comment_key(key, editor);
-                }
-                if leave_comment_input {
-                    *mode = Mode::Normal;
-                }
+            Event::Key(_) => {}
+            Event::Mouse(mouse) => {
+                handle_mouse_event(mouse, terminal.size()?, session, mode, tui_state)
             }
+            _ => {}
         }
     }
     Ok(())
+}
+
+fn handle_key_event(
+    key: KeyEvent,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    keymap: &KeyMap,
+    review_loader: &ReviewLoader,
+) -> Result<bool> {
+    if key.kind != KeyEventKind::Press {
+        return Ok(false);
+    }
+
+    match mode {
+        Mode::Normal => {
+            if let Some(action) = keymap.action_for(&key)
+                && handle_normal_action(action, session, mode, review_loader)?
+            {
+                return Ok(true);
+            }
+        }
+        Mode::CommentInput(editor) => {
+            let mut leave_comment_input = false;
+            if let Some(action) = keymap.comment_action_for(&key) {
+                leave_comment_input = handle_comment_action(action, session, editor);
+            } else {
+                handle_comment_key(key, editor);
+            }
+            if leave_comment_input {
+                *mode = Mode::Normal;
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn handle_normal_action(
@@ -355,21 +407,144 @@ fn handle_comment_key(key: KeyEvent, editor: &mut CommentEditor) {
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode, keymap: &KeyMap) {
+    let layout = ui_layout(frame.area());
+
+    draw_files(frame, layout.files, session);
+    draw_diff(frame, layout.diff, session);
+    draw_footer(frame, layout.footer, session, mode, keymap);
+
+    if let Mode::CommentInput(editor) = mode {
+        draw_comment_popup(frame, frame.area(), editor);
+    }
+}
+
+fn ui_layout(area: Rect) -> UiLayout {
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(2)])
-        .split(frame.area());
+        .split(area);
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(44), Constraint::Min(40)])
         .split(main[0]);
 
-    draw_files(frame, body[0], session);
-    draw_diff(frame, body[1], session);
-    draw_footer(frame, main[1], session, mode, keymap);
+    UiLayout {
+        files: body[0],
+        diff: body[1],
+        footer: main[1],
+    }
+}
 
-    if let Mode::CommentInput(editor) = mode {
-        draw_comment_popup(frame, frame.area(), editor);
+fn inner_bordered(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn row_in_inner(y: u16, inner: Rect) -> Option<usize> {
+    (y >= inner.y && y < inner.y.saturating_add(inner.height)).then_some((y - inner.y) as usize)
+}
+
+fn handle_mouse_event(
+    mouse: MouseEvent,
+    terminal_size: ratatui::prelude::Size,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    tui_state: &mut TuiState,
+) {
+    if matches!(mode, Mode::CommentInput(_)) {
+        return;
+    }
+
+    let layout = ui_layout(Rect::new(0, 0, terminal_size.width, terminal_size.height));
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_left_down(mouse.column, mouse.row, layout, session, tui_state);
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            handle_left_drag(mouse.column, mouse.row, layout, session, tui_state);
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            handle_left_up(session, mode, tui_state);
+        }
+        MouseEventKind::ScrollDown if point_in_rect(mouse.column, mouse.row, layout.diff) => {
+            session.scroll_diff(3);
+        }
+        MouseEventKind::ScrollUp if point_in_rect(mouse.column, mouse.row, layout.diff) => {
+            session.scroll_diff(-3);
+        }
+        _ => {}
+    }
+}
+
+fn handle_left_down(
+    x: u16,
+    y: u16,
+    layout: UiLayout,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    let files_inner = inner_bordered(layout.files);
+    if point_in_rect(x, y, files_inner) {
+        session.focus = Focus::Files;
+        if let Some(row) = row_in_inner(y, files_inner) {
+            session.select_visible_tree_row(row);
+        }
+        tui_state.diff_drag = None;
+        return;
+    }
+
+    let diff_inner = inner_bordered(layout.diff);
+    if point_in_rect(x, y, diff_inner)
+        && let Some(visible_row) = row_in_inner(y, diff_inner)
+    {
+        let row_index = session.diff_scroll as usize + visible_row;
+        session.clear_diff_range_selection();
+        session.select_diff_row(row_index);
+        tui_state.diff_drag = Some(DiffDrag {
+            start_row: row_index,
+            current_row: row_index,
+            saw_drag: false,
+        });
+    }
+}
+
+fn handle_left_drag(
+    x: u16,
+    y: u16,
+    layout: UiLayout,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    let Some(drag) = tui_state.diff_drag.as_mut() else {
+        return;
+    };
+    let diff_inner = inner_bordered(layout.diff);
+    if point_in_rect(x, y, diff_inner)
+        && let Some(visible_row) = row_in_inner(y, diff_inner)
+    {
+        drag.current_row = session.diff_scroll as usize + visible_row;
+        drag.saw_drag = true;
+        session.set_diff_range_selection(drag.start_row, drag.current_row);
+    }
+}
+
+fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut TuiState) {
+    let Some(drag) = tui_state.diff_drag.take() else {
+        return;
+    };
+    if drag.saw_drag && session.selected_range_anchor().is_some() {
+        *mode = Mode::CommentInput(CommentEditor::default());
     }
 }
 

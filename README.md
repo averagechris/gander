@@ -201,6 +201,12 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Ctrl-S in comment editor | save comment |
 | `q` / Esc | quit and save state |
 
+Mouse support:
+
+- click the file tree to focus/select files or directories
+- click the diff pane to focus/select a diff line
+- click-drag across diff rows to open a range comment editor
+
 ## Architecture
 
 Current module layout:
