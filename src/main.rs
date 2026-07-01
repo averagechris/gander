@@ -1,3 +1,4 @@
+mod anchor;
 mod app;
 mod artifact;
 mod config;

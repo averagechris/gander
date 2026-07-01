@@ -10,7 +10,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - persists per-file viewed state keyed by a content fingerprint
 - auto-restores viewed state only when the file's diff is unchanged
 - supports repeated `--ignore <glob>` filters for noisy generated files
-- records lightweight file-level comments from the TUI
+- records lightweight file-level and line-level comments from the TUI
 - exports review artifacts as JSON or Markdown
 - includes an initial tree-sitter Rust parse hook for syntax-aware diff context
 - is packaged with a Nix flake and dev shell
@@ -112,7 +112,8 @@ Use `--state <path>` to override it.
 | `u` / PageUp | scroll diff up |
 | `d` / PageDown | scroll diff down |
 | `g` | top of diff |
-| `c` | add file-level comment |
+| Tab | switch focus between file tree and diff |
+| `c` | add a file comment in file focus or line comment in diff focus |
 | `q` / Esc | quit and save state |
 
 ## Architecture
@@ -136,6 +137,6 @@ See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value nex
 
 1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
 2. directory folding for the hierarchical file tree
-3. line-level comments and comment navigation
+3. comment navigation and a multiline editor
 4. better jj revision/range semantics and support for reviewing stacks
 5. snapshot tests for parser, artifact, and TUI rendering

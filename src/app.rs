@@ -4,7 +4,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    diff::{DiffSet, FileDiff, FileStatus},
+    anchor::{CommentAnchor, DiffSide, fingerprint_line},
+    diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView},
     state::{Comment, FileState, ReviewState},
 };
@@ -17,6 +18,14 @@ pub struct ReviewSession {
     pub comments: Vec<Comment>,
     pub selected: usize,
     pub diff_scroll: u16,
+    pub diff_cursor: usize,
+    pub focus: Focus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Files,
+    Diff,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +38,25 @@ pub struct ReviewFile {
     pub viewed: bool,
     pub fingerprint: String,
     pub diff: FileDiff,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffRow {
+    pub old_lineno: Option<usize>,
+    pub new_lineno: Option<usize>,
+    pub prefix: &'static str,
+    pub text: String,
+    pub kind: DiffRowKind,
+    pub anchor: Option<CommentAnchor>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffRowKind {
+    FileHeader,
+    SyntaxSummary,
+    HunkHeader,
+    DiffLine(DiffLineKind),
+    Raw,
 }
 
 impl ReviewSession {
@@ -54,6 +82,8 @@ impl ReviewSession {
             comments,
             selected: 0,
             diff_scroll: 0,
+            diff_cursor: 0,
+            focus: Focus::Files,
         };
         session.apply_state_files(&files);
         session
@@ -86,6 +116,7 @@ impl ReviewSession {
         if let Some(next) = self.file_tree().next_file_index(self.selected, delta) {
             self.selected = next;
             self.diff_scroll = 0;
+            self.diff_cursor = 0;
         }
     }
 
@@ -133,10 +164,154 @@ impl ReviewSession {
         };
     }
 
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Files => Focus::Diff,
+            Focus::Diff => Focus::Files,
+        };
+        self.ensure_diff_cursor_commentable();
+    }
+
+    pub fn move_diff_cursor(&mut self, delta: isize) {
+        let rows = self.diff_rows_for_selected_file();
+        if rows.is_empty() {
+            self.diff_cursor = 0;
+            return;
+        }
+
+        let max = rows.len() as isize - 1;
+        let mut cursor = (self.diff_cursor as isize + delta).clamp(0, max) as usize;
+        while cursor < rows.len() && rows[cursor].anchor.is_none() {
+            let next = (cursor as isize + delta.signum()).clamp(0, max) as usize;
+            if next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+
+        self.diff_cursor = cursor;
+        if self.diff_cursor < self.diff_scroll as usize {
+            self.diff_scroll = self.diff_cursor as u16;
+        } else if self.diff_cursor > self.diff_scroll as usize + 15 {
+            self.diff_scroll = self.diff_cursor.saturating_sub(15) as u16;
+        }
+    }
+
+    pub fn diff_rows_for_selected_file(&self) -> Vec<DiffRow> {
+        let Some(file) = self.selected_file() else {
+            return Vec::new();
+        };
+
+        let mut rows = vec![DiffRow {
+            old_lineno: None,
+            new_lineno: None,
+            prefix: " ",
+            text: format!("{}  +{} -{}", file.path, file.additions, file.deletions),
+            kind: DiffRowKind::FileHeader,
+            anchor: None,
+        }];
+
+        let added_source = file
+            .diff
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .filter(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Context))
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Some(summary) = crate::syntax::summarize(&file.path, &added_source) {
+            rows.push(DiffRow {
+                old_lineno: None,
+                new_lineno: None,
+                prefix: " ",
+                text: format!(
+                    "tree-sitter: {} root={} errors={}",
+                    summary.language, summary.root_kind, summary.has_error
+                ),
+                kind: DiffRowKind::SyntaxSummary,
+                anchor: None,
+            });
+        }
+
+        for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
+            rows.push(DiffRow {
+                old_lineno: None,
+                new_lineno: None,
+                prefix: " ",
+                text: hunk.header.clone(),
+                kind: DiffRowKind::HunkHeader,
+                anchor: None,
+            });
+            for (line_index, line) in hunk.lines.iter().enumerate() {
+                let prefix = match line.kind {
+                    DiffLineKind::Context => " ",
+                    DiffLineKind::Added => "+",
+                    DiffLineKind::Removed => "-",
+                    DiffLineKind::Meta => "\\",
+                };
+                rows.push(DiffRow {
+                    old_lineno: line.old_lineno,
+                    new_lineno: line.new_lineno,
+                    prefix,
+                    text: line.text.clone(),
+                    kind: DiffRowKind::DiffLine(line.kind),
+                    anchor: self.line_anchor(file, hunk_index, line_index),
+                });
+            }
+        }
+
+        if file.diff.hunks.is_empty() {
+            rows.push(DiffRow {
+                old_lineno: None,
+                new_lineno: None,
+                prefix: " ",
+                text: file.diff.raw.clone(),
+                kind: DiffRowKind::Raw,
+                anchor: None,
+            });
+        }
+
+        rows
+    }
+
+    pub fn selected_line_anchor(&self) -> Option<CommentAnchor> {
+        self.diff_rows_for_selected_file()
+            .get(self.diff_cursor)
+            .and_then(|row| row.anchor.clone())
+    }
+
+    pub fn comments_for_anchor(&self, anchor: &CommentAnchor) -> usize {
+        self.comments
+            .iter()
+            .filter(|comment| comment.anchor.as_ref() == Some(anchor))
+            .count()
+    }
+
     pub fn add_comment(&mut self, body: String) {
-        let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
+        match self.focus {
+            Focus::Files => self.add_file_comment(body),
+            Focus::Diff => {
+                if let Some(anchor) = self.selected_line_anchor() {
+                    self.add_comment_with_anchor(body, anchor);
+                }
+            }
+        }
+    }
+
+    pub fn add_file_comment(&mut self, body: String) {
+        let Some(file) = self.selected_file() else {
             return;
         };
+        let anchor = CommentAnchor::File {
+            path: file.path.clone(),
+            old_path: file.old_path.clone(),
+            diff_fingerprint: file.fingerprint.clone(),
+        };
+        self.add_comment_with_anchor(body, anchor);
+    }
+
+    pub fn add_comment_with_anchor(&mut self, body: String, anchor: CommentAnchor) {
         if body.trim().is_empty() {
             return;
         }
@@ -147,11 +322,71 @@ impl ReviewSession {
                 created_at.timestamp_millis(),
                 self.comments.len() + 1
             ),
-            path,
-            line: None,
+            path: anchor.path().to_owned(),
+            line: anchor.line(),
+            anchor: Some(anchor),
             body,
             created_at,
         });
+    }
+
+    fn ensure_diff_cursor_commentable(&mut self) {
+        let rows = self.diff_rows_for_selected_file();
+        if rows
+            .get(self.diff_cursor)
+            .and_then(|row| row.anchor.as_ref())
+            .is_none()
+            && let Some(index) = rows.iter().position(|row| row.anchor.is_some())
+        {
+            self.diff_cursor = index;
+        }
+    }
+
+    fn line_anchor(
+        &self,
+        file: &ReviewFile,
+        hunk_index: usize,
+        line_index: usize,
+    ) -> Option<CommentAnchor> {
+        let hunk = file.diff.hunks.get(hunk_index)?;
+        let line = hunk.lines.get(line_index)?;
+        let (side, line_number) = match line.kind {
+            DiffLineKind::Added => (DiffSide::New, line.new_lineno?),
+            DiffLineKind::Removed => (DiffSide::Old, line.old_lineno?),
+            DiffLineKind::Context => (DiffSide::New, line.new_lineno?),
+            DiffLineKind::Meta => return None,
+        };
+        Some(CommentAnchor::Line {
+            path: file.path.clone(),
+            old_path: file.old_path.clone(),
+            side,
+            line: line_number,
+            old_line: line.old_lineno,
+            new_line: line.new_lineno,
+            hunk_header: hunk.header.clone(),
+            hunk_old_start: hunk.old_start,
+            hunk_old_len: hunk.old_len,
+            hunk_new_start: hunk.new_start,
+            hunk_new_len: hunk.new_len,
+            hunk_index,
+            line_index,
+            line_kind: match line.kind {
+                DiffLineKind::Context => "context",
+                DiffLineKind::Added => "added",
+                DiffLineKind::Removed => "removed",
+                DiffLineKind::Meta => "meta",
+            }
+            .to_owned(),
+            line_text: line.text.clone(),
+            line_fingerprint: fingerprint_line(
+                &file.path,
+                side,
+                line_number,
+                &line.text,
+                &file.fingerprint,
+            ),
+            diff_fingerprint: file.fingerprint.clone(),
+        })
     }
 
     pub fn into_state(self) -> ReviewState {
@@ -229,5 +464,41 @@ diff --git a/README.md b/README.md
 
         assert_eq!(tree.rows[0].label, "src");
         assert_eq!(tree.rows[0].stats.viewed, 1);
+    }
+
+    #[test]
+    fn add_file_comment_preserves_file_anchor() {
+        let mut session = session();
+
+        session.add_comment("File note".into());
+
+        let comment = &session.comments[0];
+        assert_eq!(comment.path, "src/tui.rs");
+        assert_eq!(comment.line, None);
+        assert!(matches!(comment.anchor, Some(CommentAnchor::File { .. })));
+    }
+
+    #[test]
+    fn add_line_comment_uses_diff_cursor_anchor() {
+        let mut session = session();
+        session.toggle_focus();
+
+        session.add_comment("Line note".into());
+
+        let comment = &session.comments[0];
+        assert_eq!(comment.path, "src/tui.rs");
+        assert_eq!(comment.line, Some(1));
+        assert!(matches!(comment.anchor, Some(CommentAnchor::Line { .. })));
+    }
+
+    #[test]
+    fn comments_for_anchor_matches_existing_line_comment() {
+        let mut session = session();
+        session.toggle_focus();
+        let anchor = session.selected_line_anchor().unwrap();
+
+        session.add_comment("Line note".into());
+
+        assert_eq!(session.comments_for_anchor(&anchor), 1);
     }
 }

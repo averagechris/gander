@@ -4,7 +4,7 @@ use chrono::Utc;
 use color_eyre::eyre::Result;
 use serde::Serialize;
 
-use crate::app::ReviewSession;
+use crate::{anchor::CommentAnchor, app::ReviewSession};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ArtifactFormat {
@@ -37,7 +37,7 @@ pub struct FileArtifact<'a> {
 impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
     fn from(session: &'a ReviewSession) -> Self {
         Self {
-            version: 1,
+            version: 2,
             generated_at: Utc::now(),
             repo: &session.repo,
             revision: &session.revision,
@@ -99,16 +99,45 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
         out.push_str("No comments recorded.\n");
     } else {
         for comment in artifact.comments {
-            match comment.line {
-                Some(line) => out.push_str(&format!("### `{}`:{}\n\n", comment.path, line)),
-                None => out.push_str(&format!("### `{}`\n\n", comment.path)),
-            }
+            write_comment_heading(&mut out, comment);
             out.push_str(comment.body.trim());
             out.push_str("\n\n");
         }
     }
 
     out
+}
+
+fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
+    match comment.anchor.as_ref() {
+        Some(CommentAnchor::Line {
+            path,
+            side,
+            line,
+            hunk_header,
+            line_text,
+            line_kind,
+            diff_fingerprint,
+            ..
+        }) => {
+            out.push_str(&format!("### `{path}`:{}:{line}\n\n", side.label()));
+            out.push_str(&format!("Anchor: `{hunk_header}`  \n"));
+            out.push_str(&format!("Diff fingerprint: `{diff_fingerprint}`\n\n"));
+            out.push_str("```diff\n");
+            out.push_str(match line_kind.as_str() {
+                "added" => "+",
+                "removed" => "-",
+                _ => " ",
+            });
+            out.push_str(line_text);
+            out.push_str("\n```\n\n");
+        }
+        Some(CommentAnchor::File { path, .. }) => out.push_str(&format!("### `{path}`\n\n")),
+        None => match comment.line {
+            Some(line) => out.push_str(&format!("### `{}`:{}\n\n", comment.path, line)),
+            None => out.push_str(&format!("### `{}`\n\n", comment.path)),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -134,5 +163,48 @@ mod tests {
         let markdown = to_markdown(&artifact);
         assert!(markdown.contains("`a.txt`"));
         assert!(markdown.contains("Looks good"));
+    }
+
+    #[test]
+    fn artifact_version_is_2() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+
+        let artifact = ReviewArtifact::from(&session);
+
+        assert_eq!(artifact.version, 2);
+    }
+
+    #[test]
+    fn markdown_contains_line_anchor() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default());
+        session.toggle_focus();
+        session.add_comment("Line note".into());
+
+        let artifact = ReviewArtifact::from(&session);
+        let markdown = to_markdown(&artifact);
+
+        assert!(markdown.contains("`a.txt`:old:1") || markdown.contains("`a.txt`:new:1"));
+        assert!(markdown.contains("Anchor: `@@ -1 +1 @@`"));
+        assert!(markdown.contains("Line note"));
     }
 }

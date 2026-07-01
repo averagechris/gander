@@ -16,10 +16,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::ReviewSession,
-    diff::DiffLineKind,
+    app::{DiffRowKind, Focus, ReviewSession},
     file_tree::{FlatTreeRow, FlatTreeRowKind},
-    syntax,
 };
 
 enum Mode {
@@ -65,8 +63,15 @@ fn run_loop(
         match mode {
             Mode::Normal => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Char('j') | KeyCode::Down => session.move_selection(1),
-                KeyCode::Char('k') | KeyCode::Up => session.move_selection(-1),
+                KeyCode::Char('j') | KeyCode::Down => match session.focus {
+                    Focus::Files => session.move_selection(1),
+                    Focus::Diff => session.move_diff_cursor(1),
+                },
+                KeyCode::Char('k') | KeyCode::Up => match session.focus {
+                    Focus::Files => session.move_selection(-1),
+                    Focus::Diff => session.move_diff_cursor(-1),
+                },
+                KeyCode::Tab => session.toggle_focus(),
                 KeyCode::Char('g') => session.diff_scroll = 0,
                 KeyCode::Char('G') => session.diff_scroll = u16::MAX / 2,
                 KeyCode::Char('d') | KeyCode::PageDown => session.scroll_diff(12),
@@ -181,73 +186,59 @@ fn render_file_row(
 }
 
 fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
-    let Some(file) = session.selected_file() else {
+    if session.selected_file().is_none() {
         frame.render_widget(Paragraph::new("No changed files"), area);
         return;
-    };
-
-    let mut lines = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(
-            &file.path,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("  +{} -{}", file.additions, file.deletions)),
-    ]));
-
-    let added_source = file
-        .diff
-        .hunks
-        .iter()
-        .flat_map(|hunk| &hunk.lines)
-        .filter(|line| matches!(line.kind, DiffLineKind::Added | DiffLineKind::Context))
-        .map(|line| line.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if let Some(summary) = syntax::summarize(&file.path, &added_source) {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "tree-sitter: {} root={} errors={}",
-                summary.language, summary.root_kind, summary.has_error
-            ),
-            Style::default().fg(Color::Magenta),
-        )));
     }
 
-    for hunk in &file.diff.hunks {
-        lines.push(Line::from(Span::styled(
-            hunk.header.clone(),
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for line in &hunk.lines {
-            let (prefix, style) = match line.kind {
-                DiffLineKind::Context => (" ", Style::default().fg(Color::Gray)),
-                DiffLineKind::Added => ("+", Style::default().fg(Color::Green)),
-                DiffLineKind::Removed => ("-", Style::default().fg(Color::Red)),
-                DiffLineKind::Meta => ("\\", Style::default().fg(Color::DarkGray)),
-            };
-            let lineno = line
+    let rows = session.diff_rows_for_selected_file();
+    let lines: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let selected = session.focus == Focus::Diff && session.diff_cursor == index;
+            let style = diff_row_style(row.kind, selected);
+            let lineno = row
                 .new_lineno
-                .or(line.old_lineno)
+                .or(row.old_lineno)
                 .map(|n| format!("{n:>4}"))
                 .unwrap_or_else(|| "    ".to_owned());
-            lines.push(Line::from(vec![
-                Span::styled(lineno, Style::default().fg(Color::DarkGray)),
-                Span::raw(" "),
-                Span::styled(prefix, style),
-                Span::raw(" "),
-                Span::styled(line.text.clone(), style),
-            ]));
-        }
-    }
+            let comment_mark = row
+                .anchor
+                .as_ref()
+                .filter(|anchor| session.comments_for_anchor(anchor) > 0)
+                .map(|_| "*")
+                .unwrap_or(" ");
 
-    if file.diff.hunks.is_empty() {
-        lines.push(Line::from(file.diff.raw.clone()));
-    }
+            match row.kind {
+                DiffRowKind::FileHeader => Line::from(Span::styled(
+                    row.text.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                DiffRowKind::SyntaxSummary => Line::from(Span::styled(
+                    row.text.clone(),
+                    Style::default().fg(Color::Magenta),
+                )),
+                DiffRowKind::HunkHeader => Line::from(Span::styled(
+                    row.text.clone(),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                DiffRowKind::Raw => Line::from(row.text.clone()),
+                DiffRowKind::DiffLine(_) => Line::from(vec![
+                    Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
+                    Span::styled(lineno, Style::default().fg(Color::DarkGray)),
+                    Span::raw(" "),
+                    Span::styled(row.prefix, style),
+                    Span::raw(" "),
+                    Span::styled(row.text.clone(), style),
+                ]),
+            }
+        })
+        .collect();
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("diff"))
@@ -256,11 +247,36 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     frame.render_widget(paragraph, area);
 }
 
+fn diff_row_style(kind: DiffRowKind, selected: bool) -> Style {
+    let style = match kind {
+        DiffRowKind::DiffLine(crate::diff::DiffLineKind::Context) => {
+            Style::default().fg(Color::Gray)
+        }
+        DiffRowKind::DiffLine(crate::diff::DiffLineKind::Added) => {
+            Style::default().fg(Color::Green)
+        }
+        DiffRowKind::DiffLine(crate::diff::DiffLineKind::Removed) => {
+            Style::default().fg(Color::Red)
+        }
+        DiffRowKind::DiffLine(crate::diff::DiffLineKind::Meta) => {
+            Style::default().fg(Color::DarkGray)
+        }
+        _ => Style::default(),
+    };
+
+    if selected {
+        style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession, mode: &Mode) {
     let mode_text = match mode {
-        Mode::Normal => {
-            "j/k move · enter viewed · v toggle · c comment · a all viewed · u/d scroll · q quit"
+        Mode::Normal if session.focus == Focus::Files => {
+            "focus files · j/k file · tab diff · enter viewed · v toggle · c file comment · a all viewed · q quit"
         }
+        Mode::Normal => "focus diff · j/k line · tab files · c line comment · u/d scroll · q quit",
         Mode::CommentInput(_) => "type comment · enter save · esc cancel",
     };
     frame.render_widget(

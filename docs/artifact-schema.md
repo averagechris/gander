@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `1`.
+Current schema version: `2`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool format; Markdown is rendered for humans.
 
@@ -8,7 +8,7 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "revision": "@",
@@ -28,7 +28,27 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
     {
       "id": "stable-ish-id",
       "path": "src/main.rs",
-      "line": null,
+      "line": 42,
+      "anchor": {
+        "type": "line",
+        "path": "src/main.rs",
+        "old_path": null,
+        "side": "new",
+        "line": 42,
+        "old_line": 41,
+        "new_line": 42,
+        "hunk_header": "@@ -39,6 +39,7 @@ fn render() {",
+        "hunk_old_start": 39,
+        "hunk_old_len": 6,
+        "hunk_new_start": 39,
+        "hunk_new_len": 7,
+        "hunk_index": 0,
+        "line_index": 4,
+        "line_kind": "added",
+        "line_text": "    new_call();",
+        "line_fingerprint": "sha256...",
+        "diff_fingerprint": "sha256..."
+      },
       "body": "Comment body",
       "created_at": "2026-06-30T00:00:00Z"
     }
@@ -39,7 +59,7 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
 ## Planned schema additions
 
 - explicit artifact `source` block with jj operation/change IDs
-- line anchors with side (`old`/`new`) and hunk header
+- raw excerpt around each comment
 - raw excerpt around each comment
 - per-file generated/ignored/collapsed metadata
 - reviewer identity/profile metadata
