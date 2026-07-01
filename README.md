@@ -153,20 +153,20 @@ Export artifacts:
 cargo run -- export json --output review.json
 cargo run -- export markdown --output review.md
 cargo run -- export # uses configured artifact defaults
-cargo run -- tui # prints a Markdown artifact to stdout after quit by default
-cargo run -- tui --artifact-on-quit stdout --artifact-format markdown
-cargo run -- tui --artifact-on-quit write --artifact-output review.md
+cargo run -- tui > review.md # TUI on stderr, Markdown artifact on stdout after quit
 ```
 
 By default, TUI artifact emission prints Markdown to stdout after the alternate
-screen is restored, so it can be redirected safely:
+screen is restored. The TUI itself renders to stderr, so stdout redirection
+captures only the artifact:
 
 ```sh
 cargo run -- tui > review.md
 ```
 
 Set `[artifact].on_tui_quit = "never"` to disable this default, or `"write"` to
-write the artifact to the configured artifact path instead.
+write the artifact to the configured artifact path instead. `write` is mainly
+useful when you want a config-driven save without shell redirection.
 
 Persistent state defaults to:
 

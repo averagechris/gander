@@ -210,9 +210,11 @@ pub fn run(
         generated_matcher,
     };
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
+    // Render the interactive UI to stderr so stdout remains clean for artifacts.
+    // This lets `jj-change-viewer > review.md` capture only the post-quit artifact.
+    let mut stderr = io::stderr();
+    execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
     let mut mode = Mode::Normal;
 
@@ -237,7 +239,7 @@ pub fn run(
 }
 
 fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     session: &mut ReviewSession,
     mode: &mut Mode,
     keymap: &KeyMap,
