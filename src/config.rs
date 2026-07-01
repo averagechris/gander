@@ -46,6 +46,9 @@ pub struct KeybindingsConfig {
     pub mark_viewed: Vec<String>,
     pub toggle_viewed: Vec<String>,
     pub mark_all_viewed: Vec<String>,
+    pub toggle_fold: Vec<String>,
+    pub collapse_fold: Vec<String>,
+    pub expand_fold: Vec<String>,
     pub comment: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
@@ -99,6 +102,9 @@ struct KeybindingsConfigPatch {
     mark_viewed: Option<Vec<String>>,
     toggle_viewed: Option<Vec<String>>,
     mark_all_viewed: Option<Vec<String>>,
+    toggle_fold: Option<Vec<String>>,
+    collapse_fold: Option<Vec<String>>,
+    expand_fold: Option<Vec<String>>,
     comment: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
@@ -139,6 +145,9 @@ impl Default for KeybindingsConfig {
             mark_viewed: keys(["enter"]),
             toggle_viewed: keys(["v"]),
             mark_all_viewed: keys(["a"]),
+            toggle_fold: keys(["space"]),
+            collapse_fold: keys(["left"]),
+            expand_fold: keys(["right"]),
             comment: keys(["c"]),
             submit_comment: keys(["enter"]),
             cancel_comment: keys(["esc"]),
@@ -236,6 +245,9 @@ impl KeybindingsConfig {
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);
         apply_optional(&mut self.toggle_viewed, patch.toggle_viewed);
         apply_optional(&mut self.mark_all_viewed, patch.mark_all_viewed);
+        apply_optional(&mut self.toggle_fold, patch.toggle_fold);
+        apply_optional(&mut self.collapse_fold, patch.collapse_fold);
+        apply_optional(&mut self.expand_fold, patch.expand_fold);
         apply_optional(&mut self.comment, patch.comment);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
@@ -316,6 +328,9 @@ basename = "review-current"
 [keybindings]
 move-down = ["s", "down"]
 quit = ["q"]
+toggle-fold = ["f"]
+collapse-fold = ["h"]
+expand-fold = ["l"]
 "#,
         )
         .unwrap();
@@ -330,6 +345,9 @@ quit = ["q"]
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
         assert_eq!(config.keybindings.move_down, ["s", "down"]);
         assert_eq!(config.keybindings.quit, ["q"]);
+        assert_eq!(config.keybindings.toggle_fold, ["f"]);
+        assert_eq!(config.keybindings.collapse_fold, ["h"]);
+        assert_eq!(config.keybindings.expand_fold, ["l"]);
         assert_eq!(
             config
                 .artifact
@@ -360,6 +378,9 @@ quit = ["q"]
         assert_eq!(config.keybindings.move_down, ["j", "down"]);
         assert_eq!(config.keybindings.move_up, ["k", "up"]);
         assert_eq!(config.keybindings.quit, ["q", "esc"]);
+        assert_eq!(config.keybindings.toggle_fold, ["space"]);
+        assert_eq!(config.keybindings.collapse_fold, ["left"]);
+        assert_eq!(config.keybindings.expand_fold, ["right"]);
     }
 
     #[test]

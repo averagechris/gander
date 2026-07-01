@@ -82,6 +82,9 @@ basename = "review"
 move-down = ["j", "down"]
 move-up = ["k", "up"]
 toggle-focus = ["tab"]
+toggle-fold = ["space"]
+collapse-fold = ["left"]
+expand-fold = ["right"]
 comment = ["c"]
 quit = ["q", "esc"]
 ```
@@ -141,6 +144,8 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |
 | `m` / `M` | next / previous comment |
+| Space | fold / unfold selected directory or selected file's parent directory |
+| Left / Right | collapse / expand selected directory |
 | Enter | mark selected file viewed |
 | `v` | toggle selected file viewed |
 | `a` | mark all visible files viewed |
@@ -171,7 +176,6 @@ The design goal is to keep jj interaction, parsing, review state, rendering, and
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
 1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
-2. directory folding for the hierarchical file tree
-3. multiline comment editor
-4. better jj revision/range semantics and support for reviewing stacks
-5. snapshot tests for parser, artifact, and TUI rendering
+2. multiline comment editor
+3. better jj revision/range semantics and support for reviewing stacks
+4. snapshot tests for parser, artifact, and TUI rendering

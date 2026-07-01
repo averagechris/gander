@@ -55,6 +55,9 @@ enum Action {
     MarkViewed,
     ToggleViewed,
     MarkAllViewed,
+    ToggleFold,
+    CollapseFold,
+    ExpandFold,
     Comment,
     SubmitComment,
     CancelComment,
@@ -150,6 +153,21 @@ fn handle_normal_action(action: Action, session: &mut ReviewSession, mode: &mut 
         Action::MarkViewed => session.mark_selected_viewed(),
         Action::ToggleViewed => session.toggle_viewed(),
         Action::MarkAllViewed => session.mark_all_viewed(),
+        Action::ToggleFold => {
+            if session.focus == Focus::Files {
+                session.toggle_tree_fold();
+            }
+        }
+        Action::CollapseFold => {
+            if session.focus == Focus::Files {
+                session.collapse_tree_node();
+            }
+        }
+        Action::ExpandFold => {
+            if session.focus == Focus::Files {
+                session.expand_tree_node();
+            }
+        }
         Action::Comment => *mode = Mode::CommentInput(String::new()),
         Action::SubmitComment | Action::CancelComment | Action::DeleteChar => {}
     }
@@ -197,7 +215,7 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
         .rows
         .iter()
         .map(|row| match &row.kind {
-            FlatTreeRowKind::Directory => render_directory_row(row),
+            FlatTreeRowKind::Directory { collapsed } => render_directory_row(row, *collapsed),
             FlatTreeRowKind::File { file_index } => render_file_row(row, session, *file_index),
         })
         .collect();
@@ -213,12 +231,13 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_directory_row(row: &FlatTreeRow) -> ListItem<'static> {
+fn render_directory_row(row: &FlatTreeRow, collapsed: bool) -> ListItem<'static> {
     let indent = "  ".repeat(row.depth.min(8));
+    let glyph = if collapsed { " ▸ " } else { " ▾ " };
     ListItem::new(Line::from(vec![
         Span::raw(indent),
         Span::styled(row.stats.mark(), Style::default().fg(Color::Green)),
-        Span::raw(" ▾ "),
+        Span::raw(glyph),
         Span::styled(
             row.label.clone(),
             Style::default()
@@ -352,9 +371,10 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "focus files · {down}/{up} file · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
+            "focus files · {down}/{up} tree · {fold} fold · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment} comment · {quit} quit",
             down = keymap.hint(Action::MoveDown),
             up = keymap.hint(Action::MoveUp),
+            fold = keymap.hint(Action::ToggleFold),
             next_unviewed = keymap.hint(Action::NextUnviewed),
             previous_unviewed = keymap.hint(Action::PreviousUnviewed),
             next_comment = keymap.hint(Action::NextComment),
@@ -424,6 +444,9 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             Action::MarkAllViewed,
             &config.mark_all_viewed,
         )?;
+        add_bindings(&mut bindings, Action::ToggleFold, &config.toggle_fold)?;
+        add_bindings(&mut bindings, Action::CollapseFold, &config.collapse_fold)?;
+        add_bindings(&mut bindings, Action::ExpandFold, &config.expand_fold)?;
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
         add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
@@ -541,5 +564,23 @@ mod tests {
 
         assert_eq!(keymap.action_for(&key), Some(Action::MoveDown));
         assert_eq!(keymap.hint(Action::MoveDown), "s");
+    }
+
+    #[test]
+    fn default_fold_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char(' '))),
+            Some(Action::ToggleFold)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Left)),
+            Some(Action::CollapseFold)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Right)),
+            Some(Action::ExpandFold)
+        );
     }
 }

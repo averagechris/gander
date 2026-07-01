@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -6,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
-    file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind},
+    file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     state::{Comment, FileState, ReviewState},
 };
 
@@ -20,7 +23,9 @@ pub struct ReviewSession {
     pub diff_scroll: u16,
     pub diff_cursor: usize,
     pub focus: Focus,
+    pub collapsed_dirs: BTreeSet<String>,
     viewport_by_path: BTreeMap<String, FileViewport>,
+    tree_cursor: Option<TreeRowId>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -91,7 +96,9 @@ impl ReviewSession {
             diff_scroll: 0,
             diff_cursor: 0,
             focus: Focus::Files,
+            collapsed_dirs: BTreeSet::new(),
             viewport_by_path: BTreeMap::new(),
+            tree_cursor: None,
         };
         session.apply_state_files(&files);
         session
@@ -118,11 +125,10 @@ impl ReviewSession {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        if self.files.is_empty() {
-            return;
-        }
-        if let Some(next) = self.file_tree().next_file_index(self.selected, delta) {
-            self.select_file_index(next);
+        let tree = self.file_tree();
+        let current = self.selected_tree_row(&tree);
+        if let Some(row_index) = tree.next_row_index(current, delta) {
+            self.select_tree_row(&tree, row_index);
         }
     }
 
@@ -131,12 +137,12 @@ impl ReviewSession {
             return;
         }
 
-        let tree = self.file_tree();
+        let tree = self.full_file_tree();
         let file_indices: Vec<_> = tree
             .rows
             .iter()
             .filter_map(|row| match row.kind {
-                FlatTreeRowKind::Directory => None,
+                FlatTreeRowKind::Directory { .. } => None,
                 FlatTreeRowKind::File { file_index } => Some(file_index),
             })
             .collect();
@@ -164,12 +170,27 @@ impl ReviewSession {
     }
 
     fn select_file_index(&mut self, index: usize) {
-        if index == self.selected || index >= self.files.len() {
+        if index >= self.files.len() {
+            return;
+        }
+        self.reveal_file_in_tree(index);
+        self.tree_cursor = Some(TreeRowId::File { file_index: index });
+        if index == self.selected {
             return;
         }
         self.save_current_viewport();
         self.selected = index;
         self.restore_current_viewport();
+    }
+
+    fn select_tree_row(&mut self, tree: &FileTreeView, row_index: usize) {
+        let Some(row) = tree.rows.get(row_index) else {
+            return;
+        };
+        self.tree_cursor = Some(row.id());
+        if let FlatTreeRowKind::File { file_index } = row.kind {
+            self.select_file_index(file_index);
+        }
     }
 
     fn save_current_viewport(&mut self) {
@@ -205,11 +226,75 @@ impl ReviewSession {
                 viewed: file.viewed,
             })
             .collect();
-        FileTreeView::build(&inputs)
+        FileTreeView::build(&inputs, &self.collapsed_dirs)
+    }
+
+    fn full_file_tree(&self) -> FileTreeView {
+        let inputs: Vec<_> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| FileTreeInput {
+                index,
+                path: &file.path,
+                viewed: file.viewed,
+            })
+            .collect();
+        FileTreeView::build(&inputs, &BTreeSet::new())
     }
 
     pub fn selected_tree_row(&self, tree: &FileTreeView) -> Option<usize> {
-        tree.selected_row_for_file(self.selected)
+        self.tree_cursor
+            .as_ref()
+            .and_then(|cursor| tree.row_for_id(cursor))
+            .or_else(|| tree.selected_row_for_file(self.selected))
+            .or_else(|| {
+                self.selected_file()
+                    .and_then(|file| visible_ancestor_row(tree, &file.path))
+            })
+    }
+
+    pub fn toggle_tree_fold(&mut self) {
+        let Some(directory) = self.fold_target_directory() else {
+            return;
+        };
+        if !self.collapsed_dirs.remove(&directory) {
+            self.collapsed_dirs.insert(directory.clone());
+        }
+        self.tree_cursor = Some(TreeRowId::Directory(directory));
+    }
+
+    pub fn collapse_tree_node(&mut self) {
+        let Some(directory) = self.fold_target_directory() else {
+            return;
+        };
+        self.collapsed_dirs.insert(directory.clone());
+        self.tree_cursor = Some(TreeRowId::Directory(directory));
+    }
+
+    pub fn expand_tree_node(&mut self) {
+        let Some(directory) = self.fold_target_directory() else {
+            return;
+        };
+        self.collapsed_dirs.remove(&directory);
+        self.tree_cursor = Some(TreeRowId::Directory(directory));
+    }
+
+    fn fold_target_directory(&self) -> Option<String> {
+        if let Some(TreeRowId::Directory(directory)) = &self.tree_cursor {
+            return Some(directory.clone());
+        }
+        self.selected_file()
+            .and_then(|file| parent_dir_for_path(&file.path))
+    }
+
+    fn reveal_file_in_tree(&mut self, file_index: usize) {
+        let Some(path) = self.files.get(file_index).map(|file| file.path.clone()) else {
+            return;
+        };
+        for ancestor in ancestors_for_path(&path) {
+            self.collapsed_dirs.remove(&ancestor);
+        }
     }
 
     pub fn toggle_viewed(&mut self) {
@@ -556,6 +641,34 @@ impl ReviewSession {
     }
 }
 
+fn parent_dir_for_path(path: &str) -> Option<String> {
+    path.rsplit_once('/')
+        .map(|(directory, _)| directory.to_owned())
+}
+
+fn ancestors_for_path(path: &str) -> Vec<String> {
+    let Some(directory) = parent_dir_for_path(path) else {
+        return Vec::new();
+    };
+    let mut ancestors = Vec::new();
+    let mut current = String::new();
+    for part in directory.split('/') {
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(part);
+        ancestors.push(current.clone());
+    }
+    ancestors
+}
+
+fn visible_ancestor_row(tree: &FileTreeView, path: &str) -> Option<usize> {
+    ancestors_for_path(path)
+        .into_iter()
+        .rev()
+        .find_map(|directory| tree.row_for_id(&TreeRowId::Directory(directory)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +701,50 @@ diff --git a/README.md b/README.md
         session.move_selection(1);
 
         assert_eq!(session.selected_file().unwrap().path, "README.md");
+    }
+
+    #[test]
+    fn file_tree_cursor_can_select_directory_without_changing_diff_file() {
+        let mut session = session();
+
+        session.move_selection(-1);
+
+        assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+        assert!(matches!(
+            session.tree_cursor,
+            Some(TreeRowId::Directory(ref directory)) if directory == "src"
+        ));
+    }
+
+    #[test]
+    fn toggle_fold_collapses_selected_directory() {
+        let mut session = session();
+        session.move_selection(-1);
+
+        session.toggle_tree_fold();
+
+        assert!(session.collapsed_dirs.contains("src"));
+        let tree = session.file_tree();
+        assert_eq!(tree.rows.len(), 2);
+        assert!(matches!(
+            tree.rows[0].kind,
+            FlatTreeRowKind::Directory { collapsed: true }
+        ));
+    }
+
+    #[test]
+    fn move_to_unviewed_reveals_folded_target() {
+        let mut session = session();
+        session.files[0].viewed = true;
+        session.collapsed_dirs.insert("src".to_owned());
+
+        session.move_to_unviewed(1);
+        session.files[0].viewed = false;
+        session.move_to_unviewed(1);
+
+        assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+        assert!(!session.collapsed_dirs.contains("src"));
+        assert!(session.selected_tree_row(&session.file_tree()).is_some());
     }
 
     #[test]
