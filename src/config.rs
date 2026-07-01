@@ -161,7 +161,7 @@ impl Default for ArtifactConfig {
             format: ArtifactFormatConfig::Markdown,
             output_dir: PathBuf::from(".jj-change-viewer"),
             basename: "review".to_owned(),
-            on_tui_quit: TuiArtifactOnQuitConfig::Never,
+            on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
         }
     }
 }
@@ -470,7 +470,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.cancel_range_comment, ["ctrl-g"]);
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
-        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Never);
+        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
     }
 
     #[test]

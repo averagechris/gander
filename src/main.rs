@@ -400,14 +400,14 @@ mod tests {
     }
 
     #[test]
-    fn tui_artifact_defaults_to_disabled() {
+    fn tui_artifact_defaults_to_stdout_markdown() {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        assert_eq!(
-            resolve_tui_artifact_options(repo.path(), &config, None, None, None),
-            None
-        );
+        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None).unwrap();
+
+        assert_eq!(request.format, OutputFormat::Markdown);
+        assert_eq!(request.destination, TuiArtifactDestination::Stdout);
     }
 
     #[test]
