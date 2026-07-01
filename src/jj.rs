@@ -14,6 +14,15 @@ pub struct JjCommand {
     target: ReviewTarget,
 }
 
+pub trait JjBackend {
+    fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
+}
+
+#[derive(Debug, Clone)]
+pub struct JjCliBackend {
+    binary: PathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewTarget {
     pub base: String,
@@ -80,6 +89,20 @@ impl JjCommand {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+impl JjCliBackend {
+    pub fn from_configured(configured: &Path) -> Result<Self> {
+        Ok(Self {
+            binary: JjCommand::resolve_binary(configured)?,
+        })
+    }
+}
+
+impl JjBackend for JjCliBackend {
+    fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
+        JjCommand::new(self.binary.clone(), repo.to_path_buf(), target.clone()).diff()
     }
 }
 

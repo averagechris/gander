@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, time::Duration};
 
 use color_eyre::eyre::{Context, Result, bail};
 use crossterm::{
@@ -24,7 +24,7 @@ use crate::{
     diff::DiffSet,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     generated::GeneratedMatcher,
-    jj::{JjCommand, ReviewTarget},
+    jj::{JjBackend, ReviewTarget},
     syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
@@ -193,11 +193,10 @@ impl CommentEditor {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ReviewLoader {
+struct ReviewLoader<'a> {
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
-    jj_binary: PathBuf,
+    jj: &'a dyn JjBackend,
 }
 
 pub fn run(
@@ -205,13 +204,13 @@ pub fn run(
     keybindings: &KeybindingsConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
-    jj_binary: PathBuf,
+    jj: &dyn JjBackend,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
         ignore_globs,
         generated_matcher,
-        jj_binary,
+        jj,
     };
     enable_raw_mode()?;
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
@@ -247,7 +246,7 @@ fn run_loop(
     session: &mut ReviewSession,
     mode: &mut Mode,
     keymap: &KeyMap,
-    review_loader: &ReviewLoader,
+    review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> Result<()> {
     loop {
@@ -276,7 +275,7 @@ fn handle_key_event(
     session: &mut ReviewSession,
     mode: &mut Mode,
     keymap: &KeyMap,
-    review_loader: &ReviewLoader,
+    review_loader: &ReviewLoader<'_>,
 ) -> Result<bool> {
     if key.kind != KeyEventKind::Press {
         return Ok(false);
@@ -309,7 +308,7 @@ fn handle_normal_action(
     action: Action,
     session: &mut ReviewSession,
     mode: &mut Mode,
-    review_loader: &ReviewLoader,
+    review_loader: &ReviewLoader<'_>,
 ) -> Result<bool> {
     match action {
         Action::Quit => return Ok(true),
@@ -365,12 +364,12 @@ fn handle_normal_action(
     Ok(false)
 }
 
-impl ReviewLoader {
+impl ReviewLoader<'_> {
     fn load(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
-        let diff_text =
-            JjCommand::new(self.jj_binary.clone(), session.repo.clone(), target.clone())
-                .diff()
-                .with_context(|| format!("failed to read jj diff for {target}"))?;
+        let diff_text = self
+            .jj
+            .diff(&session.repo, &target)
+            .with_context(|| format!("failed to read jj diff for {target}"))?;
         let mut diff = DiffSet::parse(&diff_text)
             .with_context(|| format!("failed to parse jj diff for {target}"))?;
         diff.apply_ignores(&self.ignore_globs)?;
@@ -1067,13 +1066,26 @@ mod tests {
         buffer::Buffer,
         style::{Color, Modifier},
     };
+    use std::{cell::RefCell, path::Path};
 
     use crate::{
         diff::DiffSet,
-        jj::ReviewTarget,
+        jj::{JjBackend, ReviewTarget},
         state::ReviewState,
         syntax::{HighlightKind, SyntaxConfig, SyntaxSpan, SyntaxThemeConfig},
     };
+
+    struct MockJjBackend {
+        calls: RefCell<Vec<ReviewTarget>>,
+        diff_text: String,
+    }
+
+    impl JjBackend for MockJjBackend {
+        fn diff(&self, _repo: &Path, target: &ReviewTarget) -> Result<String> {
+            self.calls.borrow_mut().push(target.clone());
+            Ok(self.diff_text.clone())
+        }
+    }
 
     fn snapshot_session(diff_text: &str) -> ReviewSession {
         let diff = DiffSet::parse(diff_text).unwrap();
@@ -1253,6 +1265,45 @@ diff --git a/README.md b/README.md
         session.set_diff_range_selection(3, 4);
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 14));
+    }
+
+    #[test]
+    fn review_loader_uses_injected_jj_backend() {
+        let mut session = snapshot_session(
+            r#"diff --git a/old.rs b/old.rs
+--- a/old.rs
++++ b/old.rs
+@@ -1 +1 @@
+-old
++old2
+"#,
+        );
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: r#"diff --git a/new.rs b/new.rs
+--- a/new.rs
++++ b/new.rs
+@@ -1 +1 @@
+-old
++new
+"#
+            .to_owned(),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+
+        loader
+            .load(&mut session, ReviewTarget::parent_to_current())
+            .unwrap();
+
+        assert_eq!(
+            backend.calls.borrow().as_slice(),
+            [ReviewTarget::parent_to_current()]
+        );
+        assert_eq!(session.selected_file().unwrap().path, "new.rs");
     }
 
     #[test]

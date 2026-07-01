@@ -21,7 +21,7 @@ use crate::{
     config::{ArtifactFormatConfig, Config, TuiArtifactOnQuitConfig},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
-    jj::{JjCommand, ReviewTarget},
+    jj::{JjBackend, JjCliBackend, ReviewTarget},
     state::ReviewState,
 };
 
@@ -132,9 +132,8 @@ fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
-    let jj_binary = JjCommand::resolve_binary(&config.jj.binary)?;
+    let jj = JjCliBackend::from_configured(&config.jj.binary)?;
     let target = ReviewTarget::new(cli.base, cli.rev);
-    let jj = JjCommand::new(jj_binary.clone(), repo.clone(), target.clone());
     let command = cli.command.unwrap_or(Command::Tui {
         artifact_on_quit: None,
         artifact_format: None,
@@ -144,7 +143,7 @@ fn main() -> color_eyre::Result<()> {
     let generated_matcher = GeneratedMatcher::new(&generated_policy)?;
 
     let diff_text = jj
-        .diff()
+        .diff(&repo, &target)
         .with_context(|| format!("failed to read jj diff for {target}"))?;
     let mut diff = DiffSet::parse(&diff_text).wrap_err("failed to parse jj git diff")?;
     let ignore_globs = merge_ignores(&config, cli.ignore);
@@ -172,7 +171,7 @@ fn main() -> color_eyre::Result<()> {
                 &config.keybindings,
                 ignore_globs,
                 generated_matcher,
-                jj_binary,
+                &jj,
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;
