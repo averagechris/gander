@@ -1,6 +1,6 @@
 ---
 source: src/tui.rs
-assertion_line: 1804
+assertion_line: 1980
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -8,14 +8,14 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 │Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
 │target ┌target────────────────────────────────────────────────────────────────────────────┐       │
-│--base/│Choose base for base..@ (tip is @)                                                │r, or  │
+│--base/│Choose base for def456..@ (tab toggles base/tip)                                  │r, or  │
 │       │filter: type to fuzzy match                                                       │       │
-│       │  change id      bookmarks                 description                            │re     │
-│       │   abc123       main                      feat: first change                      │       │
-│       │›● def456       feature*                  fix: selected change                    │       │
+│       │   change id      bookmarks                 description                           │re     │
+│       │  T@ abc123       main                      feat: first change                    │       │
+│       │›B   def456       feature*                  fix: selected change                  │       │
 │       │                                                                                  │       │
-│       │type fuzzy filter · backspace edit · ↑/↓ or ctrl-j/ctrl-k move · enter use base · │       │
-│       │esc cancel                                                                        │       │
+│       │type fuzzy filter · tab base/tip · ↑/↓ or ctrl-j/ctrl-k move · enter use selected │       │
+│       │· esc cancel                                                                      │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
@@ -26,4 +26,4 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
-choose base for base..@ · type filter · down/up move · enter load · esc cancel
+choose base/tip · type filter · tab side · down/up move · enter load · esc cancel

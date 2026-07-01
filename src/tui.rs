@@ -99,6 +99,14 @@ struct TargetChooserState {
     selected: usize,
     query: String,
     current_base: String,
+    current_tip: String,
+    selecting: TargetPickerSide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetPickerSide {
+    Base,
+    Tip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,10 +240,10 @@ impl CommentEditor {
 }
 
 impl TargetChooserState {
-    fn new(rows: Vec<JjChangeSummary>, current_base: &str) -> Self {
+    fn new(rows: Vec<JjChangeSummary>, current_base: &str, current_tip: &str) -> Self {
         let selected = rows
             .iter()
-            .position(|row| row.matches_base(current_base))
+            .position(|row| row.matches_rev(current_base))
             .unwrap_or(0);
         let filtered = (0..rows.len()).collect();
         Self {
@@ -244,13 +252,52 @@ impl TargetChooserState {
             selected,
             query: String::new(),
             current_base: current_base.to_owned(),
+            current_tip: current_tip.to_owned(),
+            selecting: TargetPickerSide::Base,
         }
     }
 
     fn target(&self) -> Option<ReviewTarget> {
-        self.rows
-            .get(*self.filtered.get(self.selected)?)
-            .map(|row| ReviewTarget::new(row.change_id.clone(), "@"))
+        let selected = self.rows.get(*self.filtered.get(self.selected)?)?;
+        Some(match self.selecting {
+            TargetPickerSide::Base => {
+                ReviewTarget::new(selected.change_id.clone(), self.current_tip.clone())
+            }
+            TargetPickerSide::Tip => {
+                ReviewTarget::new(self.current_base.clone(), selected.change_id.clone())
+            }
+        })
+    }
+
+    fn toggle_side(&mut self) {
+        self.selecting = match self.selecting {
+            TargetPickerSide::Base => TargetPickerSide::Tip,
+            TargetPickerSide::Tip => TargetPickerSide::Base,
+        };
+        let current = match self.selecting {
+            TargetPickerSide::Base => &self.current_base,
+            TargetPickerSide::Tip => &self.current_tip,
+        };
+        if let Some(selected) = self.selected_index_for_rev(current) {
+            self.selected = selected;
+        }
+    }
+
+    fn selected_index_for_rev(&self, rev: &str) -> Option<usize> {
+        if rev == "@" && !self.filtered.is_empty() {
+            return Some(0);
+        }
+        self.filtered
+            .iter()
+            .position(|row_index| self.rows[*row_index].matches_rev(rev))
+    }
+
+    fn tip_matches_row(&self, row: &JjChangeSummary, row_index: usize) -> bool {
+        if self.current_tip == "@" {
+            row_index == 0
+        } else {
+            row.matches_rev(&self.current_tip)
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -291,13 +338,22 @@ impl TargetChooserState {
     }
 }
 
+impl TargetPickerSide {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Tip => "tip",
+        }
+    }
+}
+
 impl JjChangeSummary {
-    fn matches_base(&self, base: &str) -> bool {
-        self.change_id == base
+    fn matches_rev(&self, rev: &str) -> bool {
+        self.change_id == rev
             || self
                 .bookmarks
                 .split_whitespace()
-                .any(|bookmark| bookmark.trim_end_matches('*') == base)
+                .any(|bookmark| bookmark.trim_end_matches('*') == rev)
     }
 }
 
@@ -478,8 +534,11 @@ fn handle_normal_action(
                 });
             }
             Ok(candidates) => {
-                *mode =
-                    Mode::TargetChooser(TargetChooserState::new(candidates, &session.target.base));
+                *mode = Mode::TargetChooser(TargetChooserState::new(
+                    candidates,
+                    &session.target.base,
+                    &session.target.rev,
+                ));
             }
             Err(error) => {
                 tui_state.notice = Some(UiNotice {
@@ -598,6 +657,10 @@ fn handle_target_chooser_key(
         }
         KeyCode::Char('G') => {
             chooser.select_last();
+            false
+        }
+        KeyCode::Tab => {
+            chooser.toggle_side();
             false
         }
         KeyCode::Backspace => {
@@ -1235,7 +1298,7 @@ fn draw_footer(
         ),
         Mode::TargetChooser(_) => {
             format!(
-                "choose base for base..@ · type filter · {down}/{up} move · enter load · esc cancel",
+                "choose base/tip · type filter · tab side · {down}/{up} move · enter load · esc cancel",
                 down = keymap.hint(Action::TargetPickerMoveDown),
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
@@ -1477,16 +1540,27 @@ fn draw_target_chooser_popup(
     frame.render_widget(Clear, popup);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
-    let fixed_lines = 5usize;
+    let fixed_lines = 6usize;
     let list_height = inner_height.saturating_sub(fixed_lines).max(1);
     let visible_window =
         picker_visible_window(chooser.selected, chooser.filtered.len(), list_height);
 
     let mut lines = vec![
         Line::from(vec![
-            Span::raw("Choose base for "),
-            Span::styled("base..@", Style::default().fg(Color::Yellow)),
-            Span::styled(" (tip is @)", Style::default().fg(Color::DarkGray)),
+            Span::raw("Choose "),
+            Span::styled(
+                chooser.selecting.label(),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::raw(" for "),
+            Span::styled(
+                format!("{}..{}", chooser.current_base, chooser.current_tip),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                " (tab toggles base/tip)",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         Line::from(vec![
             Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
@@ -1504,7 +1578,7 @@ fn draw_target_chooser_popup(
             ),
         ]),
         Line::from(Span::styled(
-            "  change id      bookmarks                 description",
+            "   change id      bookmarks                 description",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1532,8 +1606,10 @@ fn draw_target_chooser_popup(
                     let row = &chooser.rows[*row_index];
                     base_picker_row(
                         row,
+                        *row_index == 0,
                         index == chooser.selected,
-                        row.matches_base(&chooser.current_base),
+                        row.matches_rev(&chooser.current_base),
+                        chooser.tip_matches_row(row, *row_index),
                     )
                 }),
         );
@@ -1546,7 +1622,7 @@ fn draw_target_chooser_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "type fuzzy filter · backspace edit · ↑/↓ or ctrl-j/ctrl-k move · enter use base · esc cancel",
+        "type fuzzy filter · tab base/tip · ↑/↓ or ctrl-j/ctrl-k move · enter use selected · esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1622,7 +1698,13 @@ fn picker_visible_window(selected: usize, total: usize, height: usize) -> Picker
     }
 }
 
-fn base_picker_row(row: &JjChangeSummary, selected: bool, current_base: bool) -> Line<'static> {
+fn base_picker_row(
+    row: &JjChangeSummary,
+    at_tip: bool,
+    selected: bool,
+    current_base: bool,
+    current_tip: bool,
+) -> Line<'static> {
     let style = if selected {
         Style::default()
             .fg(Color::Yellow)
@@ -1631,14 +1713,22 @@ fn base_picker_row(row: &JjChangeSummary, selected: bool, current_base: bool) ->
         Style::default().fg(Color::Gray)
     };
     let marker = if selected { "›" } else { " " };
-    let current = if current_base { "●" } else { " " };
+    let base_mark = if current_base { "B" } else { " " };
+    let tip_mark = if current_tip { "T" } else { " " };
+    let at_mark = if at_tip { "@" } else { " " };
     let description = if row.description.is_empty() {
         "(no description)"
     } else {
         &row.description
     };
     Line::from(vec![
-        Span::styled(format!("{marker}{current} {:<13}", row.change_id), style),
+        Span::styled(
+            format!(
+                "{marker}{base_mark}{tip_mark}{at_mark} {:<13}",
+                row.change_id
+            ),
+            style,
+        ),
         Span::styled(
             format!("{:<26}", row.bookmarks),
             Style::default().fg(Color::Cyan),
@@ -1884,6 +1974,7 @@ diff --git a/README.md b/README.md
                 },
             ],
             "def456",
+            "@",
         ));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
@@ -2270,6 +2361,7 @@ diff --git a/README.md b/README.md
                 description: "mainline".to_owned(),
             }],
             "trunk()",
+            "@",
         );
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
@@ -2305,10 +2397,37 @@ diff --git a/README.md b/README.md
                 },
             ],
             "trunk",
+            "@",
         );
 
         assert_eq!(chooser.selected, 1);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
+    }
+
+    #[test]
+    fn target_chooser_can_switch_to_tip_selection() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "base".to_owned(),
+                    bookmarks: String::new(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "tip".to_owned(),
+                    bookmarks: "feature".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "base",
+            "feature",
+        );
+
+        chooser.toggle_side();
+
+        assert_eq!(chooser.selecting, TargetPickerSide::Tip);
+        assert_eq!(chooser.selected, 1);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("base", "tip")));
     }
 
     #[test]
@@ -2327,6 +2446,7 @@ diff --git a/README.md b/README.md
                 },
             ],
             "abc",
+            "@",
         );
 
         for ch in "tp".chars() {

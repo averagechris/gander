@@ -55,9 +55,11 @@ cargo run -- --base @- --rev @ tui        # equivalent to the old jj-show style 
 cargo run -- --base 'trunk()' --rev @ tui # explicit stack-vs-trunk diff
 ```
 
-Inside the TUI, press `b` to adjust the base for a `base..@` review. The picker
-lists jj change ids, associated bookmarks, and descriptions; select a row and
-press Enter to reload the diff with that change as the base and `@` as the tip.
+Inside the TUI, press `b` to adjust the base or tip for a review target. The
+picker lists jj change ids, associated bookmarks, and descriptions; select a row
+and press Enter to reload the diff. It opens in base-selection mode for the
+common `base..@` flow, and `tab` toggles between choosing the base and choosing
+the tip for stacked-change review.
 
 Hide generated/noisy files:
 
