@@ -4,6 +4,7 @@ use color_eyre::eyre::{Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct JjCommand {
+    binary: PathBuf,
     repo: PathBuf,
     target: ReviewTarget,
 }
@@ -38,12 +39,16 @@ impl fmt::Display for ReviewTarget {
 }
 
 impl JjCommand {
-    pub fn new(repo: PathBuf, target: ReviewTarget) -> Self {
-        Self { repo, target }
+    pub fn new(binary: PathBuf, repo: PathBuf, target: ReviewTarget) -> Self {
+        Self {
+            binary,
+            repo,
+            target,
+        }
     }
 
     pub fn diff(&self) -> Result<String> {
-        let output = Command::new("jj")
+        let output = Command::new(&self.binary)
             .arg("diff")
             .arg("--from")
             .arg(&self.target.base)

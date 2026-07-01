@@ -77,6 +77,9 @@ Example config:
 [ignore]
 globs = ["Cargo.lock", "**/*.lock", "**/generated/**"]
 
+[jj]
+binary = "jj" # default: first jj on PATH; absolute paths work well in Nix configs
+
 [generated]
 presets = ["lockfiles", "api-clients"]
 globs = ["schemas/*.json"]
@@ -136,6 +139,10 @@ quit = ["q", "esc"]
 
 CLI `--ignore` values are appended to configured ignore globs. Use
 `--config <path>` to load a specific config file.
+
+`[jj].binary` controls which `jj` executable is used. The default is `"jj"`,
+which resolves through `$PATH`. Set it to an absolute path when you want a
+specific binary, for example from a Nix store path or a project-local wrapper.
 
 Generated/noisy presets are opt-in and can be configured with `[generated]` or
 CLI flags:
@@ -281,7 +288,7 @@ Mouse support:
 
 Current module layout:
 
-- `jj`: shell boundary for `jj show --git --color=never --no-pager -r <rev>`
+- `jj`: shell boundary for `jj diff --from <base> --to <rev> --git --color=never --no-pager`
 - `diff`: small git-unified-diff parser with file fingerprints and hunk line numbers
 - `file_tree`: derived directory grouping, viewed counts, and flattened TUI rows
 - `state`: persisted viewed-state and comments
@@ -291,6 +298,8 @@ Current module layout:
 - `artifact`: JSON/Markdown review artifact serialization
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.
+See [`docs/jj-integration.md`](docs/jj-integration.md) for the decision to use
+the `jj` CLI boundary instead of embedding `jj-lib` for now.
 
 ## Near-term roadmap
 

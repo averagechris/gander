@@ -15,10 +15,17 @@ use crate::{
 #[serde(default)]
 pub struct Config {
     pub ignore: IgnoreConfig,
+    pub jj: JjConfig,
     pub artifact: ArtifactConfig,
     pub keybindings: KeybindingsConfig,
     pub generated: GeneratedConfig,
     pub syntax: SyntaxConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct JjConfig {
+    pub binary: PathBuf,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -94,10 +101,17 @@ pub enum TuiArtifactOnQuitConfig {
 #[serde(default)]
 struct ConfigPatch {
     ignore: IgnoreConfigPatch,
+    jj: JjConfigPatch,
     artifact: ArtifactConfigPatch,
     keybindings: KeybindingsConfigPatch,
     generated: GeneratedConfigPatch,
     syntax: Option<SyntaxConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct JjConfigPatch {
+    binary: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -167,6 +181,14 @@ impl Default for ArtifactConfig {
             output_dir: PathBuf::from(".jj-change-viewer"),
             basename: "review".to_owned(),
             on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
+        }
+    }
+}
+
+impl Default for JjConfig {
+    fn default() -> Self {
+        Self {
+            binary: PathBuf::from("jj"),
         }
     }
 }
@@ -261,6 +283,10 @@ impl Config {
     fn apply_patch(&mut self, patch: ConfigPatch) {
         if let Some(globs) = patch.ignore.globs {
             self.ignore.globs = globs;
+        }
+
+        if let Some(binary) = patch.jj.binary {
+            self.jj.binary = binary;
         }
 
         if let Some(format) = patch.artifact.format {
@@ -397,6 +423,9 @@ mod tests {
 [ignore]
 globs = ["Cargo.lock", "**/*.min.js"]
 
+[jj]
+binary = "/nix/store/example-jj/bin/jj"
+
 [generated]
 presets = ["lockfiles", "api-clients"]
 globs = ["schemas/*.json"]
@@ -439,6 +468,10 @@ submit-comment = ["ctrl-s"]
         .unwrap();
 
         assert_eq!(config.ignore.globs, ["Cargo.lock", "**/*.min.js"]);
+        assert_eq!(
+            config.jj.binary,
+            PathBuf::from("/nix/store/example-jj/bin/jj")
+        );
         assert_eq!(
             config.generated.presets,
             [GeneratedPreset::Lockfiles, GeneratedPreset::ApiClients]

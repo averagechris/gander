@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use color_eyre::eyre::{Context, Result, bail};
 use crossterm::{
@@ -197,6 +197,7 @@ impl CommentEditor {
 struct ReviewLoader {
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
+    jj_binary: PathBuf,
 }
 
 pub fn run(
@@ -204,11 +205,13 @@ pub fn run(
     keybindings: &KeybindingsConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
+    jj_binary: PathBuf,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
         ignore_globs,
         generated_matcher,
+        jj_binary,
     };
     enable_raw_mode()?;
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
@@ -364,9 +367,10 @@ fn handle_normal_action(
 
 impl ReviewLoader {
     fn load(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
-        let diff_text = JjCommand::new(session.repo.clone(), target.clone())
-            .diff()
-            .with_context(|| format!("failed to read jj diff for {target}"))?;
+        let diff_text =
+            JjCommand::new(self.jj_binary.clone(), session.repo.clone(), target.clone())
+                .diff()
+                .with_context(|| format!("failed to read jj diff for {target}"))?;
         let mut diff = DiffSet::parse(&diff_text)
             .with_context(|| format!("failed to parse jj diff for {target}"))?;
         diff.apply_ignores(&self.ignore_globs)?;
