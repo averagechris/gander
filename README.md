@@ -143,6 +143,8 @@ CLI `--ignore` values are appended to configured ignore globs. Use
 `[jj].binary` controls which `jj` executable is used. The default is `"jj"`,
 which resolves through `$PATH`. Set it to an absolute path when you want a
 specific binary, for example from a Nix store path or a project-local wrapper.
+If the configured binary is missing, the app falls back to `jj` on `$PATH`; if no
+usable `jj` can be found, startup fails with an actionable install/config hint.
 
 Generated/noisy presets are opt-in and can be configured with `[generated]` or
 CLI flags:

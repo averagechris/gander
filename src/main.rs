@@ -132,8 +132,9 @@ fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
+    let jj_binary = JjCommand::resolve_binary(&config.jj.binary)?;
     let target = ReviewTarget::new(cli.base, cli.rev);
-    let jj = JjCommand::new(config.jj.binary.clone(), repo.clone(), target.clone());
+    let jj = JjCommand::new(jj_binary.clone(), repo.clone(), target.clone());
     let command = cli.command.unwrap_or(Command::Tui {
         artifact_on_quit: None,
         artifact_format: None,
@@ -171,7 +172,7 @@ fn main() -> color_eyre::Result<()> {
                 &config.keybindings,
                 ignore_globs,
                 generated_matcher,
-                config.jj.binary.clone(),
+                jj_binary,
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;

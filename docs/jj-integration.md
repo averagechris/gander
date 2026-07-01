@@ -4,6 +4,11 @@
 executes the first `jj` found on `$PATH`, and `[jj].binary` can point at a
 specific executable for Nix stores, wrappers, or custom builds.
 
+At startup, the configured binary is probed with `jj --version`. If the
+configured path is missing, the app falls back to `jj` on `$PATH`. If neither is
+available, it exits with an actionable error explaining how to install jj or set
+`[jj].binary` to an absolute path.
+
 Current command shape:
 
 ```sh
