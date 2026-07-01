@@ -23,15 +23,15 @@ Status: started.
 - [x] JSON/Markdown artifact exports
 - [x] basic tree-sitter Rust parse hook
 - [x] unit tests for diff parsing, markdown export, and syntax hook
-- [ ] render diff snapshots in tests
+- [x] render diff snapshots in tests (insta TUI buffer snapshots)
 - [x] add config file loading
 
 ## Milestone 2: ergonomic review flow
 
 - [x] hierarchical file tree grouped by directory
 - [x] collapse directories/files
-- [ ] ignored/collapsed generated-file section
-- [ ] default ignore presets for common generated files:
+- [x] ignored/collapsed generated-file section (`generated/noisy` group + hide toggle)
+- [x] default ignore presets for common generated files:
   - lockfiles
   - generated OpenAPI/GraphQL clients
   - vendored/minified assets
@@ -57,13 +57,13 @@ Status: started.
 - [x] comment navigation
 - [ ] comment list pane
 - [ ] comment states: draft/resolved/todo
-- [ ] artifact schema versioning
-- [ ] artifact includes stable anchors:
+- [x] artifact schema versioning (current version documented in docs/artifact-schema.md)
+- [x] artifact includes stable anchors:
   - file path
   - side/new-or-old line
   - hunk header
   - diff fingerprint
-- [ ] import prior artifacts
+- [x] import prior artifacts (`import` subcommand, fingerprint-guarded)
 - [ ] agent-oriented artifact profile with raw excerpts
 
 ## Milestone 5: jj-native workflows

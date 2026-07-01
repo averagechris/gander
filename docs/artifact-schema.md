@@ -62,7 +62,6 @@ Artifacts are intentionally simple and serializable. JSON is the canonical tool 
 
 - explicit artifact `source` block with jj operation/change IDs
 - raw excerpt around each comment
-- raw excerpt around each comment
 - per-file ignored/collapsed metadata
 - reviewer identity/profile metadata
 - review disposition (`comment`, `approve`, `needs-work`, etc.)
