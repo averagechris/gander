@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     diff::{DiffSet, FileDiff, FileStatus},
+    file_tree::{FileTreeInput, FileTreeView},
     state::{Comment, FileState, ReviewState},
 };
 
@@ -82,9 +83,28 @@ impl ReviewSession {
         if self.files.is_empty() {
             return;
         }
-        let max = self.files.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-        self.diff_scroll = 0;
+        if let Some(next) = self.file_tree().next_file_index(self.selected, delta) {
+            self.selected = next;
+            self.diff_scroll = 0;
+        }
+    }
+
+    pub fn file_tree(&self) -> FileTreeView {
+        let inputs: Vec<_> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| FileTreeInput {
+                index,
+                path: &file.path,
+                viewed: file.viewed,
+            })
+            .collect();
+        FileTreeView::build(&inputs)
+    }
+
+    pub fn selected_tree_row(&self, tree: &FileTreeView) -> Option<usize> {
+        tree.selected_row_for_file(self.selected)
     }
 
     pub fn toggle_viewed(&mut self) {
@@ -163,5 +183,51 @@ impl ReviewSession {
             self.files.len(),
             self.comments.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{diff::DiffSet, state::ReviewState};
+
+    fn session() -> ReviewSession {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        ReviewSession::new(".".into(), "@".into(), diff, ReviewState::default())
+    }
+
+    #[test]
+    fn move_selection_uses_tree_file_order() {
+        let mut session = session();
+
+        session.move_selection(1);
+
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+    }
+
+    #[test]
+    fn viewed_toggle_updates_tree_counts() {
+        let mut session = session();
+        session.toggle_viewed();
+
+        let tree = session.file_tree();
+
+        assert_eq!(tree.rows[0].label, "src");
+        assert_eq!(tree.rows[0].stats.viewed, 1);
     }
 }

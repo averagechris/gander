@@ -2,6 +2,7 @@ mod app;
 mod artifact;
 mod config;
 mod diff;
+mod file_tree;
 mod jj;
 mod state;
 mod syntax;

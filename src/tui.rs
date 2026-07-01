@@ -15,7 +15,12 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::{app::ReviewSession, diff::DiffLineKind, syntax};
+use crate::{
+    app::ReviewSession,
+    diff::DiffLineKind,
+    file_tree::{FlatTreeRow, FlatTreeRowKind},
+    syntax,
+};
 
 enum Mode {
     Normal,
@@ -97,7 +102,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode) {
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(38), Constraint::Min(40)])
+        .constraints([Constraint::Length(44), Constraint::Min(40)])
         .split(main[0]);
 
     draw_files(frame, body[0], session);
@@ -110,30 +115,17 @@ fn draw(frame: &mut ratatui::Frame<'_>, session: &ReviewSession, mode: &Mode) {
 }
 
 fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
-    let items: Vec<ListItem<'_>> = session
-        .files
+    let tree = session.file_tree();
+    let items: Vec<ListItem<'_>> = tree
+        .rows
         .iter()
-        .map(|file| {
-            let mark = if file.viewed { "✓" } else { "•" };
-            let style = if file.viewed {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(mark, Style::default().fg(Color::Green)),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{:>7}", file.status),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::raw(" "),
-                Span::styled(file.path.clone(), style),
-            ]))
+        .map(|row| match &row.kind {
+            FlatTreeRowKind::Directory => render_directory_row(row),
+            FlatTreeRowKind::File { file_index } => render_file_row(row, session, *file_index),
         })
         .collect();
 
-    let mut state = ListState::default().with_selected(Some(session.selected));
+    let mut state = ListState::default().with_selected(session.selected_tree_row(&tree));
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("files"))
         .highlight_style(
@@ -142,6 +134,50 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_directory_row(row: &FlatTreeRow) -> ListItem<'static> {
+    let indent = "  ".repeat(row.depth.min(8));
+    ListItem::new(Line::from(vec![
+        Span::raw(indent),
+        Span::styled(row.stats.mark(), Style::default().fg(Color::Green)),
+        Span::raw(" ▾ "),
+        Span::styled(
+            row.label.clone(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}/{}", row.stats.viewed, row.stats.total),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]))
+}
+
+fn render_file_row(
+    row: &FlatTreeRow,
+    session: &ReviewSession,
+    file_index: usize,
+) -> ListItem<'static> {
+    let file = &session.files[file_index];
+    let mark = if file.viewed { "✓" } else { "•" };
+    let style = if file.viewed {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    ListItem::new(Line::from(vec![
+        Span::raw("  ".repeat(row.depth.min(8))),
+        Span::styled(mark, Style::default().fg(Color::Green)),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>7}", file.status),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::styled(row.label.clone(), style),
+    ]))
 }
 
 fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {

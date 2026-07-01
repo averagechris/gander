@@ -6,7 +6,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 
 - reads `jj show --git` for a target revision
 - parses changed files and hunks into structured Rust data
-- shows a navigable file list + diff pane in a Ratatui TUI
+- shows a navigable hierarchical file tree + diff pane in a Ratatui TUI
 - persists per-file viewed state keyed by a content fingerprint
 - auto-restores viewed state only when the file's diff is unchanged
 - supports repeated `--ignore <glob>` filters for noisy generated files
@@ -121,6 +121,7 @@ Current module layout:
 
 - `jj`: shell boundary for `jj show --git --color=never --no-pager -r <rev>`
 - `diff`: small git-unified-diff parser with file fingerprints and hunk line numbers
+- `file_tree`: derived directory grouping, viewed counts, and flattened TUI rows
 - `state`: persisted viewed-state and comments
 - `app`: review session/domain state manipulated by UI and commands
 - `tui`: Ratatui/Crossterm interface
@@ -134,8 +135,7 @@ The design goal is to keep jj interaction, parsing, review state, rendering, and
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
 1. real syntax-highlighted diff rendering with `tree-sitter-highlight`
-2. hierarchical file tree with directory folding
+2. directory folding for the hierarchical file tree
 3. line-level comments and comment navigation
 4. better jj revision/range semantics and support for reviewing stacks
-5. config file for default ignore globs and artifact settings
-6. snapshot tests for parser, artifact, and TUI rendering
+5. snapshot tests for parser, artifact, and TUI rendering

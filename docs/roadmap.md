@@ -28,7 +28,7 @@ Status: started.
 
 ## Milestone 2: ergonomic review flow
 
-- [ ] hierarchical file tree grouped by directory
+- [x] hierarchical file tree grouped by directory
 - [ ] collapse directories/files
 - [ ] ignored/collapsed generated-file section
 - [ ] default ignore presets for common generated files:
