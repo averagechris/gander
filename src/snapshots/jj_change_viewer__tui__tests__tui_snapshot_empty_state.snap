@@ -1,18 +1,19 @@
 ---
 source: src/tui.rs
+assertion_line: 1683
 expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
 │No changed files                          ││No changed files                                      │
 │                                          ││                                                      │
-│Try t for trunk, p for parent, or adjust  ││Current target: trunk()..@                            │
-│--base/--rev/--ignore.                    ││                                                      │
-│                                          ││Use t for trunk()..@, p for @-..@, or pass            │
-│                                          ││--base/--rev.                                         │
+│Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
+│target chooser, or adjust                 ││                                                      │
+│--base/--rev/--ignore.                    ││Use t for trunk()..@, p for @-..@, b for chooser, or  │
+│                                          ││pass --base/--rev.                                    │
 │                                          ││If files disappeared unexpectedly, check --ignore     │
 │                                          ││filters.                                              │
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
-trunk()..@ · focus files · j/k tree · space fold · h generated · t/p base · n/N unviewed · m/M comme
+trunk()..@ · focus files · j/k tree · space fold · h generated · t/p/b target · n/N unviewed · m/M c

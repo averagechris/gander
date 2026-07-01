@@ -55,6 +55,9 @@ cargo run -- --base @- --rev @ tui        # equivalent to the old jj-show style 
 cargo run -- --base 'trunk()' --rev @ tui # explicit stack-vs-trunk diff
 ```
 
+Inside the TUI, press `b` to open the target chooser. It can reload the diff for
+`trunk()..@`, `@-..@`, or a custom base/rev pair without restarting the app.
+
 Hide generated/noisy files:
 
 ```sh
@@ -128,6 +131,7 @@ move-up = ["k", "up"]
 toggle-focus = ["tab"]
 compare-trunk = ["t"]
 compare-parent = ["p"]
+target-chooser = ["b"]
 toggle-generated = ["h"]
 toggle-fold = ["space"]
 collapse-fold = ["left"]

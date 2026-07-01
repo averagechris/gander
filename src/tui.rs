@@ -56,6 +56,7 @@ enum Action {
     DiffBottom,
     CompareTrunk,
     CompareParent,
+    TargetChooser,
     NextUnviewed,
     PreviousUnviewed,
     NextComment,
@@ -82,10 +83,37 @@ enum Action {
 
 enum Mode {
     Normal,
+    TargetChooser(TargetChooserState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetChooserState {
+    selection: TargetChoice,
+    custom: CustomTargetEditor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetChoice {
+    Trunk,
+    Parent,
+    Custom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CustomTargetEditor {
+    base: String,
+    rev: String,
+    field: CustomTargetField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomTargetField {
+    Base,
+    Rev,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +246,73 @@ impl CommentEditor {
     }
 }
 
+impl TargetChooserState {
+    fn from_current(target: &ReviewTarget) -> Self {
+        Self {
+            selection: TargetChoice::Trunk,
+            custom: CustomTargetEditor {
+                base: target.base.clone(),
+                rev: target.rev.clone(),
+                field: CustomTargetField::Base,
+            },
+        }
+    }
+
+    fn target(&self) -> Option<ReviewTarget> {
+        match self.selection {
+            TargetChoice::Trunk => Some(ReviewTarget::trunk_to_current()),
+            TargetChoice::Parent => Some(ReviewTarget::parent_to_current()),
+            TargetChoice::Custom => {
+                let base = self.custom.base.trim();
+                let rev = self.custom.rev.trim();
+                if base.is_empty() || rev.is_empty() {
+                    None
+                } else {
+                    Some(ReviewTarget::new(base, rev))
+                }
+            }
+        }
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let index = match self.selection {
+            TargetChoice::Trunk => 0,
+            TargetChoice::Parent => 1,
+            TargetChoice::Custom => 2,
+        };
+        let next = (index as isize + delta).rem_euclid(3);
+        self.selection = match next {
+            0 => TargetChoice::Trunk,
+            1 => TargetChoice::Parent,
+            _ => TargetChoice::Custom,
+        };
+    }
+
+    fn toggle_custom_field(&mut self) {
+        self.custom.field = match self.custom.field {
+            CustomTargetField::Base => CustomTargetField::Rev,
+            CustomTargetField::Rev => CustomTargetField::Base,
+        };
+    }
+
+    fn active_custom_value_mut(&mut self) -> &mut String {
+        match self.custom.field {
+            CustomTargetField::Base => &mut self.custom.base,
+            CustomTargetField::Rev => &mut self.custom.rev,
+        }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        self.selection = TargetChoice::Custom;
+        self.active_custom_value_mut().push(ch);
+    }
+
+    fn backspace(&mut self) {
+        self.selection = TargetChoice::Custom;
+        self.active_custom_value_mut().pop();
+    }
+}
+
 struct ReviewLoader<'a> {
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
@@ -317,6 +412,11 @@ fn handle_key_event(
                 return Ok(true);
             }
         }
+        Mode::TargetChooser(chooser) => {
+            if handle_target_chooser_key(key, chooser, session, review_loader, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -364,6 +464,9 @@ fn handle_normal_action(
             ReviewTarget::parent_to_current(),
             tui_state,
         ),
+        Action::TargetChooser => {
+            *mode = Mode::TargetChooser(TargetChooserState::from_current(&session.target));
+        }
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::NextComment => session.move_to_comment(1),
@@ -439,6 +542,63 @@ fn handle_normal_action(
         | Action::DeleteChar => {}
     }
     Ok(false)
+}
+
+fn handle_target_chooser_key(
+    key: KeyEvent,
+    chooser: &mut TargetChooserState,
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(target) = chooser.target() {
+                load_review_target(review_loader, session, target, tui_state);
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: "custom target requires both base and rev".to_owned(),
+                });
+            }
+            true
+        }
+        KeyCode::Up => {
+            chooser.move_selection(-1);
+            false
+        }
+        KeyCode::Down => {
+            chooser.move_selection(1);
+            false
+        }
+        KeyCode::Tab => {
+            chooser.selection = TargetChoice::Custom;
+            chooser.toggle_custom_field();
+            false
+        }
+        KeyCode::Backspace => {
+            chooser.backspace();
+            false
+        }
+        KeyCode::Char('1') if chooser.selection != TargetChoice::Custom => {
+            chooser.selection = TargetChoice::Trunk;
+            false
+        }
+        KeyCode::Char('2') if chooser.selection != TargetChoice::Custom => {
+            chooser.selection = TargetChoice::Parent;
+            false
+        }
+        KeyCode::Char('3') if chooser.selection != TargetChoice::Custom => {
+            chooser.selection = TargetChoice::Custom;
+            false
+        }
+        KeyCode::Char(ch) => {
+            chooser.insert_char(ch);
+            false
+        }
+        _ => false,
+    }
 }
 
 impl ReviewLoader<'_> {
@@ -530,8 +690,10 @@ fn draw(
     draw_diff(frame, layout.diff, session);
     draw_footer(frame, layout.footer, session, mode, keymap, notice);
 
-    if let Mode::CommentInput { editor, .. } = mode {
-        draw_comment_popup(frame, frame.area(), editor);
+    match mode {
+        Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
+        Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
+        Mode::Normal => {}
     }
 }
 
@@ -675,7 +837,7 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
             Paragraph::new(vec![
                 Line::from("No changed files"),
                 Line::from(""),
-                Line::from("Try t for trunk, p for parent, or adjust --base/--rev/--ignore."),
+                Line::from("Try t for trunk, p for parent, b for target chooser, or adjust --base/--rev/--ignore."),
             ])
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL).title("files"))
@@ -771,7 +933,9 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                 Line::from(""),
                 Line::from(format!("Current target: {}", session.target)),
                 Line::from(""),
-                Line::from("Use t for trunk()..@, p for @-..@, or pass --base/--rev."),
+                Line::from(
+                    "Use t for trunk()..@, p for @-..@, b for chooser, or pass --base/--rev.",
+                ),
                 Line::from(generated_hint),
             ])
             .style(Style::default().fg(Color::DarkGray))
@@ -956,7 +1120,7 @@ fn draw_footer(
 ) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => format!(
-            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
+            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} generated · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
             session.target,
             if session.hide_generated {
                 " (generated hidden)"
@@ -969,6 +1133,7 @@ fn draw_footer(
             generated = keymap.hint(Action::ToggleGenerated),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
+            choose = keymap.hint(Action::TargetChooser),
             next_unviewed = keymap.hint(Action::NextUnviewed),
             previous_unviewed = keymap.hint(Action::PreviousUnviewed),
             next_comment = keymap.hint(Action::NextComment),
@@ -982,7 +1147,7 @@ fn draw_footer(
             quit = keymap.hint(Action::Quit),
         ),
         Mode::Normal => format!(
-            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent} base · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
+            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} generated · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
             session.target,
             if session.has_active_diff_range() {
                 " (range active)"
@@ -1001,6 +1166,7 @@ fn draw_footer(
             generated = keymap.hint(Action::ToggleGenerated),
             trunk = keymap.hint(Action::CompareTrunk),
             parent = keymap.hint(Action::CompareParent),
+            choose = keymap.hint(Action::TargetChooser),
             next_unviewed = keymap.hint(Action::NextUnviewed),
             previous_unviewed = keymap.hint(Action::PreviousUnviewed),
             next_comment = keymap.hint(Action::NextComment),
@@ -1023,6 +1189,9 @@ fn draw_footer(
             submit = keymap.hint(Action::SubmitComment),
             cancel = keymap.hint(Action::CancelComment),
         ),
+        Mode::TargetChooser(_) => {
+            "choose target · ↑/↓ select · tab custom field · enter load · esc cancel".to_owned()
+        }
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
     if let Some(notice) = notice {
@@ -1054,6 +1223,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::DiffBottom, &config.diff_bottom)?;
         add_bindings(&mut bindings, Action::CompareTrunk, &config.compare_trunk)?;
         add_bindings(&mut bindings, Action::CompareParent, &config.compare_parent)?;
+        add_bindings(&mut bindings, Action::TargetChooser, &config.target_chooser)?;
         add_bindings(&mut bindings, Action::NextUnviewed, &config.next_unviewed)?;
         add_bindings(
             &mut bindings,
@@ -1225,6 +1395,70 @@ fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &Comme
         inner_x.saturating_add(col as u16),
         inner_y.saturating_add(line as u16),
     ));
+}
+
+fn draw_target_chooser_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    chooser: &TargetChooserState,
+) {
+    let popup = centered_rect(64, 42, area);
+    frame.render_widget(Clear, popup);
+
+    let selected = |choice| {
+        if chooser.selection == choice {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        }
+    };
+    let field_style = |field| {
+        if chooser.selection == TargetChoice::Custom && chooser.custom.field == field {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    };
+
+    let lines = vec![
+        Line::from("Pick a review target:"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "1  trunk()..@   current stack",
+            selected(TargetChoice::Trunk),
+        )),
+        Line::from(Span::styled(
+            "2  @-..@       current change",
+            selected(TargetChoice::Parent),
+        )),
+        Line::from(Span::styled(
+            "3  custom base/rev",
+            selected(TargetChoice::Custom),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("base: ", field_style(CustomTargetField::Base)),
+            Span::raw(chooser.custom.base.clone()),
+        ]),
+        Line::from(vec![
+            Span::styled("rev:  ", field_style(CustomTargetField::Rev)),
+            Span::raw(chooser.custom.rev.clone()),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "↑/↓ select · tab custom field · type to edit · enter load · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("target"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1727,6 +1961,43 @@ diff --git a/README.md b/README.md
             keymap.action_for(&KeyEvent::from(KeyCode::Char('p'))),
             Some(Action::CompareParent)
         );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('b'))),
+            Some(Action::TargetChooser)
+        );
+    }
+
+    #[test]
+    fn target_chooser_loads_custom_target() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: Ok(String::new()),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut chooser = TargetChooserState::from_current(&session.target);
+        chooser.selection = TargetChoice::Custom;
+        chooser.custom.base = "main".to_owned();
+        chooser.custom.rev = "feature".to_owned();
+
+        assert!(handle_target_chooser_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut chooser,
+            &mut session,
+            &loader,
+            &mut tui_state,
+        ));
+
+        assert_eq!(
+            backend.calls.borrow().as_slice(),
+            [ReviewTarget::new("main", "feature")]
+        );
+        assert_eq!(session.target, ReviewTarget::new("main", "feature"));
     }
 
     #[test]
