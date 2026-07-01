@@ -1,6 +1,6 @@
 /target/
 /result
 /.direnv/
-/.jj-change-viewer/
+/.gander/
 *.swp
 *.swo

@@ -1,6 +1,6 @@
 # jj integration decision
 
-`jj-change-viewer` uses the `jj` CLI as its integration boundary. By default it
+`gander` uses the `jj` CLI as its integration boundary. By default it
 executes the first `jj` found on `$PATH`, and `[jj].binary` can point at a
 specific executable for Nix stores, wrappers, or custom builds.
 

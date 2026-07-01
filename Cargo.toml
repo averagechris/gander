@@ -1,9 +1,15 @@
 [package]
-name = "jj-change-viewer"
+name = "gander"
 version = "0.1.0"
 edition = "2024"
-description = "Fast, ergonomic TUI for reviewing jj changes and exporting review artifacts"
+description = "Take a gander at your jj changes: a fast review TUI with durable viewed-state, comments, and exportable review artifacts"
 license = "MIT OR Apache-2.0"
+repository = "https://git.sr.ht/~averagechris/gander"
+homepage = "https://git.sr.ht/~averagechris/gander"
+readme = "README.md"
+keywords = ["jj", "jujutsu", "code-review", "tui", "diff"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }

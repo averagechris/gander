@@ -1,6 +1,6 @@
-# jj-change-viewer
+# gander
 
-A fast Rust terminal UI for reviewing [`jj`](https://jj-vcs.github.io/jj/latest/) changes more ergonomically than raw `jj show`.
+Take a gander at your [`jj`](https://jj-vcs.github.io/jj/latest/) changes: a fast terminal UI for reviewing changes more ergonomically than raw `jj show`.
 
 This repo is intentionally early, but the first vertical slice is in place:
 
@@ -71,10 +71,10 @@ You can also configure default ignores, artifact output, and keys. Config is
 loaded in this order, with later files overriding earlier files field-by-field:
 
 1. built-in defaults
-2. XDG user config at `$XDG_CONFIG_HOME/jj-change-viewer/config.toml`, or
-   `~/.config/jj-change-viewer/config.toml` when `XDG_CONFIG_HOME` is unset
-3. shareable project config at `jj-change-viewer.toml`
-4. ignored project-local config at `.jj-change-viewer/config.toml`
+2. XDG user config at `$XDG_CONFIG_HOME/gander/config.toml`, or
+   `~/.config/gander/config.toml` when `XDG_CONFIG_HOME` is unset
+3. shareable project config at `gander.toml`
+4. ignored project-local config at `.gander/config.toml`
 5. an explicit `--config <path>`, when provided
 
 Example config:
@@ -92,7 +92,7 @@ globs = ["schemas/*.json"]
 
 [artifact]
 format = "markdown"
-output_dir = ".jj-change-viewer"
+output_dir = ".gander"
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
 
@@ -209,7 +209,7 @@ Syntax highlights are cached by file path, diff fingerprint, and syntax matching
 config. Unsupported files remain plain text, and supported-language highlight
 failures fall back to unhighlighted text without interrupting review.
 
-This repo's `.gitignore` excludes `.jj-change-viewer/`, so you can keep
+This repo's `.gitignore` excludes `.gander/`, so you can keep
 personal project-local keybindings there without committing them. For example,
 Colemak Mod-DH-friendly vertical movement can use:
 
@@ -273,7 +273,7 @@ useful when you want a config-driven save without shell redirection.
 Persistent state defaults to:
 
 ```text
-.jj-change-viewer/state.json
+.gander/state.json
 ```
 
 Use `--state <path>` to override it.

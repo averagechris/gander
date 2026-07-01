@@ -100,7 +100,7 @@ pub fn run(
     };
     enable_raw_mode()?;
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
-    // This lets `jj-change-viewer > review.md` capture only the post-quit artifact.
+    // This lets `gander > review.md` capture only the post-quit artifact.
     let mut stderr = io::stderr();
     execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stderr);

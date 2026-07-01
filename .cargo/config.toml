@@ -1,2 +1,2 @@
 [alias]
-xtask = "run --bin jj-change-viewer --"
+xtask = "run --bin gander --"

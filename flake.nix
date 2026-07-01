@@ -1,5 +1,5 @@
 {
-  description = "jj-change-viewer: a fast Rust TUI for reviewing jj changes";
+  description = "gander: take a gander at your jj changes in a fast review TUI";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,21 +13,28 @@
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = import nixpkgs {inherit system;};
+      cargoToml = pkgs.lib.importTOML ./Cargo.toml;
       nativeBuildInputs = with pkgs; [pkg-config];
       buildInputs = with pkgs; lib.optionals stdenv.isDarwin [apple-sdk_15];
     in {
       packages.default = pkgs.rustPlatform.buildRustPackage {
-        pname = "jj-change-viewer";
-        version = "0.1.0";
+        pname = cargoToml.package.name;
+        inherit (cargoToml.package) version;
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         inherit nativeBuildInputs buildInputs;
+
+        meta = {
+          inherit (cargoToml.package) description homepage;
+          license = with pkgs.lib.licenses; [mit asl20];
+          mainProgram = cargoToml.package.name;
+        };
       };
 
       apps.default = {
         type = "app";
-        program = "${self.packages.${system}.default}/bin/jj-change-viewer";
-        meta.description = "Fast Rust TUI for reviewing jj changes";
+        program = pkgs.lib.getExe self.packages.${system}.default;
+        meta.description = cargoToml.package.description;
       };
 
       devShells.default = pkgs.mkShell {

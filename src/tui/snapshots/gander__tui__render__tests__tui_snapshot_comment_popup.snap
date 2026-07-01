@@ -1,5 +1,6 @@
 ---
-source: src/tui.rs
+source: src/tui/render.rs
+assertion_line: 911
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐

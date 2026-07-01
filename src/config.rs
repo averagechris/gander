@@ -190,7 +190,7 @@ impl Default for ArtifactConfig {
     fn default() -> Self {
         Self {
             format: ArtifactFormatConfig::Markdown,
-            output_dir: PathBuf::from(".jj-change-viewer"),
+            output_dir: PathBuf::from(".gander"),
             basename: "review".to_owned(),
             on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
         }
@@ -259,11 +259,11 @@ impl Config {
             });
         }
         sources.push(ConfigSource {
-            path: repo.join("jj-change-viewer.toml"),
+            path: repo.join("gander.toml"),
             required: false,
         });
         sources.push(ConfigSource {
-            path: repo.join(".jj-change-viewer").join("config.toml"),
+            path: repo.join(".gander").join("config.toml"),
             required: false,
         });
         if let Some(path) = explicit_path {
@@ -390,11 +390,11 @@ fn apply_optional<T>(target: &mut T, value: Option<T>) {
 
 fn xdg_config_path() -> Option<PathBuf> {
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(config_home).join("jj-change-viewer/config.toml"));
+        return Some(PathBuf::from(config_home).join("gander/config.toml"));
     }
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
-        .map(|home| PathBuf::from(home).join(".config/jj-change-viewer/config.toml"))
+        .map(|home| PathBuf::from(home).join(".config/gander/config.toml"))
 }
 
 impl ArtifactConfig {
@@ -533,11 +533,11 @@ submit-comment = ["ctrl-s"]
 
         assert_eq!(
             artifact.output_path(repo.path(), ArtifactFormatConfig::Markdown),
-            repo.path().join(".jj-change-viewer").join("review.md")
+            repo.path().join(".gander").join("review.md")
         );
         assert_eq!(
             artifact.output_path(repo.path(), ArtifactFormatConfig::Json),
-            repo.path().join(".jj-change-viewer").join("review.json")
+            repo.path().join(".gander").join("review.json")
         );
     }
 

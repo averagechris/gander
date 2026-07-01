@@ -59,7 +59,7 @@ struct Cli {
     #[arg(long, global = true)]
     state: Option<PathBuf>,
 
-    /// Path to a jj-change-viewer config file. Defaults to .jj-change-viewer/config.toml if present.
+    /// Path to a gander config file. Defaults to .gander/config.toml if present.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -161,7 +161,7 @@ fn main() -> color_eyre::Result<()> {
 
     let state_path = cli
         .state
-        .unwrap_or_else(|| repo.join(".jj-change-viewer").join("state.json"));
+        .unwrap_or_else(|| repo.join(".gander").join("state.json"));
     let mut state = ReviewState::load_or_default(&state_path)?;
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff, state.clone(), &config);
@@ -385,10 +385,7 @@ mod tests {
         let (format, output) = resolve_export_options(repo.path(), &config, None, None);
 
         assert_eq!(format, OutputFormat::Markdown);
-        assert_eq!(
-            output,
-            repo.path().join(".jj-change-viewer").join("review.md")
-        );
+        assert_eq!(output, repo.path().join(".gander").join("review.md"));
     }
 
     #[test]
@@ -400,10 +397,7 @@ mod tests {
             resolve_export_options(repo.path(), &config, Some(OutputFormat::Json), None);
 
         assert_eq!(format, OutputFormat::Json);
-        assert_eq!(
-            output,
-            repo.path().join(".jj-change-viewer").join("review.json")
-        );
+        assert_eq!(output, repo.path().join(".gander").join("review.json"));
     }
 
     #[test]
@@ -451,7 +445,7 @@ mod tests {
         assert_eq!(request.format, OutputFormat::Markdown);
         assert_eq!(
             request.destination,
-            TuiArtifactDestination::File(repo.path().join(".jj-change-viewer").join("review.md"))
+            TuiArtifactDestination::File(repo.path().join(".gander").join("review.md"))
         );
     }
 

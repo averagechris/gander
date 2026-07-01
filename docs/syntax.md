@@ -1,6 +1,6 @@
 # Syntax highlighting roadmap
 
-`jj-change-viewer` currently ships a built-in tree-sitter registry for common
+`gander` currently ships a built-in tree-sitter registry for common
 review languages and lets config enable/disable built-ins or add extra
 extension/filename mappings.
 
