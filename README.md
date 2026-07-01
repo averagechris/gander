@@ -85,6 +85,7 @@ globs = ["schemas/*.json"]
 format = "markdown"
 output_dir = ".jj-change-viewer"
 basename = "review"
+on_tui_quit = "never" # never | write | stdout
 
 [keybindings]
 move-down = ["j", "down"]
@@ -152,6 +153,15 @@ Export artifacts:
 cargo run -- export json --output review.json
 cargo run -- export markdown --output review.md
 cargo run -- export # uses configured artifact defaults
+cargo run -- tui --artifact-on-quit stdout --artifact-format markdown
+cargo run -- tui --artifact-on-quit write --artifact-output review.md
+```
+
+TUI artifact emission happens after the alternate screen is restored, so stdout
+mode can be redirected safely:
+
+```sh
+cargo run -- tui --artifact-on-quit stdout > review.md
 ```
 
 Persistent state defaults to:

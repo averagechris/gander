@@ -17,8 +17,8 @@ use color_eyre::eyre::Context;
 
 use crate::{
     app::ReviewSession,
-    artifact::{ArtifactFormat, write_artifact},
-    config::{ArtifactFormatConfig, Config},
+    artifact::{ArtifactFormat, write_artifact, write_artifact_to},
+    config::{ArtifactFormatConfig, Config, TuiArtifactOnQuitConfig},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::{JjCommand, ReviewTarget},
@@ -67,7 +67,19 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Launch the terminal UI. This is the default command.
-    Tui,
+    Tui {
+        /// Emit an artifact after quitting the TUI.
+        #[arg(long, value_enum)]
+        artifact_on_quit: Option<TuiArtifactOnQuitArg>,
+
+        /// Artifact format for --artifact-on-quit.
+        #[arg(long = "artifact-format", value_enum)]
+        artifact_format: Option<OutputFormat>,
+
+        /// Artifact output path for --artifact-on-quit write.
+        #[arg(long = "artifact-output")]
+        artifact_output: Option<PathBuf>,
+    },
     /// Export the current review as JSON or Markdown.
     Export {
         #[arg(value_enum)]
@@ -96,6 +108,25 @@ enum GeneratedPresetArg {
     VendoredAssets,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TuiArtifactOnQuitArg {
+    Never,
+    Write,
+    Stdout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TuiArtifactRequest {
+    format: OutputFormat,
+    destination: TuiArtifactDestination,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TuiArtifactDestination {
+    File(PathBuf),
+    Stdout,
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
@@ -103,7 +134,11 @@ fn main() -> color_eyre::Result<()> {
     let config = Config::load(&repo, cli.config.as_deref())?;
     let target = ReviewTarget::new(cli.base, cli.rev);
     let jj = JjCommand::new(repo.clone(), target.clone());
-    let command = cli.command.unwrap_or(Command::Tui);
+    let command = cli.command.unwrap_or(Command::Tui {
+        artifact_on_quit: None,
+        artifact_format: None,
+        artifact_output: None,
+    });
     let generated_policy = merge_generated(&config, cli.generated_preset, cli.generated_glob);
     let generated_matcher = GeneratedMatcher::new(&generated_policy)?;
 
@@ -125,15 +160,38 @@ fn main() -> color_eyre::Result<()> {
     session.apply_viewed_state();
 
     match command {
-        Command::Tui => {
+        Command::Tui {
+            artifact_on_quit,
+            artifact_format,
+            artifact_output,
+        } => {
             tui::run(
                 &mut session,
                 &config.keybindings,
                 ignore_globs,
                 generated_matcher,
             )?;
-            state = session.into_state();
+            state = session.clone().into_state();
             state.save(&state_path)?;
+            if let Some(request) = resolve_tui_artifact_options(
+                &repo,
+                &config,
+                artifact_on_quit,
+                artifact_format,
+                artifact_output,
+            ) {
+                let format = match request.format {
+                    OutputFormat::Json => ArtifactFormat::Json,
+                    OutputFormat::Markdown => ArtifactFormat::Markdown,
+                };
+                match request.destination {
+                    TuiArtifactDestination::File(path) => write_artifact(&session, format, &path)?,
+                    TuiArtifactDestination::Stdout => {
+                        let stdout = std::io::stdout();
+                        write_artifact_to(&session, format, stdout.lock())?;
+                    }
+                }
+            }
         }
         Command::Export { format, output } => {
             let (format, output) = resolve_export_options(&repo, &config, format, output);
@@ -206,6 +264,32 @@ fn resolve_export_options(
     (format, output)
 }
 
+fn resolve_tui_artifact_options(
+    repo: &std::path::Path,
+    config: &Config,
+    cli_mode: Option<TuiArtifactOnQuitArg>,
+    cli_format: Option<OutputFormat>,
+    cli_output: Option<PathBuf>,
+) -> Option<TuiArtifactRequest> {
+    let mode = cli_mode
+        .map(TuiArtifactOnQuitConfig::from)
+        .unwrap_or(config.artifact.on_tui_quit);
+    let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
+    match mode {
+        TuiArtifactOnQuitConfig::Never => None,
+        TuiArtifactOnQuitConfig::Write => Some(TuiArtifactRequest {
+            format,
+            destination: TuiArtifactDestination::File(
+                cli_output.unwrap_or_else(|| config.artifact.output_path(repo, format.into())),
+            ),
+        }),
+        TuiArtifactOnQuitConfig::Stdout => Some(TuiArtifactRequest {
+            format,
+            destination: TuiArtifactDestination::Stdout,
+        }),
+    }
+}
+
 impl From<ArtifactFormatConfig> for OutputFormat {
     fn from(value: ArtifactFormatConfig) -> Self {
         match value {
@@ -230,6 +314,16 @@ impl From<GeneratedPresetArg> for GeneratedPreset {
             GeneratedPresetArg::Lockfiles => Self::Lockfiles,
             GeneratedPresetArg::ApiClients => Self::ApiClients,
             GeneratedPresetArg::VendoredAssets => Self::VendoredAssets,
+        }
+    }
+}
+
+impl From<TuiArtifactOnQuitArg> for TuiArtifactOnQuitConfig {
+    fn from(value: TuiArtifactOnQuitArg) -> Self {
+        match value {
+            TuiArtifactOnQuitArg::Never => Self::Never,
+            TuiArtifactOnQuitArg::Write => Self::Write,
+            TuiArtifactOnQuitArg::Stdout => Self::Stdout,
         }
     }
 }
@@ -303,5 +397,50 @@ mod tests {
             [GeneratedPreset::Lockfiles, GeneratedPreset::ApiClients]
         );
         assert_eq!(policy.globs, ["schemas/*.json", "dist/**"]);
+    }
+
+    #[test]
+    fn tui_artifact_defaults_to_disabled() {
+        let repo = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        assert_eq!(
+            resolve_tui_artifact_options(repo.path(), &config, None, None, None),
+            None
+        );
+    }
+
+    #[test]
+    fn tui_artifact_write_uses_configured_output() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.artifact.on_tui_quit = TuiArtifactOnQuitConfig::Write;
+
+        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None).unwrap();
+
+        assert_eq!(request.format, OutputFormat::Markdown);
+        assert_eq!(
+            request.destination,
+            TuiArtifactDestination::File(repo.path().join(".jj-change-viewer").join("review.md"))
+        );
+    }
+
+    #[test]
+    fn tui_artifact_cli_stdout_overrides_config_write() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.artifact.on_tui_quit = TuiArtifactOnQuitConfig::Write;
+
+        let request = resolve_tui_artifact_options(
+            repo.path(),
+            &config,
+            Some(TuiArtifactOnQuitArg::Stdout),
+            Some(OutputFormat::Json),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(request.format, OutputFormat::Json);
+        assert_eq!(request.destination, TuiArtifactDestination::Stdout);
     }
 }

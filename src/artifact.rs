@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fs, io::Write, path::Path};
 
 use chrono::Utc;
 use color_eyre::eyre::Result;
@@ -69,12 +69,28 @@ pub fn write_artifact(session: &ReviewSession, format: ArtifactFormat, path: &Pa
         fs::create_dir_all(parent)?;
     }
 
+    fs::write(path, render_artifact(session, format)?)?;
+    Ok(())
+}
+
+pub fn render_artifact(session: &ReviewSession, format: ArtifactFormat) -> Result<String> {
     let artifact = ReviewArtifact::from(session);
-    let body = match format {
-        ArtifactFormat::Json => serde_json::to_string_pretty(&artifact)?,
-        ArtifactFormat::Markdown => to_markdown(&artifact),
-    };
-    fs::write(path, body)?;
+    match format {
+        ArtifactFormat::Json => Ok(serde_json::to_string_pretty(&artifact)?),
+        ArtifactFormat::Markdown => Ok(to_markdown(&artifact)),
+    }
+}
+
+pub fn write_artifact_to(
+    session: &ReviewSession,
+    format: ArtifactFormat,
+    mut writer: impl Write,
+) -> Result<()> {
+    let body = render_artifact(session, format)?;
+    writer.write_all(body.as_bytes())?;
+    if !body.ends_with('\n') {
+        writer.write_all(b"\n")?;
+    }
     Ok(())
 }
 
@@ -178,6 +194,57 @@ mod tests {
         let markdown = to_markdown(&artifact);
         assert!(markdown.contains("`a.txt`"));
         assert!(markdown.contains("Looks good"));
+    }
+
+    #[test]
+    fn render_artifact_outputs_json_comments() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.add_comment("Looks good".into());
+
+        let json = render_artifact(&session, ArtifactFormat::Json).unwrap();
+
+        assert!(json.contains("\"comments\""));
+        assert!(json.contains("Looks good"));
+    }
+
+    #[test]
+    fn write_artifact_to_appends_newline() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        let mut out = Vec::new();
+
+        write_artifact_to(&session, ArtifactFormat::Json, &mut out).unwrap();
+
+        assert!(out.ends_with(b"\n"));
     }
 
     #[test]

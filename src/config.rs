@@ -36,6 +36,7 @@ pub struct ArtifactConfig {
     pub format: ArtifactFormatConfig,
     pub output_dir: PathBuf,
     pub basename: String,
+    pub on_tui_quit: TuiArtifactOnQuitConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -75,6 +76,14 @@ pub enum ArtifactFormatConfig {
     Markdown,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TuiArtifactOnQuitConfig {
+    Never,
+    Write,
+    Stdout,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct ConfigPatch {
@@ -103,6 +112,7 @@ struct ArtifactConfigPatch {
     format: Option<ArtifactFormatConfig>,
     output_dir: Option<PathBuf>,
     basename: Option<String>,
+    on_tui_quit: Option<TuiArtifactOnQuitConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -147,6 +157,7 @@ impl Default for ArtifactConfig {
             format: ArtifactFormatConfig::Markdown,
             output_dir: PathBuf::from(".jj-change-viewer"),
             basename: "review".to_owned(),
+            on_tui_quit: TuiArtifactOnQuitConfig::Never,
         }
     }
 }
@@ -249,6 +260,9 @@ impl Config {
         }
         if let Some(basename) = patch.artifact.basename {
             self.artifact.basename = basename;
+        }
+        if let Some(on_tui_quit) = patch.artifact.on_tui_quit {
+            self.artifact.on_tui_quit = on_tui_quit;
         }
 
         self.keybindings.apply_patch(patch.keybindings);
@@ -374,6 +388,7 @@ globs = ["schemas/*.json"]
 format = "json"
 output_dir = "artifacts"
 basename = "review-current"
+on_tui_quit = "stdout"
 
 [keybindings]
 move-down = ["s", "down"]
@@ -400,6 +415,7 @@ submit-comment = ["ctrl-s"]
         );
         assert_eq!(config.generated.globs, ["schemas/*.json"]);
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
+        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
         assert_eq!(config.keybindings.move_down, ["s", "down"]);
         assert_eq!(config.keybindings.quit, ["q"]);
         assert_eq!(config.keybindings.toggle_fold, ["f"]);
@@ -444,6 +460,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.expand_fold, ["right"]);
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
+        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Never);
     }
 
     #[test]
