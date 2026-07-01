@@ -24,7 +24,7 @@ use crate::{
     diff::DiffSet,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     generated::GeneratedMatcher,
-    jj::{JjBackend, ReviewTarget},
+    jj::{JjBackend, JjChangeSummary, ReviewTarget},
     syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
@@ -92,23 +92,8 @@ enum Mode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetChooserState {
-    row: TargetChooserRow,
-    custom: CustomTargetEditor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetChooserRow {
-    Stack,
-    Change,
-    Base,
-    Tip,
-    LoadCustom,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CustomTargetEditor {
-    base: String,
-    rev: String,
+    rows: Vec<JjChangeSummary>,
+    selected: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,75 +227,33 @@ impl CommentEditor {
 }
 
 impl TargetChooserState {
-    fn from_current(target: &ReviewTarget) -> Self {
-        Self {
-            row: TargetChooserRow::Base,
-            custom: CustomTargetEditor {
-                base: target.base.clone(),
-                rev: "@".to_owned(),
-            },
-        }
+    fn new(rows: Vec<JjChangeSummary>, current_base: &str) -> Self {
+        let selected = rows
+            .iter()
+            .position(|row| {
+                row.change_id == current_base
+                    || row
+                        .bookmarks
+                        .split_whitespace()
+                        .any(|bookmark| bookmark.trim_end_matches('*') == current_base)
+            })
+            .unwrap_or(0);
+        Self { rows, selected }
     }
 
     fn target(&self) -> Option<ReviewTarget> {
-        match self.row {
-            TargetChooserRow::Stack => Some(ReviewTarget::trunk_to_current()),
-            TargetChooserRow::Change => Some(ReviewTarget::parent_to_current()),
-            TargetChooserRow::Base | TargetChooserRow::Tip | TargetChooserRow::LoadCustom => {
-                let base = self.custom.base.trim();
-                let rev = self.custom.rev.trim();
-                if base.is_empty() || rev.is_empty() {
-                    None
-                } else {
-                    Some(ReviewTarget::new(base, rev))
-                }
-            }
-        }
+        self.rows
+            .get(self.selected)
+            .map(|row| ReviewTarget::new(row.change_id.clone(), "@"))
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let index = match self.row {
-            TargetChooserRow::Stack => 0,
-            TargetChooserRow::Change => 1,
-            TargetChooserRow::Base => 2,
-            TargetChooserRow::Tip => 3,
-            TargetChooserRow::LoadCustom => 4,
-        };
-        let next = (index as isize + delta).rem_euclid(5);
-        self.row = match next {
-            0 => TargetChooserRow::Stack,
-            1 => TargetChooserRow::Change,
-            2 => TargetChooserRow::Base,
-            3 => TargetChooserRow::Tip,
-            _ => TargetChooserRow::LoadCustom,
-        };
-    }
-
-    fn toggle_custom_field(&mut self) {
-        self.row = match self.row {
-            TargetChooserRow::Tip => TargetChooserRow::Base,
-            _ => TargetChooserRow::Tip,
-        };
-    }
-
-    fn active_custom_value_mut(&mut self) -> Option<&mut String> {
-        match self.row {
-            TargetChooserRow::Base => Some(&mut self.custom.base),
-            TargetChooserRow::Tip => Some(&mut self.custom.rev),
-            _ => None,
+        if self.rows.is_empty() {
+            self.selected = 0;
+            return;
         }
-    }
-
-    fn insert_char(&mut self, ch: char) {
-        if let Some(value) = self.active_custom_value_mut() {
-            value.push(ch);
-        }
-    }
-
-    fn backspace(&mut self) {
-        if let Some(value) = self.active_custom_value_mut() {
-            value.pop();
-        }
+        let max = self.rows.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
     }
 }
 
@@ -465,9 +408,24 @@ fn handle_normal_action(
             ReviewTarget::parent_to_current(),
             tui_state,
         ),
-        Action::TargetChooser => {
-            *mode = Mode::TargetChooser(TargetChooserState::from_current(&session.target));
-        }
+        Action::TargetChooser => match review_loader.base_candidates(session) {
+            Ok(candidates) if candidates.is_empty() => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no jj changes found for base picker".to_owned(),
+                });
+            }
+            Ok(candidates) => {
+                *mode =
+                    Mode::TargetChooser(TargetChooserState::new(candidates, &session.target.base));
+            }
+            Err(error) => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!("failed to load jj changes: {error:?}"),
+                });
+            }
+        },
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::NextComment => session.move_to_comment(1),
@@ -557,11 +515,6 @@ fn handle_target_chooser_key(
         KeyCode::Enter => {
             if let Some(target) = chooser.target() {
                 load_review_target(review_loader, session, target, tui_state);
-            } else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: "custom target requires both base and rev".to_owned(),
-                });
             }
             true
         }
@@ -573,34 +526,12 @@ fn handle_target_chooser_key(
             chooser.move_selection(1);
             false
         }
-        KeyCode::Tab => {
-            chooser.toggle_custom_field();
+        KeyCode::Char('g') => {
+            chooser.selected = 0;
             false
         }
-        KeyCode::Backspace => {
-            chooser.backspace();
-            false
-        }
-        KeyCode::Char('1')
-            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
-        {
-            chooser.row = TargetChooserRow::Stack;
-            false
-        }
-        KeyCode::Char('2')
-            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
-        {
-            chooser.row = TargetChooserRow::Change;
-            false
-        }
-        KeyCode::Char('3')
-            if !matches!(chooser.row, TargetChooserRow::Base | TargetChooserRow::Tip) =>
-        {
-            chooser.row = TargetChooserRow::Base;
-            false
-        }
-        KeyCode::Char(ch) => {
-            chooser.insert_char(ch);
+        KeyCode::Char('G') => {
+            chooser.selected = chooser.rows.len().saturating_sub(1);
             false
         }
         _ => false,
@@ -608,6 +539,10 @@ fn handle_target_chooser_key(
 }
 
 impl ReviewLoader<'_> {
+    fn base_candidates(&self, session: &ReviewSession) -> Result<Vec<JjChangeSummary>> {
+        self.jj.change_summaries(&session.repo)
+    }
+
     fn load(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
         let diff_text = self
             .jj
@@ -1225,7 +1160,7 @@ fn draw_footer(
             cancel = keymap.hint(Action::CancelComment),
         ),
         Mode::TargetChooser(_) => {
-            "choose target · ↑/↓ move · type edit · tab base/tip · enter load · esc cancel"
+            "choose base for base..@ · ↑/↓ move · g/G top/bottom · enter load · esc cancel"
                 .to_owned()
         }
     };
@@ -1438,87 +1373,32 @@ fn draw_target_chooser_popup(
     area: Rect,
     chooser: &TargetChooserState,
 ) {
-    let popup = centered_rect(70, 50, area);
+    let popup = centered_rect(84, 64, area);
     frame.render_widget(Clear, popup);
 
-    let row_style = |row| {
-        if chooser.row == row {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        }
-    };
-
-    let marker = |row| if chooser.row == row { "›" } else { " " };
-    let field_value_style = |row| {
-        if chooser.row == row {
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        }
-    };
-
-    let lines = vec![
-        Line::from("Choose the range to review:"),
-        Line::from(""),
-        picker_row(
-            marker(TargetChooserRow::Stack),
-            "Stack",
-            "trunk()..@",
-            "review everything in the current stack",
-            row_style(TargetChooserRow::Stack),
-        ),
-        picker_row(
-            marker(TargetChooserRow::Change),
-            "Change",
-            "@-..@",
-            "review only the working-copy change",
-            row_style(TargetChooserRow::Change),
-        ),
-        Line::from(""),
+    let mut lines = vec![
         Line::from(vec![
-            Span::styled(
-                format!("{} Base  ", marker(TargetChooserRow::Base)),
-                row_style(TargetChooserRow::Base),
-            ),
-            Span::styled("from ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                chooser.custom.base.clone(),
-                field_value_style(TargetChooserRow::Base),
-            ),
+            Span::raw("Choose base for "),
+            Span::styled("base..@", Style::default().fg(Color::Yellow)),
+            Span::styled(" (tip is @)", Style::default().fg(Color::DarkGray)),
         ]),
-        Line::from(vec![
-            Span::styled(
-                format!("{} Tip   ", marker(TargetChooserRow::Tip)),
-                row_style(TargetChooserRow::Tip),
-            ),
-            Span::styled("to   ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                chooser.custom.rev.clone(),
-                field_value_style(TargetChooserRow::Tip),
-            ),
-            Span::styled("  (defaults to @)", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!("{} Load  ", marker(TargetChooserRow::LoadCustom)),
-                row_style(TargetChooserRow::LoadCustom),
-            ),
-            Span::styled(
-                format!("{}..{}", chooser.custom.base, chooser.custom.rev),
-                row_style(TargetChooserRow::LoadCustom),
-            ),
-        ]),
-        Line::from(""),
         Line::from(Span::styled(
-            "↑/↓ move · type/backspace edit · tab base/tip · enter load · esc cancel",
+            "change id      bookmarks                 description",
             Style::default().fg(Color::DarkGray),
         )),
     ];
+    lines.extend(
+        chooser
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| base_picker_row(row, index == chooser.selected)),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ move · g/G top/bottom · enter use selected change as base · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -1528,17 +1408,27 @@ fn draw_target_chooser_popup(
     );
 }
 
-fn picker_row<'a>(
-    marker: &'a str,
-    label: &'a str,
-    target: &'a str,
-    hint: &'a str,
-    style: Style,
-) -> Line<'a> {
+fn base_picker_row(row: &JjChangeSummary, selected: bool) -> Line<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let marker = if selected { "›" } else { " " };
+    let description = if row.description.is_empty() {
+        "(no description)"
+    } else {
+        &row.description
+    };
     Line::from(vec![
-        Span::styled(format!("{marker} {label:<7}"), style),
-        Span::styled(format!("{target:<12}"), style),
-        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{marker} {:<13}", row.change_id), style),
+        Span::styled(
+            format!("{:<26}", row.bookmarks),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(description.to_owned(), style),
     ])
 }
 
@@ -1582,6 +1472,7 @@ mod tests {
     struct MockJjBackend {
         calls: RefCell<Vec<ReviewTarget>>,
         diff_text: Result<String, String>,
+        summaries: Vec<JjChangeSummary>,
     }
 
     impl JjBackend for MockJjBackend {
@@ -1591,6 +1482,10 @@ mod tests {
                 Ok(diff_text) => Ok(diff_text.clone()),
                 Err(error) => bail!(error.clone()),
             }
+        }
+
+        fn change_summaries(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
+            Ok(self.summaries.clone())
         }
     }
 
@@ -1760,7 +1655,21 @@ diff --git a/README.md b/README.md
     #[test]
     fn tui_snapshot_target_chooser() {
         let session = snapshot_session("");
-        let mode = Mode::TargetChooser(TargetChooserState::from_current(&session.target));
+        let mode = Mode::TargetChooser(TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "abc123".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: "feat: first change".to_owned(),
+                },
+                JjChangeSummary {
+                    change_id: "def456".to_owned(),
+                    bookmarks: "feature*".to_owned(),
+                    description: "fix: selected change".to_owned(),
+                },
+            ],
+            "def456",
+        ));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
@@ -1813,6 +1722,7 @@ diff --git a/README.md b/README.md
 +new
 "#
             .to_owned()),
+            summaries: Vec::new(),
         };
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -1837,6 +1747,7 @@ diff --git a/README.md b/README.md
         let backend = MockJjBackend {
             calls: RefCell::new(Vec::new()),
             diff_text: Err("boom".to_owned()),
+            summaries: Vec::new(),
         };
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -2096,11 +2007,12 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn target_chooser_loads_custom_target() {
+    fn target_chooser_loads_selected_base_to_current_tip() {
         let mut session = snapshot_session("");
         let backend = MockJjBackend {
             calls: RefCell::new(Vec::new()),
             diff_text: Ok(String::new()),
+            summaries: Vec::new(),
         };
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -2108,10 +2020,14 @@ diff --git a/README.md b/README.md
             jj: &backend,
         };
         let mut tui_state = TuiState::default();
-        let mut chooser = TargetChooserState::from_current(&session.target);
-        chooser.row = TargetChooserRow::LoadCustom;
-        chooser.custom.base = "main".to_owned();
-        chooser.custom.rev = "feature".to_owned();
+        let mut chooser = TargetChooserState::new(
+            vec![JjChangeSummary {
+                change_id: "mainchange".to_owned(),
+                bookmarks: "main".to_owned(),
+                description: "mainline".to_owned(),
+            }],
+            "trunk()",
+        );
 
         assert!(handle_target_chooser_key(
             KeyEvent::from(KeyCode::Enter),
@@ -2123,18 +2039,31 @@ diff --git a/README.md b/README.md
 
         assert_eq!(
             backend.calls.borrow().as_slice(),
-            [ReviewTarget::new("main", "feature")]
+            [ReviewTarget::new("mainchange", "@")]
         );
-        assert_eq!(session.target, ReviewTarget::new("main", "feature"));
+        assert_eq!(session.target, ReviewTarget::new("mainchange", "@"));
     }
 
     #[test]
-    fn target_chooser_defaults_tip_to_current_revision() {
-        let chooser = TargetChooserState::from_current(&ReviewTarget::new("@--", "feature"));
+    fn target_chooser_selects_current_base_when_visible() {
+        let chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "abc".to_owned(),
+                    bookmarks: String::new(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "def".to_owned(),
+                    bookmarks: "trunk".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "trunk",
+        );
 
-        assert_eq!(chooser.row, TargetChooserRow::Base);
-        assert_eq!(chooser.custom.base, "@--");
-        assert_eq!(chooser.custom.rev, "@");
+        assert_eq!(chooser.selected, 1);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
     }
 
     #[test]

@@ -16,6 +16,14 @@ pub struct JjCommand {
 
 pub trait JjBackend {
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
+    fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjChangeSummary {
+    pub change_id: String,
+    pub bookmarks: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +98,33 @@ impl JjCommand {
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+
+    pub fn change_summaries(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        let output = Command::new(binary)
+            .arg("log")
+            .arg("-r")
+            .arg("ancestors(@) | trunk() | bookmarks()")
+            .arg("--no-graph")
+            .arg("--color=never")
+            .arg("--no-pager")
+            .arg("--template")
+            .arg(
+                "change_id.short() ++ \"\\t\" ++ bookmarks ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
+            )
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        if !output.status.success() {
+            bail!(
+                "jj log failed with status {}:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        parse_change_summaries(&String::from_utf8_lossy(&output.stdout))
+    }
 }
 
 impl JjCliBackend {
@@ -104,6 +139,31 @@ impl JjBackend for JjCliBackend {
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
         JjCommand::new(self.binary.clone(), repo.to_path_buf(), target.clone()).diff()
     }
+
+    fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        JjCommand::change_summaries(&self.binary, repo)
+    }
+}
+
+fn parse_change_summaries(output: &str) -> Result<Vec<JjChangeSummary>> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let change_id = parts.next().unwrap_or_default().trim().to_owned();
+            let bookmarks = parts.next().unwrap_or_default().trim().to_owned();
+            let description = parts.next().unwrap_or_default().trim().to_owned();
+            if change_id.is_empty() {
+                bail!("jj log emitted a row without a change id: {line:?}");
+            }
+            Ok(JjChangeSummary {
+                change_id,
+                bookmarks,
+                description,
+            })
+        })
+        .collect()
 }
 
 fn resolve_binary_with_probe(
@@ -254,6 +314,28 @@ mod tests {
         assert!(version_output_looks_like_jj("jj 0.42.0\n"));
         assert!(!version_output_looks_like_jj("json-join 1.0.0\n"));
         assert!(!version_output_looks_like_jj(""));
+    }
+
+    #[test]
+    fn parses_change_summary_rows() {
+        let rows =
+            parse_change_summaries("abc123\tmain* feature\tfeat: hello\ndef456\t\t\n").unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                JjChangeSummary {
+                    change_id: "abc123".to_owned(),
+                    bookmarks: "main* feature".to_owned(),
+                    description: "feat: hello".to_owned(),
+                },
+                JjChangeSummary {
+                    change_id: "def456".to_owned(),
+                    bookmarks: String::new(),
+                    description: String::new(),
+                },
+            ]
+        );
     }
 
     #[cfg(unix)]
