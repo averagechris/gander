@@ -1061,6 +1061,199 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        buffer::Buffer,
+        style::{Color, Modifier},
+    };
+
+    use crate::{
+        diff::DiffSet,
+        jj::ReviewTarget,
+        state::ReviewState,
+        syntax::{HighlightKind, SyntaxConfig, SyntaxSpan, SyntaxThemeConfig},
+    };
+
+    fn snapshot_session(diff_text: &str) -> ReviewSession {
+        let diff = DiffSet::parse(diff_text).unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.syntax = SyntaxConfig {
+            enabled: false,
+            ..SyntaxConfig::default()
+        };
+        session
+    }
+
+    fn render_tui_text(session: &ReviewSession, mode: &Mode, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, session, mode, &keymap))
+            .unwrap();
+
+        buffer_text(terminal.backend().buffer())
+    }
+
+    fn render_tui_style_runs(
+        session: &ReviewSession,
+        mode: &Mode,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        terminal
+            .draw(|frame| draw(frame, session, mode, &keymap))
+            .unwrap();
+
+        buffer_style_runs(terminal.backend().buffer())
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            for x in area.x..area.x + area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
+    fn buffer_style_runs(buffer: &Buffer) -> String {
+        let area = buffer.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            let mut x = area.x;
+            while x < area.x + area.width {
+                let cell = &buffer[(x, y)];
+                let style = cell.style();
+                if style_is_plain(style) {
+                    x += 1;
+                    continue;
+                }
+
+                let start = x;
+                let mut text = String::new();
+                while x < area.x + area.width && buffer[(x, y)].style() == style {
+                    text.push_str(buffer[(x, y)].symbol());
+                    x += 1;
+                }
+                out.push_str(&format!(
+                    "y={y:02} x={start:02}..{end:02} fg={fg:?} bg={bg:?} add={add:?} sub={sub:?} text={text:?}\n",
+                    end = x.saturating_sub(1),
+                    fg = style.fg,
+                    bg = style.bg,
+                    add = style.add_modifier,
+                    sub = style.sub_modifier,
+                ));
+            }
+        }
+        out
+    }
+
+    fn style_is_plain(style: Style) -> bool {
+        matches!(style.fg, None | Some(Color::Reset))
+            && matches!(style.bg, None | Some(Color::Reset))
+            && style.add_modifier.is_empty()
+            && style.sub_modifier.is_empty()
+    }
+
+    #[test]
+    fn tui_snapshot_basic_files_and_diff() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old title
++new title
+"#,
+        );
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_diff_focus_with_range() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.toggle_focus();
+        session.set_diff_range_selection(3, 4);
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 18));
+    }
+
+    #[test]
+    fn tui_snapshot_comment_popup() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mode = Mode::CommentInput(CommentEditor {
+            text: "Looks good\nexcept this line".to_owned(),
+            cursor: "Looks good\nexcept".len(),
+        });
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_selected_and_range_styles() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.toggle_focus();
+        session.set_diff_range_selection(3, 4);
+
+        insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 14));
+    }
 
     #[test]
     fn parses_named_and_character_keys() {

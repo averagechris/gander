@@ -1,0 +1,22 @@
+---
+source: src/tui.rs
+expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• ▾ src 0/1                               ││src/app.rs  +2 -1                                     │
+│  • mod     app.rs                        ││@@ -1,4 +1,5 @@                                       │
+│                                          ││    1   fn main() {                                   │
+│                                          ││|   2 -     old();                                    │
+│                                          ││|   2 +     new();                                    │
+│                                          ││    3 +     extra();                                  │
+│                                          ││    4   }                                             │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments
+trunk()..@ · focus diff (range active) · j/k line · r range · ctrl-g cancel · t/p base · n/N unviewe
