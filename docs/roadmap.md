@@ -37,7 +37,7 @@ Status: started.
   - vendored/minified assets
 - [ ] fuzzy file search
 - [ ] viewed/unviewed filters
-- [ ] jump to next unviewed file
+- [x] jump to next unviewed file
 - [ ] preserve cursor and scroll position per file
 
 ## Milestone 3: syntax-aware reviewing

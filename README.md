@@ -106,6 +106,7 @@ Use `--state <path>` to override it.
 | --- | --- |
 | `j` / Down | next file |
 | `k` / Up | previous file |
+| `n` / `N` | next / previous unviewed file |
 | Enter | mark selected file viewed |
 | `v` | toggle selected file viewed |
 | `a` | mark all visible files viewed |

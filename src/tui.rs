@@ -74,6 +74,8 @@ fn run_loop(
                 KeyCode::Tab => session.toggle_focus(),
                 KeyCode::Char('g') => session.diff_scroll = 0,
                 KeyCode::Char('G') => session.diff_scroll = u16::MAX / 2,
+                KeyCode::Char('n') => session.move_to_unviewed(1),
+                KeyCode::Char('N') => session.move_to_unviewed(-1),
                 KeyCode::Char('d') | KeyCode::PageDown => session.scroll_diff(12),
                 KeyCode::Char('u') | KeyCode::PageUp => session.scroll_diff(-12),
                 KeyCode::Enter => session.mark_selected_viewed(),
@@ -274,9 +276,11 @@ fn diff_row_style(kind: DiffRowKind, selected: bool) -> Style {
 fn draw_footer(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession, mode: &Mode) {
     let mode_text = match mode {
         Mode::Normal if session.focus == Focus::Files => {
-            "focus files · j/k file · tab diff · enter viewed · v toggle · c file comment · a all viewed · q quit"
+            "focus files · j/k file · n/N unviewed · tab diff · enter viewed · v toggle · c file comment · q quit"
         }
-        Mode::Normal => "focus diff · j/k line · tab files · c line comment · u/d scroll · q quit",
+        Mode::Normal => {
+            "focus diff · j/k line · n/N unviewed · tab files · c line comment · u/d scroll · q quit"
+        }
         Mode::CommentInput(_) => "type comment · enter save · esc cancel",
     };
     frame.render_widget(

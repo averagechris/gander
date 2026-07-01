@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
     diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
-    file_tree::{FileTreeInput, FileTreeView},
+    file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind},
     state::{Comment, FileState, ReviewState},
 };
 
@@ -117,6 +117,45 @@ impl ReviewSession {
             self.selected = next;
             self.diff_scroll = 0;
             self.diff_cursor = 0;
+        }
+    }
+
+    pub fn move_to_unviewed(&mut self, delta: isize) {
+        if self.files.is_empty() {
+            return;
+        }
+
+        let tree = self.file_tree();
+        let file_indices: Vec<_> = tree
+            .rows
+            .iter()
+            .filter_map(|row| match row.kind {
+                FlatTreeRowKind::Directory => None,
+                FlatTreeRowKind::File { file_index } => Some(file_index),
+            })
+            .collect();
+        if file_indices.is_empty() {
+            return;
+        }
+
+        let current_position = file_indices
+            .iter()
+            .position(|index| *index == self.selected)
+            .unwrap_or(0);
+        let direction = if delta.is_negative() { -1 } else { 1 };
+        for offset in 1..=file_indices.len() {
+            let position = if direction > 0 {
+                (current_position + offset) % file_indices.len()
+            } else {
+                (current_position + file_indices.len() - offset) % file_indices.len()
+            };
+            let candidate = file_indices[position];
+            if !self.files[candidate].viewed {
+                self.selected = candidate;
+                self.diff_scroll = 0;
+                self.diff_cursor = 0;
+                return;
+            }
         }
     }
 
@@ -500,5 +539,20 @@ diff --git a/README.md b/README.md
         session.add_comment("Line note".into());
 
         assert_eq!(session.comments_for_anchor(&anchor), 1);
+    }
+
+    #[test]
+    fn move_to_unviewed_uses_tree_order_and_wraps() {
+        let mut session = session();
+        session.files[0].viewed = true;
+
+        session.move_to_unviewed(1);
+
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+
+        session.files[0].viewed = false;
+        session.move_to_unviewed(1);
+
+        assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
     }
 }
