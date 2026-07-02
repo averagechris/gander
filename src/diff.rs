@@ -661,3 +661,150 @@ LcmZQzU|;|M0Ha
         assert!(split_leading_quoted("not quoted").is_none());
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Lines that look like diff structure, plus arbitrary noise, so shrunk
+    /// counterexamples stay readable.
+    fn diffish_line() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("diff --git a/some/file.rs b/some/file.rs".to_owned()),
+            Just("--- a/some/file.rs".to_owned()),
+            Just("+++ b/some/file.rs".to_owned()),
+            Just("+++ /dev/null".to_owned()),
+            Just("@@ -1,2 +3,4 @@ fn header()".to_owned()),
+            Just("rename from old.rs".to_owned()),
+            Just("rename to new.rs".to_owned()),
+            Just("new file mode 100644".to_owned()),
+            Just("deleted file mode 100644".to_owned()),
+            Just("Binary files a/x and b/x differ".to_owned()),
+            Just("GIT binary patch".to_owned()),
+            "[ +\\-@\\\\\"]{0,6}.{0,40}",
+            ".{0,60}",
+        ]
+    }
+
+    /// git-style C quoting for paths with unusual bytes.
+    fn quote_git_path(path: &str) -> String {
+        let mut out = String::from("\"");
+        for byte in path.bytes() {
+            match byte {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                b'\n' => out.push_str("\\n"),
+                b'\t' => out.push_str("\\t"),
+                b'\r' => out.push_str("\\r"),
+                0x20..=0x7e => out.push(byte as char),
+                other => out.push_str(&format!("\\{other:03o}")),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn parse_never_panics_on_arbitrary_input(input in ".{0,2000}") {
+            let _ = DiffSet::parse(&input);
+        }
+
+        #[test]
+        fn parse_never_panics_on_diffish_lines(lines in proptest::collection::vec(diffish_line(), 0..80)) {
+            let _ = DiffSet::parse(&lines.join("\n"));
+        }
+
+        #[test]
+        fn parse_reader_matches_string_parse(lines in proptest::collection::vec(diffish_line(), 0..60)) {
+            let input = lines.join("\n");
+
+            let from_str = DiffSet::parse(&input).unwrap();
+            let from_reader = DiffSet::parse_reader(std::io::Cursor::new(input.clone())).unwrap();
+
+            prop_assert_eq!(from_str.raw_header, from_reader.raw_header);
+            prop_assert_eq!(from_str.files.len(), from_reader.files.len());
+            for (left, right) in from_str.files.iter().zip(&from_reader.files) {
+                prop_assert_eq!(&left.path, &right.path);
+                prop_assert_eq!(&left.fingerprint, &right.fingerprint);
+                prop_assert_eq!(&left.raw, &right.raw);
+            }
+        }
+
+        #[test]
+        fn generated_diff_counts_and_numbering_are_consistent(
+            adds in proptest::collection::vec("[a-z ]{0,20}", 0..12),
+            removes in proptest::collection::vec("[a-z ]{0,20}", 0..12),
+            contexts in proptest::collection::vec("[a-z ]{0,20}", 0..12),
+            old_start in 1usize..500,
+            new_start in 1usize..500,
+        ) {
+            let mut body = format!(
+                "diff --git a/gen.rs b/gen.rs\n--- a/gen.rs\n+++ b/gen.rs\n@@ -{old_start},{} +{new_start},{} @@\n",
+                contexts.len() + removes.len(),
+                contexts.len() + adds.len(),
+            );
+            for line in &contexts {
+                body.push_str(&format!(" {line}\n"));
+            }
+            for line in &removes {
+                body.push_str(&format!("-{line}\n"));
+            }
+            for line in &adds {
+                body.push_str(&format!("+{line}\n"));
+            }
+
+            let diff = DiffSet::parse(&body).unwrap();
+            prop_assert_eq!(diff.files.len(), 1);
+            let file = &diff.files[0];
+            prop_assert_eq!(file.additions, adds.len());
+            prop_assert_eq!(file.deletions, removes.len());
+            prop_assert_eq!(file.hunks.len(), 1);
+            prop_assert_eq!(
+                file.hunks[0].lines.len(),
+                adds.len() + removes.len() + contexts.len()
+            );
+
+            // Line numbering is monotonic per side and starts at the hunk header.
+            let mut expected_old = old_start;
+            let mut expected_new = new_start;
+            for line in &file.hunks[0].lines {
+                match line.kind {
+                    DiffLineKind::Context => {
+                        prop_assert_eq!(line.old_lineno, Some(expected_old));
+                        prop_assert_eq!(line.new_lineno, Some(expected_new));
+                        expected_old += 1;
+                        expected_new += 1;
+                    }
+                    DiffLineKind::Added => {
+                        prop_assert_eq!(line.new_lineno, Some(expected_new));
+                        expected_new += 1;
+                    }
+                    DiffLineKind::Removed => {
+                        prop_assert_eq!(line.old_lineno, Some(expected_old));
+                        expected_old += 1;
+                    }
+                    DiffLineKind::Meta => {}
+                }
+            }
+        }
+
+        #[test]
+        fn quoted_paths_round_trip(path in "[a-zA-Z0-9 ._\\-\"\\\\éü/]{1,30}") {
+            // Avoid path segments git would never emit.
+            prop_assume!(!path.starts_with('/') && !path.ends_with('/') && !path.contains("//"));
+            prop_assume!(path.trim() == path && path != "/dev/null");
+
+            let quoted_old = quote_git_path(&format!("a/{path}"));
+            let quoted_new = quote_git_path(&format!("b/{path}"));
+            let body = format!(
+                "diff --git {quoted_old} {quoted_new}\n--- {quoted_old}\n+++ {quoted_new}\n@@ -1 +1 @@\n-old\n+new\n"
+            );
+
+            let diff = DiffSet::parse(&body).unwrap();
+            prop_assert_eq!(diff.files.len(), 1);
+            prop_assert_eq!(&diff.files[0].path, &path);
+        }
+    }
+}

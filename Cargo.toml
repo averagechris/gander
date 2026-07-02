@@ -42,6 +42,7 @@ wait-timeout = "0.2.1"
 
 [dev-dependencies]
 insta = { version = "1.44.0", features = ["json"] }
+proptest = "1.11.0"
 tempfile = "3.23.0"
 
 [profile.release]
