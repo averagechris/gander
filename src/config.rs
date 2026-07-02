@@ -45,6 +45,7 @@ pub struct GeneratedConfig {
 #[serde(default)]
 pub struct ArtifactConfig {
     pub format: ArtifactFormatConfig,
+    pub profile: ArtifactProfileConfig,
     pub output_dir: PathBuf,
     pub basename: String,
     pub on_tui_quit: TuiArtifactOnQuitConfig,
@@ -95,11 +96,20 @@ pub struct KeybindingsConfig {
     pub delete_char: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ArtifactFormatConfig {
     Json,
     Markdown,
+}
+
+/// Artifact audience: agent adds raw hunks and comment excerpts to JSON.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactProfileConfig {
+    #[default]
+    Human,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -144,6 +154,7 @@ struct GeneratedConfigPatch {
 #[serde(default)]
 struct ArtifactConfigPatch {
     format: Option<ArtifactFormatConfig>,
+    profile: Option<ArtifactProfileConfig>,
     output_dir: Option<PathBuf>,
     basename: Option<String>,
     on_tui_quit: Option<TuiArtifactOnQuitConfig>,
@@ -204,6 +215,7 @@ impl Default for ArtifactConfig {
     fn default() -> Self {
         Self {
             format: ArtifactFormatConfig::Markdown,
+            profile: ArtifactProfileConfig::default(),
             output_dir: PathBuf::from(".gander"),
             basename: "review".to_owned(),
             on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
@@ -332,6 +344,9 @@ impl Config {
 
         if let Some(format) = patch.artifact.format {
             self.artifact.format = format;
+        }
+        if let Some(profile) = patch.artifact.profile {
+            self.artifact.profile = profile;
         }
         if let Some(output_dir) = patch.artifact.output_dir {
             self.artifact.output_dir = output_dir;

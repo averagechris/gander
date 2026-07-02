@@ -19,10 +19,10 @@ use color_eyre::eyre::Context;
 use crate::{
     app::ReviewSession,
     artifact::{
-        ArtifactFormat, OwnedReviewArtifact, import_json_artifact_into_state, write_artifact,
-        write_artifact_to,
+        ArtifactFormat, ArtifactProfile, OwnedReviewArtifact, import_json_artifact_into_state,
+        write_artifact, write_artifact_to,
     },
-    config::{ArtifactFormatConfig, Config, TuiArtifactOnQuitConfig},
+    config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::{JjBackend, JjCliBackend, ReviewTarget},
@@ -80,6 +80,10 @@ enum Command {
         #[arg(long = "artifact-format", value_enum)]
         artifact_format: Option<OutputFormat>,
 
+        /// Artifact profile for --artifact-on-quit (agent adds raw excerpts).
+        #[arg(long = "artifact-profile", value_enum)]
+        artifact_profile: Option<OutputProfile>,
+
         /// Artifact output path for --artifact-on-quit write.
         #[arg(long = "artifact-output")]
         artifact_output: Option<PathBuf>,
@@ -90,6 +94,9 @@ enum Command {
         format: Option<OutputFormat>,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Artifact profile; agent adds raw hunks and comment excerpts.
+        #[arg(short, long, value_enum)]
+        profile: Option<OutputProfile>,
     },
     /// Import comments/viewed state from a JSON review artifact.
     Import {
@@ -111,6 +118,12 @@ enum OutputFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputProfile {
+    Human,
+    Agent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum GeneratedPresetArg {
     Lockfiles,
     ApiClients,
@@ -127,6 +140,7 @@ enum TuiArtifactOnQuitArg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TuiArtifactRequest {
     format: OutputFormat,
+    profile: OutputProfile,
     destination: TuiArtifactDestination,
 }
 
@@ -146,6 +160,7 @@ fn main() -> color_eyre::Result<()> {
     let command = cli.command.unwrap_or(Command::Tui {
         artifact_on_quit: None,
         artifact_format: None,
+        artifact_profile: None,
         artifact_output: None,
     });
     let generated_policy = merge_generated(&config, cli.generated_preset, cli.generated_glob);
@@ -175,6 +190,7 @@ fn main() -> color_eyre::Result<()> {
         Command::Tui {
             artifact_on_quit,
             artifact_format,
+            artifact_profile,
             artifact_output,
         } => {
             tui::run(
@@ -192,29 +208,39 @@ fn main() -> color_eyre::Result<()> {
                 &config,
                 artifact_on_quit,
                 artifact_format,
+                artifact_profile,
                 artifact_output,
             ) {
                 let format = match request.format {
                     OutputFormat::Json => ArtifactFormat::Json,
                     OutputFormat::Markdown => ArtifactFormat::Markdown,
                 };
+                let profile = ArtifactProfile::from(request.profile);
                 match request.destination {
-                    TuiArtifactDestination::File(path) => write_artifact(&session, format, &path)?,
+                    TuiArtifactDestination::File(path) => {
+                        write_artifact(&session, format, profile, &path)?
+                    }
                     TuiArtifactDestination::Stdout => {
                         let stdout = std::io::stdout();
-                        write_artifact_to(&session, format, stdout.lock())?;
+                        write_artifact_to(&session, format, profile, stdout.lock())?;
                     }
                 }
             }
         }
-        Command::Export { format, output } => {
-            let (format, output) = resolve_export_options(&repo, &config, format, output);
+        Command::Export {
+            format,
+            output,
+            profile,
+        } => {
+            let (format, output, profile) =
+                resolve_export_options(&repo, &config, format, output, profile);
             write_artifact(
                 &session,
                 match format {
                     OutputFormat::Json => ArtifactFormat::Json,
                     OutputFormat::Markdown => ArtifactFormat::Markdown,
                 },
+                ArtifactProfile::from(profile),
                 &output,
             )?;
         }
@@ -293,10 +319,12 @@ fn resolve_export_options(
     config: &Config,
     cli_format: Option<OutputFormat>,
     cli_output: Option<PathBuf>,
-) -> (OutputFormat, PathBuf) {
+    cli_profile: Option<OutputProfile>,
+) -> (OutputFormat, PathBuf, OutputProfile) {
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
     let output = cli_output.unwrap_or_else(|| config.artifact.output_path(repo, format.into()));
-    (format, output)
+    let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
+    (format, output, profile)
 }
 
 fn resolve_tui_artifact_options(
@@ -304,22 +332,26 @@ fn resolve_tui_artifact_options(
     config: &Config,
     cli_mode: Option<TuiArtifactOnQuitArg>,
     cli_format: Option<OutputFormat>,
+    cli_profile: Option<OutputProfile>,
     cli_output: Option<PathBuf>,
 ) -> Option<TuiArtifactRequest> {
     let mode = cli_mode
         .map(TuiArtifactOnQuitConfig::from)
         .unwrap_or(config.artifact.on_tui_quit);
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
+    let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
     match mode {
         TuiArtifactOnQuitConfig::Never => None,
         TuiArtifactOnQuitConfig::Write => Some(TuiArtifactRequest {
             format,
+            profile,
             destination: TuiArtifactDestination::File(
                 cli_output.unwrap_or_else(|| config.artifact.output_path(repo, format.into())),
             ),
         }),
         TuiArtifactOnQuitConfig::Stdout => Some(TuiArtifactRequest {
             format,
+            profile,
             destination: TuiArtifactDestination::Stdout,
         }),
     }
@@ -330,6 +362,24 @@ impl From<ArtifactFormatConfig> for OutputFormat {
         match value {
             ArtifactFormatConfig::Json => Self::Json,
             ArtifactFormatConfig::Markdown => Self::Markdown,
+        }
+    }
+}
+
+impl From<ArtifactProfileConfig> for OutputProfile {
+    fn from(value: ArtifactProfileConfig) -> Self {
+        match value {
+            ArtifactProfileConfig::Human => Self::Human,
+            ArtifactProfileConfig::Agent => Self::Agent,
+        }
+    }
+}
+
+impl From<OutputProfile> for ArtifactProfile {
+    fn from(value: OutputProfile) -> Self {
+        match value {
+            OutputProfile::Human => Self::Human,
+            OutputProfile::Agent => Self::Agent,
         }
     }
 }
@@ -387,10 +437,12 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let (format, output) = resolve_export_options(repo.path(), &config, None, None);
+        let (format, output, profile) =
+            resolve_export_options(repo.path(), &config, None, None, None);
 
         assert_eq!(format, OutputFormat::Markdown);
         assert_eq!(output, repo.path().join(".gander").join("review.md"));
+        assert_eq!(profile, OutputProfile::Human);
     }
 
     #[test]
@@ -398,11 +450,17 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let (format, output) =
-            resolve_export_options(repo.path(), &config, Some(OutputFormat::Json), None);
+        let (format, output, profile) = resolve_export_options(
+            repo.path(),
+            &config,
+            Some(OutputFormat::Json),
+            None,
+            Some(OutputProfile::Agent),
+        );
 
         assert_eq!(format, OutputFormat::Json);
         assert_eq!(output, repo.path().join(".gander").join("review.json"));
+        assert_eq!(profile, OutputProfile::Agent);
     }
 
     #[test]
@@ -433,9 +491,11 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None).unwrap();
+        let request =
+            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap();
 
         assert_eq!(request.format, OutputFormat::Markdown);
+        assert_eq!(request.profile, OutputProfile::Human);
         assert_eq!(request.destination, TuiArtifactDestination::Stdout);
     }
 
@@ -445,7 +505,8 @@ mod tests {
         let mut config = Config::default();
         config.artifact.on_tui_quit = TuiArtifactOnQuitConfig::Write;
 
-        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None).unwrap();
+        let request =
+            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap();
 
         assert_eq!(request.format, OutputFormat::Markdown);
         assert_eq!(
@@ -465,11 +526,13 @@ mod tests {
             &config,
             Some(TuiArtifactOnQuitArg::Stdout),
             Some(OutputFormat::Json),
+            Some(OutputProfile::Agent),
             None,
         )
         .unwrap();
 
         assert_eq!(request.format, OutputFormat::Json);
+        assert_eq!(request.profile, OutputProfile::Agent);
         assert_eq!(request.destination, TuiArtifactDestination::Stdout);
     }
 }
