@@ -37,6 +37,9 @@ pub enum DiffRowKind {
     HunkHeader,
     DiffLine(DiffLineKind),
     ContextFold,
+    /// Stand-in for content that is intentionally not rendered (binary
+    /// files, diffs over the size threshold).
+    Placeholder,
     Raw,
 }
 
@@ -49,7 +52,11 @@ impl ReviewSession {
             return Rc::new(Vec::new());
         };
 
-        let key = (SyntaxCacheKey::for_file(self, file), self.fold_context);
+        let key = (
+            SyntaxCacheKey::for_file(self, file),
+            self.fold_context,
+            self.force_rendered.contains(&file.path),
+        );
         if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
             return cached;
         }
@@ -68,6 +75,22 @@ impl ReviewSession {
             kind: DiffRowKind::FileHeader,
             anchor: None,
         }];
+
+        if file.status == crate::diff::FileStatus::Binary {
+            rows.push(placeholder_row(
+                "binary file: contents not rendered (mark viewed with v/enter)",
+            ));
+            return rows;
+        }
+
+        let diff_lines: usize = file.diff.hunks.iter().map(|hunk| hunk.lines.len()).sum();
+        if diff_lines > self.max_diff_lines && !self.force_rendered.contains(&file.path) {
+            rows.push(placeholder_row(&format!(
+                "large diff hidden: {diff_lines} lines exceed the {} line threshold (press L to render)",
+                self.max_diff_lines
+            )));
+            return rows;
+        }
 
         let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
         let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
@@ -247,6 +270,18 @@ impl ReviewSession {
             ),
             diff_fingerprint: file.fingerprint.clone(),
         })
+    }
+}
+
+fn placeholder_row(text: &str) -> DiffRow {
+    DiffRow {
+        old_lineno: None,
+        new_lineno: None,
+        prefix: " ",
+        text: text.to_owned(),
+        syntax: Vec::new(),
+        kind: DiffRowKind::Placeholder,
+        anchor: None,
     }
 }
 

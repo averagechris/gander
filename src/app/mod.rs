@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
-    config::Config,
+    config::{Config, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
@@ -34,8 +34,8 @@ use diff_rows::nearest_commentable_row;
 use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 
 /// Memoized diff rows keyed by file/syntax-config cache key plus the
-/// context-fold flag.
-type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool), Rc<Vec<DiffRow>>>;
+/// context-fold and force-render-large flags.
+type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool), Rc<Vec<DiffRow>>>;
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -60,6 +60,11 @@ pub struct ReviewSession {
     pub fold_context: bool,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
+    /// Diffs with more lines than this render as a placeholder until the
+    /// file is explicitly expanded.
+    pub max_diff_lines: usize,
+    /// Files the user expanded past the large-diff threshold.
+    pub force_rendered: BTreeSet<String>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
@@ -159,15 +164,34 @@ impl ReviewSession {
         state: ReviewState,
         config: &Config,
     ) -> Self {
-        Self::new_with_syntax(repo, target, diff, state, config.syntax.clone())
+        Self::new_with_syntax_and_limits(
+            repo,
+            target,
+            diff,
+            state,
+            config.syntax.clone(),
+            config.limits.clone(),
+        )
     }
 
+    #[cfg(test)]
     fn new_with_syntax(
         repo: PathBuf,
         target: ReviewTarget,
         diff: DiffSet,
         state: ReviewState,
         syntax: SyntaxConfig,
+    ) -> Self {
+        Self::new_with_syntax_and_limits(repo, target, diff, state, syntax, LimitsConfig::default())
+    }
+
+    fn new_with_syntax_and_limits(
+        repo: PathBuf,
+        target: ReviewTarget,
+        diff: DiffSet,
+        state: ReviewState,
+        syntax: SyntaxConfig,
+        limits: LimitsConfig,
     ) -> Self {
         let ReviewState {
             files, comments, ..
@@ -201,6 +225,8 @@ impl ReviewSession {
             fold_context: false,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
+            max_diff_lines: limits.max_diff_lines,
+            force_rendered: BTreeSet::new(),
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
@@ -229,7 +255,30 @@ impl ReviewSession {
                 .collect(),
             comments: self.comments.clone(),
         };
-        *self = Self::new_with_syntax(self.repo.clone(), target, diff, state, self.syntax.clone());
+        *self = Self::new_with_syntax_and_limits(
+            self.repo.clone(),
+            target,
+            diff,
+            state,
+            self.syntax.clone(),
+            LimitsConfig {
+                max_diff_lines: self.max_diff_lines,
+            },
+        );
+    }
+
+    /// Toggle rendering the selected file even though its diff exceeds the
+    /// large-diff threshold.
+    pub fn toggle_large_diff_render(&mut self) {
+        let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
+            return;
+        };
+        if !self.force_rendered.remove(&path) {
+            self.force_rendered.insert(path);
+        }
+        self.diff_cursor = 0;
+        self.diff_scroll = 0;
+        self.ensure_diff_cursor_commentable();
     }
 
     fn apply_state_files(&mut self, files: &BTreeMap<String, FileState>) {
@@ -1281,6 +1330,60 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(session.files[0].viewed);
         assert!(!session.files[1].viewed);
         assert!(!session.files[2].viewed);
+    }
+
+    #[test]
+    fn large_diffs_render_placeholder_until_expanded() {
+        let mut body = String::from(
+            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,4 +1,4 @@\n",
+        );
+        for index in 1..=4 {
+            body.push_str(&format!(" line {index}\n"));
+        }
+        let diff = DiffSet::parse(&body).unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.max_diff_lines = 3;
+
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[1].kind, DiffRowKind::Placeholder));
+        assert!(rows[1].text.contains("4 lines exceed the 3 line threshold"));
+
+        session.toggle_large_diff_render();
+        let rows = session.diff_rows_for_selected_file();
+        assert!(rows.len() > 2);
+        assert!(!rows.iter().any(|row| row.kind == DiffRowKind::Placeholder));
+
+        session.toggle_large_diff_render();
+        let rows = session.diff_rows_for_selected_file();
+        assert!(matches!(rows[1].kind, DiffRowKind::Placeholder));
+    }
+
+    #[test]
+    fn binary_files_render_placeholder_and_stay_viewable() {
+        let diff = DiffSet::parse(
+            "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[1].kind, DiffRowKind::Placeholder));
+        assert!(rows[1].text.contains("binary file"));
+
+        session.toggle_viewed();
+        assert!(session.selected_file().unwrap().viewed);
     }
 
     #[test]

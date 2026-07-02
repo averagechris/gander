@@ -279,6 +279,12 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                     .add_modifier(Modifier::BOLD),
             )),
             DiffRowKind::Raw => Line::from(row.text.clone()),
+            DiffRowKind::Placeholder => Line::from(Span::styled(
+                format!("  ⊘ {}", row.text),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )),
             DiffRowKind::ContextFold => Line::from(Span::styled(
                 format!("      {}", row.text),
                 Style::default()
@@ -625,6 +631,7 @@ fn diff_footer_segments(
         FooterHint::new([Action::NextSymbol, Action::PreviousSymbol], "symbols"),
         FooterHint::new([Action::SymbolOutline], "outline"),
         FooterHint::new([Action::ToggleContextFold], context_fold_label(session)),
+        FooterHint::new([Action::ToggleLargeDiff], "big diff"),
         FooterHint::new([Action::RangeComment], "range"),
         FooterHint::new([Action::CancelRangeComment], "cancel"),
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
@@ -1714,6 +1721,27 @@ diff --git a/README.md b/README.md
         let scrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
         assert!(scrolled.contains("↳ pinned"));
         assert!(!scrolled.contains("a.txt  +1 -1"));
+    }
+
+    #[test]
+    fn tui_snapshot_binary_and_large_placeholders() {
+        let mut body = String::from(
+            "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\ndiff --git a/huge.txt b/huge.txt\n--- a/huge.txt\n+++ b/huge.txt\n@@ -1,6 +1,6 @@\n",
+        );
+        for index in 1..=6 {
+            body.push_str(&format!(" line {index}\n"));
+        }
+        let mut session = snapshot_session(&body);
+        session.max_diff_lines = 5;
+        // Select huge.txt to show the large-diff placeholder in the pane.
+        let huge = session
+            .files
+            .iter()
+            .position(|file| file.path == "huge.txt")
+            .unwrap();
+        session.jump_to_file(huge);
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 16));
     }
 
     #[test]

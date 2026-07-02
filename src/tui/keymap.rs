@@ -40,6 +40,7 @@ pub(super) enum Action {
     StackPrevious,
     OperationPicker,
     JjHelpers,
+    ToggleLargeDiff,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,

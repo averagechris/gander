@@ -20,6 +20,24 @@ pub struct Config {
     pub keybindings: KeybindingsConfig,
     pub generated: GeneratedConfig,
     pub syntax: SyntaxConfig,
+    pub limits: LimitsConfig,
+}
+
+/// Size thresholds that keep huge inputs from overwhelming the TUI.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct LimitsConfig {
+    /// Diffs with more lines than this render as a placeholder until
+    /// explicitly expanded.
+    pub max_diff_lines: usize,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_diff_lines: 5000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -68,6 +86,7 @@ pub struct KeybindingsConfig {
     pub stack_previous: Vec<String>,
     pub operation_picker: Vec<String>,
     pub jj_helpers: Vec<String>,
+    pub toggle_large_diff: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
     pub next_unviewed: Vec<String>,
@@ -134,6 +153,13 @@ struct ConfigPatch {
     keybindings: KeybindingsConfigPatch,
     generated: GeneratedConfigPatch,
     syntax: Option<SyntaxConfig>,
+    limits: LimitsConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct LimitsConfigPatch {
+    max_diff_lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -182,6 +208,7 @@ struct KeybindingsConfigPatch {
     stack_previous: Option<Vec<String>>,
     operation_picker: Option<Vec<String>>,
     jj_helpers: Option<Vec<String>>,
+    toggle_large_diff: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
@@ -260,6 +287,7 @@ impl Default for KeybindingsConfig {
             stack_previous: keys(["<"]),
             operation_picker: keys(["I"]),
             jj_helpers: keys(["!"]),
+            toggle_large_diff: keys(["L"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
             next_unviewed: keys(["n"]),
@@ -385,6 +413,10 @@ impl Config {
         if let Some(syntax) = patch.syntax {
             self.syntax = syntax;
         }
+
+        if let Some(max_diff_lines) = patch.limits.max_diff_lines {
+            self.limits.max_diff_lines = max_diff_lines;
+        }
     }
 }
 
@@ -413,6 +445,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.stack_previous, patch.stack_previous);
         apply_optional(&mut self.operation_picker, patch.operation_picker);
         apply_optional(&mut self.jj_helpers, patch.jj_helpers);
+        apply_optional(&mut self.toggle_large_diff, patch.toggle_large_diff);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
@@ -525,6 +558,9 @@ output_dir = "artifacts"
 basename = "review-current"
 on_tui_quit = "stdout"
 
+[limits]
+max-diff-lines = 123
+
 [syntax]
 enabled = true
 languages = ["rust", "python"]
@@ -568,6 +604,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.generated.globs, ["schemas/*.json"]);
         assert_eq!(config.artifact.format, ArtifactFormatConfig::Json);
         assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
+        assert_eq!(config.limits.max_diff_lines, 123);
         assert!(config.syntax.enabled);
         assert_eq!(config.syntax.languages, ["rust", "python"]);
         assert_eq!(config.syntax.mappings.len(), 1);
@@ -621,6 +658,8 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.stack_previous, ["<"]);
         assert_eq!(config.keybindings.operation_picker, ["I"]);
         assert_eq!(config.keybindings.jj_helpers, ["!"]);
+        assert_eq!(config.keybindings.toggle_large_diff, ["L"]);
+        assert_eq!(config.limits.max_diff_lines, 5000);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);
         assert_eq!(config.keybindings.target_picker_up, ["up", "ctrl-k"]);
         assert_eq!(config.keybindings.toggle_generated, ["h"]);

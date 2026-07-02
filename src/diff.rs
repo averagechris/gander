@@ -181,7 +181,7 @@ impl FileDiffBuilder {
         } else if in_header && let Some(rest) = line.strip_prefix("copy to ") {
             self.status = FileStatus::Copied;
             self.path = Some(parse_bare_path(rest));
-        } else if in_header && line.starts_with("Binary files ") {
+        } else if in_header && (line.starts_with("Binary files ") || line == "GIT binary patch") {
             self.status = FileStatus::Binary;
         } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
             if let Some(parsed) = parse_marker_path(rest, "a/") {
@@ -629,6 +629,26 @@ diff --git a/README.md b/README.md
             assert_eq!(streamed.additions, parsed.additions);
             assert_eq!(streamed.deletions, parsed.deletions);
         }
+    }
+
+    #[test]
+    fn git_binary_patch_marks_file_binary() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/logo.png b/logo.png
+index 111..222 100644
+GIT binary patch
+literal 5
+McmZQzU|;|M00aO5
+
+literal 4
+LcmZQzU|;|M0Ha
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].status, FileStatus::Binary);
+        assert_eq!(diff.files[0].path, "logo.png");
+        assert!(diff.files[0].hunks.is_empty());
     }
 
     #[test]

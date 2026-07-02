@@ -425,6 +425,7 @@ fn handle_normal_action(
             }
         }
         Action::ToggleContextFold => session.toggle_context_fold(),
+        Action::ToggleLargeDiff => session.toggle_large_diff_render(),
         Action::RangeComment => {
             if session.focus == Focus::Diff {
                 session.toggle_diff_range_selection();
