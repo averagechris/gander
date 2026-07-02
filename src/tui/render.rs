@@ -21,6 +21,7 @@ use super::{
     chooser::TargetChooserState,
     chunks::ChunkListState,
     comments::CommentListState,
+    drafts::DraftListState,
     editor::CommentEditor,
     flags::FlagListState,
     helpers::{JjHelperOption, JjHelperState},
@@ -58,6 +59,7 @@ pub(super) fn draw(
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
         Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
+        Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -517,6 +519,7 @@ fn draw_footer(
             kind = match target {
                 CommentInputTarget::New => "new",
                 CommentInputTarget::Edit { .. } => "edit",
+                CommentInputTarget::AcceptDraft { .. } => "accept draft",
             },
             newline = keymap.hint(Action::InsertNewline),
             submit = keymap.hint(Action::SubmitComment),
@@ -549,6 +552,9 @@ fn draw_footer(
         }
         Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
         Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
+        Mode::DraftList(_) => {
+            "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
+        }
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -623,6 +629,7 @@ fn files_footer_segments(
         FooterHint::new([Action::ToggleAgentOrder], "agent order"),
         FooterHint::new([Action::FlagList], "flags"),
         FooterHint::new([Action::ChunkList], "chunks"),
+        FooterHint::new([Action::DraftList], "drafts"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -1012,6 +1019,90 @@ fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Chun
                     .borders(Borders::ALL)
                     .title("review chunks"),
             )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_draft_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &DraftListState) {
+    let popup = centered_rect(82, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 3usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(list.selected, list.drafts.len(), list_height);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Agent-drafted comments awaiting your decision",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if list.drafts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no pending drafts",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            list.drafts
+                .iter()
+                .enumerate()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .map(|(index, draft)| {
+                    let selected = index == list.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let location = match draft.line {
+                        Some(line) => format!("{}:{line}", draft.path),
+                        None => draft.path.clone(),
+                    };
+                    let summary = draft
+                        .body
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("(empty draft)")
+                        .trim()
+                        .to_owned();
+                    Line::from(vec![
+                        Span::styled(format!("{marker} "), style),
+                        Span::styled(
+                            format!("[{:^8}] ", draft.state.label()),
+                            Style::default().fg(Color::Magenta),
+                        ),
+                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(summary, style),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter/a accept · e edit then accept · x discard · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("agent drafts"))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -2054,6 +2145,43 @@ diff --git a/README.md b/README.md
             ..Default::default()
         });
         let mode = Mode::ChunkList(ChunkListState::new(&session));
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
+    }
+
+    #[test]
+    fn tui_snapshot_agent_draft_list() {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            drafts: vec![
+                crate::agent::AgentDraft {
+                    id: "draft-1".to_owned(),
+                    path: "a.txt".to_owned(),
+                    line: Some(1),
+                    body: "consider a clearer name".to_owned(),
+                    state: crate::agent::DraftState::Pending,
+                    accepted_comment_id: None,
+                },
+                crate::agent::AgentDraft {
+                    id: "draft-2".to_owned(),
+                    path: "a.txt".to_owned(),
+                    line: None,
+                    body: "file-level: needs tests".to_owned(),
+                    state: crate::agent::DraftState::Pending,
+                    accepted_comment_id: None,
+                },
+            ],
+            ..Default::default()
+        });
+        let mode = Mode::DraftList(DraftListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
     }

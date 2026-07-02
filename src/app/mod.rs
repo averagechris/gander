@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentFlag, AgentOverlay, ChunkPart, ReviewChunk},
+    agent::{AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, ReviewChunk},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::{Config, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
@@ -76,6 +76,8 @@ pub struct ReviewSession {
     pub agent_flags: Vec<AgentFlag>,
     /// Agent-defined reviewable units that can span or subdivide files.
     pub review_chunks: Vec<ReviewChunk>,
+    /// Agent-drafted comments with their dispositions.
+    pub agent_drafts: Vec<AgentDraft>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
@@ -242,6 +244,7 @@ impl ReviewSession {
             use_agent_order: true,
             agent_flags: Vec::new(),
             review_chunks: Vec::new(),
+            agent_drafts: Vec::new(),
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
@@ -493,6 +496,69 @@ impl ReviewSession {
         self.agent_ordering = overlay.ordering.clone();
         self.agent_flags = overlay.flags.clone();
         self.review_chunks = overlay.chunks.clone();
+        self.agent_drafts = overlay.drafts.clone();
+    }
+
+    /// Agent drafts still awaiting a human decision.
+    pub fn pending_agent_drafts(&self) -> Vec<AgentDraft> {
+        self.agent_drafts
+            .iter()
+            .filter(|draft| draft.state == DraftState::Pending)
+            .cloned()
+            .collect()
+    }
+
+    /// Accept an agent draft as a real comment (optionally with an edited
+    /// body). Anchors to the drafted line when it exists in the current
+    /// diff, otherwise to the file. Returns the new comment id, or `None`
+    /// when the file is not part of the current diff or the body is empty.
+    pub fn accept_agent_draft(&mut self, draft: &AgentDraft, body: String) -> Option<String> {
+        if body.trim().is_empty() {
+            return None;
+        }
+        let file_index = self.files.iter().position(|file| file.path == draft.path)?;
+        self.select_file_index(file_index);
+        let anchor = draft
+            .line
+            .and_then(|line| {
+                self.diff_rows_for_selected_file()
+                    .iter()
+                    .find(|row| row.new_lineno == Some(line) && row.anchor.is_some())
+                    .and_then(|row| row.anchor.clone())
+            })
+            .unwrap_or_else(|| {
+                let file = &self.files[file_index];
+                CommentAnchor::File {
+                    path: file.path.clone(),
+                    old_path: file.old_path.clone(),
+                    diff_fingerprint: file.fingerprint.clone(),
+                }
+            });
+        self.add_comment_with_anchor(body, anchor);
+        let comment_id = self.comments.last()?.id.clone();
+        self.set_agent_draft_state(&draft.id, DraftState::Accepted, Some(comment_id.clone()));
+        Some(comment_id)
+    }
+
+    /// Discard an agent draft without creating a comment.
+    pub fn discard_agent_draft(&mut self, draft_id: &str) {
+        self.set_agent_draft_state(draft_id, DraftState::Discarded, None);
+    }
+
+    fn set_agent_draft_state(
+        &mut self,
+        draft_id: &str,
+        state: DraftState,
+        accepted_comment_id: Option<String>,
+    ) {
+        if let Some(draft) = self
+            .agent_drafts
+            .iter_mut()
+            .find(|draft| draft.id == draft_id)
+        {
+            draft.state = state;
+            draft.accepted_comment_id = accepted_comment_id;
+        }
     }
 
     /// Jump to a chunk part: select its file and move the diff cursor to

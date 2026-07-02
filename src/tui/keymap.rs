@@ -44,6 +44,7 @@ pub(super) enum Action {
     ToggleAgentOrder,
     FlagList,
     ChunkList,
+    DraftList,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,

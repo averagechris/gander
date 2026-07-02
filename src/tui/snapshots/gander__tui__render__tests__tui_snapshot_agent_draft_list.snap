@@ -1,0 +1,24 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &mode, 100, 20)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• mod     a.txt                           ││a.txt  +1 -1                                          │
+│                                          ││@@ -1 +1 @@                                           │
+│                                          ││    1 - old                                           │
+│        ┌agent drafts────────────────────────────────────────────────────────────────────┐        │
+│        │Agent-drafted comments awaiting your decision                                   │        │
+│        │› [pending ] a.txt:1 consider a clearer name                                    │        │
+│        │  [pending ] a.txt file-level: needs tests                                      │        │
+│        │                                                                                │        │
+│        │↑/↓ or j/k move · enter/a accept · e edit then accept · x discard · esc close   │        │
+│        │                                                                                │        │
+│        │                                                                                │        │
+│        │                                                                                │        │
+│        │                                                                                │        │
+│        │                                                                                │        │
+│        └────────────────────────────────────────────────────────────────────────────────┘        │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments
+agent drafts · j/k move · enter/a accept · e edit · x discard · esc close

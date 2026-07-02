@@ -103,6 +103,16 @@ pub enum DraftState {
     Discarded,
 }
 
+impl DraftState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Discarded => "discarded",
+        }
+    }
+}
+
 impl AgentOverlay {
     pub fn default_path(repo: &Path) -> PathBuf {
         repo.join(".gander").join("agent.json")

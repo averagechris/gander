@@ -11,6 +11,7 @@
 mod chooser;
 mod chunks;
 mod comments;
+mod drafts;
 mod editor;
 mod flags;
 mod helpers;
@@ -49,6 +50,7 @@ use crate::{
 use chooser::TargetChooserState;
 use chunks::ChunkListState;
 use comments::CommentListState;
+use drafts::DraftListState;
 use editor::CommentEditor;
 use flags::FlagListState;
 use helpers::JjHelperState;
@@ -67,6 +69,7 @@ enum Mode {
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
     ChunkList(ChunkListState),
+    DraftList(DraftListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -79,7 +82,13 @@ enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommentInputTarget {
     New,
-    Edit { id: String },
+    Edit {
+        id: String,
+    },
+    /// Editing an agent draft before accepting it as a comment.
+    AcceptDraft {
+        id: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -93,6 +102,8 @@ struct TuiState {
     /// suggestions written mid-session are picked up without reloading on
     /// every tick.
     overlay_mtime: Option<std::time::SystemTime>,
+    /// Where the agent overlay lives, for writing draft dispositions back.
+    agent_overlay_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +159,7 @@ pub fn run(
     // a write on the first event.
     let mut tui_state = TuiState {
         last_autosave: Some(state_fingerprint(session)),
+        agent_overlay_path: agent_overlay_path.clone(),
         ..TuiState::default()
     };
     let result = run_loop(
@@ -328,6 +340,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::DraftList(list) => {
+            if let Some(next_mode) = handle_draft_list_key(key, list, session, keymap, tui_state) {
+                *mode = next_mode;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -346,7 +363,8 @@ fn handle_key_event(
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
-                leave_comment_input = handle_comment_action(action, session, editor, target);
+                leave_comment_input =
+                    handle_comment_action(action, session, editor, target, tui_state);
             } else {
                 handle_comment_key(key, editor);
             }
@@ -457,6 +475,17 @@ fn handle_normal_action(
                 });
             } else {
                 *mode = Mode::ChunkList(ChunkListState::new(session));
+            }
+        }
+        Action::DraftList => {
+            let drafts = DraftListState::new(session);
+            if drafts.drafts.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no pending agent drafts".to_owned(),
+                });
+            } else {
+                *mode = Mode::DraftList(drafts);
             }
         }
         Action::NextUnviewed => session.move_to_unviewed(1),
@@ -976,6 +1005,141 @@ fn handle_chunk_list_key(
     }
 }
 
+/// Returns the next mode when the popup should change state.
+fn handle_draft_list_key(
+    key: KeyEvent,
+    list: &mut DraftListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> Option<Mode> {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1),
+            Action::TargetPickerMoveUp => list.move_selection(-1),
+            _ => {}
+        }
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Esc => Some(Mode::Normal),
+        KeyCode::Enter | KeyCode::Char('a') => {
+            let draft = list.selected_draft().cloned()?;
+            if accept_agent_draft(session, tui_state, &draft.id, None) && list.remove(&draft.id) {
+                return Some(Mode::Normal);
+            }
+            None
+        }
+        KeyCode::Char('e') => {
+            let draft = list.selected_draft().cloned()?;
+            Some(Mode::CommentInput {
+                editor: CommentEditor {
+                    cursor: draft.body.len(),
+                    text: draft.body,
+                },
+                target: CommentInputTarget::AcceptDraft { id: draft.id },
+            })
+        }
+        KeyCode::Char('x') => {
+            let draft = list.selected_draft().cloned()?;
+            session.discard_agent_draft(&draft.id);
+            persist_draft_disposition(session, tui_state, &draft.id);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "discarded agent draft".to_owned(),
+            });
+            if list.remove(&draft.id) {
+                return Some(Mode::Normal);
+            }
+            None
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1);
+            None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1);
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Accept a pending agent draft (optionally with an edited body), persisting
+/// the disposition to the overlay. Returns true on success.
+fn accept_agent_draft(
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+    draft_id: &str,
+    body_override: Option<String>,
+) -> bool {
+    let Some(draft) = session
+        .agent_drafts
+        .iter()
+        .find(|draft| draft.id == draft_id)
+        .cloned()
+    else {
+        return false;
+    };
+    let body = body_override.unwrap_or_else(|| draft.body.clone());
+    match session.accept_agent_draft(&draft, body) {
+        Some(_comment_id) => {
+            persist_draft_disposition(session, tui_state, draft_id);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "accepted agent draft as comment".to_owned(),
+            });
+            true
+        }
+        None => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("cannot accept draft: {} is not in this diff", draft.path),
+            });
+            false
+        }
+    }
+}
+
+/// Write a draft's disposition back into the shared overlay so agents can
+/// observe the outcome. Refreshes the poll mtime so our own write does not
+/// trigger a spurious reload notice.
+fn persist_draft_disposition(session: &ReviewSession, tui_state: &mut TuiState, draft_id: &str) {
+    let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
+        return;
+    };
+    let Some(session_draft) = session
+        .agent_drafts
+        .iter()
+        .find(|draft| draft.id == draft_id)
+    else {
+        return;
+    };
+    let result =
+        crate::agent::AgentOverlay::load_or_default(&overlay_path).and_then(|mut overlay| {
+            if let Some(draft) = overlay.drafts.iter_mut().find(|draft| draft.id == draft_id) {
+                draft.state = session_draft.state;
+                draft.accepted_comment_id = session_draft.accepted_comment_id.clone();
+            }
+            overlay.save(&overlay_path)?;
+            Ok(())
+        });
+    match result {
+        Ok(()) => {
+            tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to record draft disposition: {error}"),
+            });
+        }
+    }
+}
+
 fn handle_file_search_key(
     key: KeyEvent,
     search: &mut FileSearchState,
@@ -1149,6 +1313,7 @@ fn handle_comment_action(
     session: &mut ReviewSession,
     editor: &mut CommentEditor,
     target: &CommentInputTarget,
+    tui_state: &mut TuiState,
 ) -> bool {
     match action {
         Action::CancelComment => return true,
@@ -1158,6 +1323,9 @@ fn handle_comment_action(
                 CommentInputTarget::New => session.add_comment(body),
                 CommentInputTarget::Edit { id } => {
                     session.update_comment_body(id, body);
+                }
+                CommentInputTarget::AcceptDraft { id } => {
+                    accept_agent_draft(session, tui_state, id, Some(body));
                 }
             }
             return true;
@@ -1197,6 +1365,7 @@ fn handle_mouse_event(
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
             | Mode::ChunkList(_)
+            | Mode::DraftList(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)
@@ -1506,7 +1675,8 @@ mod tests {
             Action::SubmitComment,
             &mut session,
             &mut editor,
-            &target
+            &target,
+            &mut TuiState::default(),
         ));
 
         assert_eq!(session.comments.len(), 1);
@@ -1935,6 +2105,156 @@ diff --git a/b.rs b/b.rs
         tui_state.notice = None;
         maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
         assert!(tui_state.notice.is_none());
+    }
+
+    fn draft_session_with_overlay(dir: &std::path::Path) -> (ReviewSession, PathBuf) {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let overlay_path = dir.join("agent.json");
+        let overlay = crate::agent::AgentOverlay {
+            drafts: vec![crate::agent::AgentDraft {
+                id: "draft-1".to_owned(),
+                path: "a.txt".to_owned(),
+                line: Some(1),
+                body: "agent thinks this is wrong".to_owned(),
+                state: crate::agent::DraftState::Pending,
+                accepted_comment_id: None,
+            }],
+            ..Default::default()
+        };
+        overlay.save(&overlay_path).unwrap();
+        session.apply_agent_overlay(&overlay);
+        (session, overlay_path)
+    }
+
+    #[test]
+    fn accepting_a_draft_creates_comment_and_persists_disposition() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path.clone()),
+            ..TuiState::default()
+        };
+        let mut list = DraftListState::new(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        let next = handle_draft_list_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut list,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        );
+
+        // Last pending draft handled: popup closes.
+        assert!(matches!(next, Some(Mode::Normal)));
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.comments[0].body, "agent thinks this is wrong");
+        assert_eq!(session.comments[0].line, Some(1));
+
+        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
+        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Accepted);
+        assert_eq!(
+            on_disk.drafts[0].accepted_comment_id.as_deref(),
+            Some(session.comments[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn discarding_a_draft_persists_without_creating_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path.clone()),
+            ..TuiState::default()
+        };
+        let mut list = DraftListState::new(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        let next = handle_draft_list_key(
+            KeyEvent::from(KeyCode::Char('x')),
+            &mut list,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        );
+
+        assert!(matches!(next, Some(Mode::Normal)));
+        assert!(session.comments.is_empty());
+        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
+        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Discarded);
+        assert_eq!(on_disk.drafts[0].accepted_comment_id, None);
+    }
+
+    #[test]
+    fn editing_a_draft_accepts_it_with_the_edited_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path.clone()),
+            ..TuiState::default()
+        };
+        let mut list = DraftListState::new(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        let next = handle_draft_list_key(
+            KeyEvent::from(KeyCode::Char('e')),
+            &mut list,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        );
+        let Some(Mode::CommentInput { mut editor, target }) = next else {
+            panic!("expected comment input mode");
+        };
+        assert_eq!(editor.text, "agent thinks this is wrong");
+
+        editor.text = "human-edited note".to_owned();
+        editor.cursor = editor.text.len();
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &target,
+            &mut tui_state,
+        ));
+
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.comments[0].body, "human-edited note");
+        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
+        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Accepted);
+    }
+
+    #[test]
+    fn accepting_draft_for_missing_file_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        session.agent_drafts[0].path = "gone.rs".to_owned();
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path.clone()),
+            ..TuiState::default()
+        };
+
+        assert!(!accept_agent_draft(
+            &mut session,
+            &mut tui_state,
+            "draft-1",
+            None
+        ));
+
+        assert!(session.comments.is_empty());
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("gone.rs"));
+        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
+        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Pending);
     }
 
     #[test]
