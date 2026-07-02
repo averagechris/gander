@@ -17,8 +17,12 @@ Set TypingSpeed 60ms
 Set Shell bash
 
 Hide
-Type "bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '; clear"
+Type "bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '"
 Enter
+Sleep 6s
+Type "clear"
+Enter
+Sleep 1s
 Show
 
 # A quick text summary of the change under review.
