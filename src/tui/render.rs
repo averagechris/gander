@@ -288,12 +288,11 @@ fn comment_summary_line(comment: &Comment) -> Line<'static> {
         .find(|line| !line.trim().is_empty())
         .unwrap_or("(empty comment)")
         .trim();
+    // Comment ids are UUIDs; show a short prefix so the gutter stays readable.
+    let short_id: String = comment.id.chars().take(8).collect();
     Line::from(vec![
         Span::styled("      ↳ ", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            format!("{} ", comment.id),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Span::styled(format!("{short_id} "), Style::default().fg(Color::DarkGray)),
         Span::styled(summary.to_owned(), Style::default().fg(Color::Yellow)),
     ])
 }

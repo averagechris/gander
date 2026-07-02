@@ -983,11 +983,10 @@ impl ReviewSession {
         }
         let created_at = Utc::now();
         self.comments.push(Comment {
-            id: format!(
-                "{}-{}",
-                created_at.timestamp_millis(),
-                self.comments.len() + 1
-            ),
+            // UUIDs keep comment ids collision-free across delete/re-add cycles
+            // and across sessions/people, which matters because artifact import
+            // dedupes comments by id.
+            id: uuid::Uuid::new_v4().to_string(),
             path: anchor.path().to_owned(),
             line: anchor.line(),
             end_line: anchor
@@ -1567,6 +1566,19 @@ diff --git a/src/c.rs b/src/c.rs
         let selected = session.selected_comment().unwrap();
 
         assert_eq!(selected.body, "Range note");
+    }
+
+    #[test]
+    fn comment_ids_stay_unique_across_delete_and_readd() {
+        let mut session = session();
+        session.add_comment("first".into());
+        let first_id = session.comments[0].id.clone();
+        assert!(session.delete_comment(&first_id));
+
+        session.add_comment("second".into());
+
+        assert_ne!(session.comments[0].id, first_id);
+        assert!(!session.comments[0].id.is_empty());
     }
 
     #[test]
