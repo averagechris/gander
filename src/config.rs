@@ -208,7 +208,9 @@ impl Default for JjConfig {
 impl Default for KeybindingsConfig {
     fn default() -> Self {
         Self {
-            quit: keys(["q", "esc"]),
+            // Esc intentionally does not quit: it dismisses the current layer
+            // (range selection, notices, popups) so it stays safe to mash.
+            quit: keys(["q"]),
             move_down: keys(["j", "down"]),
             move_up: keys(["k", "up"]),
             toggle_focus: keys(["tab"]),
@@ -233,7 +235,7 @@ impl Default for KeybindingsConfig {
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
             range_comment: keys(["r"]),
-            cancel_range_comment: keys(["ctrl-g"]),
+            cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
             edit_comment: keys(["e"]),
             delete_comment: keys(["x"]),
@@ -547,7 +549,7 @@ submit-comment = ["ctrl-s"]
 
         assert_eq!(config.keybindings.move_down, ["j", "down"]);
         assert_eq!(config.keybindings.move_up, ["k", "up"]);
-        assert_eq!(config.keybindings.quit, ["q", "esc"]);
+        assert_eq!(config.keybindings.quit, ["q"]);
         assert_eq!(config.keybindings.compare_trunk, ["t"]);
         assert_eq!(config.keybindings.compare_parent, ["p"]);
         assert_eq!(config.keybindings.target_chooser, ["b"]);
@@ -558,7 +560,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.collapse_fold, ["left"]);
         assert_eq!(config.keybindings.expand_fold, ["right"]);
         assert_eq!(config.keybindings.range_comment, ["r"]);
-        assert_eq!(config.keybindings.cancel_range_comment, ["ctrl-g"]);
+        assert_eq!(config.keybindings.cancel_range_comment, ["ctrl-g", "esc"]);
         assert_eq!(config.keybindings.edit_comment, ["e"]);
         assert_eq!(config.keybindings.delete_comment, ["x"]);
         assert_eq!(config.keybindings.insert_newline, ["enter"]);

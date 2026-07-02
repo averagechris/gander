@@ -411,4 +411,18 @@ mod tests {
             Some(Action::CancelRangeComment)
         );
     }
+
+    #[test]
+    fn esc_dismisses_instead_of_quitting_by_default() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Esc)),
+            Some(Action::CancelRangeComment)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('q'))),
+            Some(Action::Quit)
+        );
+    }
 }

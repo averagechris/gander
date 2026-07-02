@@ -281,7 +281,12 @@ fn handle_normal_action(
                 session.toggle_diff_range_selection();
             }
         }
-        Action::CancelRangeComment => session.clear_diff_range_selection(),
+        Action::CancelRangeComment => {
+            // Esc-style dismissal: clear the transient layers (range selection
+            // and footer notice) instead of quitting.
+            session.clear_diff_range_selection();
+            tui_state.notice = None;
+        }
         Action::Comment => {
             *mode = Mode::CommentInput {
                 editor: CommentEditor::default(),

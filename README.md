@@ -162,7 +162,7 @@ edit-comment = ["e"]
 delete-comment = ["x"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
-quit = ["q", "esc"]
+quit = ["q"]
 ```
 
 CLI `--ignore` values are appended to configured ignore globs. Use
@@ -313,7 +313,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
 | `h` | hide/show generated/noisy files in the TUI |
 | `r` in diff focus | start/cancel a range selection for a multi-line comment |
-| Ctrl-G | cancel active range selection |
+| Ctrl-G / Esc | cancel active range selection and dismiss notices |
 | Enter | mark selected file viewed and advance to the next unviewed file |
 | `v` | toggle selected file viewed/unviewed |
 | `a` | mark all visible files viewed |
@@ -325,7 +325,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `e` / `x` | edit / delete the selected comment |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
-| `q` / Esc | quit and save state |
+| `q` | quit and save state |
 
 Mouse support:
 
