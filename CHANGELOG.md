@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.1.0 - 2026-07-01
+
 ### Added
 
 - First vertical slice of the jj review TUI: parses `jj show --git` output
