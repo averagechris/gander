@@ -23,6 +23,14 @@ This repo is intentionally early, but the first vertical slice is in place:
 - tracks comment states (draft/todo/resolved) with a comment list pane (`C`)
 - exports review artifacts as JSON or Markdown, including an agent profile
   with raw hunks and comment excerpts (`--profile agent`)
+- reviews arbitrary revsets (`R`), steps through stacks change-by-change
+  (`>`/`<`), and re-reviews incrementally against a prior jj operation (`I`)
+- offers split/squash jj helpers that only run after explicit confirmation (`!`)
+- streams diff parsing, renders lazily, and shows placeholders for binary
+  files and diffs over a configurable size threshold (`L` to expand)
+- hosts agent-collaborative review over ACP (`gander acp`): agents read the
+  session and suggest ordering (`A`), flag critical sections (`F`), define
+  review chunks (`S`), and draft comments the human triages (`D`)
 - syntax-highlights common languages with a built-in tree-sitter registry
 - is packaged with a Nix flake and dev shell
 
@@ -83,6 +91,14 @@ and press Enter to reload the diff. It opens in base-selection mode for the
 common `base..@` flow, and `tab` toggles between choosing the base and choosing
 the tip for stacked-change review.
 
+Press `R` to type arbitrary base/tip revsets (full jj revset syntax), and
+`>` / `<` to step through the current stack (`trunk()..@`) change-by-change,
+reviewing each change against its parent. Press `I` to pick a prior jj
+operation for incremental re-review: files unchanged since that operation are
+marked viewed, changed or new files are marked unviewed. Press `!` for
+split/squash helpers; the exact `jj` command is shown and nothing runs until
+you confirm it.
+
 Hide generated/noisy files:
 
 ```sh
@@ -111,6 +127,9 @@ binary = "jj" # default: first jj on PATH; absolute paths work well in Nix confi
 [generated]
 presets = ["lockfiles", "api-clients"]
 globs = ["schemas/*.json"]
+
+[limits]
+max-diff-lines = 5000 # larger diffs render a placeholder until expanded with L
 
 [artifact]
 format = "markdown"
@@ -158,6 +177,16 @@ toggle-focus = ["tab"]
 compare-trunk = ["t"]
 compare-parent = ["p"]
 target-chooser = ["b"]
+revset-input = ["R"]
+stack-next = [">"]
+stack-previous = ["<"]
+operation-picker = ["I"]
+jj-helpers = ["!"]
+toggle-large-diff = ["L"]
+toggle-agent-order = ["A"]
+flag-list = ["F"]
+chunk-list = ["S"]
+draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
 toggle-generated = ["h"]
@@ -330,6 +359,16 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
+| `b` | base/tip target chooser popup |
+| `R` | free-form base/tip revset input popup |
+| `>` / `<` | step to the next / previous change in the stack (`trunk()..@`) |
+| `I` | prior-operation picker for incremental re-review |
+| `!` | jj split/squash helpers (runs only after confirmation) |
+| `L` | render/hide a diff that exceeds the large-diff threshold |
+| `A` | toggle agent-suggested review ordering |
+| `F` | agent-flagged sections popup |
+| `S` | agent review chunks popup |
+| `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
 | `o` | changed-symbol outline popup for the selected file |
@@ -356,6 +395,21 @@ Mouse support:
 - click the diff pane to focus/select a diff line
 - click-drag across diff rows to open a range comment editor
 
+## Agent-collaborative review (ACP)
+
+Serve the review session to agents over line-delimited JSON-RPC 2.0 on stdio:
+
+```sh
+cargo run -- acp
+```
+
+Agents can read the diff, comments, and viewed state, and write suggestions
+into `.gander/agent.json`: a review ordering, flagged critical sections,
+review chunks, and draft comments. A running TUI polls the overlay and
+surfaces suggestions live; draft dispositions (accept/edit/discard) are
+written back so agents observe the outcome. See [`docs/acp.md`](docs/acp.md)
+for the method reference.
+
 ## Architecture
 
 Current module layout:
@@ -368,6 +422,8 @@ Current module layout:
 - `tui`: Ratatui/Crossterm interface
 - `syntax`: built-in language registry and tree-sitter highlighting
 - `artifact`: JSON/Markdown review artifact serialization
+- `agent`: shared agent-overlay schema (`.gander/agent.json`)
+- `acp`: JSON-RPC stdio server for agent-collaborative review
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.
 See [`docs/jj-integration.md`](docs/jj-integration.md) for the decision to use
@@ -378,9 +434,8 @@ the `jj` CLI boundary instead of embedding `jj-lib` for now.
 See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
 
 1. Helix-inspired external grammar/query loading for custom languages
-2. better jj revision/range semantics and support for reviewing stacks
-3. performance and resilience: streaming diff parsing, lazy rendering, and
-   binary/huge-file handling
+2. full Agent Client Protocol schema compliance for `gander acp`
+3. live session updates for long-running agent connections
 
 ## License
 

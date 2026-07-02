@@ -79,35 +79,57 @@ Status: complete.
 
 ## Milestone 5: jj-native workflows
 
-- [ ] review arbitrary revsets
-- [ ] review stack/change sequences
-- [ ] compare current change to prior operation for incremental re-review
+Status: complete.
+
+- [x] review arbitrary revsets (`--base`/`--rev` accept revsets; `R` opens a
+  free-form base/tip revset input in the TUI)
+- [x] review stack/change sequences (`>`/`<` step through `trunk()..@`
+  change-by-change against each change's parent)
+- [x] compare current change to prior operation for incremental re-review
+  (`I` opens a jj operation picker; unchanged files are marked viewed,
+  changed/new files marked unviewed)
 - [x] command to mark generated files viewed by policy
-- [ ] optional split/squash helper affordances that shell out to jj commands only after confirmation
+- [x] optional split/squash helper affordances that shell out to jj commands
+  only after confirmation (`!` popup with a verbatim-command confirm step)
 
 ## Milestone 6: performance and resilience
 
-- [ ] streaming diff parser
-- [ ] lazy file/hunk rendering
-- [ ] size thresholds with placeholders for huge files
-- [ ] binary file handling
+Status: complete.
+
+- [x] streaming diff parser (`DiffSet::parse_reader` builds files
+  incrementally from any `BufRead`, fingerprints unchanged)
+- [x] lazy file/hunk rendering (diff pane constructs styled lines only for
+  the visible viewport window)
+- [x] size thresholds with placeholders for huge files
+  (`[limits].max-diff-lines`, expand with `L`)
+- [x] binary file handling (placeholder rows for `Binary files ...` and
+  `GIT binary patch` diffs; files stay markable as viewed)
 - [x] robust rename/copy parsing, including quoted paths
-- [ ] property/fuzz tests for diff parsing
+- [x] property/fuzz tests for diff parsing (proptest: no-panic, streaming
+  equivalence, count/numbering invariants, quoted-path round trips)
 
 ## Milestone 7: agent-collaborative review (ACP)
 
 The long-term direction: gander should not just show a diff, it should host a
 review that an agent can help conduct.
 
-- [ ] expose the review session over ACP so agents can read the diff, comments,
-  and viewed state
-- [ ] agent-suggested review ordering: rearrange the review by priority and
-  risk instead of file order
-- [ ] agent-flagged critical sections that are surfaced/pinned in the UI
-- [ ] review chunks: break a change into reviewable units that can span or
+Status: first full vertical slice complete (see docs/acp.md). Full Agent
+Client Protocol schema compliance is future work.
+
+- [x] expose the review session over ACP so agents can read the diff, comments,
+  and viewed state (`gander acp`: line-delimited JSON-RPC 2.0 on stdio)
+- [x] agent-suggested review ordering: rearrange the review by priority and
+  risk instead of file order (`review/set_ordering` + `A` toggle; the TUI
+  polls the shared `.gander/agent.json` overlay live)
+- [x] agent-flagged critical sections that are surfaced/pinned in the UI
+  (`review/flag_section`; red `!` gutter/file pins + `F` flag list popup)
+- [x] review chunks: break a change into reviewable units that can span or
   subdivide files, rather than reviewing strictly file-by-file
-- [ ] two-way feedback: agents draft comments/questions into the session; the
+  (`review/set_chunks` + `S` chunk popup with part-level jumps)
+- [x] two-way feedback: agents draft comments/questions into the session; the
   human accepts, edits, or discards them before export
+  (`review/draft_comment` + `D` triage popup; dispositions are written back
+  to the overlay for agents to observe)
 - [x] artifact profile for agent consumption with raw excerpts and stable
   anchors (see milestone 4)
 
@@ -132,8 +154,28 @@ search, viewed filters, changed-symbol outline/jumps, symbol-aware context
 folding, generated-content detection, comment states + list pane, and the
 agent artifact profile (schema v4).
 
-No known debt is currently tracked. New findings should be added here in
-priority order.
+Feature burn-down (2026-07, second pass): milestones 5, 6, and 7 completed —
+revset input, stack stepping, incremental re-review against prior operations,
+confirmed split/squash helpers, streaming diff parsing, lazy diff rendering,
+size/binary placeholders, diff parser property tests, and the ACP
+agent-collaboration slice (session server, ordering, flags, chunks, two-way
+drafts). Also fixed along the way: uppercase char keybindings now match
+whether or not the terminal reports the SHIFT modifier.
+
+Known debt, in priority order:
+
+- The ACP surface is a minimal JSON-RPC method set (`gander-acp` v1), not the
+  published Agent Client Protocol schema; adopting the real schema (session
+  lifecycle, capabilities negotiation, streaming) is the next step for
+  milestone 7.
+- The ACP server snapshots the diff/comments at startup; long-running agent
+  sessions do not see mid-review comment edits until restarted (viewed-state
+  writes land in `state.json`, drafts merge safely via the overlay).
+- Diff-pane scroll offsets count logical rows, not wrapped display lines, so
+  scrolling within files containing very long wrapped lines is approximate
+  (pre-existing behavior, kept by the lazy renderer).
+- jj split/squash helpers only cover non-interactive path-scoped invocations;
+  interactive splitting is out of scope for the TUI popup.
 
 ## Delegation notes for future agents
 
