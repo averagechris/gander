@@ -35,6 +35,7 @@ pub(super) enum Action {
     CompareTrunk,
     CompareParent,
     TargetChooser,
+    RevsetInput,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,
@@ -82,6 +83,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::CompareTrunk, &config.compare_trunk)?;
         add_bindings(&mut bindings, Action::CompareParent, &config.compare_parent)?;
         add_bindings(&mut bindings, Action::TargetChooser, &config.target_chooser)?;
+        add_bindings(&mut bindings, Action::RevsetInput, &config.revset_input)?;
         add_bindings(
             &mut bindings,
             Action::TargetPickerMoveDown,
@@ -205,7 +207,19 @@ impl KeyMap {
 
 impl KeyPress {
     fn matches(&self, key: &KeyEvent) -> bool {
-        self.code == key.code && self.modifiers == key.modifiers
+        if self.code != key.code {
+            return false;
+        }
+        // Character keys already encode shift in the character itself
+        // (`G` vs `g`), but terminals may or may not report the SHIFT
+        // modifier alongside the uppercase char. Ignore SHIFT for char keys
+        // unless the binding explicitly asks for it.
+        if let KeyCode::Char(_) = self.code
+            && !self.modifiers.contains(KeyModifiers::SHIFT)
+        {
+            return self.modifiers == key.modifiers.difference(KeyModifiers::SHIFT);
+        }
+        self.modifiers == key.modifiers
     }
 }
 
@@ -297,6 +311,24 @@ mod tests {
 
         assert_eq!(key.code, KeyCode::Char('s'));
         assert_eq!(key.modifiers, KeyModifiers::CONTROL);
+    }
+
+    #[test]
+    fn uppercase_char_bindings_match_with_or_without_shift_modifier() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('G'))),
+            Some(Action::DiffBottom)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT)),
+            Some(Action::DiffBottom)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(Action::RevsetInput)
+        );
     }
 
     #[test]
@@ -393,6 +425,10 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('b'))),
             Some(Action::TargetChooser)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('R'))),
+            Some(Action::RevsetInput)
         );
     }
 

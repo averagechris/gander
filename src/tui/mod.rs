@@ -14,6 +14,7 @@ mod editor;
 mod keymap;
 mod outline;
 mod render;
+mod revset;
 mod search;
 
 use std::{
@@ -47,11 +48,13 @@ use editor::CommentEditor;
 use keymap::{Action, KeyMap};
 use outline::SymbolOutlineState;
 use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
+use revset::RevsetInputState;
 use search::FileSearchState;
 
 enum Mode {
     Normal,
     TargetChooser(TargetChooserState),
+    RevsetInput(RevsetInputState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -237,6 +240,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::RevsetInput(input) => {
+            if handle_revset_input_key(key, input, session, review_loader, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -320,6 +328,12 @@ fn handle_normal_action(
                 });
             }
         },
+        Action::RevsetInput => {
+            *mode = Mode::RevsetInput(RevsetInputState::new(
+                &session.target.base,
+                &session.target.rev,
+            ));
+        }
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::FileSearch => {
@@ -475,6 +489,44 @@ fn handle_target_chooser_key(
         }
         KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             chooser.push_query_char(ch);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_revset_input_key(
+    key: KeyEvent,
+    input: &mut RevsetInputState,
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => match input.target() {
+            Some(target) => {
+                load_review_target(review_loader, session, target, tui_state);
+                true
+            }
+            None => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "both base and tip revsets are required".to_owned(),
+                });
+                false
+            }
+        },
+        KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+            input.toggle_field();
+            false
+        }
+        KeyCode::Backspace => {
+            input.pop_char();
+            false
+        }
+        KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            input.push_char(ch);
             false
         }
         _ => false,
@@ -697,6 +749,7 @@ fn handle_mouse_event(
     if matches!(
         mode,
         Mode::CommentInput { .. }
+            | Mode::RevsetInput(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)
@@ -971,6 +1024,86 @@ mod tests {
 
         assert_eq!(session.comments.len(), 1);
         assert_eq!(session.comments[0].body, "new body");
+    }
+
+    #[test]
+    fn revset_input_loads_typed_target() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: Ok(String::new()),
+            summaries: Vec::new(),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut input = RevsetInputState::new("", "");
+        for ch in "ancestors(@, 2)".chars() {
+            assert!(!handle_revset_input_key(
+                KeyEvent::from(KeyCode::Char(ch)),
+                &mut input,
+                &mut session,
+                &loader,
+                &mut tui_state,
+            ));
+        }
+        input.toggle_field();
+        for ch in "@".chars() {
+            handle_revset_input_key(
+                KeyEvent::from(KeyCode::Char(ch)),
+                &mut input,
+                &mut session,
+                &loader,
+                &mut tui_state,
+            );
+        }
+
+        assert!(handle_revset_input_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut input,
+            &mut session,
+            &loader,
+            &mut tui_state,
+        ));
+
+        assert_eq!(
+            backend.calls.borrow().as_slice(),
+            [ReviewTarget::new("ancestors(@, 2)", "@")]
+        );
+        assert_eq!(session.target, ReviewTarget::new("ancestors(@, 2)", "@"));
+    }
+
+    #[test]
+    fn revset_input_requires_both_fields_before_loading() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend {
+            calls: RefCell::new(Vec::new()),
+            diff_text: Ok(String::new()),
+            summaries: Vec::new(),
+        };
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut input = RevsetInputState::new("", "@");
+
+        assert!(!handle_revset_input_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut input,
+            &mut session,
+            &loader,
+            &mut tui_state,
+        ));
+
+        assert!(backend.calls.borrow().is_empty());
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Info);
+        assert!(notice.message.contains("required"));
     }
 
     #[test]

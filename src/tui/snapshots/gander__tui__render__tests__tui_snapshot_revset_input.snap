@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
+expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
 │No changed files                          ││No changed files                                      │
@@ -10,9 +10,19 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
 │--base/--rev/--ignore.                    ││Use t for trunk()..@, p for @-..@, b for chooser, or  │
 │                                          ││pass --base/--rev.                                    │
 │                                          ││If files disappeared unexpectedly, check --ignore     │
-│                                          ││filters.                                              │
+│              ┌revsets─────────────────────────────────────────────────────────────┐              │
+│              │Review an arbitrary revset range (jj revset syntax)                 │              │
+│              │                                                                    │              │
+│              │  base: trunk()                                                     │              │
+│              │›  tip: @                                                           │              │
+│              │                                                                    │              │
+│              │type revset · tab/↑/↓ switch field · enter load · esc cancel        │              │
+│              └────────────────────────────────────────────────────────────────────┘              │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
-trunk()..@ · focus files · j/k tree · space fold · h hide noisy · f filter · t/p/b/R target · n/N un
+revset target · type revset · tab/↑/↓ switch field · enter load · esc cancel

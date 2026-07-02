@@ -23,6 +23,7 @@ use super::{
     editor::CommentEditor,
     keymap::{Action, KeyMap},
     outline::SymbolOutlineState,
+    revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
 };
 
@@ -48,6 +49,7 @@ pub(super) fn draw(
 
     match mode {
         Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
+        Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -468,6 +470,10 @@ fn draw_footer(
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
         }
+        Mode::RevsetInput(_) => {
+            "revset target · type revset · tab/↑/↓ switch field · enter load · esc cancel"
+                .to_owned()
+        }
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -544,6 +550,7 @@ fn files_footer_segments(
                 Action::CompareTrunk,
                 Action::CompareParent,
                 Action::TargetChooser,
+                Action::RevsetInput,
             ],
             "target",
         ),
@@ -584,6 +591,7 @@ fn diff_footer_segments(
                 Action::CompareTrunk,
                 Action::CompareParent,
                 Action::TargetChooser,
+                Action::RevsetInput,
             ],
             "target",
         ),
@@ -644,6 +652,55 @@ fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &Comme
         inner_x.saturating_add(col as u16),
         inner_y.saturating_add(line as u16),
     ));
+}
+
+fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &RevsetInputState) {
+    let popup = centered_rect(70, 30, area);
+    frame.render_widget(Clear, popup);
+
+    let field_line = |label: &str, value: &str, active: bool| {
+        let marker = if active { "›" } else { " " };
+        let value_style = if active {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Line::from(vec![
+            Span::styled(
+                format!("{marker} {label:>4}: "),
+                if active {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::styled(value.to_owned(), value_style),
+        ])
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Review an arbitrary revset range (jj revset syntax)",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        field_line("base", &input.base, input.editing == RevsetField::Base),
+        field_line("tip", &input.tip, input.editing == RevsetField::Tip),
+        Line::from(""),
+        Line::from(Span::styled(
+            "type revset · tab/↑/↓ switch field · enter load · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("revsets"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn draw_file_search_popup(frame: &mut ratatui::Frame<'_>, area: Rect, search: &FileSearchState) {
@@ -1359,6 +1416,16 @@ diff --git a/README.md b/README.md
         let todo_id = session.comments[1].id.clone();
         session.cycle_comment_state(&todo_id);
         let mode = Mode::CommentList(CommentListState { selected: 1 });
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_revset_input() {
+        let session = snapshot_session("");
+        let mut input = RevsetInputState::new("trunk()", "@");
+        input.toggle_field();
+        let mode = Mode::RevsetInput(input);
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
