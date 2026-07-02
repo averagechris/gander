@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- CI (flake check, fmt, clippy, tests) now runs on builds.sr.ht for every
+  push via `.builds/ci.yml`; the Linux release manifest moved to
+  `builds/release-linux-x86_64.yml` so artifacts and the downloads page are
+  only built and published for explicit releases.
+
 
 ## v0.1.0 - 2026-07-01
 

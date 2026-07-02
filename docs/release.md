@@ -24,7 +24,7 @@ Each stage is its own flake app so it can be run (and re-run) independently:
 
 | Command | What it does |
 | --- | --- |
-| `nix run .#prepare-release -- [--version X.Y.Z]` | Writes the version into `Cargo.toml`, `Cargo.lock`, and `.builds/release-linux-x86_64.yml`, then converts the `## Unreleased` section of `CHANGELOG.md` into a dated `## vX.Y.Z` entry. If `Unreleased` is empty, it generates bullets from conventional-commit summaries since the previous semver tag. |
+| `nix run .#prepare-release -- [--version X.Y.Z]` | Writes the version into `Cargo.toml`, `Cargo.lock`, and `builds/release-linux-x86_64.yml`, then converts the `## Unreleased` section of `CHANGELOG.md` into a dated `## vX.Y.Z` entry. If `Unreleased` is empty, it generates bullets from conventional-commit summaries since the previous semver tag. |
 | `nix run .#release-tag -- [--revision REV]` | Creates the `vX.Y.Z` tag from `Cargo.toml` (via `jj tag set` in jj repos) and pushes it to `origin`. Refuses to reuse an existing local or remote tag, and refuses to tag an empty jj revision. |
 | `nix build .#release-artifact` | Builds a reproducible tarball for the current platform (`gander-vX.Y.Z-<platform>.tar.gz` containing the binary, `README.md`, `CHANGELOG.md`, and both licenses) plus a `.sha256` checksum file. |
 | `nix run .#build-pages -- [--include-existing-downloads]` | Renders `dist/pages/site/` (an `index.html` downloads listing grouped by release, a `manifest.json`, and `downloads/` artifacts from `dist/downloads/`) and packs it into `dist/pages/gander-pages.tar.gz`. `--include-existing-downloads` fetches previously published artifacts from the live `manifest.json` so old releases stay listed. |
@@ -37,12 +37,12 @@ Each stage is its own flake app so it can be run (and re-run) independently:
    under `## Unreleased` in `CHANGELOG.md` as you go (preferred over relying
    on generated commit summaries).
 2. Run `nix run .#release -- --version X.Y.Z`. This mutates
-   `Cargo.toml`/`Cargo.lock`/`CHANGELOG.md`/`.builds/…` in the working copy;
+   `Cargo.toml`/`Cargo.lock`/`CHANGELOG.md`/`builds/…` in the working copy;
    the changes are snapshotted into `@` by jj and included in the tagged
    revision. Use `--revision @-` if your release commit is already described.
 3. Review the result, then publish:
    `nix run .#publish-pages` and/or
-   `hut builds submit .builds/release-linux-x86_64.yml …`
+   `hut builds submit builds/release-linux-x86_64.yml …`
    (the release script prints the exact commands).
 4. The builds.sr.ht job builds the Linux artifact from the pushed tag,
    rebuilds the pages with `--include-existing-downloads`, and republishes so
@@ -51,6 +51,12 @@ Each stage is its own flake app so it can be run (and re-run) independently:
 ## Notes
 
 - Versions are plain semver `X.Y.Z`; tags are `vX.Y.Z`.
+- CI (`.builds/ci.yml`: flake check, fmt, clippy, tests) is auto-submitted by
+  builds.sr.ht on every push. The release manifest lives in
+  `builds/release-linux-x86_64.yml` — deliberately *outside* `.builds/` — so
+  artifacts and pages are only built/published when it is submitted
+  explicitly (by `nix run .#release -- --submit-linux-build` or manually
+  with `hut builds submit`).
 - Requires `hut` (in the dev shell) authenticated for pages/builds publishing,
   and the host `jj lint` alias for the validation stage
   (`--skip-validate` if unavailable).

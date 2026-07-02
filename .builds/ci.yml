@@ -1,0 +1,17 @@
+image: nixos/unstable
+arch: x86_64
+environment:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+sources:
+  - https://git.sr.ht/~averagechris/gander
+tasks:
+  - flake-check: |
+      cd gander
+      nix flake check --accept-flake-config
+  - lint: |
+      cd gander
+      nix develop --accept-flake-config -c cargo fmt --check
+      nix develop --accept-flake-config -c cargo clippy --all-targets -- -D warnings
+  - test: |
+      cd gander
+      nix develop --accept-flake-config -c cargo test

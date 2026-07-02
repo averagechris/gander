@@ -119,7 +119,7 @@
             cargo_toml.write_text(updated)
 
         def update_linux_build_manifest(repo_root: pathlib.Path, version: str) -> None:
-            manifest = repo_root / ".builds" / "release-linux-x86_64.yml"
+            manifest = repo_root / "builds" / "release-linux-x86_64.yml"
             if not manifest.exists():
                 return
             tag = f"v{version.removeprefix('v')}"
@@ -680,7 +680,7 @@
         submit_linux_build=0
         domain="averagechris.srht.site"
         subdirectory="/gander"
-        linux_manifest=".builds/release-linux-x86_64.yml"
+        linux_manifest="builds/release-linux-x86_64.yml"
 
         usage() {
           cat <<'EOF'
@@ -697,7 +697,7 @@
           --skip-artifact            do not build/copy the local release artifact
           --skip-pages               do not build the static downloads page
           --publish-pages            publish dist/pages/gander-pages.tar.gz with hut
-          --submit-linux-build       submit .builds/release-linux-x86_64.yml with hut
+          --submit-linux-build       submit builds/release-linux-x86_64.yml with hut
           --domain DOMAIN            SourceHut Pages domain (default: averagechris.srht.site)
           --subdirectory PATH        SourceHut Pages subdirectory (default: /gander)
           -h, --help                 show this help
