@@ -355,3 +355,17 @@ See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value nex
 1. Helix-inspired external grammar/query loading for custom languages
 2. better jj revision/range semantics and support for reviewing stacks
 3. snapshot tests for parser, artifact, and TUI rendering
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.
