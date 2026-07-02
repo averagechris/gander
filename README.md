@@ -2,6 +2,8 @@
 
 Take a gander at your [`jj`](https://jj-vcs.github.io/jj/latest/) changes: a fast terminal UI for reviewing changes more ergonomically than raw `jj show`.
 
+![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
+
 This repo is intentionally early, but the first vertical slice is in place:
 
 - reads `jj show --git` for a target revision
