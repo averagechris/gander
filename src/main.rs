@@ -179,6 +179,7 @@ fn main() -> color_eyre::Result<()> {
                 ignore_globs,
                 generated_matcher,
                 &jj,
+                Some(state_path.clone()),
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;

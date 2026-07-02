@@ -13,7 +13,11 @@ mod editor;
 mod keymap;
 mod render;
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use color_eyre::eyre::{Context, Result};
 use crossterm::{
@@ -58,6 +62,9 @@ enum CommentInputTarget {
 struct TuiState {
     diff_drag: Option<DiffDrag>,
     notice: Option<UiNotice>,
+    /// Fingerprint of the last autosaved files/comments payload, used to skip
+    /// redundant writes between events.
+    last_autosave: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +98,7 @@ pub fn run(
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
+    state_path: Option<PathBuf>,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
@@ -107,7 +115,12 @@ pub fn run(
     let mut terminal = Terminal::new(backend)?;
     let mut mode = Mode::Normal;
 
-    let mut tui_state = TuiState::default();
+    // Seed the autosave fingerprint so an unchanged session does not trigger
+    // a write on the first event.
+    let mut tui_state = TuiState {
+        last_autosave: Some(state_fingerprint(session)),
+        ..TuiState::default()
+    };
     let result = run_loop(
         &mut terminal,
         session,
@@ -115,6 +128,7 @@ pub fn run(
         &keymap,
         &review_loader,
         &mut tui_state,
+        state_path.as_deref(),
     );
 
     disable_raw_mode()?;
@@ -134,6 +148,7 @@ fn run_loop(
     keymap: &KeyMap,
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
+    state_path: Option<&Path>,
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, session, mode, keymap, tui_state.notice.as_ref()))?;
@@ -154,8 +169,38 @@ fn run_loop(
             }
             _ => {}
         }
+
+        // Persist viewed marks and comments as they change so a crash or
+        // killed terminal cannot lose review progress (state is otherwise
+        // only saved on clean quit).
+        if let Some(state_path) = state_path {
+            autosave_state(session, state_path, tui_state);
+        }
     }
     Ok(())
+}
+
+/// Cheap change-detection payload: only the persistable parts of the session
+/// (viewed marks and comments), excluding volatile metadata like `saved_at`.
+fn state_fingerprint(session: &ReviewSession) -> String {
+    let state = session.to_state();
+    serde_json::to_string(&(&state.files, &state.comments)).unwrap_or_default()
+}
+
+fn autosave_state(session: &ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
+    let fingerprint = state_fingerprint(session);
+    if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str()) {
+        return;
+    }
+    match session.to_state().save(state_path) {
+        Ok(()) => tui_state.last_autosave = Some(fingerprint),
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to autosave review state: {error}"),
+            });
+        }
+    }
 }
 
 fn handle_key_event(
@@ -605,6 +650,44 @@ mod tests {
         fn change_summaries(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
             Ok(self.summaries.clone())
         }
+    }
+
+    #[test]
+    fn autosave_writes_state_changes_and_skips_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join(".gander").join("state.json");
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mut tui_state = TuiState {
+            last_autosave: Some(state_fingerprint(&session)),
+            ..TuiState::default()
+        };
+
+        // No changes yet: nothing should be written.
+        autosave_state(&session, &state_path, &mut tui_state);
+        assert!(!state_path.exists());
+
+        session.toggle_viewed();
+        session.add_comment("note".into());
+        autosave_state(&session, &state_path, &mut tui_state);
+
+        let saved = crate::state::ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.files["a.txt"].viewed);
+        assert_eq!(saved.comments.len(), 1);
+        assert!(tui_state.notice.is_none());
+
+        // Unchanged session: fingerprint short-circuits the write.
+        let modified_before = std::fs::metadata(&state_path).unwrap().modified().unwrap();
+        autosave_state(&session, &state_path, &mut tui_state);
+        let modified_after = std::fs::metadata(&state_path).unwrap().modified().unwrap();
+        assert_eq!(modified_before, modified_after);
     }
 
     #[test]

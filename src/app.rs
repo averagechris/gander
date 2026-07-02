@@ -1108,6 +1108,12 @@ impl ReviewSession {
     }
 
     pub fn into_state(self) -> ReviewState {
+        self.to_state()
+    }
+
+    /// Snapshot the persistable review state (viewed marks and comments)
+    /// without consuming the session, so the TUI can autosave mid-session.
+    pub fn to_state(&self) -> ReviewState {
         ReviewState {
             meta: ReviewStateMeta {
                 version: 1,
@@ -1118,18 +1124,18 @@ impl ReviewSession {
             },
             files: self
                 .files
-                .into_iter()
+                .iter()
                 .map(|file| {
                     (
-                        file.path,
+                        file.path.clone(),
                         FileState {
-                            fingerprint: file.fingerprint,
+                            fingerprint: file.fingerprint.clone(),
                             viewed: file.viewed,
                         },
                     )
                 })
                 .collect(),
-            comments: self.comments,
+            comments: self.comments.clone(),
         }
     }
 
