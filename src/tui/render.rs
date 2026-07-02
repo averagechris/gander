@@ -396,68 +396,35 @@ fn draw_footer(
     notice: Option<&UiNotice>,
 ) {
     let mode_text = match mode {
-        Mode::Normal if session.focus == Focus::Files => format!(
-            "{} · focus files{} · {down}/{up} tree · {fold} fold · {generated} {noisy_label} · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} diff · {mark} viewed · {toggle} toggle · {comment}/{edit}/{delete} comment · {quit} quit",
-            session.target,
-            if session.hide_generated {
-                " (noisy hidden)"
-            } else {
-                ""
-            },
-            down = keymap.hint(Action::MoveDown),
-            up = keymap.hint(Action::MoveUp),
-            fold = keymap.hint(Action::ToggleFold),
-            generated = keymap.hint(Action::ToggleGenerated),
-            noisy_label = noisy_toggle_label(session),
-            trunk = keymap.hint(Action::CompareTrunk),
-            parent = keymap.hint(Action::CompareParent),
-            choose = keymap.hint(Action::TargetChooser),
-            next_unviewed = keymap.hint(Action::NextUnviewed),
-            previous_unviewed = keymap.hint(Action::PreviousUnviewed),
-            next_comment = keymap.hint(Action::NextComment),
-            previous_comment = keymap.hint(Action::PreviousComment),
-            focus = keymap.hint(Action::ToggleFocus),
-            mark = keymap.hint(Action::MarkViewed),
-            toggle = keymap.hint(Action::ToggleViewed),
-            comment = keymap.hint(Action::Comment),
-            edit = keymap.hint(Action::EditComment),
-            delete = keymap.hint(Action::DeleteComment),
-            quit = keymap.hint(Action::Quit),
-        ),
-        Mode::Normal => format!(
-            "{} · focus diff{}{} · {down}/{up} line · {range} range · {cancel_range} cancel · {generated} {noisy_label} · {trunk}/{parent}/{choose} target · {next_unviewed}/{previous_unviewed} unviewed · {next_comment}/{previous_comment} comments · {focus} files · {comment}/{edit}/{delete} comment · {scroll_down}/{scroll_up} scroll · {quit} quit",
-            session.target,
-            if session.has_active_diff_range() {
-                " (range active)"
-            } else {
-                ""
-            },
-            if session.hide_generated {
-                " (noisy hidden)"
-            } else {
-                ""
-            },
-            down = keymap.hint(Action::MoveDown),
-            up = keymap.hint(Action::MoveUp),
-            range = keymap.hint(Action::RangeComment),
-            cancel_range = keymap.hint(Action::CancelRangeComment),
-            generated = keymap.hint(Action::ToggleGenerated),
-            noisy_label = noisy_toggle_label(session),
-            trunk = keymap.hint(Action::CompareTrunk),
-            parent = keymap.hint(Action::CompareParent),
-            choose = keymap.hint(Action::TargetChooser),
-            next_unviewed = keymap.hint(Action::NextUnviewed),
-            previous_unviewed = keymap.hint(Action::PreviousUnviewed),
-            next_comment = keymap.hint(Action::NextComment),
-            previous_comment = keymap.hint(Action::PreviousComment),
-            focus = keymap.hint(Action::ToggleFocus),
-            comment = keymap.hint(Action::Comment),
-            edit = keymap.hint(Action::EditComment),
-            delete = keymap.hint(Action::DeleteComment),
-            scroll_down = keymap.hint(Action::ScrollDown),
-            scroll_up = keymap.hint(Action::ScrollUp),
-            quit = keymap.hint(Action::Quit),
-        ),
+        Mode::Normal if session.focus == Focus::Files => footer_line(files_footer_segments(
+            session,
+            keymap,
+            &format!(
+                "focus files{}",
+                if session.hide_generated {
+                    " (noisy hidden)"
+                } else {
+                    ""
+                }
+            ),
+        )),
+        Mode::Normal => footer_line(diff_footer_segments(
+            session,
+            keymap,
+            &format!(
+                "focus diff{}{}",
+                if session.has_active_diff_range() {
+                    " (range active)"
+                } else {
+                    ""
+                },
+                if session.hide_generated {
+                    " (noisy hidden)"
+                } else {
+                    ""
+                }
+            ),
+        )),
         Mode::CommentInput { target, .. } => format!(
             "{kind} comment · {newline} newline · {submit} save · {cancel} cancel",
             kind = match target {
@@ -491,6 +458,104 @@ fn draw_footer(
         Paragraph::new(lines).style(Style::default().fg(Color::DarkGray)),
         area,
     );
+}
+
+/// One footer entry: the keys that trigger it plus a short label.
+struct FooterHint {
+    keys: Vec<Action>,
+    label: String,
+}
+
+impl FooterHint {
+    fn new(keys: impl Into<Vec<Action>>, label: impl Into<String>) -> Self {
+        Self {
+            keys: keys.into(),
+            label: label.into(),
+        }
+    }
+
+    fn render(&self, keymap: &KeyMap) -> String {
+        let keys: Vec<&str> = self
+            .keys
+            .iter()
+            .map(|action| keymap.hint(*action))
+            .collect();
+        format!("{} {}", keys.join("/"), self.label)
+    }
+}
+
+fn footer_line(segments: Vec<String>) -> String {
+    segments.join(" · ")
+}
+
+fn hint_segments(keymap: &KeyMap, hints: &[FooterHint]) -> Vec<String> {
+    hints.iter().map(|hint| hint.render(keymap)).collect()
+}
+
+fn files_footer_segments(
+    session: &ReviewSession,
+    keymap: &KeyMap,
+    focus_label: &str,
+) -> Vec<String> {
+    let hints = [
+        FooterHint::new([Action::MoveDown, Action::MoveUp], "tree"),
+        FooterHint::new([Action::ToggleFold], "fold"),
+        FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
+        FooterHint::new(
+            [
+                Action::CompareTrunk,
+                Action::CompareParent,
+                Action::TargetChooser,
+            ],
+            "target",
+        ),
+        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
+        FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
+        FooterHint::new([Action::ToggleFocus], "diff"),
+        FooterHint::new([Action::MarkViewed], "viewed"),
+        FooterHint::new([Action::ToggleViewed], "toggle"),
+        FooterHint::new(
+            [Action::Comment, Action::EditComment, Action::DeleteComment],
+            "comment",
+        ),
+        FooterHint::new([Action::Quit], "quit"),
+    ];
+    let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
+    segments.extend(hint_segments(keymap, &hints));
+    segments
+}
+
+fn diff_footer_segments(
+    session: &ReviewSession,
+    keymap: &KeyMap,
+    focus_label: &str,
+) -> Vec<String> {
+    let hints = [
+        FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
+        FooterHint::new([Action::RangeComment], "range"),
+        FooterHint::new([Action::CancelRangeComment], "cancel"),
+        FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
+        FooterHint::new(
+            [
+                Action::CompareTrunk,
+                Action::CompareParent,
+                Action::TargetChooser,
+            ],
+            "target",
+        ),
+        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
+        FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
+        FooterHint::new([Action::ToggleFocus], "files"),
+        FooterHint::new(
+            [Action::Comment, Action::EditComment, Action::DeleteComment],
+            "comment",
+        ),
+        FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
+        FooterHint::new([Action::Quit], "quit"),
+    ];
+    let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
+    segments.extend(hint_segments(keymap, &hints));
+    segments
 }
 
 fn noisy_toggle_label(session: &ReviewSession) -> &'static str {
