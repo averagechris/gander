@@ -12,6 +12,7 @@ mod chooser;
 mod editor;
 mod keymap;
 mod render;
+mod search;
 
 use std::{
     io,
@@ -42,10 +43,12 @@ use chooser::TargetChooserState;
 use editor::CommentEditor;
 use keymap::{Action, KeyMap};
 use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
+use search::FileSearchState;
 
 enum Mode {
     Normal,
     TargetChooser(TargetChooserState),
+    FileSearch(FileSearchState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
@@ -228,6 +231,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::FileSearch(search) => {
+            if handle_file_search_key(key, search, session, keymap) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -298,6 +306,9 @@ fn handle_normal_action(
         },
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
+        Action::FileSearch => {
+            *mode = Mode::FileSearch(FileSearchState::new(session));
+        }
         Action::NextComment => session.move_to_comment(1),
         Action::PreviousComment => session.move_to_comment(-1),
         Action::ScrollDown => session.scroll_diff(12),
@@ -429,6 +440,41 @@ fn handle_target_chooser_key(
     }
 }
 
+fn handle_file_search_key(
+    key: KeyEvent,
+    search: &mut FileSearchState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => search.move_selection(1),
+            Action::TargetPickerMoveUp => search.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(file_index) = search.selected_file_index() {
+                session.jump_to_file(file_index);
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            search.pop_query_char();
+            false
+        }
+        KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            search.push_query_char(ch);
+            false
+        }
+        _ => false,
+    }
+}
+
 impl ReviewLoader<'_> {
     fn base_candidates(&self, session: &ReviewSession) -> Result<Vec<crate::jj::JjChangeSummary>> {
         self.jj.change_summaries(&session.repo)
@@ -515,7 +561,7 @@ fn handle_mouse_event(
     mode: &mut Mode,
     tui_state: &mut TuiState,
 ) {
-    if matches!(mode, Mode::CommentInput { .. }) {
+    if matches!(mode, Mode::CommentInput { .. } | Mode::FileSearch(_)) {
         return;
     }
 

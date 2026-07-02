@@ -21,6 +21,7 @@ use super::{
     chooser::TargetChooserState,
     editor::CommentEditor,
     keymap::{Action, KeyMap},
+    search::FileSearchState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,7 @@ pub(super) fn draw(
 
     match mode {
         Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
+        Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
         Mode::Normal => {}
     }
@@ -442,6 +444,13 @@ fn draw_footer(
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
         }
+        Mode::FileSearch(_) => {
+            format!(
+                "file search · type filter · {down}/{up} move · enter open · esc cancel",
+                down = keymap.hint(Action::TargetPickerMoveDown),
+                up = keymap.hint(Action::TargetPickerMoveUp),
+            )
+        }
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
     if let Some(notice) = notice {
@@ -510,6 +519,7 @@ fn files_footer_segments(
             "target",
         ),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
+        FooterHint::new([Action::FileSearch], "search"),
         FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
         FooterHint::new([Action::ToggleFocus], "diff"),
         FooterHint::new([Action::MarkViewed], "viewed"),
@@ -583,6 +593,92 @@ fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &Comme
         inner_x.saturating_add(col as u16),
         inner_y.saturating_add(line as u16),
     ));
+}
+
+fn draw_file_search_popup(frame: &mut ratatui::Frame<'_>, area: Rect, search: &FileSearchState) {
+    let popup = centered_rect(72, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 3usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(search.selected, search.filtered.len(), list_height);
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("search: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            if search.query.is_empty() {
+                "type to fuzzy match files".to_owned()
+            } else {
+                search.query.clone()
+            },
+            if search.query.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+    ])];
+    if search.filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no matching files",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            search
+                .filtered
+                .iter()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .enumerate()
+                .map(|(visible_index, row_index)| {
+                    let index = visible_window.start + visible_index;
+                    let row = &search.files[*row_index];
+                    let selected = index == search.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let viewed_mark = if row.viewed { "✓" } else { "•" };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else if row.viewed {
+                        Style::default().fg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{marker} "), style),
+                        Span::styled(viewed_mark, Style::default().fg(Color::Green)),
+                        Span::styled(format!(" {}", row.path), style),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "type fuzzy filter · ↑/↓ or ctrl-j/ctrl-k move · enter open file · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("file search"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn draw_target_chooser_popup(
@@ -994,6 +1090,38 @@ diff --git a/README.md b/README.md
             "def456",
             "@",
         ));
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_file_search() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/tui/render.rs b/src/tui/render.rs
+--- a/src/tui/render.rs
++++ b/src/tui/render.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mut search = FileSearchState::new(&session);
+        for ch in "rs".chars() {
+            search.push_query_char(ch);
+        }
+        let mode = Mode::FileSearch(search);
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }

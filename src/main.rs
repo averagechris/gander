@@ -4,6 +4,7 @@ mod artifact;
 mod config;
 mod diff;
 mod file_tree;
+mod fuzzy;
 mod generated;
 mod jj;
 mod state;

@@ -41,6 +41,7 @@ pub(super) enum Action {
     PreviousUnviewed,
     NextComment,
     PreviousComment,
+    FileSearch,
     ScrollDown,
     ScrollUp,
     MarkViewed,
@@ -97,6 +98,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             Action::PreviousComment,
             &config.previous_comment,
         )?;
+        add_bindings(&mut bindings, Action::FileSearch, &config.file_search)?;
         add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
         add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;
         add_bindings(&mut bindings, Action::MarkViewed, &config.mark_viewed)?;

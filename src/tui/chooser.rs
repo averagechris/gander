@@ -1,6 +1,9 @@
 //! Base/tip target picker: jj change list, fuzzy filtering, and selection state.
 
-use crate::jj::{JjChangeSummary, ReviewTarget};
+use crate::{
+    fuzzy::fuzzy_matches as fuzzy_matches_text,
+    jj::{JjChangeSummary, ReviewTarget},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TargetChooserState {
@@ -138,21 +141,8 @@ impl JjChangeSummary {
 }
 
 fn fuzzy_matches(row: &JjChangeSummary, query: &str) -> bool {
-    let query = query.trim();
-    if query.is_empty() {
-        return true;
-    }
     let haystack = format!("{} {} {}", row.change_id, row.bookmarks, row.description);
-    fuzzy_contains(&haystack.to_ascii_lowercase(), &query.to_ascii_lowercase())
-}
-
-fn fuzzy_contains(haystack: &str, needle: &str) -> bool {
-    let mut haystack_chars = haystack.chars();
-    needle.chars().all(|needle_char| {
-        haystack_chars
-            .by_ref()
-            .any(|haystack_char| haystack_char == needle_char)
-    })
+    fuzzy_matches_text(&haystack, query)
 }
 
 #[cfg(test)]

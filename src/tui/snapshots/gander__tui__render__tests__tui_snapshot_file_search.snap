@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &mode, 100, 24)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• ▾ src 0/2                               ││src/app.rs  +1 -1                                     │
+│  • ▾ tui 0/1                             ││@@ -1 +1 @@                                           │
+│    • mod     render.rs                   ││    1 - old                                           │
+│  • mod     app.rs                        ││    1 + new                                           │
+│• mod     REA┌file search───────────────────────────────────────────────────────────┐             │
+│             │search: rs                                                            │             │
+│             │› • src/app.rs                                                        │             │
+│             │  • src/tui/render.rs                                                 │             │
+│             │                                                                      │             │
+│             │type fuzzy filter · ↑/↓ or ctrl-j/ctrl-k move · enter open file · esc │             │
+│             │cancel                                                                │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             └──────────────────────────────────────────────────────────────────────┘             │
+│                                          ││                                                      │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+3 files (0/3 viewed, 0 generated/noisy), +3/-3, 0 comments
+file search · type filter · down/up move · enter open · esc cancel

@@ -284,6 +284,23 @@ impl ReviewSession {
         self.select_tree_row(&tree, row_index);
     }
 
+    /// Indices of files currently visible (respecting the generated-file
+    /// toggle), in session order. Used by the fuzzy file search overlay.
+    pub fn visible_file_indices(&self) -> Vec<usize> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| self.file_visible(file).then_some(index))
+            .collect()
+    }
+
+    /// Jump straight to a file by index, revealing it in the tree and moving
+    /// focus to the files pane.
+    pub fn jump_to_file(&mut self, file_index: usize) {
+        self.select_file_index(file_index);
+        self.focus = Focus::Files;
+    }
+
     pub fn select_diff_row(&mut self, row_index: usize) {
         let rows = self.diff_rows_for_selected_file();
         if rows.is_empty() {

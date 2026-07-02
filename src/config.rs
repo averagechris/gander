@@ -68,6 +68,7 @@ pub struct KeybindingsConfig {
     pub previous_unviewed: Vec<String>,
     pub next_comment: Vec<String>,
     pub previous_comment: Vec<String>,
+    pub file_search: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub mark_viewed: Vec<String>,
@@ -160,6 +161,7 @@ struct KeybindingsConfigPatch {
     previous_unviewed: Option<Vec<String>>,
     next_comment: Option<Vec<String>>,
     previous_comment: Option<Vec<String>>,
+    file_search: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     mark_viewed: Option<Vec<String>>,
@@ -225,6 +227,7 @@ impl Default for KeybindingsConfig {
             previous_unviewed: keys(["N"]),
             next_comment: keys(["m"]),
             previous_comment: keys(["M"]),
+            file_search: keys(["/"]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             mark_viewed: keys(["enter"]),
@@ -363,6 +366,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.previous_unviewed, patch.previous_unviewed);
         apply_optional(&mut self.next_comment, patch.next_comment);
         apply_optional(&mut self.previous_comment, patch.previous_comment);
+        apply_optional(&mut self.file_search, patch.file_search);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);
