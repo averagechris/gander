@@ -1,3 +1,7 @@
+[files]
+# TUI buffer snapshots contain arbitrary truncated text fragments.
+extend-exclude = ["src/tui/snapshots/*.snap"]
+
 [default.extend-words]
 Ratatui = "Ratatui"
 ratatui = "ratatui"
