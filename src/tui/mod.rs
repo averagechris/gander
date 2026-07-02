@@ -334,6 +334,8 @@ fn handle_normal_action(
                 &session.target.rev,
             ));
         }
+        Action::StackNext => step_stack(review_loader, session, 1, tui_state),
+        Action::StackPrevious => step_stack(review_loader, session, -1, tui_state),
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::FileSearch => {
@@ -444,6 +446,78 @@ fn handle_normal_action(
         | Action::TargetPickerMoveUp => {}
     }
     Ok(false)
+}
+
+/// Step through the current stack (`trunk()..@`) change-by-change, reviewing
+/// each change against its parent.
+fn step_stack(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    delta: isize,
+    tui_state: &mut TuiState,
+) {
+    let stack = match review_loader.jj.stack_changes(&session.repo) {
+        Ok(stack) => stack,
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load stack: {error:?}"),
+            });
+            return;
+        }
+    };
+    if stack.is_empty() {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "no stack changes between trunk() and @".to_owned(),
+        });
+        return;
+    }
+
+    let current = stack
+        .iter()
+        .position(|change| change.matches_rev(&session.target.rev))
+        .or_else(|| (session.target.rev == "@").then(|| stack.len() - 1));
+    let next = match current {
+        Some(index) => {
+            let max = stack.len() as isize - 1;
+            (index as isize + delta).clamp(0, max) as usize
+        }
+        None if delta.is_negative() => stack.len() - 1,
+        None => 0,
+    };
+    if current == Some(next) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: format!(
+                "already at the {} of the stack",
+                if delta.is_negative() { "bottom" } else { "top" }
+            ),
+        });
+        return;
+    }
+
+    let change = &stack[next];
+    let target = ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone());
+    match review_loader.load(session, target) {
+        Ok(()) => {
+            let description = if change.description.is_empty() {
+                "(no description)"
+            } else {
+                &change.description
+            };
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!("stack {}/{}: {description}", next + 1, stack.len()),
+            });
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load stack change: {error:?}"),
+            });
+        }
+    }
 }
 
 fn handle_target_chooser_key(
@@ -874,6 +948,18 @@ mod tests {
         calls: RefCell<Vec<ReviewTarget>>,
         diff_text: Result<String, String>,
         summaries: Vec<JjChangeSummary>,
+        stack: Vec<JjChangeSummary>,
+    }
+
+    impl MockJjBackend {
+        fn with_diff(diff_text: Result<String, String>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                diff_text,
+                summaries: Vec::new(),
+                stack: Vec::new(),
+            }
+        }
     }
 
     impl JjBackend for MockJjBackend {
@@ -887,6 +973,10 @@ mod tests {
 
         fn change_summaries(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
             Ok(self.summaries.clone())
+        }
+
+        fn stack_changes(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
+            Ok(self.stack.clone())
         }
     }
 
@@ -939,18 +1029,14 @@ mod tests {
 +old2
 "#,
         );
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Ok(r#"diff --git a/new.rs b/new.rs
+        let backend = MockJjBackend::with_diff(Ok(r#"diff --git a/new.rs b/new.rs
 --- a/new.rs
 +++ b/new.rs
 @@ -1 +1 @@
 -old
 +new
 "#
-            .to_owned()),
-            summaries: Vec::new(),
-        };
+        .to_owned()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
@@ -971,11 +1057,7 @@ mod tests {
     #[test]
     fn compare_errors_become_tui_notices() {
         let mut session = snapshot_session("");
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Err("boom".to_owned()),
-            summaries: Vec::new(),
-        };
+        let backend = MockJjBackend::with_diff(Err("boom".to_owned()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
@@ -1029,11 +1111,7 @@ mod tests {
     #[test]
     fn revset_input_loads_typed_target() {
         let mut session = snapshot_session("");
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Ok(String::new()),
-            summaries: Vec::new(),
-        };
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
@@ -1079,11 +1157,7 @@ mod tests {
     #[test]
     fn revset_input_requires_both_fields_before_loading() {
         let mut session = snapshot_session("");
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Ok(String::new()),
-            summaries: Vec::new(),
-        };
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
@@ -1106,14 +1180,96 @@ mod tests {
         assert!(notice.message.contains("required"));
     }
 
+    fn stack_change(id: &str, description: &str) -> JjChangeSummary {
+        JjChangeSummary {
+            change_id: id.to_owned(),
+            bookmarks: String::new(),
+            description: description.to_owned(),
+        }
+    }
+
+    #[test]
+    fn stack_previous_from_working_copy_steps_to_prior_change() {
+        let mut session = snapshot_session("");
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.stack = vec![
+            stack_change("aaa", "feat: first"),
+            stack_change("bbb", "feat: second"),
+            stack_change("ccc", "feat: third"),
+        ];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        session.target = ReviewTarget::new("trunk()", "@");
+
+        step_stack(&loader, &mut session, -1, &mut tui_state);
+
+        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.message, "stack 2/3: feat: second");
+    }
+
+    #[test]
+    fn stack_next_moves_forward_and_stops_at_top() {
+        let mut session = snapshot_session("");
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.stack = vec![stack_change("aaa", "feat: first"), stack_change("bbb", "")];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        session.target = ReviewTarget::new("aaa-", "aaa");
+
+        step_stack(&loader, &mut session, 1, &mut tui_state);
+        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
+        assert_eq!(
+            tui_state.notice.as_ref().unwrap().message,
+            "stack 2/2: (no description)"
+        );
+
+        step_stack(&loader, &mut session, 1, &mut tui_state);
+        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("already at the top")
+        );
+    }
+
+    #[test]
+    fn stack_step_with_empty_stack_shows_notice() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+
+        step_stack(&loader, &mut session, 1, &mut tui_state);
+
+        assert!(backend.calls.borrow().is_empty());
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("no stack changes")
+        );
+    }
+
     #[test]
     fn target_chooser_loads_selected_base_to_current_tip() {
         let mut session = snapshot_session("");
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Ok(String::new()),
-            summaries: Vec::new(),
-        };
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
@@ -1150,11 +1306,7 @@ mod tests {
     #[test]
     fn target_chooser_filter_accepts_g_and_shifted_characters() {
         let mut session = snapshot_session("");
-        let backend = MockJjBackend {
-            calls: RefCell::new(Vec::new()),
-            diff_text: Ok(String::new()),
-            summaries: Vec::new(),
-        };
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),

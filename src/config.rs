@@ -64,6 +64,8 @@ pub struct KeybindingsConfig {
     pub compare_parent: Vec<String>,
     pub target_chooser: Vec<String>,
     pub revset_input: Vec<String>,
+    pub stack_next: Vec<String>,
+    pub stack_previous: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
     pub next_unviewed: Vec<String>,
@@ -174,6 +176,8 @@ struct KeybindingsConfigPatch {
     compare_parent: Option<Vec<String>>,
     target_chooser: Option<Vec<String>>,
     revset_input: Option<Vec<String>>,
+    stack_next: Option<Vec<String>>,
+    stack_previous: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
@@ -248,6 +252,8 @@ impl Default for KeybindingsConfig {
             compare_parent: keys(["p"]),
             target_chooser: keys(["b"]),
             revset_input: keys(["R"]),
+            stack_next: keys([">"]),
+            stack_previous: keys(["<"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
             next_unviewed: keys(["n"]),
@@ -397,6 +403,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.compare_parent, patch.compare_parent);
         apply_optional(&mut self.target_chooser, patch.target_chooser);
         apply_optional(&mut self.revset_input, patch.revset_input);
+        apply_optional(&mut self.stack_next, patch.stack_next);
+        apply_optional(&mut self.stack_previous, patch.stack_previous);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
@@ -601,6 +609,8 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.compare_parent, ["p"]);
         assert_eq!(config.keybindings.target_chooser, ["b"]);
         assert_eq!(config.keybindings.revset_input, ["R"]);
+        assert_eq!(config.keybindings.stack_next, [">"]);
+        assert_eq!(config.keybindings.stack_previous, ["<"]);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);
         assert_eq!(config.keybindings.target_picker_up, ["up", "ctrl-k"]);
         assert_eq!(config.keybindings.toggle_generated, ["h"]);

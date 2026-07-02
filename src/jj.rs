@@ -17,6 +17,8 @@ pub struct JjCommand {
 pub trait JjBackend {
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+    /// Changes in the current stack (`trunk()..@`), oldest first.
+    fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,20 +102,37 @@ impl JjCommand {
     }
 
     pub fn change_summaries(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
-        let output = Command::new(binary)
+        Self::log_summaries(binary, repo, "ancestors(@) | trunk() | bookmarks()", false)
+    }
+
+    /// Changes between trunk and the working copy, oldest first, so callers
+    /// can step through the stack change-by-change.
+    pub fn stack_changes(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        Self::log_summaries(binary, repo, "trunk()..@", true)
+    }
+
+    fn log_summaries(
+        binary: &Path,
+        repo: &Path,
+        revset: &str,
+        reversed: bool,
+    ) -> Result<Vec<JjChangeSummary>> {
+        let mut command = Command::new(binary);
+        command
             .arg("log")
             .arg("-r")
-            .arg("ancestors(@) | trunk() | bookmarks()")
+            .arg(revset)
             .arg("--no-graph")
             .arg("--color=never")
             .arg("--no-pager")
             .arg("--template")
             .arg(
                 "change_id.short() ++ \"\\t\" ++ bookmarks ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
-            )
-            .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+            );
+        if reversed {
+            command.arg("--reversed");
+        }
+        let output = command.stdin(Stdio::null()).current_dir(repo).output()?;
 
         if !output.status.success() {
             bail!(
@@ -142,6 +161,10 @@ impl JjBackend for JjCliBackend {
 
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
         JjCommand::change_summaries(&self.binary, repo)
+    }
+
+    fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        JjCommand::stack_changes(&self.binary, repo)
     }
 }
 

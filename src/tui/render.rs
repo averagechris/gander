@@ -554,6 +554,7 @@ fn files_footer_segments(
             ],
             "target",
         ),
+        FooterHint::new([Action::StackNext, Action::StackPrevious], "stack"),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::FileSearch], "search"),
         FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),

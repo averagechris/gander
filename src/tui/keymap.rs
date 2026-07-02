@@ -36,6 +36,8 @@ pub(super) enum Action {
     CompareParent,
     TargetChooser,
     RevsetInput,
+    StackNext,
+    StackPrevious,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,
@@ -84,6 +86,8 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::CompareParent, &config.compare_parent)?;
         add_bindings(&mut bindings, Action::TargetChooser, &config.target_chooser)?;
         add_bindings(&mut bindings, Action::RevsetInput, &config.revset_input)?;
+        add_bindings(&mut bindings, Action::StackNext, &config.stack_next)?;
+        add_bindings(&mut bindings, Action::StackPrevious, &config.stack_previous)?;
         add_bindings(
             &mut bindings,
             Action::TargetPickerMoveDown,
