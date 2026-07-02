@@ -19,6 +19,7 @@ use crate::{
 use super::{
     CommentInputTarget, Mode, UiNotice, UiNoticeLevel,
     chooser::TargetChooserState,
+    chunks::ChunkListState,
     comments::CommentListState,
     editor::CommentEditor,
     flags::FlagListState,
@@ -56,6 +57,7 @@ pub(super) fn draw(
         Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
+        Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -546,6 +548,7 @@ fn draw_footer(
             }
         }
         Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
+        Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -619,6 +622,7 @@ fn files_footer_segments(
         FooterHint::new([Action::CycleViewedFilter], "filter"),
         FooterHint::new([Action::ToggleAgentOrder], "agent order"),
         FooterHint::new([Action::FlagList], "flags"),
+        FooterHint::new([Action::ChunkList], "chunks"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -918,6 +922,96 @@ fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagL
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("agent flags"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &ChunkListState) {
+    let popup = centered_rect(82, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 3usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(list.selected, list.rows.len(), list_height);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Agent-suggested review units (can span or subdivide files)",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if list.rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no chunks",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            list.rows
+                .iter()
+                .enumerate()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .map(|(index, row)| {
+                    let selected = index == list.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let position = row
+                        .part_position
+                        .map(|(part, total)| format!(" ({part}/{total})"))
+                        .unwrap_or_default();
+                    let location = match &row.part {
+                        Some(part) => match (part.start_line, part.end_line) {
+                            (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
+                            (Some(start), None) => format!("{}:{start}", part.path),
+                            _ => part.path.clone(),
+                        },
+                        None => "(no location)".to_owned(),
+                    };
+                    let rationale = row
+                        .rationale
+                        .as_deref()
+                        .map(|rationale| format!(" — {rationale}"))
+                        .unwrap_or_default();
+                    Line::from(vec![
+                        Span::styled(format!("{marker} {}{position} ", row.title), style),
+                        Span::styled(location, Style::default().fg(Color::Cyan)),
+                        Span::styled(rationale, Style::default().fg(Color::DarkGray)),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter jump · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("review chunks"),
+            )
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -1923,6 +2017,45 @@ diff --git a/README.md b/README.md
                 18
             )
         );
+    }
+
+    #[test]
+    fn tui_snapshot_chunk_list() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "core change".to_owned(),
+                rationale: Some("start here".to_owned()),
+                parts: vec![
+                    crate::agent::ChunkPart {
+                        path: "src/app.rs".to_owned(),
+                        start_line: Some(2),
+                        end_line: Some(3),
+                    },
+                    crate::agent::ChunkPart {
+                        path: "src/app.rs".to_owned(),
+                        start_line: Some(4),
+                        end_line: None,
+                    },
+                ],
+            }],
+            ..Default::default()
+        });
+        let mode = Mode::ChunkList(ChunkListState::new(&session));
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
     }
 
     #[test]

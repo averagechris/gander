@@ -9,6 +9,7 @@
 //! This file owns the event loop, mode state machine, and event handling.
 
 mod chooser;
+mod chunks;
 mod comments;
 mod editor;
 mod flags;
@@ -46,6 +47,7 @@ use crate::{
 };
 
 use chooser::TargetChooserState;
+use chunks::ChunkListState;
 use comments::CommentListState;
 use editor::CommentEditor;
 use flags::FlagListState;
@@ -64,6 +66,7 @@ enum Mode {
     OperationPicker(OperationPickerState),
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
+    ChunkList(ChunkListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -320,6 +323,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::ChunkList(list) => {
+            if handle_chunk_list_key(key, list, session, keymap) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -439,6 +447,16 @@ fn handle_normal_action(
                 });
             } else {
                 *mode = Mode::FlagList(FlagListState::new(session));
+            }
+        }
+        Action::ChunkList => {
+            if session.review_chunks.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no review chunks suggested".to_owned(),
+                });
+            } else {
+                *mode = Mode::ChunkList(ChunkListState::new(session));
             }
         }
         Action::NextUnviewed => session.move_to_unviewed(1),
@@ -923,6 +941,41 @@ fn handle_flag_list_key(
     }
 }
 
+fn handle_chunk_list_key(
+    key: KeyEvent,
+    list: &mut ChunkListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1),
+            Action::TargetPickerMoveUp => list.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(part) = list.selected_row().and_then(|row| row.part.clone()) {
+                session.jump_to_chunk_part(&part);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1);
+            false
+        }
+        _ => false,
+    }
+}
+
 fn handle_file_search_key(
     key: KeyEvent,
     search: &mut FileSearchState,
@@ -1143,6 +1196,7 @@ fn handle_mouse_event(
             | Mode::OperationPicker(_)
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
+            | Mode::ChunkList(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)

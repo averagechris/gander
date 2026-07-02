@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentFlag, AgentOverlay},
+    agent::{AgentFlag, AgentOverlay, ChunkPart, ReviewChunk},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::{Config, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
@@ -74,6 +74,8 @@ pub struct ReviewSession {
     /// Sections agents flagged as critical, surfaced in the diff gutter and
     /// the flag list popup.
     pub agent_flags: Vec<AgentFlag>,
+    /// Agent-defined reviewable units that can span or subdivide files.
+    pub review_chunks: Vec<ReviewChunk>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
@@ -239,6 +241,7 @@ impl ReviewSession {
             agent_ordering: Vec::new(),
             use_agent_order: true,
             agent_flags: Vec::new(),
+            review_chunks: Vec::new(),
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
@@ -489,6 +492,26 @@ impl ReviewSession {
     pub fn apply_agent_overlay(&mut self, overlay: &AgentOverlay) {
         self.agent_ordering = overlay.ordering.clone();
         self.agent_flags = overlay.flags.clone();
+        self.review_chunks = overlay.chunks.clone();
+    }
+
+    /// Jump to a chunk part: select its file and move the diff cursor to
+    /// the part's first line (or the top of the file without line info).
+    pub fn jump_to_chunk_part(&mut self, part: &ChunkPart) {
+        let Some(file_index) = self.files.iter().position(|file| file.path == part.path) else {
+            return;
+        };
+        self.select_file_index(file_index);
+        let Some(start_line) = part.start_line else {
+            self.focus = Focus::Files;
+            self.diff_scroll = 0;
+            return;
+        };
+        if let Some(row_index) = self.diff_rows_for_selected_file().iter().position(|row| {
+            row.anchor.is_some() && row.new_lineno.is_some_and(|line| line >= start_line)
+        }) {
+            self.jump_to_diff_row(row_index);
+        }
     }
 
     /// Flags sorted for display: critical first, then by path and line.
@@ -1592,6 +1615,31 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(session.focus, Focus::Diff);
         let rows = session.diff_rows_for_selected_file();
         assert_eq!(rows[session.diff_cursor].new_lineno, Some(2));
+    }
+
+    #[test]
+    fn jump_to_chunk_part_moves_cursor_to_start_line() {
+        let mut session = multi_line_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "core".to_owned(),
+                rationale: None,
+                parts: vec![crate::agent::ChunkPart {
+                    path: "src/app.rs".to_owned(),
+                    start_line: Some(3),
+                    end_line: Some(4),
+                }],
+            }],
+            ..Default::default()
+        });
+
+        let part = session.review_chunks[0].parts[0].clone();
+        session.jump_to_chunk_part(&part);
+
+        assert_eq!(session.focus, Focus::Diff);
+        let rows = session.diff_rows_for_selected_file();
+        assert!(rows[session.diff_cursor].new_lineno.unwrap() >= 3);
     }
 
     #[test]

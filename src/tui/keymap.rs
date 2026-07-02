@@ -43,6 +43,7 @@ pub(super) enum Action {
     ToggleLargeDiff,
     ToggleAgentOrder,
     FlagList,
+    ChunkList,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,
