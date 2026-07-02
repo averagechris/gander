@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, io::BufRead};
 
 use color_eyre::eyre::Result;
 use globset::{Glob, GlobSetBuilder};
@@ -23,9 +23,10 @@ pub struct FileDiff {
     pub fingerprint: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileStatus {
     Added,
+    #[default]
     Modified,
     Deleted,
     Renamed,
@@ -76,29 +77,37 @@ pub enum DiffLineKind {
 
 impl DiffSet {
     pub fn parse(input: &str) -> Result<Self> {
+        Self::parse_reader(input.as_bytes())
+    }
+
+    /// Streaming parse: consumes the reader line-by-line, building each file
+    /// incrementally instead of materializing the whole diff up front.
+    pub fn parse_reader(reader: impl BufRead) -> Result<Self> {
+        Self::parse_lines(reader.lines().map(|line| line.map_err(Into::into)))
+    }
+
+    fn parse_lines(lines: impl Iterator<Item = Result<String>>) -> Result<Self> {
         let mut raw_header = Vec::new();
         let mut files = Vec::new();
-        let mut current = Vec::new();
-        let mut in_file = false;
+        let mut current: Option<FileDiffBuilder> = None;
 
-        for line in input.lines() {
+        for line in lines {
+            let line = line?;
             if line.starts_with("diff --git ") {
-                if !current.is_empty() {
-                    files.push(FileDiff::parse(&current.join("\n"))?);
-                    current.clear();
+                if let Some(builder) = current.take() {
+                    files.push(builder.finish());
                 }
-                in_file = true;
+                current = Some(FileDiffBuilder::new());
             }
 
-            if in_file {
-                current.push(line.to_owned());
-            } else {
-                raw_header.push(line.to_owned());
+            match current.as_mut() {
+                Some(builder) => builder.push_line(&line),
+                None => raw_header.push(line),
             }
         }
 
-        if !current.is_empty() {
-            files.push(FileDiff::parse(&current.join("\n"))?);
+        if let Some(builder) = current.take() {
+            files.push(builder.finish());
         }
 
         Ok(Self { raw_header, files })
@@ -118,135 +127,151 @@ impl DiffSet {
     }
 }
 
-impl FileDiff {
-    fn parse(raw: &str) -> Result<Self> {
-        let mut path = String::from("<unknown>");
-        let mut old_path: Option<String> = None;
-        let mut status = FileStatus::Modified;
-        let mut hunks = Vec::new();
-        let mut current_hunk: Option<Hunk> = None;
-        let mut old_line = 0;
-        let mut new_line = 0;
-        let mut additions = 0;
-        let mut deletions = 0;
+/// Incremental single-file parser fed one line at a time, so callers can
+/// stream arbitrarily large diffs without buffering per-file line vectors.
+#[derive(Debug, Default)]
+struct FileDiffBuilder {
+    path: Option<String>,
+    old_path: Option<String>,
+    status: FileStatus,
+    hunks: Vec<Hunk>,
+    current_hunk: Option<Hunk>,
+    old_line: usize,
+    new_line: usize,
+    additions: usize,
+    deletions: usize,
+    raw: String,
+}
 
-        for line in raw.lines() {
-            // Header metadata (---/+++, rename/copy, mode lines) must only be
-            // parsed before the first hunk; inside hunks, lines like
-            // "--- text" are diff content, not file markers.
-            let in_header = hunks.is_empty() && current_hunk.is_none();
-            if let Some(rest) = line.strip_prefix("diff --git ") {
-                if let Some((old, new)) = parse_diff_git_paths(rest) {
-                    let old = strip_path_prefix(&old, "a/");
-                    let new = strip_path_prefix(&new, "b/");
-                    path = new;
-                    old_path = Some(old);
-                }
-            } else if in_header && line.starts_with("new file mode") {
-                status = FileStatus::Added;
-            } else if in_header && line.starts_with("deleted file mode") {
-                status = FileStatus::Deleted;
-            } else if in_header && let Some(rest) = line.strip_prefix("rename from ") {
-                status = FileStatus::Renamed;
-                old_path = Some(parse_bare_path(rest));
-            } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
-                status = FileStatus::Renamed;
-                path = parse_bare_path(rest);
-            } else if in_header && let Some(rest) = line.strip_prefix("copy from ") {
-                status = FileStatus::Copied;
-                old_path = Some(parse_bare_path(rest));
-            } else if in_header && let Some(rest) = line.strip_prefix("copy to ") {
-                status = FileStatus::Copied;
-                path = parse_bare_path(rest);
-            } else if in_header && line.starts_with("Binary files ") {
-                status = FileStatus::Binary;
-            } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
-                if let Some(parsed) = parse_marker_path(rest, "a/") {
-                    old_path = Some(parsed);
-                }
-            } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
-                if let Some(parsed) = parse_marker_path(rest, "b/") {
-                    path = parsed;
-                }
-            } else if let Some((old_start, old_len, new_start, new_len, header)) =
-                parse_hunk_header(line)
-            {
-                if let Some(hunk) = current_hunk.take() {
-                    hunks.push(hunk);
-                }
-                old_line = old_start;
-                new_line = new_start;
-                current_hunk = Some(Hunk {
-                    old_start,
-                    old_len,
-                    new_start,
-                    new_len,
-                    header,
-                    lines: Vec::new(),
-                });
-            } else if let Some(hunk) = current_hunk.as_mut() {
-                let (kind, old_lineno, new_lineno, text) =
-                    if line.starts_with('+') && !line.starts_with("+++") {
-                        let lineno = new_line;
-                        new_line += 1;
-                        additions += 1;
-                        (
-                            DiffLineKind::Added,
-                            None,
-                            Some(lineno),
-                            line[1..].to_owned(),
-                        )
-                    } else if line.starts_with('-') && !line.starts_with("---") {
-                        let lineno = old_line;
-                        old_line += 1;
-                        deletions += 1;
-                        (
-                            DiffLineKind::Removed,
-                            Some(lineno),
-                            None,
-                            line[1..].to_owned(),
-                        )
-                    } else if let Some(text) = line.strip_prefix(' ') {
-                        let old_lineno = old_line;
-                        let new_lineno = new_line;
-                        old_line += 1;
-                        new_line += 1;
-                        (
-                            DiffLineKind::Context,
-                            Some(old_lineno),
-                            Some(new_lineno),
-                            text.to_owned(),
-                        )
-                    } else {
-                        (DiffLineKind::Meta, None, None, line.to_owned())
-                    };
-                hunk.lines.push(DiffLine {
-                    kind,
-                    old_lineno,
-                    new_lineno,
-                    text,
-                });
-            }
+impl FileDiffBuilder {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if !self.raw.is_empty() {
+            self.raw.push('\n');
         }
+        self.raw.push_str(line);
 
-        if let Some(hunk) = current_hunk.take() {
-            hunks.push(hunk);
+        // Header metadata (---/+++, rename/copy, mode lines) must only be
+        // parsed before the first hunk; inside hunks, lines like
+        // "--- text" are diff content, not file markers.
+        let in_header = self.hunks.is_empty() && self.current_hunk.is_none();
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some((old, new)) = parse_diff_git_paths(rest) {
+                let old = strip_path_prefix(&old, "a/");
+                let new = strip_path_prefix(&new, "b/");
+                self.path = Some(new);
+                self.old_path = Some(old);
+            }
+        } else if in_header && line.starts_with("new file mode") {
+            self.status = FileStatus::Added;
+        } else if in_header && line.starts_with("deleted file mode") {
+            self.status = FileStatus::Deleted;
+        } else if in_header && let Some(rest) = line.strip_prefix("rename from ") {
+            self.status = FileStatus::Renamed;
+            self.old_path = Some(parse_bare_path(rest));
+        } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
+            self.status = FileStatus::Renamed;
+            self.path = Some(parse_bare_path(rest));
+        } else if in_header && let Some(rest) = line.strip_prefix("copy from ") {
+            self.status = FileStatus::Copied;
+            self.old_path = Some(parse_bare_path(rest));
+        } else if in_header && let Some(rest) = line.strip_prefix("copy to ") {
+            self.status = FileStatus::Copied;
+            self.path = Some(parse_bare_path(rest));
+        } else if in_header && line.starts_with("Binary files ") {
+            self.status = FileStatus::Binary;
+        } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
+            if let Some(parsed) = parse_marker_path(rest, "a/") {
+                self.old_path = Some(parsed);
+            }
+        } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
+            if let Some(parsed) = parse_marker_path(rest, "b/") {
+                self.path = Some(parsed);
+            }
+        } else if let Some((old_start, old_len, new_start, new_len, header)) =
+            parse_hunk_header(line)
+        {
+            if let Some(hunk) = self.current_hunk.take() {
+                self.hunks.push(hunk);
+            }
+            self.old_line = old_start;
+            self.new_line = new_start;
+            self.current_hunk = Some(Hunk {
+                old_start,
+                old_len,
+                new_start,
+                new_len,
+                header,
+                lines: Vec::new(),
+            });
+        } else if let Some(hunk) = self.current_hunk.as_mut() {
+            let (kind, old_lineno, new_lineno, text) =
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    let lineno = self.new_line;
+                    self.new_line += 1;
+                    self.additions += 1;
+                    (
+                        DiffLineKind::Added,
+                        None,
+                        Some(lineno),
+                        line[1..].to_owned(),
+                    )
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    let lineno = self.old_line;
+                    self.old_line += 1;
+                    self.deletions += 1;
+                    (
+                        DiffLineKind::Removed,
+                        Some(lineno),
+                        None,
+                        line[1..].to_owned(),
+                    )
+                } else if let Some(text) = line.strip_prefix(' ') {
+                    let old_lineno = self.old_line;
+                    let new_lineno = self.new_line;
+                    self.old_line += 1;
+                    self.new_line += 1;
+                    (
+                        DiffLineKind::Context,
+                        Some(old_lineno),
+                        Some(new_lineno),
+                        text.to_owned(),
+                    )
+                } else {
+                    (DiffLineKind::Meta, None, None, line.to_owned())
+                };
+            hunk.lines.push(DiffLine {
+                kind,
+                old_lineno,
+                new_lineno,
+                text,
+            });
+        }
+    }
+
+    fn finish(mut self) -> FileDiff {
+        if let Some(hunk) = self.current_hunk.take() {
+            self.hunks.push(hunk);
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(raw.as_bytes());
+        hasher.update(self.raw.as_bytes());
         let fingerprint = format!("{:x}", hasher.finalize());
 
-        Ok(Self {
-            old_path: old_path.filter(|old| *old != path),
+        let path = self.path.unwrap_or_else(|| "<unknown>".to_owned());
+        FileDiff {
+            old_path: self.old_path.filter(|old| *old != path),
             path,
-            status,
-            additions,
-            deletions,
-            hunks,
-            raw: raw.to_owned(),
+            status: self.status,
+            additions: self.additions,
+            deletions: self.deletions,
+            hunks: self.hunks,
+            raw: self.raw,
             fingerprint,
-        })
+        }
     }
 }
 
@@ -568,6 +593,42 @@ deleted file mode 100644
         .unwrap();
 
         assert_eq!(diff.files[0].path, "a/b/x.rs");
+    }
+
+    #[test]
+    fn parse_reader_streams_and_matches_string_parse() {
+        let input = r#"commit metadata
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,2 +1,3 @@
+ fn main() {
+-    println!("old");
++    println!("new");
++    println!("extra");
+ }
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#;
+
+        let from_str = DiffSet::parse(input).unwrap();
+        let from_reader = DiffSet::parse_reader(std::io::Cursor::new(input)).unwrap();
+
+        assert_eq!(from_reader.raw_header, from_str.raw_header);
+        assert_eq!(from_reader.files.len(), from_str.files.len());
+        for (streamed, parsed) in from_reader.files.iter().zip(&from_str.files) {
+            assert_eq!(streamed.path, parsed.path);
+            assert_eq!(streamed.raw, parsed.raw);
+            // Fingerprints must stay stable across parser implementations or
+            // saved viewed-state would silently invalidate.
+            assert_eq!(streamed.fingerprint, parsed.fingerprint);
+            assert_eq!(streamed.additions, parsed.additions);
+            assert_eq!(streamed.deletions, parsed.deletions);
+        }
     }
 
     #[test]

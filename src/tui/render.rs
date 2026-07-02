@@ -216,8 +216,31 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     }
 
     let rows = session.diff_rows_for_selected_file();
+    // Lazy rendering: only construct styled lines for the visible window.
+    // Rows before the scroll offset are counted (a row emits one line plus
+    // one line per attached comment) but never built, so huge files cost
+    // O(viewport) per frame instead of O(file).
+    let scroll = session.diff_scroll as usize;
+    let viewport_lines = inner_bordered(area).height as usize;
+    let window_end = scroll.saturating_add(viewport_lines);
+    let mut line_index = 0usize;
     let mut lines = Vec::new();
+    let in_window = |line_index: usize| line_index >= scroll && line_index < window_end;
     for (index, row) in rows.iter().enumerate() {
+        if line_index >= window_end {
+            break;
+        }
+        let comments = row
+            .anchor
+            .as_ref()
+            .map(|anchor| session.comments_for_diff_row_anchor_details(anchor))
+            .unwrap_or_default();
+        // Skip rows that end before the window without building any spans.
+        let row_extent = 1 + comments.len();
+        if line_index + row_extent <= scroll {
+            line_index += row_extent;
+            continue;
+        }
         let selected = session.focus == Focus::Diff && session.diff_cursor == index;
         let in_range = session.diff_row_in_active_range(index);
         let style = diff_row_style(row.kind, selected, in_range);
@@ -226,11 +249,7 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             .or(row.old_lineno)
             .map(|n| format!("{n:>4}"))
             .unwrap_or_else(|| "    ".to_owned());
-        let comment_count = row
-            .anchor
-            .as_ref()
-            .map(|anchor| session.comments_for_diff_row_anchor(anchor))
-            .unwrap_or(0);
+        let comment_count = comments.len();
         let comment_mark = if comment_count > 0 {
             match comment_count {
                 1..=9 => comment_count.to_string(),
@@ -284,17 +303,20 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                 Line::from(spans)
             }
         };
-        lines.push(line);
-        if let Some(anchor) = row.anchor.as_ref() {
-            for comment in session.comments_for_diff_row_anchor_details(anchor) {
+        if in_window(line_index) {
+            lines.push(line);
+        }
+        line_index += 1;
+        for comment in comments {
+            if in_window(line_index) {
                 lines.push(comment_summary_line(comment));
             }
+            line_index += 1;
         }
     }
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("diff"))
-        .scroll((session.diff_scroll, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
@@ -1644,6 +1666,54 @@ diff --git a/README.md b/README.md
             "tui_snapshot_jj_helpers_confirm",
             render_tui_text(&session, &Mode::JjHelpers(state), 100, 24)
         );
+    }
+
+    #[test]
+    fn tui_snapshot_scrolled_diff_window() {
+        let mut body = String::from(
+            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,30 +1,30 @@\n",
+        );
+        for index in 1..=30 {
+            if index == 5 {
+                body.push_str("-removed line 5\n+line 5\n");
+            } else {
+                body.push_str(&format!(" line {index}\n"));
+            }
+        }
+        let mut session = snapshot_session(&body);
+        session.diff_scroll = 6;
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 16));
+    }
+
+    #[test]
+    fn scrolled_diff_keeps_comment_lines_aligned() {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+ one
+-old
++new
+ three
+"#,
+        );
+        session.toggle_focus();
+        session.move_diff_cursor(2);
+        session.add_comment("note on new".into());
+        session.comments[0].id = "pinned".to_owned();
+
+        let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        assert!(unscrolled.contains("↳ pinned"));
+
+        // Scrolling past the commented row must not shift or duplicate the
+        // remaining lines: line 4 of the full render becomes the first
+        // diff line after scrolling by 4.
+        session.diff_scroll = 4;
+        let scrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        assert!(scrolled.contains("↳ pinned"));
+        assert!(!scrolled.contains("a.txt  +1 -1"));
     }
 
     #[test]

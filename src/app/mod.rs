@@ -861,13 +861,6 @@ impl ReviewSession {
             .collect()
     }
 
-    pub fn comments_for_diff_row_anchor(&self, anchor: &CommentAnchor) -> usize {
-        self.comments
-            .iter()
-            .filter(|comment| self.comment_matches_diff_row_anchor(comment, anchor))
-            .count()
-    }
-
     fn comment_matches_diff_row_anchor(&self, comment: &Comment, anchor: &CommentAnchor) -> bool {
         let row_fingerprint = match anchor {
             CommentAnchor::Line {
@@ -1499,7 +1492,10 @@ diff --git a/src/c.rs b/src/c.rs
 
         session.add_comment("Line note".into());
 
-        assert_eq!(session.comments_for_diff_row_anchor(&anchor), 1);
+        assert_eq!(
+            session.comments_for_diff_row_anchor_details(&anchor).len(),
+            1
+        );
     }
 
     #[test]
