@@ -121,7 +121,7 @@ impl DiffSet {
 impl FileDiff {
     fn parse(raw: &str) -> Result<Self> {
         let mut path = String::from("<unknown>");
-        let mut old_path = None;
+        let mut old_path: Option<String> = None;
         let mut status = FileStatus::Modified;
         let mut hunks = Vec::new();
         let mut current_hunk: Option<Hunk> = None;
@@ -131,30 +131,43 @@ impl FileDiff {
         let mut deletions = 0;
 
         for line in raw.lines() {
+            // Header metadata (---/+++, rename/copy, mode lines) must only be
+            // parsed before the first hunk; inside hunks, lines like
+            // "--- text" are diff content, not file markers.
+            let in_header = hunks.is_empty() && current_hunk.is_none();
             if let Some(rest) = line.strip_prefix("diff --git ") {
-                let mut parts = rest.split_whitespace();
-                let old = parts
-                    .next()
-                    .unwrap_or("a/<unknown>")
-                    .trim_start_matches("a/");
-                let new = parts
-                    .next()
-                    .unwrap_or("b/<unknown>")
-                    .trim_start_matches("b/");
-                path = new.to_owned();
-                old_path = Some(old.to_owned()).filter(|old| old != new);
-            } else if line.starts_with("new file mode") {
+                if let Some((old, new)) = parse_diff_git_paths(rest) {
+                    let old = strip_path_prefix(&old, "a/");
+                    let new = strip_path_prefix(&new, "b/");
+                    path = new;
+                    old_path = Some(old);
+                }
+            } else if in_header && line.starts_with("new file mode") {
                 status = FileStatus::Added;
-            } else if line.starts_with("deleted file mode") {
+            } else if in_header && line.starts_with("deleted file mode") {
                 status = FileStatus::Deleted;
-            } else if line.starts_with("rename from ") {
+            } else if in_header && let Some(rest) = line.strip_prefix("rename from ") {
                 status = FileStatus::Renamed;
-            } else if line.starts_with("copy from ") {
+                old_path = Some(parse_bare_path(rest));
+            } else if in_header && let Some(rest) = line.strip_prefix("rename to ") {
+                status = FileStatus::Renamed;
+                path = parse_bare_path(rest);
+            } else if in_header && let Some(rest) = line.strip_prefix("copy from ") {
                 status = FileStatus::Copied;
-            } else if line.starts_with("Binary files ") {
+                old_path = Some(parse_bare_path(rest));
+            } else if in_header && let Some(rest) = line.strip_prefix("copy to ") {
+                status = FileStatus::Copied;
+                path = parse_bare_path(rest);
+            } else if in_header && line.starts_with("Binary files ") {
                 status = FileStatus::Binary;
-            } else if let Some(rest) = line.strip_prefix("+++ b/") {
-                path = rest.to_owned();
+            } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
+                if let Some(parsed) = parse_marker_path(rest, "a/") {
+                    old_path = Some(parsed);
+                }
+            } else if in_header && let Some(rest) = line.strip_prefix("+++ ") {
+                if let Some(parsed) = parse_marker_path(rest, "b/") {
+                    path = parsed;
+                }
             } else if let Some((old_start, old_len, new_start, new_len, header)) =
                 parse_hunk_header(line)
             {
@@ -225,8 +238,8 @@ impl FileDiff {
         let fingerprint = format!("{:x}", hasher.finalize());
 
         Ok(Self {
+            old_path: old_path.filter(|old| *old != path),
             path,
-            old_path,
             status,
             additions,
             deletions,
@@ -235,6 +248,133 @@ impl FileDiff {
             fingerprint,
         })
     }
+}
+
+fn strip_path_prefix(path: &str, prefix: &str) -> String {
+    path.strip_prefix(prefix).unwrap_or(path).to_owned()
+}
+
+/// Parse the path from a `--- ` or `+++ ` file marker, handling quoted paths
+/// and returning `None` for `/dev/null`.
+fn parse_marker_path(rest: &str, prefix: &str) -> Option<String> {
+    let rest = rest.trim_end();
+    if rest == "/dev/null" {
+        return None;
+    }
+    let path = parse_bare_path(rest);
+    Some(strip_path_prefix(&path, prefix))
+}
+
+/// Parse a path that may be C-style quoted (as in `rename to "sp ace.rs"`).
+fn parse_bare_path(rest: &str) -> String {
+    let rest = rest.trim_end();
+    if rest.starts_with('"')
+        && let Some((path, _)) = split_leading_quoted(rest)
+    {
+        return path;
+    }
+    rest.to_owned()
+}
+
+/// Split the remainder of a `diff --git ` line into old and new path tokens
+/// (still carrying their `a/`/`b/` prefixes). Handles quoted paths and
+/// unquoted paths containing spaces.
+fn parse_diff_git_paths(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+
+    // Quoted old path: `diff --git "a/sp ace" "b/sp ace"` (new may be unquoted).
+    if let Some((old, remainder)) = split_leading_quoted(rest) {
+        let remainder = remainder.trim_start();
+        let new = match split_leading_quoted(remainder) {
+            Some((token, _)) => token,
+            None => remainder.to_owned(),
+        };
+        return Some((old, new));
+    }
+
+    // Unquoted old path, quoted new path: `diff --git a/x "b/sp ace"`.
+    if let Some(pos) = rest.find(" \"") {
+        let (new, _) = split_leading_quoted(rest[pos + 1..].trim_start())?;
+        return Some((rest[..pos].to_owned(), new));
+    }
+
+    // Both unquoted. Paths with spaces make the boundary ambiguous, so prefer
+    // the ` b/` split where both sides agree (the overwhelmingly common case
+    // of an unrenamed file), falling back to the first ` b/` boundary.
+    let positions: Vec<usize> = rest.match_indices(" b/").map(|(index, _)| index).collect();
+    let Some(&first) = positions.first() else {
+        let mut parts = rest.split_whitespace();
+        return Some((parts.next()?.to_owned(), parts.next()?.to_owned()));
+    };
+    let boundary = positions
+        .iter()
+        .copied()
+        .find(|&pos| {
+            let old = &rest[..pos];
+            let new = &rest[pos + 1..];
+            old.strip_prefix("a/") == new.strip_prefix("b/")
+        })
+        .unwrap_or(first);
+    Some((rest[..boundary].to_owned(), rest[boundary + 1..].to_owned()))
+}
+
+/// Parse a leading C-style quoted string (as produced by git for unusual
+/// paths), returning the unescaped value and the remainder after the closing
+/// quote. Returns `None` when `s` does not start with a terminated quote.
+fn split_leading_quoted(s: &str) -> Option<(String, &str)> {
+    let inner = s.strip_prefix('"')?;
+    let raw = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::new();
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index] {
+            b'"' => {
+                return Some((
+                    String::from_utf8_lossy(&out).into_owned(),
+                    &inner[index + 1..],
+                ));
+            }
+            b'\\' => {
+                index += 1;
+                match raw.get(index)? {
+                    b'n' => {
+                        out.push(b'\n');
+                        index += 1;
+                    }
+                    b't' => {
+                        out.push(b'\t');
+                        index += 1;
+                    }
+                    b'r' => {
+                        out.push(b'\r');
+                        index += 1;
+                    }
+                    digit @ b'0'..=b'7' => {
+                        // Up to three octal digits encode one raw byte.
+                        let mut value = u32::from(digit - b'0');
+                        index += 1;
+                        let mut digits = 1;
+                        while digits < 3 && index < raw.len() && (b'0'..=b'7').contains(&raw[index])
+                        {
+                            value = value * 8 + u32::from(raw[index] - b'0');
+                            index += 1;
+                            digits += 1;
+                        }
+                        out.push(value as u8);
+                    }
+                    &other => {
+                        out.push(other);
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    None
 }
 
 fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize, String)> {
@@ -287,5 +427,156 @@ index 111..222 100644
         assert_eq!(diff.files[0].additions, 2);
         assert_eq!(diff.files[0].deletions, 1);
         assert_eq!(diff.files[0].hunks[0].lines.len(), 5);
+    }
+
+    #[test]
+    fn parses_unquoted_paths_with_spaces() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/docs/my notes.md b/docs/my notes.md
+--- a/docs/my notes.md
++++ b/docs/my notes.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].path, "docs/my notes.md");
+        assert_eq!(diff.files[0].old_path, None);
+    }
+
+    #[test]
+    fn parses_quoted_paths_with_spaces_and_escapes() {
+        let diff = DiffSet::parse(
+            "diff --git \"a/sp ace \\\"q\\\".rs\" \"b/sp ace \\\"q\\\".rs\"\n--- \"a/sp ace \\\"q\\\".rs\"\n+++ \"b/sp ace \\\"q\\\".rs\"\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].path, "sp ace \"q\".rs");
+        assert_eq!(diff.files[0].old_path, None);
+    }
+
+    #[test]
+    fn parses_quoted_paths_with_octal_utf8_escapes() {
+        let diff = DiffSet::parse(
+            "diff --git \"a/na\\303\\257ve.txt\" \"b/na\\303\\257ve.txt\"\n--- \"a/na\\303\\257ve.txt\"\n+++ \"b/na\\303\\257ve.txt\"\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].path, "naïve.txt");
+    }
+
+    #[test]
+    fn parses_rename_with_similarity_index() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/old_name.rs b/src/new_name.rs
+similarity index 97%
+rename from src/old_name.rs
+rename to src/new_name.rs
+--- a/src/old_name.rs
++++ b/src/new_name.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].status, FileStatus::Renamed);
+        assert_eq!(diff.files[0].path, "src/new_name.rs");
+        assert_eq!(diff.files[0].old_path.as_deref(), Some("src/old_name.rs"));
+    }
+
+    #[test]
+    fn parses_quoted_rename_paths() {
+        let diff = DiffSet::parse(
+            "diff --git \"a/old name.rs\" \"b/new name.rs\"\nsimilarity index 90%\nrename from \"old name.rs\"\nrename to \"new name.rs\"\n--- \"a/old name.rs\"\n+++ \"b/new name.rs\"\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].status, FileStatus::Renamed);
+        assert_eq!(diff.files[0].path, "new name.rs");
+        assert_eq!(diff.files[0].old_path.as_deref(), Some("old name.rs"));
+    }
+
+    #[test]
+    fn parses_copy_paths() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/base.rs b/src/copy.rs
+similarity index 100%
+copy from src/base.rs
+copy to src/copy.rs
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].status, FileStatus::Copied);
+        assert_eq!(diff.files[0].path, "src/copy.rs");
+        assert_eq!(diff.files[0].old_path.as_deref(), Some("src/base.rs"));
+    }
+
+    #[test]
+    fn added_and_deleted_files_use_dev_null_markers() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/gone.rs b/gone.rs
+deleted file mode 100644
+--- a/gone.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-old
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].status, FileStatus::Deleted);
+        assert_eq!(diff.files[0].path, "gone.rs");
+        assert_eq!(diff.files[0].old_path, None);
+    }
+
+    #[test]
+    fn hunk_content_resembling_markers_does_not_clobber_paths() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/notes.md b/notes.md
+--- a/notes.md
++++ b/notes.md
+@@ -1,3 +1,3 @@
+ context
+--- b/other-file.rs looks like a marker
++++ b/another looks like an added marker
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].path, "notes.md");
+        assert_eq!(diff.files[0].old_path, None);
+        // The marker-looking lines stay hunk content.
+        assert_eq!(diff.files[0].hunks[0].lines.len(), 3);
+    }
+
+    #[test]
+    fn repeated_prefix_like_paths_are_not_over_stripped() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a/b/x.rs b/a/b/x.rs
+--- a/a/b/x.rs
++++ b/a/b/x.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(diff.files[0].path, "a/b/x.rs");
+    }
+
+    #[test]
+    fn split_leading_quoted_unescapes_and_returns_rest() {
+        let (value, rest) = split_leading_quoted("\"a/sp \\t ace\" trailing").unwrap();
+
+        assert_eq!(value, "a/sp \t ace");
+        assert_eq!(rest, " trailing");
+        assert!(split_leading_quoted("\"unterminated").is_none());
+        assert!(split_leading_quoted("not quoted").is_none());
     }
 }
