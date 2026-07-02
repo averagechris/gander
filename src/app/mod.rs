@@ -21,6 +21,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    agent::AgentOverlay,
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::{Config, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
@@ -65,6 +66,11 @@ pub struct ReviewSession {
     pub max_diff_lines: usize,
     /// Files the user expanded past the large-diff threshold.
     pub force_rendered: BTreeSet<String>,
+    /// Agent-suggested review order (highest priority first), from the
+    /// agent overlay. Empty when no agent has made a suggestion.
+    pub agent_ordering: Vec<String>,
+    /// Whether the agent-suggested order is applied to the file list.
+    pub use_agent_order: bool,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
@@ -227,6 +233,8 @@ impl ReviewSession {
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
             force_rendered: BTreeSet::new(),
+            agent_ordering: Vec::new(),
+            use_agent_order: true,
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
@@ -458,13 +466,64 @@ impl ReviewSession {
     }
 
     pub fn file_tree(&self) -> FileTreeView {
+        if self.agent_order_active() {
+            return self.agent_ordered_tree();
+        }
         self.build_file_tree(&self.collapsed_dirs)
     }
 
     /// Tree with every directory expanded, used for stable file ordering
     /// regardless of the user's current fold state.
     fn full_file_tree(&self) -> FileTreeView {
+        if self.agent_order_active() {
+            return self.agent_ordered_tree();
+        }
         self.build_file_tree(&BTreeSet::new())
+    }
+
+    /// Apply agent overlay suggestions to the session.
+    pub fn apply_agent_overlay(&mut self, overlay: &AgentOverlay) {
+        self.agent_ordering = overlay.ordering.clone();
+    }
+
+    pub fn agent_order_active(&self) -> bool {
+        self.use_agent_order && !self.agent_ordering.is_empty()
+    }
+
+    /// Toggle applying the agent-suggested review order.
+    pub fn toggle_agent_order(&mut self) {
+        self.use_agent_order = !self.use_agent_order;
+    }
+
+    /// Flat file list in agent-priority order: listed files first (in the
+    /// order the agent gave), everything else after in natural order.
+    fn agent_ordered_tree(&self) -> FileTreeView {
+        let rank_for = |path: &str| {
+            self.agent_ordering
+                .iter()
+                .position(|candidate| candidate == path)
+                .unwrap_or(self.agent_ordering.len())
+        };
+        let mut visible: Vec<usize> = self.visible_file_indices();
+        visible.sort_by_key(|index| (rank_for(&self.files[*index].path), *index));
+        FileTreeView {
+            rows: visible
+                .into_iter()
+                .map(|file_index| {
+                    let file = &self.files[file_index];
+                    crate::file_tree::FlatTreeRow {
+                        depth: 0,
+                        path: file.path.clone(),
+                        label: file.path.clone(),
+                        kind: FlatTreeRowKind::File { file_index },
+                        stats: crate::file_tree::ViewedStats {
+                            viewed: usize::from(file.viewed),
+                            total: 1,
+                        },
+                    }
+                })
+                .collect(),
+        }
     }
 
     fn build_file_tree(&self, collapsed_dirs: &BTreeSet<String>) -> FileTreeView {
@@ -1384,6 +1443,51 @@ diff --git a/src/c.rs b/src/c.rs
 
         session.toggle_viewed();
         assert!(session.selected_file().unwrap().viewed);
+    }
+
+    #[test]
+    fn agent_ordering_flattens_tree_in_priority_order() {
+        let mut session = three_file_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            ordering: vec!["src/c.rs".to_owned(), "src/a.rs".to_owned()],
+            ..Default::default()
+        });
+
+        let tree = session.file_tree();
+        let labels: Vec<&str> = tree.rows.iter().map(|row| row.label.as_str()).collect();
+        // Listed files first in agent order; unlisted files after, flat list.
+        assert_eq!(labels, ["src/c.rs", "src/a.rs", "src/b.rs"]);
+        assert!(
+            tree.rows
+                .iter()
+                .all(|row| matches!(row.kind, FlatTreeRowKind::File { .. }))
+        );
+
+        // Navigation follows the agent order too: after the currently
+        // selected src/a.rs, the next unviewed file in agent order is b.
+        session.move_to_unviewed(1);
+        assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
+
+        // Toggling off restores the nested directory tree.
+        session.toggle_agent_order();
+        assert!(!session.agent_order_active());
+        let tree = session.file_tree();
+        assert_eq!(tree.rows[0].label, "src");
+    }
+
+    #[test]
+    fn agent_ordering_respects_visibility_filters() {
+        let mut session = three_file_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            ordering: vec!["src/b.rs".to_owned()],
+            ..Default::default()
+        });
+        session.files[1].viewed = true;
+        session.viewed_filter = ViewedFilter::Unviewed;
+
+        let tree = session.file_tree();
+        let labels: Vec<&str> = tree.rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, ["src/a.rs", "src/c.rs"]);
     }
 
     #[test]

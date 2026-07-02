@@ -205,6 +205,7 @@ fn main() -> color_eyre::Result<()> {
                 generated_matcher,
                 &jj,
                 Some(state_path.clone()),
+                Some(crate::agent::AgentOverlay::default_path(&repo)),
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;

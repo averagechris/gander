@@ -17,4 +17,4 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 16)"
 │                                          ││   15   line 15                                       │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments
-trunk()..@ · focus files · j/k tree · space fold · h hide noisy · f filter · t/p/b/R target · >/< st
+trunk()..@ · focus files · j/k tree · space fold · h hide noisy · f filter · ? agent order · t/p/b/R

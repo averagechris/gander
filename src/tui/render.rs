@@ -458,13 +458,18 @@ fn draw_footer(
             session,
             keymap,
             &format!(
-                "focus files{}{}",
+                "focus files{}{}{}",
                 if session.hide_generated {
                     " (noisy hidden)"
                 } else {
                     ""
                 },
                 viewed_filter_label(session),
+                if session.agent_order_active() {
+                    " (agent order)"
+                } else {
+                    ""
+                },
             ),
         )),
         Mode::Normal => footer_line(diff_footer_segments(
@@ -591,6 +596,7 @@ fn files_footer_segments(
         FooterHint::new([Action::ToggleFold], "fold"),
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
         FooterHint::new([Action::CycleViewedFilter], "filter"),
+        FooterHint::new([Action::ToggleAgentOrder], "agent order"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -1740,6 +1746,31 @@ diff --git a/README.md b/README.md
             .position(|file| file.path == "huge.txt")
             .unwrap();
         session.jump_to_file(huge);
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 16));
+    }
+
+    #[test]
+    fn tui_snapshot_agent_ordered_files() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            ordering: vec!["README.md".to_owned()],
+            ..Default::default()
+        });
 
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 16));
     }

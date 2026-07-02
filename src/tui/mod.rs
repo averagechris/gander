@@ -83,6 +83,10 @@ struct TuiState {
     /// Fingerprint of the last autosaved files/comments payload, used to skip
     /// redundant writes between events.
     last_autosave: Option<String>,
+    /// Modification time of the agent overlay at the last poll, so agent
+    /// suggestions written mid-session are picked up without reloading on
+    /// every tick.
+    overlay_mtime: Option<std::time::SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +121,7 @@ pub fn run(
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
     state_path: Option<PathBuf>,
+    agent_overlay_path: Option<PathBuf>,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
@@ -147,6 +152,7 @@ pub fn run(
         &review_loader,
         &mut tui_state,
         state_path.as_deref(),
+        agent_overlay_path.as_deref(),
     );
 
     disable_raw_mode()?;
@@ -159,6 +165,7 @@ pub fn run(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     session: &mut ReviewSession,
@@ -167,11 +174,20 @@ fn run_loop(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
     state_path: Option<&Path>,
+    agent_overlay_path: Option<&Path>,
 ) -> Result<()> {
+    if let Some(overlay_path) = agent_overlay_path {
+        maybe_reload_agent_overlay(session, overlay_path, tui_state, false);
+    }
     loop {
         terminal.draw(|frame| draw(frame, session, mode, keymap, tui_state.notice.as_ref()))?;
 
         if !event::poll(Duration::from_millis(150))? {
+            // Idle ticks are the natural moment to pick up agent overlay
+            // writes without competing with user input handling.
+            if let Some(overlay_path) = agent_overlay_path {
+                maybe_reload_agent_overlay(session, overlay_path, tui_state, true);
+            }
             continue;
         }
 
@@ -196,6 +212,41 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+/// Reload the agent overlay when its mtime changes, applying suggestions to
+/// the session. `notify` controls whether a footer notice announces updates
+/// (suppressed for the initial load).
+fn maybe_reload_agent_overlay(
+    session: &mut ReviewSession,
+    overlay_path: &Path,
+    tui_state: &mut TuiState,
+    notify: bool,
+) {
+    let mtime = std::fs::metadata(overlay_path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    if mtime.is_none() || mtime == tui_state.overlay_mtime {
+        return;
+    }
+    tui_state.overlay_mtime = mtime;
+    match crate::agent::AgentOverlay::load_or_default(overlay_path) {
+        Ok(overlay) => {
+            session.apply_agent_overlay(&overlay);
+            if notify {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "agent suggestions updated".to_owned(),
+                });
+            }
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load agent overlay: {error}"),
+            });
+        }
+    }
 }
 
 /// Cheap change-detection payload: only the persistable parts of the session
@@ -426,6 +477,19 @@ fn handle_normal_action(
         }
         Action::ToggleContextFold => session.toggle_context_fold(),
         Action::ToggleLargeDiff => session.toggle_large_diff_render(),
+        Action::ToggleAgentOrder => {
+            session.toggle_agent_order();
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: if session.agent_order_active() {
+                    "agent-suggested review order enabled".to_owned()
+                } else if session.agent_ordering.is_empty() {
+                    "no agent ordering suggested yet".to_owned()
+                } else {
+                    "agent-suggested review order disabled".to_owned()
+                },
+            });
+        }
         Action::RangeComment => {
             if session.focus == Focus::Diff {
                 session.toggle_diff_range_selection();
@@ -1717,6 +1781,52 @@ diff --git a/changed.rs b/changed.rs
         assert_eq!(notice.level, UiNoticeLevel::Error);
         assert!(notice.message.contains("jj squash -r @ failed"));
         assert!(notice.message.contains("immutable commit"));
+    }
+
+    #[test]
+    fn overlay_polling_applies_agent_ordering_on_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        let mut session = snapshot_session(
+            r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mut tui_state = TuiState::default();
+
+        // No overlay on disk yet: nothing happens.
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        assert!(session.agent_ordering.is_empty());
+        assert!(tui_state.notice.is_none());
+
+        crate::agent::AgentOverlay {
+            ordering: vec!["b.rs".to_owned()],
+            ..Default::default()
+        }
+        .save(&overlay_path)
+        .unwrap();
+
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        assert_eq!(session.agent_ordering, ["b.rs"]);
+        assert_eq!(
+            tui_state.notice.as_ref().unwrap().message,
+            "agent suggestions updated"
+        );
+
+        // Unchanged mtime: no re-notification.
+        tui_state.notice = None;
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        assert!(tui_state.notice.is_none());
     }
 
     #[test]
