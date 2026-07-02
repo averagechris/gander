@@ -63,6 +63,7 @@ use search::FileSearchState;
 
 enum Mode {
     Normal,
+    Help,
     TargetChooser(TargetChooserState),
     RevsetInput(RevsetInputState),
     OperationPicker(OperationPickerState),
@@ -310,6 +311,10 @@ fn handle_key_event(
                 return Ok(true);
             }
         }
+        Mode::Help => {
+            // Any key dismisses the help overlay; it is purely informational.
+            *mode = Mode::Normal;
+        }
         Mode::TargetChooser(chooser) => {
             if handle_target_chooser_key(key, chooser, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
@@ -385,6 +390,7 @@ fn handle_normal_action(
 ) -> Result<bool> {
     match action {
         Action::Quit => return Ok(true),
+        Action::Help => *mode = Mode::Help,
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => session.move_diff_cursor(1),
@@ -1359,7 +1365,8 @@ fn handle_mouse_event(
 ) {
     if matches!(
         mode,
-        Mode::CommentInput { .. }
+        Mode::Help
+            | Mode::CommentInput { .. }
             | Mode::RevsetInput(_)
             | Mode::OperationPicker(_)
             | Mode::JjHelpers(_)

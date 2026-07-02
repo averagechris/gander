@@ -73,6 +73,7 @@ pub struct ArtifactConfig {
 #[serde(default, rename_all = "kebab-case")]
 pub struct KeybindingsConfig {
     pub quit: Vec<String>,
+    pub help: Vec<String>,
     pub move_down: Vec<String>,
     pub move_up: Vec<String>,
     pub toggle_focus: Vec<String>,
@@ -199,6 +200,7 @@ struct ArtifactConfigPatch {
 #[serde(default, rename_all = "kebab-case")]
 struct KeybindingsConfigPatch {
     quit: Option<Vec<String>>,
+    help: Option<Vec<String>>,
     move_down: Option<Vec<String>>,
     move_up: Option<Vec<String>>,
     toggle_focus: Option<Vec<String>>,
@@ -282,6 +284,7 @@ impl Default for KeybindingsConfig {
             // Esc intentionally does not quit: it dismisses the current layer
             // (range selection, notices, popups) so it stays safe to mash.
             quit: keys(["q"]),
+            help: keys(["?"]),
             move_down: keys(["j", "down"]),
             move_up: keys(["k", "up"]),
             toggle_focus: keys(["tab"]),
@@ -444,6 +447,7 @@ impl From<GeneratedConfig> for GeneratedPolicy {
 impl KeybindingsConfig {
     fn apply_patch(&mut self, patch: KeybindingsConfigPatch) {
         apply_optional(&mut self.quit, patch.quit);
+        apply_optional(&mut self.help, patch.help);
         apply_optional(&mut self.move_down, patch.move_down);
         apply_optional(&mut self.move_up, patch.move_up);
         apply_optional(&mut self.toggle_focus, patch.toggle_focus);

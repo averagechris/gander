@@ -346,10 +346,12 @@ killed terminal does not lose review progress.
 
 The defaults below can be overridden in the `[keybindings]` config section.
 Key names support single characters plus `esc`, `enter`, `tab`, `backspace`,
-arrow keys, `pageup`, `pagedown`, and `space`.
+arrow keys, `pageup`, `pagedown`, and `space`. Press `?` in the TUI for the
+full grouped keymap; the footer only shows the everyday hints.
 
 | Key | Action |
 | --- | --- |
+| `?` | help overlay with the full keymap |
 | `j` / Down | next file |
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |

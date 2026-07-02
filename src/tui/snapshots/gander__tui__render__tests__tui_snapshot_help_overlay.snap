@@ -1,0 +1,36 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
+---
+┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
+│• ▾ src 0/1                               ││src/app.rs  +1 -1                                               │
+│  • mod     app.rs                        ││@@ -1,2 +1,2 @@                                                 │
+│     ┌help─────────────────────────────────────────────────────────────────────────────────────────────┐    │
+│     │general                                          comments                                        │    │
+│     │         tab  switch focus between files and diff           c  comment at cursor                 │    │
+│     │           ?  this help                                     r  start/finish range comment        │    │
+│     │      ctrl-g  dismiss range/notice                          e  edit comment                      │    │
+│     │           q  quit (writes artifact)                        x  delete comment                    │    │
+│     │files                                                       C  comment list                      │    │
+│     │         j/k  move in tree                                m/M  next/previous comment             │    │
+│     │       space  fold/unfold directory              targets & jj                                    │    │
+│     │  left/right  collapse/expand directory                     t  compare trunk()..@                │    │
+│     │           /  fuzzy file search                             p  compare @-..@                     │    │
+│     │           h  hide/show noisy files                         b  base/tip chooser                  │    │
+│     │           f  cycle viewed filter                           R  revset input                      │    │
+│     │         n/N  next/previous unviewed file                 >/<  step through stack                │    │
+│     │       enter  mark viewed and advance                       I  diff against prior jj operation   │    │
+│     │           v  toggle viewed                                 !  jj helpers (squash, rebase, ...)  │    │
+│     │           a  mark all viewed                    agent                                           │    │
+│     │diff                                                        A  toggle agent-suggested order      │    │
+│     │         j/k  move cursor                                   F  agent-flagged sections            │    │
+│     │         d/u  scroll                                        S  agent review chunks               │    │
+│     │         g/G  jump top/bottom                               D  agent draft comments              │    │
+│     │         ]/[  next/previous changed symbol                                                       │    │
+│     │           o  changed symbol outline                                                             │    │
+│     │           z  fold/unfold context lines                                                          │    │
+│     │           L  expand/collapse huge diff                                                          │    │
+│     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments
+help · any key to close

@@ -64,6 +64,7 @@ pub(super) fn draw(
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
         Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
+        Mode::Help => draw_help_popup(frame, frame.area(), keymap),
         Mode::Normal => {}
     }
 }
@@ -566,6 +567,7 @@ fn draw_footer(
         Mode::CommentList(_) => {
             "comments · j/k move · enter jump · s cycle state · x delete · esc close".to_owned()
         }
+        Mode::Help => "help · any key to close".to_owned(),
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
     if let Some(notice) = notice {
@@ -621,38 +623,18 @@ fn files_footer_segments(
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
+    // Deliberately short: the everyday loop only. Everything else lives in
+    // the help overlay so the footer stays readable at a glance.
     let hints = [
-        FooterHint::new([Action::MoveDown, Action::MoveUp], "tree"),
+        FooterHint::new([Action::MoveDown, Action::MoveUp], "move"),
         FooterHint::new([Action::ToggleFold], "fold"),
-        FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
         FooterHint::new([Action::CycleViewedFilter], "filter"),
-        FooterHint::new([Action::ToggleAgentOrder], "agent order"),
-        FooterHint::new([Action::FlagList], "flags"),
-        FooterHint::new([Action::ChunkList], "chunks"),
-        FooterHint::new([Action::DraftList], "drafts"),
-        FooterHint::new(
-            [
-                Action::CompareTrunk,
-                Action::CompareParent,
-                Action::TargetChooser,
-                Action::RevsetInput,
-            ],
-            "target",
-        ),
-        FooterHint::new([Action::StackNext, Action::StackPrevious], "stack"),
-        FooterHint::new([Action::OperationPicker], "op diff"),
-        FooterHint::new([Action::JjHelpers], "jj helpers"),
-        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::FileSearch], "search"),
-        FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
-        FooterHint::new([Action::ToggleFocus], "diff"),
+        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::MarkViewed], "viewed"),
-        FooterHint::new([Action::ToggleViewed], "toggle"),
-        FooterHint::new(
-            [Action::Comment, Action::EditComment, Action::DeleteComment],
-            "comment",
-        ),
-        FooterHint::new([Action::CommentList], "list"),
+        FooterHint::new([Action::ToggleFocus], "diff"),
+        FooterHint::new([Action::Comment], "comment"),
+        FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
     let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
@@ -667,45 +649,17 @@ fn diff_footer_segments(
 ) -> Vec<String> {
     let hints = [
         FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
-        FooterHint::new([Action::NextSymbol, Action::PreviousSymbol], "symbols"),
-        FooterHint::new([Action::SymbolOutline], "outline"),
-        FooterHint::new([Action::ToggleContextFold], context_fold_label(session)),
-        FooterHint::new([Action::ToggleLargeDiff], "big diff"),
-        FooterHint::new([Action::RangeComment], "range"),
-        FooterHint::new([Action::CancelRangeComment], "cancel"),
-        FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
-        FooterHint::new([Action::CycleViewedFilter], "filter"),
-        FooterHint::new(
-            [
-                Action::CompareTrunk,
-                Action::CompareParent,
-                Action::TargetChooser,
-                Action::RevsetInput,
-            ],
-            "target",
-        ),
-        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
-        FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
-        FooterHint::new([Action::ToggleFocus], "files"),
-        FooterHint::new(
-            [Action::Comment, Action::EditComment, Action::DeleteComment],
-            "comment",
-        ),
-        FooterHint::new([Action::CommentList], "list"),
         FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
+        FooterHint::new([Action::RangeComment], "range"),
+        FooterHint::new([Action::Comment], "comment"),
+        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
+        FooterHint::new([Action::ToggleFocus], "files"),
+        FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
     let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
     segments.extend(hint_segments(keymap, &hints));
     segments
-}
-
-fn noisy_toggle_label(session: &ReviewSession) -> &'static str {
-    if session.hide_generated {
-        "show noisy"
-    } else {
-        "hide noisy"
-    }
 }
 
 fn viewed_filter_label(session: &ReviewSession) -> String {
@@ -716,12 +670,110 @@ fn viewed_filter_label(session: &ReviewSession) -> String {
         .unwrap_or_default()
 }
 
-fn context_fold_label(session: &ReviewSession) -> &'static str {
-    if session.fold_context {
-        "unfold ctx"
-    } else {
-        "fold ctx"
-    }
+/// Full keymap reference, grouped by workflow. The footer only shows the
+/// everyday hints; this popup is the complete map. Two columns keep every
+/// group visible on typical terminal heights.
+fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) {
+    let popup = centered_rect(90, 80, area);
+    frame.render_widget(Clear, popup);
+
+    let section = |title: &str| {
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+    let entry = |actions: &[Action], label: &str| {
+        let keys: Vec<&str> = actions.iter().map(|action| keymap.hint(*action)).collect();
+        Line::from(vec![
+            Span::styled(
+                format!("  {:>10}  ", keys.join("/")),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(label.to_owned(), Style::default().fg(Color::Gray)),
+        ])
+    };
+
+    let left = vec![
+        section("general"),
+        entry(
+            &[Action::ToggleFocus],
+            "switch focus between files and diff",
+        ),
+        entry(&[Action::Help], "this help"),
+        entry(&[Action::CancelRangeComment], "dismiss range/notice"),
+        entry(&[Action::Quit], "quit (writes artifact)"),
+        section("files"),
+        entry(&[Action::MoveDown, Action::MoveUp], "move in tree"),
+        entry(&[Action::ToggleFold], "fold/unfold directory"),
+        entry(
+            &[Action::CollapseFold, Action::ExpandFold],
+            "collapse/expand directory",
+        ),
+        entry(&[Action::FileSearch], "fuzzy file search"),
+        entry(&[Action::ToggleGenerated], "hide/show noisy files"),
+        entry(&[Action::CycleViewedFilter], "cycle viewed filter"),
+        entry(
+            &[Action::NextUnviewed, Action::PreviousUnviewed],
+            "next/previous unviewed file",
+        ),
+        entry(&[Action::MarkViewed], "mark viewed and advance"),
+        entry(&[Action::ToggleViewed], "toggle viewed"),
+        entry(&[Action::MarkAllViewed], "mark all viewed"),
+        section("diff"),
+        entry(&[Action::MoveDown, Action::MoveUp], "move cursor"),
+        entry(&[Action::ScrollDown, Action::ScrollUp], "scroll"),
+        entry(&[Action::DiffTop, Action::DiffBottom], "jump top/bottom"),
+        entry(
+            &[Action::NextSymbol, Action::PreviousSymbol],
+            "next/previous changed symbol",
+        ),
+        entry(&[Action::SymbolOutline], "changed symbol outline"),
+        entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
+        entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
+    ];
+    let right = vec![
+        section("comments"),
+        entry(&[Action::Comment], "comment at cursor"),
+        entry(&[Action::RangeComment], "start/finish range comment"),
+        entry(&[Action::EditComment], "edit comment"),
+        entry(&[Action::DeleteComment], "delete comment"),
+        entry(&[Action::CommentList], "comment list"),
+        entry(
+            &[Action::NextComment, Action::PreviousComment],
+            "next/previous comment",
+        ),
+        section("targets & jj"),
+        entry(&[Action::CompareTrunk], "compare trunk()..@"),
+        entry(&[Action::CompareParent], "compare @-..@"),
+        entry(&[Action::TargetChooser], "base/tip chooser"),
+        entry(&[Action::RevsetInput], "revset input"),
+        entry(
+            &[Action::StackNext, Action::StackPrevious],
+            "step through stack",
+        ),
+        entry(
+            &[Action::OperationPicker],
+            "diff against prior jj operation",
+        ),
+        entry(&[Action::JjHelpers], "jj helpers (squash, rebase, ...)"),
+        section("agent"),
+        entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
+        entry(&[Action::FlagList], "agent-flagged sections"),
+        entry(&[Action::ChunkList], "agent review chunks"),
+        entry(&[Action::DraftList], "agent draft comments"),
+    ];
+
+    frame.render_widget(Block::default().borders(Borders::ALL).title("help"), popup);
+    let inner = inner_bordered(popup);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(left).wrap(Wrap { trim: false }), columns[0]);
+    frame.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), columns[1]);
 }
 
 fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &CommentEditor) {
@@ -1800,6 +1852,21 @@ diff --git a/README.md b/README.md
         );
 
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_help_overlay() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,2 +1,2 @@
+-    old();
++    new();
+"#,
+        );
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Help, 110, 32));
     }
 
     #[test]

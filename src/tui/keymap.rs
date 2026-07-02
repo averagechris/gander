@@ -27,6 +27,7 @@ struct KeyPress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
     Quit,
+    Help,
     MoveDown,
     MoveUp,
     ToggleFocus,
@@ -84,6 +85,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
     fn try_from(config: &KeybindingsConfig) -> Result<Self> {
         let mut bindings = Vec::new();
         add_bindings(&mut bindings, Action::Quit, &config.quit)?;
+        add_bindings(&mut bindings, Action::Help, &config.help)?;
         add_bindings(&mut bindings, Action::MoveDown, &config.move_down)?;
         add_bindings(&mut bindings, Action::MoveUp, &config.move_up)?;
         add_bindings(&mut bindings, Action::ToggleFocus, &config.toggle_focus)?;
@@ -95,6 +97,25 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::RevsetInput, &config.revset_input)?;
         add_bindings(&mut bindings, Action::StackNext, &config.stack_next)?;
         add_bindings(&mut bindings, Action::StackPrevious, &config.stack_previous)?;
+        add_bindings(
+            &mut bindings,
+            Action::OperationPicker,
+            &config.operation_picker,
+        )?;
+        add_bindings(&mut bindings, Action::JjHelpers, &config.jj_helpers)?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleLargeDiff,
+            &config.toggle_large_diff,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleAgentOrder,
+            &config.toggle_agent_order,
+        )?;
+        add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
+        add_bindings(&mut bindings, Action::ChunkList, &config.chunk_list)?;
+        add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
         add_bindings(
             &mut bindings,
             Action::TargetPickerMoveDown,
@@ -340,6 +361,48 @@ mod tests {
             keymap.action_for(&KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
             Some(Action::RevsetInput)
         );
+    }
+
+    #[test]
+    fn agent_and_jj_actions_have_default_bindings() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        // Regression: these actions used to be missing from KeyMap::try_from,
+        // leaving them unbound (`?` hints in the footer, dead keys).
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('A'))),
+            Some(Action::ToggleAgentOrder)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('F'))),
+            Some(Action::FlagList)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('S'))),
+            Some(Action::ChunkList)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('D'))),
+            Some(Action::DraftList)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('I'))),
+            Some(Action::OperationPicker)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('!'))),
+            Some(Action::JjHelpers)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('L'))),
+            Some(Action::ToggleLargeDiff)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('?'))),
+            Some(Action::Help)
+        );
+        assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
+        assert_eq!(keymap.hint(Action::Help), "?");
     }
 
     #[test]
