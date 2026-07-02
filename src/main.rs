@@ -166,7 +166,10 @@ fn main() -> color_eyre::Result<()> {
     let mut state = ReviewState::load_or_default(&state_path)?;
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff, state.clone(), &config);
-    session.annotate_generated_where(|file| generated_matcher.is_match(&file.path));
+    session.annotate_generated_where(|file| {
+        generated_matcher.is_match(&file.path)
+            || crate::generated::diff_content_looks_generated(&file.diff)
+    });
 
     match command {
         Command::Tui {

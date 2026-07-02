@@ -547,7 +547,10 @@ impl ReviewLoader<'_> {
             .with_context(|| format!("failed to parse jj diff for {target}"))?;
         diff.apply_ignores(&self.ignore_globs)?;
         session.replace_diff(target, diff);
-        session.annotate_generated_where(|file| self.generated_matcher.is_match(&file.path));
+        session.annotate_generated_where(|file| {
+            self.generated_matcher.is_match(&file.path)
+                || crate::generated::diff_content_looks_generated(&file.diff)
+        });
         Ok(())
     }
 }
