@@ -64,6 +64,7 @@
             chmod 0555 "$stage/gander"
             cp -p ${./README.md} "$stage/README.md"
             cp -p ${./CHANGELOG.md} "$stage/CHANGELOG.md"
+            cp -p ${./LICENSE} "$stage/LICENSE"
             cp -p ${./LICENSE-MIT} "$stage/LICENSE-MIT"
             cp -p ${./LICENSE-APACHE} "$stage/LICENSE-APACHE"
 
