@@ -1,6 +1,8 @@
 //! Construction of the flattened diff rows rendered in the diff pane,
 //! including per-line comment anchors.
 
+use std::rc::Rc;
+
 use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
     diff::DiffLineKind,
@@ -9,7 +11,7 @@ use crate::{
 
 use super::{
     ReviewFile, ReviewSession,
-    syntax_cache::{SyntaxCacheStatus, SyntaxSide, syntax_source},
+    syntax_cache::{SyntaxCacheKey, SyntaxCacheStatus, SyntaxSide, syntax_source},
 };
 
 #[derive(Debug, Clone)]
@@ -33,11 +35,24 @@ pub enum DiffRowKind {
 }
 
 impl ReviewSession {
-    pub fn diff_rows_for_selected_file(&self) -> Vec<DiffRow> {
+    /// Diff rows for the selected file, memoized per file/fingerprint/syntax
+    /// config. Rebuilding on every draw and cursor move was the main hot spot
+    /// on large files.
+    pub fn diff_rows_for_selected_file(&self) -> Rc<Vec<DiffRow>> {
         let Some(file) = self.selected_visible_file() else {
-            return Vec::new();
+            return Rc::new(Vec::new());
         };
 
+        let key = SyntaxCacheKey::for_file(self, file);
+        if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
+            return cached;
+        }
+        let rows = Rc::new(self.build_diff_rows(file));
+        self.rows_cache.borrow_mut().insert(key, Rc::clone(&rows));
+        rows
+    }
+
+    fn build_diff_rows(&self, file: &ReviewFile) -> Vec<DiffRow> {
         let mut rows = vec![DiffRow {
             old_lineno: None,
             new_lineno: None,

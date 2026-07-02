@@ -14,6 +14,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    rc::Rc,
 };
 
 use chrono::Utc;
@@ -53,6 +54,9 @@ pub struct ReviewSession {
     pub diff_range_selection: Option<DiffRangeSelection>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
+    /// Memoized diff rows per file (same key as the syntax cache), rebuilt
+    /// only when the diff fingerprint or syntax config changes.
+    rows_cache: RefCell<BTreeMap<SyntaxCacheKey, Rc<Vec<DiffRow>>>>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
 }
@@ -145,6 +149,7 @@ impl ReviewSession {
             diff_range_selection: None,
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
+            rows_cache: RefCell::new(BTreeMap::new()),
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
         };
@@ -1216,6 +1221,35 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(added_fn.syntax.is_empty());
         assert!(
             !rows
+                .iter()
+                .any(|row| matches!(row.kind, DiffRowKind::SyntaxSummary))
+        );
+    }
+
+    #[test]
+    fn diff_rows_are_memoized_per_file_fingerprint() {
+        let session = rust_syntax_session();
+
+        let first = session.diff_rows_for_selected_file();
+        let second = session.diff_rows_for_selected_file();
+
+        assert!(std::rc::Rc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn diff_rows_cache_tracks_syntax_config_changes() {
+        let mut session = rust_syntax_session();
+
+        let before = session.diff_rows_for_selected_file();
+        session.syntax = SyntaxConfig {
+            enabled: false,
+            ..SyntaxConfig::default()
+        };
+        let after = session.diff_rows_for_selected_file();
+
+        assert!(!std::rc::Rc::ptr_eq(&before, &after));
+        assert!(
+            !after
                 .iter()
                 .any(|row| matches!(row.kind, DiffRowKind::SyntaxSummary))
         );
