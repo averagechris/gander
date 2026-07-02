@@ -67,6 +67,7 @@ pub struct KeybindingsConfig {
     pub stack_next: Vec<String>,
     pub stack_previous: Vec<String>,
     pub operation_picker: Vec<String>,
+    pub jj_helpers: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
     pub next_unviewed: Vec<String>,
@@ -180,6 +181,7 @@ struct KeybindingsConfigPatch {
     stack_next: Option<Vec<String>>,
     stack_previous: Option<Vec<String>>,
     operation_picker: Option<Vec<String>>,
+    jj_helpers: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
@@ -257,6 +259,7 @@ impl Default for KeybindingsConfig {
             stack_next: keys([">"]),
             stack_previous: keys(["<"]),
             operation_picker: keys(["I"]),
+            jj_helpers: keys(["!"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
             next_unviewed: keys(["n"]),
@@ -409,6 +412,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.stack_next, patch.stack_next);
         apply_optional(&mut self.stack_previous, patch.stack_previous);
         apply_optional(&mut self.operation_picker, patch.operation_picker);
+        apply_optional(&mut self.jj_helpers, patch.jj_helpers);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
@@ -616,6 +620,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.stack_next, [">"]);
         assert_eq!(config.keybindings.stack_previous, ["<"]);
         assert_eq!(config.keybindings.operation_picker, ["I"]);
+        assert_eq!(config.keybindings.jj_helpers, ["!"]);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);
         assert_eq!(config.keybindings.target_picker_up, ["up", "ctrl-k"]);
         assert_eq!(config.keybindings.toggle_generated, ["h"]);

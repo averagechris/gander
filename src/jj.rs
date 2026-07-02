@@ -28,6 +28,9 @@ pub trait JjBackend {
         target: &ReviewTarget,
         operation_id: &str,
     ) -> Result<String>;
+    /// Run a mutating jj helper command (e.g. `split`/`squash`). Callers must
+    /// only invoke this after explicit user confirmation.
+    fn run_command(&self, repo: &Path, args: &[String]) -> Result<String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +234,32 @@ impl JjBackend for JjCliBackend {
         operation_id: &str,
     ) -> Result<String> {
         JjCommand::run_diff(&self.binary, repo, target, Some(operation_id))
+    }
+
+    fn run_command(&self, repo: &Path, args: &[String]) -> Result<String> {
+        let output = Command::new(&self.binary)
+            .args(args)
+            .arg("--color=never")
+            .arg("--no-pager")
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !output.status.success() {
+            bail!(
+                "jj {} failed with status {}:\n{}",
+                args.join(" "),
+                output.status,
+                stderr
+            );
+        }
+        Ok(if stdout.trim().is_empty() {
+            stderr
+        } else {
+            stdout
+        })
     }
 }
 

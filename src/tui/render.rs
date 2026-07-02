@@ -21,6 +21,7 @@ use super::{
     chooser::TargetChooserState,
     comments::CommentListState,
     editor::CommentEditor,
+    helpers::{JjHelperOption, JjHelperState},
     keymap::{Action, KeyMap},
     ops::OperationPickerState,
     outline::SymbolOutlineState,
@@ -52,6 +53,7 @@ pub(super) fn draw(
         Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
         Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input),
         Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
+        Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -483,6 +485,13 @@ fn draw_footer(
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
         }
+        Mode::JjHelpers(state) => {
+            if state.confirming {
+                "confirm jj command · enter run · esc back".to_owned()
+            } else {
+                "jj helpers · j/k move · enter select · esc close".to_owned()
+            }
+        }
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -565,6 +574,7 @@ fn files_footer_segments(
         ),
         FooterHint::new([Action::StackNext, Action::StackPrevious], "stack"),
         FooterHint::new([Action::OperationPicker], "op diff"),
+        FooterHint::new([Action::JjHelpers], "jj helpers"),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::FileSearch], "search"),
         FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
@@ -709,6 +719,71 @@ fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &R
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("revsets"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjHelperState) {
+    let popup = centered_rect(76, 46, area);
+    frame.render_widget(Clear, popup);
+
+    let mut lines = Vec::new();
+    if state.confirming {
+        let command = state
+            .selected_option()
+            .map(JjHelperOption::command_line)
+            .unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            "About to run:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {command}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "This rewrites history in your repo. enter run · esc back",
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "jj helpers (nothing runs until you confirm)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+        for (index, option) in state.options.iter().enumerate() {
+            let selected = index == state.selected;
+            let marker = if selected { "›" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} {}", option.label), style),
+                Span::styled(
+                    format!("  ({})", option.command_line()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "↑/↓ or j/k move · enter select · esc close",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("jj helpers"))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -1545,6 +1620,30 @@ diff --git a/README.md b/README.md
         ]));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_jj_helpers_choose_and_confirm() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mut state = JjHelperState::for_session(&session);
+        insta::assert_snapshot!(
+            "tui_snapshot_jj_helpers_choose",
+            render_tui_text(&session, &Mode::JjHelpers(state.clone()), 100, 24)
+        );
+
+        state.confirming = true;
+        insta::assert_snapshot!(
+            "tui_snapshot_jj_helpers_confirm",
+            render_tui_text(&session, &Mode::JjHelpers(state), 100, 24)
+        );
     }
 
     #[test]

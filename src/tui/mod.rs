@@ -11,6 +11,7 @@
 mod chooser;
 mod comments;
 mod editor;
+mod helpers;
 mod keymap;
 mod ops;
 mod outline;
@@ -46,6 +47,7 @@ use crate::{
 use chooser::TargetChooserState;
 use comments::CommentListState;
 use editor::CommentEditor;
+use helpers::JjHelperState;
 use keymap::{Action, KeyMap};
 use ops::OperationPickerState;
 use outline::SymbolOutlineState;
@@ -58,6 +60,7 @@ enum Mode {
     TargetChooser(TargetChooserState),
     RevsetInput(RevsetInputState),
     OperationPicker(OperationPickerState),
+    JjHelpers(JjHelperState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -253,6 +256,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::JjHelpers(state) => {
+            if handle_jj_helpers_key(key, state, session, keymap, review_loader, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -361,6 +369,9 @@ fn handle_normal_action(
                 });
             }
         },
+        Action::JjHelpers => {
+            *mode = Mode::JjHelpers(JjHelperState::for_session(session));
+        }
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::FileSearch => {
@@ -709,6 +720,91 @@ fn apply_incremental_review(
     });
 }
 
+fn handle_jj_helpers_key(
+    key: KeyEvent,
+    state: &mut JjHelperState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => state.move_selection(1),
+            Action::TargetPickerMoveUp => state.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        // Esc dismisses one layer: the confirmation first, then the popup.
+        KeyCode::Esc => {
+            if state.confirming {
+                state.confirming = false;
+                false
+            } else {
+                true
+            }
+        }
+        KeyCode::Enter => {
+            if state.selected_option().is_none() {
+                return true;
+            }
+            if !state.confirming {
+                state.confirming = true;
+                return false;
+            }
+            let option = state.selected_option().cloned().expect("checked above");
+            run_jj_helper(review_loader, session, &option, tui_state);
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.move_selection(-1);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Run a confirmed jj helper command and reload the current target so the
+/// review reflects the rewritten change.
+fn run_jj_helper(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    option: &helpers::JjHelperOption,
+    tui_state: &mut TuiState,
+) {
+    match review_loader.jj.run_command(&session.repo, &option.args) {
+        Ok(_) => {
+            let reload = review_loader.load(session, session.target.clone());
+            tui_state.notice = Some(match reload {
+                Ok(()) => UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("ran {}", option.command_line()),
+                },
+                Err(error) => UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!(
+                        "ran {} but failed to reload diff: {error:?}",
+                        option.command_line()
+                    ),
+                },
+            });
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("{} failed: {error:?}", option.command_line()),
+            });
+        }
+    }
+}
+
 fn handle_file_search_key(
     key: KeyEvent,
     search: &mut FileSearchState,
@@ -927,6 +1023,7 @@ fn handle_mouse_event(
         Mode::CommentInput { .. }
             | Mode::RevsetInput(_)
             | Mode::OperationPicker(_)
+            | Mode::JjHelpers(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)
@@ -1054,6 +1151,8 @@ mod tests {
         stack: Vec<JjChangeSummary>,
         operations: Vec<crate::jj::JjOperationSummary>,
         diff_at_op: Option<String>,
+        commands: RefCell<Vec<Vec<String>>>,
+        command_result: Result<String, String>,
     }
 
     impl MockJjBackend {
@@ -1065,6 +1164,8 @@ mod tests {
                 stack: Vec::new(),
                 operations: Vec::new(),
                 diff_at_op: None,
+                commands: RefCell::new(Vec::new()),
+                command_result: Ok(String::new()),
             }
         }
     }
@@ -1099,6 +1200,14 @@ mod tests {
             match &self.diff_at_op {
                 Some(diff) => Ok(diff.clone()),
                 None => bail!("no at-op diff configured"),
+            }
+        }
+
+        fn run_command(&self, _repo: &Path, args: &[String]) -> Result<String> {
+            self.commands.borrow_mut().push(args.to_vec());
+            match &self.command_result {
+                Ok(output) => Ok(output.clone()),
+                Err(error) => bail!(error.clone()),
             }
         }
     }
@@ -1485,6 +1594,128 @@ diff --git a/changed.rs b/changed.rs
         let notice = tui_state.notice.unwrap();
         assert_eq!(notice.level, UiNoticeLevel::Error);
         assert!(notice.message.contains("op123"));
+    }
+
+    #[test]
+    fn jj_helper_runs_only_after_explicit_confirmation() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut state = JjHelperState::for_session(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        // First Enter only advances to the confirmation step.
+        assert!(!handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert!(state.confirming);
+        assert!(backend.commands.borrow().is_empty());
+
+        // Second Enter actually runs the command and closes the popup.
+        assert!(handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(
+            backend.commands.borrow().as_slice(),
+            [vec!["squash".to_owned(), "-r".to_owned(), "@".to_owned()]]
+        );
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("ran jj squash -r @")
+        );
+    }
+
+    #[test]
+    fn jj_helper_esc_backs_out_of_confirmation_without_running() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut state = JjHelperState::for_session(&session);
+        state.confirming = true;
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        // Esc dismisses the confirmation layer but keeps the popup open.
+        assert!(!handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Esc),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert!(!state.confirming);
+
+        // A second Esc closes the popup entirely; nothing ever ran.
+        assert!(handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Esc),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert!(backend.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn jj_helper_failures_become_error_notices() {
+        let mut session = snapshot_session("");
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.command_result = Err("immutable commit".to_owned());
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut state = JjHelperState::for_session(&session);
+        state.confirming = true;
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert!(handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("jj squash -r @ failed"));
+        assert!(notice.message.contains("immutable commit"));
     }
 
     #[test]
