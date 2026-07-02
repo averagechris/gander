@@ -14,9 +14,15 @@ This repo is intentionally early, but the first vertical slice is in place:
 - sorts viewed files below unviewed files and advances after marking viewed
 - preserves each file's diff cursor and scroll position while navigating
 - supports repeated `--ignore <glob>` filters for noisy generated files
-- labels generated/noisy files in the TUI, summaries, and artifacts
+- labels generated/noisy files in the TUI, summaries, and artifacts, and
+  auto-detects generated files by header markers like `@generated`/`DO NOT EDIT`
+- fuzzy file search (`/`) and viewed/unviewed file filters (`f`)
+- changed-symbol outline (`o`) with `]`/`[` jumps between changed functions
+- symbol-aware folding of long unchanged context runs (`z`)
 - records lightweight file-level and line-level comments from the TUI
-- exports review artifacts as JSON or Markdown
+- tracks comment states (draft/todo/resolved) with a comment list pane (`C`)
+- exports review artifacts as JSON or Markdown, including an agent profile
+  with raw hunks and comment excerpts (`--profile agent`)
 - syntax-highlights common languages with a built-in tree-sitter registry
 - is packaged with a Nix flake and dev shell
 
@@ -108,6 +114,7 @@ globs = ["schemas/*.json"]
 
 [artifact]
 format = "markdown"
+profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JSON)
 output_dir = ".gander"
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
@@ -154,12 +161,19 @@ target-chooser = ["b"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
 toggle-generated = ["h"]
+cycle-viewed-filter = ["f"]
 toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
+toggle-context-fold = ["z"]
+file-search = ["/"]
+symbol-outline = ["o"]
+next-symbol = ["]"]
+previous-symbol = ["["]
 comment = ["c"]
 edit-comment = ["e"]
 delete-comment = ["x"]
+comment-list = ["C"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
 quit = ["q"]
@@ -260,6 +274,7 @@ Export artifacts:
 ```sh
 cargo run -- export json --output review.json
 cargo run -- export markdown --output review.md
+cargo run -- export json --profile agent # adds raw hunks + comment excerpts
 cargo run -- export # uses configured artifact defaults
 cargo run -- tui > review.md # TUI on stderr, Markdown artifact on stdout after quit
 ```
@@ -310,10 +325,15 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |
 | `m` / `M` | next / previous comment |
+| `/` | fuzzy file search popup |
+| `f` | cycle viewed filter: all → unviewed only → viewed only |
 | Space | fold / unfold selected directory or selected file's parent directory |
 | Left / Right | collapse / expand selected directory |
 | `t` / `p` | compare `trunk()..@` / `@-..@` |
 | `h` | hide/show generated/noisy files in the TUI |
+| `z` | fold/unfold long unchanged context runs in the diff |
+| `o` | changed-symbol outline popup for the selected file |
+| `]` / `[` | jump to next / previous changed symbol in the diff |
 | `r` in diff focus | start/cancel a range selection for a multi-line comment |
 | Ctrl-G / Esc | cancel active range selection and dismiss notices |
 | Enter | mark selected file viewed and advance to the next unviewed file |
@@ -325,6 +345,7 @@ arrow keys, `pageup`, `pagedown`, and `space`.
 | Tab | switch focus between file tree and diff |
 | `c` | add a file comment in file focus, or line/range comment in diff focus |
 | `e` / `x` | edit / delete the selected comment |
+| `C` | comment list popup (jump, cycle draft/todo/resolved, delete) |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
 | `q` | quit and save state |
@@ -358,7 +379,8 @@ See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value nex
 
 1. Helix-inspired external grammar/query loading for custom languages
 2. better jj revision/range semantics and support for reviewing stacks
-3. snapshot tests for parser, artifact, and TUI rendering
+3. performance and resilience: streaming diff parsing, lazy rendering, and
+   binary/huge-file handling
 
 ## License
 
