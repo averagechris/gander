@@ -1,3 +1,5 @@
+mod acp;
+mod agent;
 mod anchor;
 mod app;
 mod artifact;
@@ -107,6 +109,9 @@ enum Command {
     MarkViewed,
     /// Mark generated/noisy files as viewed without opening the TUI.
     MarkGeneratedViewed,
+    /// Serve the review session to agents over line-delimited JSON-RPC on
+    /// stdio (ACP). See docs/acp.md.
+    Acp,
     /// Print a terse summary of the current change.
     Summary,
 }
@@ -274,6 +279,13 @@ fn main() -> color_eyre::Result<()> {
             session.mark_files_viewed_where(|file| file.generated);
             state = session.into_state();
             state.save(&state_path)?;
+        }
+        Command::Acp => {
+            let overlay_path = crate::agent::AgentOverlay::default_path(&repo);
+            let mut server = crate::acp::AcpServer::new(session, overlay_path)?;
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            server.serve(stdin.lock(), stdout.lock())?;
         }
         Command::Summary => {
             println!("Reviewing {}", session.target);
