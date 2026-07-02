@@ -12,6 +12,7 @@ mod chooser;
 mod comments;
 mod editor;
 mod keymap;
+mod ops;
 mod outline;
 mod render;
 mod revset;
@@ -46,6 +47,7 @@ use chooser::TargetChooserState;
 use comments::CommentListState;
 use editor::CommentEditor;
 use keymap::{Action, KeyMap};
+use ops::OperationPickerState;
 use outline::SymbolOutlineState;
 use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
 use revset::RevsetInputState;
@@ -55,6 +57,7 @@ enum Mode {
     Normal,
     TargetChooser(TargetChooserState),
     RevsetInput(RevsetInputState),
+    OperationPicker(OperationPickerState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -245,6 +248,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::OperationPicker(picker) => {
+            if handle_operation_picker_key(key, picker, session, keymap, review_loader, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -336,6 +344,23 @@ fn handle_normal_action(
         }
         Action::StackNext => step_stack(review_loader, session, 1, tui_state),
         Action::StackPrevious => step_stack(review_loader, session, -1, tui_state),
+        Action::OperationPicker => match review_loader.jj.operations(&session.repo) {
+            Ok(operations) if operations.is_empty() => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no jj operations found".to_owned(),
+                });
+            }
+            Ok(operations) => {
+                *mode = Mode::OperationPicker(OperationPickerState::new(operations));
+            }
+            Err(error) => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!("failed to load jj operations: {error:?}"),
+                });
+            }
+        },
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::FileSearch => {
@@ -607,6 +632,83 @@ fn handle_revset_input_key(
     }
 }
 
+fn handle_operation_picker_key(
+    key: KeyEvent,
+    picker: &mut OperationPickerState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => picker.move_selection(1),
+            Action::TargetPickerMoveUp => picker.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(operation) = picker.selected_operation().cloned() {
+                apply_incremental_review(review_loader, session, &operation, tui_state);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            picker.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            picker.move_selection(-1);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Compare the current diff against the same target at a prior operation:
+/// unchanged files are marked viewed, changed/new files marked unviewed.
+fn apply_incremental_review(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    operation: &crate::jj::JjOperationSummary,
+    tui_state: &mut TuiState,
+) {
+    let prior = review_loader
+        .jj
+        .diff_at_operation(&session.repo, &session.target, &operation.operation_id)
+        .and_then(|diff_text| DiffSet::parse(&diff_text));
+    let prior = match prior {
+        Ok(prior) => prior,
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!(
+                    "failed to load diff at operation {}: {error:?}",
+                    operation.operation_id
+                ),
+            });
+            return;
+        }
+    };
+    let prior_fingerprints: std::collections::BTreeMap<String, String> = prior
+        .files
+        .into_iter()
+        .map(|file| (file.path, file.fingerprint))
+        .collect();
+    let (unchanged, changed) = session.apply_incremental_review(&prior_fingerprints);
+    tui_state.notice = Some(UiNotice {
+        level: UiNoticeLevel::Info,
+        message: format!(
+            "since op {}: {unchanged} unchanged file(s) marked viewed, {changed} need re-review",
+            operation.operation_id
+        ),
+    });
+}
+
 fn handle_file_search_key(
     key: KeyEvent,
     search: &mut FileSearchState,
@@ -824,6 +926,7 @@ fn handle_mouse_event(
         mode,
         Mode::CommentInput { .. }
             | Mode::RevsetInput(_)
+            | Mode::OperationPicker(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)
@@ -949,6 +1052,8 @@ mod tests {
         diff_text: Result<String, String>,
         summaries: Vec<JjChangeSummary>,
         stack: Vec<JjChangeSummary>,
+        operations: Vec<crate::jj::JjOperationSummary>,
+        diff_at_op: Option<String>,
     }
 
     impl MockJjBackend {
@@ -958,6 +1063,8 @@ mod tests {
                 diff_text,
                 summaries: Vec::new(),
                 stack: Vec::new(),
+                operations: Vec::new(),
+                diff_at_op: None,
             }
         }
     }
@@ -977,6 +1084,22 @@ mod tests {
 
         fn stack_changes(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
             Ok(self.stack.clone())
+        }
+
+        fn operations(&self, _repo: &Path) -> Result<Vec<crate::jj::JjOperationSummary>> {
+            Ok(self.operations.clone())
+        }
+
+        fn diff_at_operation(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+            _operation_id: &str,
+        ) -> Result<String> {
+            match &self.diff_at_op {
+                Some(diff) => Ok(diff.clone()),
+                None => bail!("no at-op diff configured"),
+            }
         }
     }
 
@@ -1264,6 +1387,104 @@ mod tests {
                 .message
                 .contains("no stack changes")
         );
+    }
+
+    #[test]
+    fn operation_picker_enter_applies_incremental_review() {
+        let mut session = snapshot_session(
+            r#"diff --git a/same.rs b/same.rs
+--- a/same.rs
++++ b/same.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/changed.rs b/changed.rs
+--- a/changed.rs
++++ b/changed.rs
+@@ -1 +1 @@
+-old
++other
+"#,
+        );
+        let same_file_diff = session
+            .files
+            .iter()
+            .find(|file| file.path == "same.rs")
+            .unwrap()
+            .diff
+            .raw
+            .clone();
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.diff_at_op = Some(format!("{same_file_diff}\n"));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut picker = OperationPickerState::new(vec![crate::jj::JjOperationSummary {
+            operation_id: "op123".to_owned(),
+            time: "1 hour ago".to_owned(),
+            description: "snapshot".to_owned(),
+        }]);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert!(handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+
+        let same = session
+            .files
+            .iter()
+            .find(|file| file.path == "same.rs")
+            .unwrap();
+        let changed = session
+            .files
+            .iter()
+            .find(|file| file.path == "changed.rs")
+            .unwrap();
+        assert!(same.viewed);
+        assert!(!changed.viewed);
+        let notice = tui_state.notice.unwrap();
+        assert!(notice.message.contains("since op op123"));
+        assert!(notice.message.contains("1 unchanged"));
+        assert!(notice.message.contains("1 need re-review"));
+    }
+
+    #[test]
+    fn operation_picker_errors_become_notices() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut picker = OperationPickerState::new(vec![crate::jj::JjOperationSummary {
+            operation_id: "op123".to_owned(),
+            time: String::new(),
+            description: String::new(),
+        }]);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert!(handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("op123"));
     }
 
     #[test]

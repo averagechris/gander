@@ -38,6 +38,7 @@ pub(super) enum Action {
     RevsetInput,
     StackNext,
     StackPrevious,
+    OperationPicker,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,

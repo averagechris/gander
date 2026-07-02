@@ -19,6 +19,22 @@ pub trait JjBackend {
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the current stack (`trunk()..@`), oldest first.
     fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+    /// Recent operations from `jj op log`, newest first.
+    fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>>;
+    /// The diff for `target` as it looked at a prior operation.
+    fn diff_at_operation(
+        &self,
+        repo: &Path,
+        target: &ReviewTarget,
+        operation_id: &str,
+    ) -> Result<String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JjOperationSummary {
+    pub operation_id: String,
+    pub time: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,29 +92,66 @@ impl JjCommand {
     }
 
     pub fn diff(&self) -> Result<String> {
-        let output = Command::new(&self.binary)
+        Self::run_diff(&self.binary, &self.repo, &self.target, None)
+    }
+
+    fn run_diff(
+        binary: &Path,
+        repo: &Path,
+        target: &ReviewTarget,
+        at_operation: Option<&str>,
+    ) -> Result<String> {
+        let mut command = Command::new(binary);
+        if let Some(operation_id) = at_operation {
+            command.arg("--at-operation").arg(operation_id);
+        }
+        let output = command
             .arg("diff")
             .arg("--from")
-            .arg(&self.target.base)
+            .arg(&target.base)
             .arg("--to")
-            .arg(&self.target.rev)
+            .arg(&target.rev)
             .arg("--git")
             .arg("--color=never")
             .arg("--no-pager")
             .stdin(Stdio::null())
-            .current_dir(&self.repo)
+            .current_dir(repo)
             .output()?;
 
         if !output.status.success() {
             bail!(
                 "jj diff failed for {} with status {}:\n{}",
-                self.target,
+                target,
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub fn operations(binary: &Path, repo: &Path) -> Result<Vec<JjOperationSummary>> {
+        let output = Command::new(binary)
+            .arg("op")
+            .arg("log")
+            .arg("--no-graph")
+            .arg("--color=never")
+            .arg("--no-pager")
+            .arg("--template")
+            .arg("id.short() ++ \"\\t\" ++ time.end().ago() ++ \"\\t\" ++ description ++ \"\\n\"")
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        if !output.status.success() {
+            bail!(
+                "jj op log failed with status {}:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        parse_operation_summaries(&String::from_utf8_lossy(&output.stdout))
     }
 
     pub fn change_summaries(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
@@ -166,6 +219,40 @@ impl JjBackend for JjCliBackend {
     fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
         JjCommand::stack_changes(&self.binary, repo)
     }
+
+    fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>> {
+        JjCommand::operations(&self.binary, repo)
+    }
+
+    fn diff_at_operation(
+        &self,
+        repo: &Path,
+        target: &ReviewTarget,
+        operation_id: &str,
+    ) -> Result<String> {
+        JjCommand::run_diff(&self.binary, repo, target, Some(operation_id))
+    }
+}
+
+fn parse_operation_summaries(output: &str) -> Result<Vec<JjOperationSummary>> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let operation_id = parts.next().unwrap_or_default().trim().to_owned();
+            let time = parts.next().unwrap_or_default().trim().to_owned();
+            let description = parts.next().unwrap_or_default().trim().to_owned();
+            if operation_id.is_empty() {
+                bail!("jj op log emitted a row without an operation id: {line:?}");
+            }
+            Ok(JjOperationSummary {
+                operation_id,
+                time,
+                description,
+            })
+        })
+        .collect()
 }
 
 fn parse_change_summaries(output: &str) -> Result<Vec<JjChangeSummary>> {
@@ -359,6 +446,31 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn parses_operation_summary_rows() {
+        let rows = parse_operation_summaries(
+            "op123\t5 minutes ago\tsnapshot working copy\nop456\t2 days ago\t\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                JjOperationSummary {
+                    operation_id: "op123".to_owned(),
+                    time: "5 minutes ago".to_owned(),
+                    description: "snapshot working copy".to_owned(),
+                },
+                JjOperationSummary {
+                    operation_id: "op456".to_owned(),
+                    time: "2 days ago".to_owned(),
+                    description: String::new(),
+                },
+            ]
+        );
+        assert!(parse_operation_summaries("\tno id\n").is_err());
     }
 
     #[cfg(unix)]

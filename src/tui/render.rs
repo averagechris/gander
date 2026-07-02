@@ -22,6 +22,7 @@ use super::{
     comments::CommentListState,
     editor::CommentEditor,
     keymap::{Action, KeyMap},
+    ops::OperationPickerState,
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
@@ -50,6 +51,7 @@ pub(super) fn draw(
     match mode {
         Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
         Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input),
+        Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -474,6 +476,13 @@ fn draw_footer(
             "revset target · type revset · tab/↑/↓ switch field · enter load · esc cancel"
                 .to_owned()
         }
+        Mode::OperationPicker(_) => {
+            format!(
+                "prior operation · {down}/{up} or j/k move · enter compare · esc cancel",
+                down = keymap.hint(Action::TargetPickerMoveDown),
+                up = keymap.hint(Action::TargetPickerMoveUp),
+            )
+        }
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -555,6 +564,7 @@ fn files_footer_segments(
             "target",
         ),
         FooterHint::new([Action::StackNext, Action::StackPrevious], "stack"),
+        FooterHint::new([Action::OperationPicker], "op diff"),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::FileSearch], "search"),
         FooterHint::new([Action::NextComment, Action::PreviousComment], "comments"),
@@ -699,6 +709,93 @@ fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &R
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("revsets"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_operation_picker_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    picker: &OperationPickerState,
+) {
+    let popup = centered_rect(80, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 3usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window =
+        picker_visible_window(picker.selected, picker.operations.len(), list_height);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Compare against a prior operation: unchanged files are marked viewed",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if picker.operations.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no operations",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            picker
+                .operations
+                .iter()
+                .enumerate()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .map(|(index, operation)| {
+                    let selected = index == picker.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let description = if operation.description.is_empty() {
+                        "(no description)"
+                    } else {
+                        &operation.description
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{marker} {:<14}", operation.operation_id), style),
+                        Span::styled(
+                            format!("{:<18}", operation.time),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::styled(description.to_owned(), style),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter compare · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("prior operations"),
+            )
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -1427,6 +1524,25 @@ diff --git a/README.md b/README.md
         let mut input = RevsetInputState::new("trunk()", "@");
         input.toggle_field();
         let mode = Mode::RevsetInput(input);
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_operation_picker() {
+        let session = snapshot_session("");
+        let mode = Mode::OperationPicker(OperationPickerState::new(vec![
+            crate::jj::JjOperationSummary {
+                operation_id: "abc123def".to_owned(),
+                time: "5 minutes ago".to_owned(),
+                description: "snapshot working copy".to_owned(),
+            },
+            crate::jj::JjOperationSummary {
+                operation_id: "456fed789".to_owned(),
+                time: "2 hours ago".to_owned(),
+                description: "commit working copy".to_owned(),
+            },
+        ]));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }

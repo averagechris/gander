@@ -541,6 +541,31 @@ impl ReviewSession {
         }
     }
 
+    /// Incremental re-review against a prior snapshot of the same target:
+    /// files whose diff fingerprint is unchanged are marked viewed, files
+    /// that changed (or are new) since the snapshot are marked unviewed.
+    ///
+    /// `prior_fingerprints` maps file path to the diff fingerprint the file
+    /// had at the prior snapshot. Returns `(unchanged, changed)` counts.
+    pub fn apply_incremental_review(
+        &mut self,
+        prior_fingerprints: &BTreeMap<String, String>,
+    ) -> (usize, usize) {
+        let mut unchanged = 0;
+        let mut changed = 0;
+        for file in &mut self.files {
+            if prior_fingerprints.get(&file.path) == Some(&file.fingerprint) {
+                file.viewed = true;
+                unchanged += 1;
+            } else {
+                file.viewed = false;
+                changed += 1;
+            }
+        }
+        self.ensure_selected_file_visible();
+        (unchanged, changed)
+    }
+
     pub fn annotate_generated_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
         for file in &mut self.files {
             file.generated = predicate(file);
@@ -1244,6 +1269,25 @@ diff --git a/src/c.rs b/src/c.rs
             diff,
             ReviewState::default(),
         )
+    }
+
+    #[test]
+    fn incremental_review_marks_unchanged_viewed_and_changed_unviewed() {
+        let mut session = three_file_session();
+        session.files[0].viewed = true;
+        session.files[2].viewed = true;
+
+        let mut prior = BTreeMap::new();
+        // a.rs unchanged since the prior snapshot, b.rs changed, c.rs is new.
+        prior.insert("src/a.rs".to_owned(), session.files[0].fingerprint.clone());
+        prior.insert("src/b.rs".to_owned(), "different".to_owned());
+
+        let (unchanged, changed) = session.apply_incremental_review(&prior);
+
+        assert_eq!((unchanged, changed), (1, 2));
+        assert!(session.files[0].viewed);
+        assert!(!session.files[1].viewed);
+        assert!(!session.files[2].viewed);
     }
 
     #[test]

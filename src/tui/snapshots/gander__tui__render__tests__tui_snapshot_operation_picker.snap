@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &mode, 100, 24)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│No changed files                          ││No changed files                                      │
+│                                          ││                                                      │
+│Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
+│target chooser, or adjust                 ││                                                      │
+│--base/--┌prior operations──────────────────────────────────────────────────────────────┐ser, or  │
+│         │Compare against a prior operation: unchanged files are marked viewed          │         │
+│         │› abc123def     5 minutes ago     snapshot working copy                       │nore     │
+│         │  456fed789     2 hours ago       commit working copy                         │         │
+│         │                                                                              │         │
+│         │↑/↓ or j/k move · enter compare · esc cancel                                  │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         └──────────────────────────────────────────────────────────────────────────────┘         │
+│                                          ││                                                      │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
+prior operation · down/up or j/k move · enter compare · esc cancel
