@@ -1,18 +1,23 @@
 //! Construction of the flattened diff rows rendered in the diff pane,
-//! including per-line comment anchors.
+//! including per-line comment anchors and symbol-aware context folding.
 
-use std::rc::Rc;
+use std::{collections::BTreeMap, rc::Rc};
 
 use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
-    diff::DiffLineKind,
-    syntax::SyntaxSpan,
+    diff::{DiffLineKind, Hunk},
+    syntax::{SymbolSpan, SyntaxSpan},
 };
 
 use super::{
     ReviewFile, ReviewSession,
     syntax_cache::{SyntaxCacheKey, SyntaxCacheStatus, SyntaxSide, syntax_source},
 };
+
+/// Context lines kept visible on each side of a fold.
+const FOLD_KEEP_CONTEXT: usize = 2;
+/// Minimum number of hidden lines for a fold to be worth a placeholder row.
+const FOLD_MIN_HIDDEN: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct DiffRow {
@@ -31,6 +36,7 @@ pub enum DiffRowKind {
     SyntaxSummary,
     HunkHeader,
     DiffLine(DiffLineKind),
+    ContextFold,
     Raw,
 }
 
@@ -43,7 +49,7 @@ impl ReviewSession {
             return Rc::new(Vec::new());
         };
 
-        let key = SyntaxCacheKey::for_file(self, file);
+        let key = (SyntaxCacheKey::for_file(self, file), self.fold_context);
         if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
             return cached;
         }
@@ -100,6 +106,14 @@ impl ReviewSession {
             });
         }
 
+        // Map (hunk, line) back to its line offset within the concatenated
+        // new-side source, for symbol-aware fold labels.
+        let new_source_line: BTreeMap<(usize, usize), usize> = new_line_indices
+            .iter()
+            .enumerate()
+            .map(|(source_line, key)| (*key, source_line))
+            .collect();
+
         for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
             rows.push(DiffRow {
                 old_lineno: None,
@@ -110,7 +124,37 @@ impl ReviewSession {
                 kind: DiffRowKind::HunkHeader,
                 anchor: None,
             });
-            for (line_index, line) in hunk.lines.iter().enumerate() {
+            let folds = if self.fold_context {
+                context_folds(hunk)
+            } else {
+                BTreeMap::new()
+            };
+            let mut line_index = 0;
+            while line_index < hunk.lines.len() {
+                if let Some(fold_end) = folds.get(&line_index).copied() {
+                    let hidden = fold_end - line_index;
+                    let middle = line_index + hidden / 2;
+                    let symbol = new_source_line
+                        .get(&(hunk_index, middle))
+                        .and_then(|source_line| {
+                            enclosing_symbol(&syntax_cache.symbol_spans, *source_line)
+                        })
+                        .map(|symbol| format!(" (in {} {})", symbol.kind, symbol.name))
+                        .unwrap_or_default();
+                    rows.push(DiffRow {
+                        old_lineno: None,
+                        new_lineno: None,
+                        prefix: " ",
+                        text: format!("⋯ {hidden} unchanged lines{symbol}"),
+                        syntax: Vec::new(),
+                        kind: DiffRowKind::ContextFold,
+                        anchor: None,
+                    });
+                    line_index = fold_end;
+                    continue;
+                }
+
+                let line = &hunk.lines[line_index];
                 let prefix = match line.kind {
                     DiffLineKind::Context => " ",
                     DiffLineKind::Added => "+",
@@ -139,6 +183,7 @@ impl ReviewSession {
                     kind: DiffRowKind::DiffLine(line.kind),
                     anchor: self.line_anchor(file, hunk_index, line_index),
                 });
+                line_index += 1;
             }
         }
 
@@ -211,4 +256,39 @@ pub(super) fn nearest_commentable_row(rows: &[DiffRow], target: usize) -> Option
         .filter(|(_, row)| row.anchor.is_some())
         .min_by_key(|(index, _)| index.abs_diff(target))
         .map(|(index, _)| index)
+}
+
+/// Fold ranges for one hunk: map from run start line index to run end
+/// (exclusive). Only long runs of context lines fold, keeping
+/// [`FOLD_KEEP_CONTEXT`] lines next to surrounding changes.
+fn context_folds(hunk: &Hunk) -> BTreeMap<usize, usize> {
+    let mut folds = BTreeMap::new();
+    let mut run_start: Option<usize> = None;
+    for index in 0..=hunk.lines.len() {
+        let is_context = hunk
+            .lines
+            .get(index)
+            .is_some_and(|line| line.kind == DiffLineKind::Context);
+        match (run_start, is_context) {
+            (None, true) => run_start = Some(index),
+            (Some(start), false) => {
+                let fold_start = start + FOLD_KEEP_CONTEXT;
+                let fold_end = index.saturating_sub(FOLD_KEEP_CONTEXT);
+                if fold_end > fold_start && fold_end - fold_start >= FOLD_MIN_HIDDEN {
+                    folds.insert(fold_start, fold_end);
+                }
+                run_start = None;
+            }
+            _ => {}
+        }
+    }
+    folds
+}
+
+/// Innermost symbol whose span contains `source_line`.
+fn enclosing_symbol(symbols: &[SymbolSpan], source_line: usize) -> Option<&SymbolSpan> {
+    symbols
+        .iter()
+        .filter(|symbol| source_line >= symbol.start_line && source_line <= symbol.end_line)
+        .min_by_key(|symbol| symbol.end_line - symbol.start_line)
 }

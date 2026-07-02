@@ -33,6 +33,10 @@ use crate::{
 use diff_rows::nearest_commentable_row;
 use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 
+/// Memoized diff rows keyed by file/syntax-config cache key plus the
+/// context-fold flag.
+type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool), Rc<Vec<DiffRow>>>;
+
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
 /// Rough number of diff rows kept visible below the cursor when auto-scrolling.
@@ -51,13 +55,17 @@ pub struct ReviewSession {
     pub syntax: SyntaxConfig,
     pub hide_generated: bool,
     pub viewed_filter: ViewedFilter,
+    /// When set, long runs of unchanged context lines collapse into
+    /// symbol-labelled fold rows in the diff pane.
+    pub fold_context: bool,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
-    /// Memoized diff rows per file (same key as the syntax cache), rebuilt
-    /// only when the diff fingerprint or syntax config changes.
-    rows_cache: RefCell<BTreeMap<SyntaxCacheKey, Rc<Vec<DiffRow>>>>,
+    /// Memoized diff rows per file (same key as the syntax cache plus the
+    /// context-fold flag), rebuilt only when the diff fingerprint, syntax
+    /// config, or fold mode changes.
+    rows_cache: RefCell<DiffRowsCache>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
 }
@@ -190,6 +198,7 @@ impl ReviewSession {
             syntax,
             hide_generated: false,
             viewed_filter: ViewedFilter::default(),
+            fold_context: false,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             selected_comment_id: None,
@@ -260,6 +269,14 @@ impl ReviewSession {
     pub fn cycle_viewed_filter(&mut self) {
         self.viewed_filter = self.viewed_filter.next();
         self.ensure_selected_file_visible();
+    }
+
+    /// Toggle collapsing long unchanged-context runs in the diff pane.
+    pub fn toggle_context_fold(&mut self) {
+        self.fold_context = !self.fold_context;
+        // Row indices shift when folds appear/disappear; snap the cursor back
+        // to a commentable row.
+        self.ensure_diff_cursor_commentable();
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {
@@ -1776,6 +1793,67 @@ diff --git a/src/c.rs b/src/c.rs
 
         // Markdown has no symbol declarations in these hunks.
         assert!(session.changed_symbol_targets().is_empty());
+    }
+
+    #[test]
+    fn context_folding_collapses_long_context_runs_with_symbol_labels() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,12 +1,12 @@
+-fn changed() {
++fn renamed() {
+     one();
+     two();
+     three();
+     four();
+     five();
+     six();
+     seven();
+     eight();
+     nine();
+-    old_tail();
++    new_tail();
+ }
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+
+        let unfolded_len = session.diff_rows_for_selected_file().len();
+        session.toggle_context_fold();
+        let rows = session.diff_rows_for_selected_file();
+
+        assert!(rows.len() < unfolded_len);
+        let fold = rows
+            .iter()
+            .find(|row| matches!(row.kind, DiffRowKind::ContextFold))
+            .expect("expected a context fold row");
+        assert_eq!(fold.text, "⋯ 5 unchanged lines (in fn renamed)");
+        assert!(fold.anchor.is_none());
+        // Kept context around the fold survives.
+        assert!(rows.iter().any(|row| row.text.trim() == "two();"));
+        assert!(rows.iter().any(|row| row.text.trim() == "eight();"));
+        assert!(!rows.iter().any(|row| row.text.trim() == "five();"));
+
+        session.toggle_context_fold();
+        assert_eq!(session.diff_rows_for_selected_file().len(), unfolded_len);
+    }
+
+    #[test]
+    fn short_context_runs_do_not_fold() {
+        let mut session = multi_line_session();
+        let unfolded_len = session.diff_rows_for_selected_file().len();
+
+        session.toggle_context_fold();
+
+        assert_eq!(session.diff_rows_for_selected_file().len(), unfolded_len);
     }
 
     #[test]

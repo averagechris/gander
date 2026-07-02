@@ -55,6 +55,7 @@ pub(super) enum Action {
     ToggleFold,
     CollapseFold,
     ExpandFold,
+    ToggleContextFold,
     RangeComment,
     CancelRangeComment,
     Comment,
@@ -132,6 +133,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::ToggleFold, &config.toggle_fold)?;
         add_bindings(&mut bindings, Action::CollapseFold, &config.collapse_fold)?;
         add_bindings(&mut bindings, Action::ExpandFold, &config.expand_fold)?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleContextFold,
+            &config.toggle_context_fold,
+        )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
         add_bindings(
             &mut bindings,

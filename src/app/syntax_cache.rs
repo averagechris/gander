@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     diff::DiffLineKind,
-    syntax::{HighlightOutcome, SyntaxConfig, SyntaxSpan, SyntaxSummary},
+    syntax::{HighlightOutcome, SymbolSpan, SyntaxConfig, SyntaxSpan, SyntaxSummary},
 };
 
 use super::{ReviewFile, ReviewSession};
@@ -37,6 +37,9 @@ pub(super) struct SyntaxFileCache {
     /// Symbols (per the new side) that contain at least one added line,
     /// keyed to the first added diff line inside each symbol.
     pub(super) changed_symbols: Vec<ChangedSymbol>,
+    /// All named declarations on the new side, in source order, used for
+    /// symbol-aware context fold labels.
+    pub(super) symbol_spans: Vec<SymbolSpan>,
 }
 
 /// A changed symbol plus the (hunk, line) coordinates of its first added line.
@@ -82,13 +85,15 @@ impl ReviewSession {
         let (old_lines, old_status) =
             syntax_highlights_by_diff_line(&file.path, old_source, old_line_indices, &self.syntax);
 
+        let symbol_spans = crate::syntax::symbol_spans(&file.path, new_source, &self.syntax);
         let computed = SyntaxFileCache {
             summary: crate::syntax::summarize_with_config(&file.path, new_source, &self.syntax),
             new_lines,
             old_lines,
             new_status,
             old_status,
-            changed_symbols: changed_symbols(file, new_source, new_line_indices, &self.syntax),
+            changed_symbols: changed_symbols(file, &symbol_spans, new_line_indices),
+            symbol_spans,
         };
         self.syntax_cache.borrow_mut().insert(key, computed.clone());
         computed
@@ -100,11 +105,9 @@ impl ReviewSession {
 /// declaration (e.g. the `fn` wins over its enclosing `impl`).
 fn changed_symbols(
     file: &ReviewFile,
-    new_source: &str,
+    symbols: &[SymbolSpan],
     new_line_indices: &[(usize, usize)],
-    config: &crate::syntax::SyntaxConfig,
 ) -> Vec<ChangedSymbol> {
-    let symbols = crate::syntax::symbol_spans(&file.path, new_source, config);
     if symbols.is_empty() {
         return Vec::new();
     }
@@ -134,7 +137,7 @@ fn changed_symbols(
         let span_size = symbol.end_line - symbol.start_line;
         let (hunk_index, line_index) = new_line_indices[first_added];
         let candidate = ChangedSymbol {
-            name: symbol.name,
+            name: symbol.name.clone(),
             kind: symbol.kind,
             hunk_index,
             line_index,

@@ -354,6 +354,7 @@ fn handle_normal_action(
                 session.expand_tree_node();
             }
         }
+        Action::ToggleContextFold => session.toggle_context_fold(),
         Action::RangeComment => {
             if session.focus == Focus::Diff {
                 session.toggle_diff_range_selection();

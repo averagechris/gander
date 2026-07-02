@@ -252,6 +252,12 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                     .add_modifier(Modifier::BOLD),
             )),
             DiffRowKind::Raw => Line::from(row.text.clone()),
+            DiffRowKind::ContextFold => Line::from(Span::styled(
+                format!("      {}", row.text),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )),
             DiffRowKind::DiffLine(_) => {
                 let mut spans = vec![
                     Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
@@ -550,6 +556,7 @@ fn diff_footer_segments(
         FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
         FooterHint::new([Action::NextSymbol, Action::PreviousSymbol], "symbols"),
         FooterHint::new([Action::SymbolOutline], "outline"),
+        FooterHint::new([Action::ToggleContextFold], context_fold_label(session)),
         FooterHint::new([Action::RangeComment], "range"),
         FooterHint::new([Action::CancelRangeComment], "cancel"),
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
@@ -591,6 +598,14 @@ fn viewed_filter_label(session: &ReviewSession) -> String {
         .label()
         .map(|label| format!(" ({label})"))
         .unwrap_or_default()
+}
+
+fn context_fold_label(session: &ReviewSession) -> &'static str {
+    if session.fold_context {
+        "unfold ctx"
+    } else {
+        "fold ctx"
+    }
 }
 
 fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &CommentEditor) {

@@ -82,6 +82,7 @@ pub struct KeybindingsConfig {
     pub toggle_fold: Vec<String>,
     pub collapse_fold: Vec<String>,
     pub expand_fold: Vec<String>,
+    pub toggle_context_fold: Vec<String>,
     pub range_comment: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
@@ -179,6 +180,7 @@ struct KeybindingsConfigPatch {
     toggle_fold: Option<Vec<String>>,
     collapse_fold: Option<Vec<String>>,
     expand_fold: Option<Vec<String>>,
+    toggle_context_fold: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
@@ -249,6 +251,7 @@ impl Default for KeybindingsConfig {
             toggle_fold: keys(["space"]),
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
+            toggle_context_fold: keys(["z"]),
             range_comment: keys(["r"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
@@ -392,6 +395,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_fold, patch.toggle_fold);
         apply_optional(&mut self.collapse_fold, patch.collapse_fold);
         apply_optional(&mut self.expand_fold, patch.expand_fold);
+        apply_optional(&mut self.toggle_context_fold, patch.toggle_context_fold);
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
