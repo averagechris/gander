@@ -40,7 +40,37 @@ pub struct Comment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<CommentAnchor>,
     pub body: String,
+    #[serde(default)]
+    pub state: CommentState,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Review lifecycle state of a comment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentState {
+    #[default]
+    Draft,
+    Todo,
+    Resolved,
+}
+
+impl CommentState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Todo => "todo",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Draft => Self::Todo,
+            Self::Todo => Self::Resolved,
+            Self::Resolved => Self::Draft,
+        }
+    }
 }
 
 impl ReviewState {

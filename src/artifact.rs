@@ -202,6 +202,7 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
     } else {
         for comment in artifact.comments {
             write_comment_heading(&mut out, comment);
+            out.push_str(&format!("Status: {}\n\n", comment.state.label()));
             out.push_str(comment.body.trim());
             out.push_str("\n\n");
         }
@@ -351,6 +352,35 @@ mod tests {
         write_artifact_to(&session, ArtifactFormat::Json, &mut out).unwrap();
 
         assert!(out.ends_with(b"\n"));
+    }
+
+    #[test]
+    fn markdown_includes_comment_state() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.add_comment("Needs work".into());
+        let id = session.comments[0].id.clone();
+        session.cycle_comment_state(&id);
+
+        let markdown = render_artifact(&session, ArtifactFormat::Markdown).unwrap();
+        let json = render_artifact(&session, ArtifactFormat::Json).unwrap();
+
+        assert!(markdown.contains("Status: todo"));
+        assert!(json.contains("\"state\": \"todo\""));
     }
 
     #[test]
@@ -516,6 +546,7 @@ mod tests {
             end_line: None,
             anchor: None,
             body: "already here".to_owned(),
+            state: crate::state::CommentState::default(),
             created_at: chrono::DateTime::parse_from_rfc3339("2026-06-30T00:00:00Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),

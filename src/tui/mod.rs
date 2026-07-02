@@ -9,6 +9,7 @@
 //! This file owns the event loop, mode state machine, and event handling.
 
 mod chooser;
+mod comments;
 mod editor;
 mod keymap;
 mod outline;
@@ -41,6 +42,7 @@ use crate::{
 };
 
 use chooser::TargetChooserState;
+use comments::CommentListState;
 use editor::CommentEditor;
 use keymap::{Action, KeyMap};
 use outline::SymbolOutlineState;
@@ -52,6 +54,7 @@ enum Mode {
     TargetChooser(TargetChooserState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
+    CommentList(CommentListState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
@@ -244,6 +247,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::CommentList(list) => {
+            if handle_comment_list_key(key, list, session, keymap, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -330,6 +338,16 @@ fn handle_normal_action(
         }
         Action::NextSymbol => session.jump_to_changed_symbol(1),
         Action::PreviousSymbol => session.jump_to_changed_symbol(-1),
+        Action::CommentList => {
+            if session.comments.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no comments recorded yet".to_owned(),
+                });
+            } else {
+                *mode = Mode::CommentList(CommentListState::default());
+            }
+        }
         Action::NextComment => session.move_to_comment(1),
         Action::PreviousComment => session.move_to_comment(-1),
         Action::ScrollDown => session.scroll_diff(12),
@@ -533,6 +551,60 @@ fn handle_symbol_outline_key(
     }
 }
 
+fn handle_comment_list_key(
+    key: KeyEvent,
+    list: &mut CommentListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1, session),
+            Action::TargetPickerMoveUp => list.move_selection(-1, session),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(id) = list.selected_comment_id(session) {
+                session.select_comment_by_id(&id);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1, session);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1, session);
+            false
+        }
+        KeyCode::Char('s') => {
+            if let Some(id) = list.selected_comment_id(session)
+                && let Some(state) = session.cycle_comment_state(&id)
+            {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("comment marked {}", state.label()),
+                });
+            }
+            false
+        }
+        KeyCode::Char('x') => {
+            if let Some(id) = list.selected_comment_id(session) {
+                session.delete_comment(&id);
+                list.clamp(session);
+            }
+            session.comments.is_empty()
+        }
+        _ => false,
+    }
+}
+
 impl ReviewLoader<'_> {
     fn base_candidates(&self, session: &ReviewSession) -> Result<Vec<crate::jj::JjChangeSummary>> {
         self.jj.change_summaries(&session.repo)
@@ -624,7 +696,10 @@ fn handle_mouse_event(
 ) {
     if matches!(
         mode,
-        Mode::CommentInput { .. } | Mode::FileSearch(_) | Mode::SymbolOutline(_)
+        Mode::CommentInput { .. }
+            | Mode::FileSearch(_)
+            | Mode::SymbolOutline(_)
+            | Mode::CommentList(_)
     ) {
         return;
     }

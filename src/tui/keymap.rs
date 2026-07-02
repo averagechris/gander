@@ -61,6 +61,7 @@ pub(super) enum Action {
     Comment,
     EditComment,
     DeleteComment,
+    CommentList,
     SubmitComment,
     CancelComment,
     InsertNewline,
@@ -147,6 +148,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
         add_bindings(&mut bindings, Action::EditComment, &config.edit_comment)?;
         add_bindings(&mut bindings, Action::DeleteComment, &config.delete_comment)?;
+        add_bindings(&mut bindings, Action::CommentList, &config.comment_list)?;
         add_bindings(&mut bindings, Action::SubmitComment, &config.submit_comment)?;
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
         add_bindings(&mut bindings, Action::InsertNewline, &config.insert_newline)?;

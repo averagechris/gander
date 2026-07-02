@@ -26,7 +26,7 @@ use crate::{
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
-    state::{Comment, FileState, ReviewState, ReviewStateMeta},
+    state::{Comment, CommentState, FileState, ReviewState, ReviewStateMeta},
     syntax::SyntaxConfig,
 };
 
@@ -930,6 +930,20 @@ impl ReviewSession {
         true
     }
 
+    /// Advance a comment's state (draft -> todo -> resolved -> draft).
+    pub fn cycle_comment_state(&mut self, id: &str) -> Option<CommentState> {
+        let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
+        comment.state = comment.state.next();
+        Some(comment.state)
+    }
+
+    /// Select a comment by id, moving the file/diff cursors to its anchor.
+    pub fn select_comment_by_id(&mut self, id: &str) {
+        if let Some(index) = self.comments.iter().position(|comment| comment.id == id) {
+            self.select_comment(index);
+        }
+    }
+
     pub fn delete_comment(&mut self, id: &str) -> bool {
         let Some(index) = self.comments.iter().position(|comment| comment.id == id) else {
             return false;
@@ -982,6 +996,7 @@ impl ReviewSession {
                 .filter(|end_line| Some(*end_line) != anchor.line()),
             anchor: Some(anchor),
             body,
+            state: CommentState::default(),
             created_at,
         });
     }

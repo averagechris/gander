@@ -88,6 +88,7 @@ pub struct KeybindingsConfig {
     pub comment: Vec<String>,
     pub edit_comment: Vec<String>,
     pub delete_comment: Vec<String>,
+    pub comment_list: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
@@ -186,6 +187,7 @@ struct KeybindingsConfigPatch {
     comment: Option<Vec<String>>,
     edit_comment: Option<Vec<String>>,
     delete_comment: Option<Vec<String>>,
+    comment_list: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
     insert_newline: Option<Vec<String>>,
@@ -257,6 +259,7 @@ impl Default for KeybindingsConfig {
             comment: keys(["c"]),
             edit_comment: keys(["e"]),
             delete_comment: keys(["x"]),
+            comment_list: keys(["C"]),
             submit_comment: keys(["ctrl-s"]),
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
@@ -401,6 +404,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.comment, patch.comment);
         apply_optional(&mut self.edit_comment, patch.edit_comment);
         apply_optional(&mut self.delete_comment, patch.delete_comment);
+        apply_optional(&mut self.comment_list, patch.comment_list);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
         apply_optional(&mut self.insert_newline, patch.insert_newline);

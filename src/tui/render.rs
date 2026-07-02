@@ -19,6 +19,7 @@ use crate::{
 use super::{
     CommentInputTarget, Mode, UiNotice, UiNoticeLevel,
     chooser::TargetChooserState,
+    comments::CommentListState,
     editor::CommentEditor,
     keymap::{Action, KeyMap},
     outline::SymbolOutlineState,
@@ -49,6 +50,7 @@ pub(super) fn draw(
         Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
+        Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
         Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
         Mode::Normal => {}
     }
@@ -303,8 +305,20 @@ fn comment_summary_line(comment: &Comment) -> Line<'static> {
     Line::from(vec![
         Span::styled("      ↳ ", Style::default().fg(Color::Yellow)),
         Span::styled(format!("{short_id} "), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("[{}] ", comment.state.label()),
+            comment_state_style(comment.state),
+        ),
         Span::styled(summary.to_owned(), Style::default().fg(Color::Yellow)),
     ])
+}
+
+fn comment_state_style(state: crate::state::CommentState) -> Style {
+    match state {
+        crate::state::CommentState::Draft => Style::default().fg(Color::DarkGray),
+        crate::state::CommentState::Todo => Style::default().fg(Color::Red),
+        crate::state::CommentState::Resolved => Style::default().fg(Color::Green),
+    }
 }
 
 fn diff_text_spans<'a>(
@@ -462,6 +476,9 @@ fn draw_footer(
             )
         }
         Mode::SymbolOutline(_) => "changed symbols · j/k move · enter jump · esc cancel".to_owned(),
+        Mode::CommentList(_) => {
+            "comments · j/k move · enter jump · s cycle state · x delete · esc close".to_owned()
+        }
     };
     let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
     if let Some(notice) = notice {
@@ -540,6 +557,7 @@ fn files_footer_segments(
             [Action::Comment, Action::EditComment, Action::DeleteComment],
             "comment",
         ),
+        FooterHint::new([Action::CommentList], "list"),
         FooterHint::new([Action::Quit], "quit"),
     ];
     let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
@@ -576,6 +594,7 @@ fn diff_footer_segments(
             [Action::Comment, Action::EditComment, Action::DeleteComment],
             "comment",
         ),
+        FooterHint::new([Action::CommentList], "list"),
         FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
         FooterHint::new([Action::Quit], "quit"),
     ];
@@ -780,6 +799,96 @@ fn draw_symbol_outline_popup(
                     .borders(Borders::ALL)
                     .title("changed symbols"),
             )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_comment_list_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    list: &CommentListState,
+) {
+    let popup = centered_rect(80, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 2usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(list.selected, session.comments.len(), list_height);
+
+    let mut lines = Vec::new();
+    if session.comments.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no comments",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            session
+                .comments
+                .iter()
+                .enumerate()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .map(|(index, comment)| {
+                    let selected = index == list.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let location = match (comment.line, comment.end_line) {
+                        (Some(line), Some(end_line)) => {
+                            format!("{}:{line}-{end_line}", comment.path)
+                        }
+                        (Some(line), None) => format!("{}:{line}", comment.path),
+                        _ => comment.path.clone(),
+                    };
+                    let summary = comment
+                        .body
+                        .lines()
+                        .find(|line| !line.trim().is_empty())
+                        .unwrap_or("(empty comment)")
+                        .trim()
+                        .to_owned();
+                    Line::from(vec![
+                        Span::styled(format!("{marker} "), style),
+                        Span::styled(
+                            format!("[{:^8}] ", comment.state.label()),
+                            comment_state_style(comment.state),
+                        ),
+                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(summary, style),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter jump · s cycle state · x delete · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("comments"))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -1231,6 +1340,30 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn tui_snapshot_comment_list() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.add_comment("File-level note".into());
+        session.toggle_focus();
+        session.add_comment("Line note that needs fixing".into());
+        // UUID ids would leak into the diff gutter; pin them for the snapshot.
+        session.comments[0].id = "file-note".to_owned();
+        session.comments[1].id = "line-note".to_owned();
+        let todo_id = session.comments[1].id.clone();
+        session.cycle_comment_state(&todo_id);
+        let mode = Mode::CommentList(CommentListState { selected: 1 });
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
     fn tui_snapshot_empty_state() {
         let session = snapshot_session("");
 
@@ -1303,6 +1436,7 @@ diff --git a/README.md b/README.md
             end_line: None,
             anchor: Some(anchor.clone()),
             body: "first note".to_owned(),
+            state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
         });
         session.comments.push(Comment {
@@ -1312,14 +1446,15 @@ diff --git a/README.md b/README.md
             end_line: None,
             anchor: Some(anchor),
             body: "second note".to_owned(),
+            state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
         });
 
         let rendered = render_tui_text(&session, &Mode::Normal, 100, 16);
 
         assert!(rendered.contains("2   1 - old"));
-        assert!(rendered.contains("↳ c1 first note"));
-        assert!(rendered.contains("↳ c2 second note"));
+        assert!(rendered.contains("↳ c1 [draft] first note"));
+        assert!(rendered.contains("↳ c2 [draft] second note"));
     }
 
     #[test]
