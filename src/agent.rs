@@ -50,6 +50,17 @@ pub enum FlagPriority {
     Low,
 }
 
+impl FlagPriority {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewChunk {
     pub id: String,

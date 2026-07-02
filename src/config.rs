@@ -88,6 +88,7 @@ pub struct KeybindingsConfig {
     pub jj_helpers: Vec<String>,
     pub toggle_large_diff: Vec<String>,
     pub toggle_agent_order: Vec<String>,
+    pub flag_list: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
     pub next_unviewed: Vec<String>,
@@ -211,6 +212,7 @@ struct KeybindingsConfigPatch {
     jj_helpers: Option<Vec<String>>,
     toggle_large_diff: Option<Vec<String>>,
     toggle_agent_order: Option<Vec<String>>,
+    flag_list: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
@@ -291,6 +293,7 @@ impl Default for KeybindingsConfig {
             jj_helpers: keys(["!"]),
             toggle_large_diff: keys(["L"]),
             toggle_agent_order: keys(["A"]),
+            flag_list: keys(["F"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
             next_unviewed: keys(["n"]),
@@ -450,6 +453,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.jj_helpers, patch.jj_helpers);
         apply_optional(&mut self.toggle_large_diff, patch.toggle_large_diff);
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
+        apply_optional(&mut self.flag_list, patch.flag_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
@@ -664,6 +668,7 @@ submit-comment = ["ctrl-s"]
         assert_eq!(config.keybindings.jj_helpers, ["!"]);
         assert_eq!(config.keybindings.toggle_large_diff, ["L"]);
         assert_eq!(config.keybindings.toggle_agent_order, ["A"]);
+        assert_eq!(config.keybindings.flag_list, ["F"]);
         assert_eq!(config.limits.max_diff_lines, 5000);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);
         assert_eq!(config.keybindings.target_picker_up, ["up", "ctrl-k"]);

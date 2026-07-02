@@ -11,6 +11,7 @@
 mod chooser;
 mod comments;
 mod editor;
+mod flags;
 mod helpers;
 mod keymap;
 mod ops;
@@ -47,6 +48,7 @@ use crate::{
 use chooser::TargetChooserState;
 use comments::CommentListState;
 use editor::CommentEditor;
+use flags::FlagListState;
 use helpers::JjHelperState;
 use keymap::{Action, KeyMap};
 use ops::OperationPickerState;
@@ -61,6 +63,7 @@ enum Mode {
     RevsetInput(RevsetInputState),
     OperationPicker(OperationPickerState),
     JjHelpers(JjHelperState),
+    FlagList(FlagListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
@@ -312,6 +315,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::FlagList(list) => {
+            if handle_flag_list_key(key, list, session, keymap) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::FileSearch(search) => {
             if handle_file_search_key(key, search, session, keymap) {
                 *mode = Mode::Normal;
@@ -422,6 +430,16 @@ fn handle_normal_action(
         },
         Action::JjHelpers => {
             *mode = Mode::JjHelpers(JjHelperState::for_session(session));
+        }
+        Action::FlagList => {
+            if session.agent_flags.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no agent-flagged sections".to_owned(),
+                });
+            } else {
+                *mode = Mode::FlagList(FlagListState::new(session));
+            }
         }
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
@@ -870,6 +888,41 @@ fn run_jj_helper(
     }
 }
 
+fn handle_flag_list_key(
+    key: KeyEvent,
+    list: &mut FlagListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1),
+            Action::TargetPickerMoveUp => list.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(flag) = list.selected_flag().cloned() {
+                session.jump_to_flag(&flag);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1);
+            false
+        }
+        _ => false,
+    }
+}
+
 fn handle_file_search_key(
     key: KeyEvent,
     search: &mut FileSearchState,
@@ -1089,6 +1142,7 @@ fn handle_mouse_event(
             | Mode::RevsetInput(_)
             | Mode::OperationPicker(_)
             | Mode::JjHelpers(_)
+            | Mode::FlagList(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
             | Mode::CommentList(_)

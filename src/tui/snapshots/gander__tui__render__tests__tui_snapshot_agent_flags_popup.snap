@@ -1,0 +1,22 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &Mode::FlagList(FlagListState::new(&session)), 100,\n18)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• ▾ src 0/1                               ││src/app.rs  +2 -1                                     │
+│  •!mod     app.rs                        ││@@ -1,4 +1,5 @@                                       │
+│                                          ││    1   fn main() {                                   │
+│         ┌agent flags───────────────────────────────────────────────────────────────────┐         │
+│         │Sections flagged by agents, critical first                                    │         │
+│         │› [critical] src/app.rs:2 unchecked call                                      │         │
+│         │                                                                              │         │
+│         │↑/↓ or j/k move · enter jump · esc close                                      │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         │                                                                              │         │
+│         └──────────────────────────────────────────────────────────────────────────────┘         │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments
+agent flags · j/k move · enter jump · esc close

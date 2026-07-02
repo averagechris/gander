@@ -42,6 +42,7 @@ pub(super) enum Action {
     JjHelpers,
     ToggleLargeDiff,
     ToggleAgentOrder,
+    FlagList,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
     NextUnviewed,

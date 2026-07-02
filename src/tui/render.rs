@@ -21,6 +21,7 @@ use super::{
     chooser::TargetChooserState,
     comments::CommentListState,
     editor::CommentEditor,
+    flags::FlagListState,
     helpers::{JjHelperOption, JjHelperState},
     keymap::{Action, KeyMap},
     ops::OperationPickerState,
@@ -54,6 +55,7 @@ pub(super) fn draw(
         Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input),
         Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
+        Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
@@ -167,10 +169,18 @@ fn render_file_row(
     } else {
         Style::default().fg(Color::White)
     };
+    let flag_span = if session.file_has_flags(&file.path) {
+        Span::styled(
+            "!",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw(" ")
+    };
     ListItem::new(Line::from(vec![
         Span::raw("  ".repeat(row.depth.min(8))),
         Span::styled(mark, Style::default().fg(Color::Green)),
-        Span::raw(" "),
+        flag_span,
         Span::styled(
             format!("{:>7}", file.status),
             Style::default().fg(Color::Cyan),
@@ -250,15 +260,25 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             .map(|n| format!("{n:>4}"))
             .unwrap_or_else(|| "    ".to_owned());
         let comment_count = comments.len();
-        let comment_mark = if comment_count > 0 {
-            match comment_count {
-                1..=9 => comment_count.to_string(),
-                _ => "+".to_owned(),
-            }
+        let flagged = session.diff_row_flagged(row);
+        let (comment_mark, mark_style) = if comment_count > 0 {
+            (
+                match comment_count {
+                    1..=9 => comment_count.to_string(),
+                    _ => "+".to_owned(),
+                },
+                Style::default().fg(Color::Yellow),
+            )
+        } else if flagged {
+            // Agent-flagged section: pinned in the gutter.
+            (
+                "!".to_owned(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
         } else if in_range {
-            "|".to_owned()
+            ("|".to_owned(), Style::default().fg(Color::Yellow))
         } else {
-            " ".to_owned()
+            (" ".to_owned(), Style::default().fg(Color::Yellow))
         };
 
         let line = match row.kind {
@@ -293,7 +313,7 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             )),
             DiffRowKind::DiffLine(_) => {
                 let mut spans = vec![
-                    Span::styled(comment_mark, Style::default().fg(Color::Yellow)),
+                    Span::styled(comment_mark, mark_style),
                     Span::styled(lineno, Style::default().fg(Color::DarkGray)),
                     Span::raw(" "),
                     Span::styled(row.prefix, style),
@@ -525,6 +545,7 @@ fn draw_footer(
                 "jj helpers · j/k move · enter select · esc close".to_owned()
             }
         }
+        Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
         Mode::FileSearch(_) => {
             format!(
                 "file search · type filter · {down}/{up} move · enter open · esc cancel",
@@ -597,6 +618,7 @@ fn files_footer_segments(
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
         FooterHint::new([Action::CycleViewedFilter], "filter"),
         FooterHint::new([Action::ToggleAgentOrder], "agent order"),
+        FooterHint::new([Action::FlagList], "flags"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -822,6 +844,94 @@ fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjH
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagListState) {
+    let popup = centered_rect(80, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 3usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(list.selected, list.flags.len(), list_height);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Sections flagged by agents, critical first",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    if list.flags.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no flags",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.extend(
+            list.flags
+                .iter()
+                .enumerate()
+                .skip(visible_window.start)
+                .take(visible_window.end.saturating_sub(visible_window.start))
+                .map(|(index, flag)| {
+                    let selected = index == list.selected;
+                    let marker = if selected { "›" } else { " " };
+                    let style = if selected {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    let location = match flag.line {
+                        Some(line) => format!("{}:{line}", flag.path),
+                        None => flag.path.clone(),
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{marker} "), style),
+                        Span::styled(
+                            format!("[{:^8}] ", flag.priority.label()),
+                            flag_priority_style(flag.priority),
+                        ),
+                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(flag.reason.clone(), style),
+                    ])
+                }),
+        );
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter jump · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("agent flags"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn flag_priority_style(priority: crate::agent::FlagPriority) -> Style {
+    match priority {
+        crate::agent::FlagPriority::Critical => {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        }
+        crate::agent::FlagPriority::High => Style::default().fg(Color::Red),
+        crate::agent::FlagPriority::Medium => Style::default().fg(Color::Yellow),
+        crate::agent::FlagPriority::Low => Style::default().fg(Color::DarkGray),
+    }
 }
 
 fn draw_operation_picker_popup(
@@ -1773,6 +1883,46 @@ diff --git a/README.md b/README.md
         });
 
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 16));
+    }
+
+    #[test]
+    fn tui_snapshot_agent_flags_gutter_and_popup() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            flags: vec![crate::agent::AgentFlag {
+                id: "flag-1".to_owned(),
+                path: "src/app.rs".to_owned(),
+                line: Some(2),
+                reason: "unchecked call".to_owned(),
+                priority: crate::agent::FlagPriority::Critical,
+            }],
+            ..Default::default()
+        });
+
+        insta::assert_snapshot!(
+            "tui_snapshot_agent_flags_gutter",
+            render_tui_text(&session, &Mode::Normal, 100, 18)
+        );
+        insta::assert_snapshot!(
+            "tui_snapshot_agent_flags_popup",
+            render_tui_text(
+                &session,
+                &Mode::FlagList(FlagListState::new(&session)),
+                100,
+                18
+            )
+        );
     }
 
     #[test]

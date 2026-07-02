@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::AgentOverlay,
+    agent::{AgentFlag, AgentOverlay},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::{Config, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
@@ -71,6 +71,9 @@ pub struct ReviewSession {
     pub agent_ordering: Vec<String>,
     /// Whether the agent-suggested order is applied to the file list.
     pub use_agent_order: bool,
+    /// Sections agents flagged as critical, surfaced in the diff gutter and
+    /// the flag list popup.
+    pub agent_flags: Vec<AgentFlag>,
     selected_comment_id: Option<String>,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
@@ -235,6 +238,7 @@ impl ReviewSession {
             force_rendered: BTreeSet::new(),
             agent_ordering: Vec::new(),
             use_agent_order: true,
+            agent_flags: Vec::new(),
             selected_comment_id: None,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
@@ -484,6 +488,60 @@ impl ReviewSession {
     /// Apply agent overlay suggestions to the session.
     pub fn apply_agent_overlay(&mut self, overlay: &AgentOverlay) {
         self.agent_ordering = overlay.ordering.clone();
+        self.agent_flags = overlay.flags.clone();
+    }
+
+    /// Flags sorted for display: critical first, then by path and line.
+    pub fn flags_sorted(&self) -> Vec<AgentFlag> {
+        let mut flags = self.agent_flags.clone();
+        flags.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        flags
+    }
+
+    pub fn file_has_flags(&self, path: &str) -> bool {
+        self.agent_flags.iter().any(|flag| flag.path == path)
+    }
+
+    /// Whether a diff row of the selected file is covered by an agent flag:
+    /// line flags match the new-side line number, file-level flags mark the
+    /// file header row.
+    pub fn diff_row_flagged(&self, row: &DiffRow) -> bool {
+        let Some(file) = self.selected_visible_file() else {
+            return false;
+        };
+        self.agent_flags.iter().any(|flag| {
+            flag.path == file.path
+                && match flag.line {
+                    Some(line) => row.new_lineno == Some(line),
+                    None => matches!(row.kind, DiffRowKind::FileHeader),
+                }
+        })
+    }
+
+    /// Jump to a flagged section: select the file and move the diff cursor
+    /// to the flagged line (or the top of the file for file-level flags).
+    pub fn jump_to_flag(&mut self, flag: &AgentFlag) {
+        let Some(file_index) = self.files.iter().position(|file| file.path == flag.path) else {
+            return;
+        };
+        self.select_file_index(file_index);
+        let Some(line) = flag.line else {
+            self.focus = Focus::Files;
+            self.diff_scroll = 0;
+            return;
+        };
+        if let Some(row_index) = self
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(line) && row.anchor.is_some())
+        {
+            self.jump_to_diff_row(row_index);
+        }
     }
 
     pub fn agent_order_active(&self) -> bool {
@@ -1488,6 +1546,52 @@ diff --git a/src/c.rs b/src/c.rs
         let tree = session.file_tree();
         let labels: Vec<&str> = tree.rows.iter().map(|row| row.label.as_str()).collect();
         assert_eq!(labels, ["src/a.rs", "src/c.rs"]);
+    }
+
+    #[test]
+    fn agent_flags_mark_rows_and_jump_to_lines() {
+        let mut session = multi_line_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            flags: vec![
+                crate::agent::AgentFlag {
+                    id: "line-flag".to_owned(),
+                    path: "src/app.rs".to_owned(),
+                    line: Some(2),
+                    reason: "risky call".to_owned(),
+                    priority: crate::agent::FlagPriority::Critical,
+                },
+                crate::agent::AgentFlag {
+                    id: "file-flag".to_owned(),
+                    path: "src/app.rs".to_owned(),
+                    line: None,
+                    reason: "whole file".to_owned(),
+                    priority: crate::agent::FlagPriority::Low,
+                },
+            ],
+            ..Default::default()
+        });
+
+        assert!(session.file_has_flags("src/app.rs"));
+        assert!(!session.file_has_flags("other.rs"));
+
+        let rows = session.diff_rows_for_selected_file();
+        let flagged: Vec<usize> = (0..rows.len())
+            .filter(|index| session.diff_row_flagged(&rows[*index]))
+            .collect();
+        // File header (file-level flag) plus the row for new line 2.
+        assert!(flagged.contains(&0));
+        assert!(
+            flagged
+                .iter()
+                .any(|index| rows[*index].new_lineno == Some(2))
+        );
+
+        let flag = session.flags_sorted()[0].clone();
+        assert_eq!(flag.id, "line-flag");
+        session.jump_to_flag(&flag);
+        assert_eq!(session.focus, Focus::Diff);
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].new_lineno, Some(2));
     }
 
     #[test]
