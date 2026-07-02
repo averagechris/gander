@@ -82,7 +82,7 @@ Status: started.
 - [ ] lazy file/hunk rendering
 - [ ] size thresholds with placeholders for huge files
 - [ ] binary file handling
-- [ ] robust rename/copy parsing, including quoted paths
+- [x] robust rename/copy parsing, including quoted paths
 - [ ] property/fuzz tests for diff parsing
 
 ## Milestone 7: agent-collaborative review (ACP)
@@ -109,36 +109,17 @@ diff-bottom scrolled past content, `tui.rs` monolith split into submodules,
 duplicate tree builders, no-op `apply_viewed_state` hook, non-atomic state
 saves.
 
-Still open, roughly priority ordered:
+Fixed post-MVP (2026-07): `app.rs` split into session/diff-row/syntax-cache
+submodules; diff rows memoized per file fingerprint; comment ids switched to
+UUIDs; diff parser handles quoted/spaced paths, rename/copy lines, and
+`/dev/null` markers with header-only marker parsing; review state autosaves
+after each TUI event instead of only on clean quit; footer hints built from a
+declarative segment list; jj probe uses proper `wait_timeout` semantics; `Esc`
+now dismisses the current layer (range selection, notices) instead of
+quitting.
 
-1. **`ReviewSession` is the next split candidate** (`src/app.rs`, ~1200
-   non-test lines). It mixes navigation, comments, syntax caching, and diff-row
-   building. Extract diff-row construction and the syntax cache into
-   submodules the way `tui/` was split.
-2. **`diff_rows_for_selected_file()` allocates fresh rows on every call** and
-   is called several times per event (draw, cursor movement, anchor lookup).
-   First thing that will feel slow on large files. A per-file memoized row
-   cache keyed by diff fingerprint would fix most of it; pairs with the
-   milestone 6 lazy-rendering work.
-3. **Comment IDs can collide.** IDs are `{timestamp_millis}-{count}`, so
-   delete-then-add within the same millisecond can reuse an ID, and artifact
-   import dedupes by ID. Use a UUID or a persisted counter before artifacts
-   are shared between people/agents.
-4. **Diff parser path handling is fragile for exotic paths.** Quoted paths and
-   paths with spaces in `diff --git` lines, and rename/copy similarity lines,
-   are not parsed robustly. Paths key state, comments, and matchers, so a
-   malformed path degrades several features at once (tracked in milestone 6).
-5. **State is only saved on clean quit.** Atomic writes prevent corruption,
-   but a panic mid-session loses viewed marks and comments. Consider
-   save-on-mark or a panic-hook save.
-6. **Footer hints are two giant `format!` calls** in `src/tui/render.rs`. A
-   small `Vec<(key, label)>` builder would make adding actions less
-   error-prone.
-7. **`can_run_jj_with_timeout` polls with 10ms sleeps** (`src/jj.rs`). Works,
-   but proper `wait_timeout` semantics would be cleaner.
-8. **`Esc` doubles as quit in normal mode.** Once more modes/popups exist,
-   users will expect Esc to only dismiss the current layer. Revisit the
-   default `quit` binding.
+No known debt is currently tracked. New findings should be added here in
+priority order.
 
 ## Delegation notes for future agents
 

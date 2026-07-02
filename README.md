@@ -295,6 +295,8 @@ Persistent state defaults to:
 Use `--state <path>` to override it.
 State stores the last reviewed base/revision metadata alongside viewed files and
 comments so future resume/import behavior can detect target mismatches safely.
+The TUI autosaves state whenever viewed marks or comments change, so a crash or
+killed terminal does not lose review progress.
 
 ## TUI keys
 
