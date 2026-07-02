@@ -38,6 +38,7 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 uuid = { version = "1.23.4", features = ["v4"] }
+wait-timeout = "0.2.1"
 
 [dev-dependencies]
 insta = { version = "1.44.0", features = ["json"] }

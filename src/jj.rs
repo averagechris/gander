@@ -2,7 +2,7 @@ use std::{
     fmt, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use color_eyre::eyre::{Result, bail, eyre};
@@ -213,6 +213,8 @@ fn can_run_jj(binary: &Path) -> io::Result<bool> {
 }
 
 fn can_run_jj_with_timeout(binary: &Path, timeout: Duration) -> io::Result<bool> {
+    use wait_timeout::ChildExt;
+
     let mut child = Command::new(binary)
         .arg("--version")
         .stdin(Stdio::null())
@@ -220,26 +222,24 @@ fn can_run_jj_with_timeout(binary: &Path, timeout: Duration) -> io::Result<bool>
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
+    match child.wait_timeout(timeout)? {
+        Some(_status) => {
             let output = child.wait_with_output()?;
-            return Ok(output.status.success()
-                && version_output_looks_like_jj(&String::from_utf8_lossy(&output.stdout)));
+            Ok(output.status.success()
+                && version_output_looks_like_jj(&String::from_utf8_lossy(&output.stdout)))
         }
-        if started.elapsed() >= timeout {
+        None => {
             child.kill()?;
             let _ = child.wait();
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
                     "jj binary '{}' did not respond to --version within {}ms; this may be the wrong package (for Nix, use nixpkgs#jujutsu, not nixpkgs#jj)",
                     binary.display(),
                     timeout.as_millis()
                 ),
-            ));
+            ))
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
