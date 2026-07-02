@@ -1,3 +1,15 @@
+//! Review session domain state: file selection, tree folding, viewed marks,
+//! comments, and viewport bookkeeping.
+//!
+//! Submodules:
+//! - [`diff_rows`]: flattened diff-row construction for the diff pane
+//! - [`syntax_cache`]: per-file tree-sitter highlight caching
+
+mod diff_rows;
+mod syntax_cache;
+
+pub use diff_rows::{DiffRow, DiffRowKind};
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -8,14 +20,17 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    anchor::{CommentAnchor, DiffSide, RangeLineAnchor, fingerprint_line, fingerprint_range},
+    anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::Config,
-    diff::{DiffLineKind, DiffSet, FileDiff, FileStatus},
+    diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
     state::{Comment, FileState, ReviewState, ReviewStateMeta},
-    syntax::{HighlightOutcome, SyntaxConfig, SyntaxSpan, SyntaxSummary},
+    syntax::SyntaxConfig,
 };
+
+use diff_rows::nearest_commentable_row;
+use syntax_cache::{SyntaxCacheKey, SyntaxFileCache};
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -40,31 +55,6 @@ pub struct ReviewSession {
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct SyntaxCacheKey {
-    path: String,
-    fingerprint: String,
-    config_key: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SyntaxFileCache {
-    summary: Option<SyntaxSummary>,
-    new_lines: BTreeMap<(usize, usize), Vec<SyntaxSpan>>,
-    old_lines: BTreeMap<(usize, usize), Vec<SyntaxSpan>>,
-    new_status: SyntaxCacheStatus,
-    old_status: SyntaxCacheStatus,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum SyntaxCacheStatus {
-    #[default]
-    Disabled,
-    Unsupported,
-    Highlighted,
-    Failed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,26 +88,6 @@ pub struct ReviewFile {
     pub viewed: bool,
     pub fingerprint: String,
     pub diff: FileDiff,
-}
-
-#[derive(Debug, Clone)]
-pub struct DiffRow {
-    pub old_lineno: Option<usize>,
-    pub new_lineno: Option<usize>,
-    pub prefix: &'static str,
-    pub text: String,
-    pub syntax: Vec<SyntaxSpan>,
-    pub kind: DiffRowKind,
-    pub anchor: Option<CommentAnchor>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffRowKind {
-    FileHeader,
-    SyntaxSummary,
-    HunkHeader,
-    DiffLine(DiffLineKind),
-    Raw,
 }
 
 impl ReviewSession {
@@ -622,148 +592,6 @@ impl ReviewSession {
             .unwrap_or(false)
     }
 
-    pub fn diff_rows_for_selected_file(&self) -> Vec<DiffRow> {
-        let Some(file) = self.selected_visible_file() else {
-            return Vec::new();
-        };
-
-        let mut rows = vec![DiffRow {
-            old_lineno: None,
-            new_lineno: None,
-            prefix: " ",
-            text: format!("{}  +{} -{}", file.path, file.additions, file.deletions),
-            syntax: Vec::new(),
-            kind: DiffRowKind::FileHeader,
-            anchor: None,
-        }];
-
-        let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
-        let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
-        let syntax_cache = self.syntax_cache_for_file(
-            file,
-            &new_source,
-            &new_line_indices,
-            &old_source,
-            &old_line_indices,
-        );
-        if let Some(summary) = syntax_cache.summary.clone() {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: format!(
-                    "tree-sitter: {} root={} errors={}",
-                    summary.language, summary.root_kind, summary.has_error
-                ),
-                syntax: Vec::new(),
-                kind: DiffRowKind::SyntaxSummary,
-                anchor: None,
-            });
-        }
-        if syntax_cache.new_status == SyntaxCacheStatus::Failed
-            || syntax_cache.old_status == SyntaxCacheStatus::Failed
-        {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: "tree-sitter: highlighting unavailable".to_owned(),
-                syntax: Vec::new(),
-                kind: DiffRowKind::SyntaxSummary,
-                anchor: None,
-            });
-        }
-
-        for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: hunk.header.clone(),
-                syntax: Vec::new(),
-                kind: DiffRowKind::HunkHeader,
-                anchor: None,
-            });
-            for (line_index, line) in hunk.lines.iter().enumerate() {
-                let prefix = match line.kind {
-                    DiffLineKind::Context => " ",
-                    DiffLineKind::Added => "+",
-                    DiffLineKind::Removed => "-",
-                    DiffLineKind::Meta => "\\",
-                };
-                let syntax = match line.kind {
-                    DiffLineKind::Added | DiffLineKind::Context => syntax_cache
-                        .new_lines
-                        .get(&(hunk_index, line_index))
-                        .cloned()
-                        .unwrap_or_default(),
-                    DiffLineKind::Removed => syntax_cache
-                        .old_lines
-                        .get(&(hunk_index, line_index))
-                        .cloned()
-                        .unwrap_or_default(),
-                    DiffLineKind::Meta => Vec::new(),
-                };
-                rows.push(DiffRow {
-                    old_lineno: line.old_lineno,
-                    new_lineno: line.new_lineno,
-                    prefix,
-                    text: line.text.clone(),
-                    syntax,
-                    kind: DiffRowKind::DiffLine(line.kind),
-                    anchor: self.line_anchor(file, hunk_index, line_index),
-                });
-            }
-        }
-
-        if file.diff.hunks.is_empty() {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: file.diff.raw.clone(),
-                syntax: Vec::new(),
-                kind: DiffRowKind::Raw,
-                anchor: None,
-            });
-        }
-
-        rows
-    }
-
-    fn syntax_cache_for_file(
-        &self,
-        file: &ReviewFile,
-        new_source: &str,
-        new_line_indices: &[(usize, usize)],
-        old_source: &str,
-        old_line_indices: &[(usize, usize)],
-    ) -> SyntaxFileCache {
-        let key = SyntaxCacheKey {
-            path: file.path.clone(),
-            fingerprint: file.fingerprint.clone(),
-            config_key: self.syntax.cache_key(),
-        };
-        if let Some(cached) = self.syntax_cache.borrow().get(&key).cloned() {
-            return cached;
-        }
-
-        let (new_lines, new_status) =
-            syntax_highlights_by_diff_line(&file.path, new_source, new_line_indices, &self.syntax);
-        let (old_lines, old_status) =
-            syntax_highlights_by_diff_line(&file.path, old_source, old_line_indices, &self.syntax);
-
-        let computed = SyntaxFileCache {
-            summary: crate::syntax::summarize_with_config(&file.path, new_source, &self.syntax),
-            new_lines,
-            old_lines,
-            new_status,
-            old_status,
-        };
-        self.syntax_cache.borrow_mut().insert(key, computed.clone());
-        computed
-    }
-
     pub fn selected_line_anchor(&self) -> Option<CommentAnchor> {
         self.diff_rows_for_selected_file()
             .get(self.diff_cursor)
@@ -1060,53 +888,6 @@ impl ReviewSession {
         }
     }
 
-    fn line_anchor(
-        &self,
-        file: &ReviewFile,
-        hunk_index: usize,
-        line_index: usize,
-    ) -> Option<CommentAnchor> {
-        let hunk = file.diff.hunks.get(hunk_index)?;
-        let line = hunk.lines.get(line_index)?;
-        let (side, line_number) = match line.kind {
-            DiffLineKind::Added => (DiffSide::New, line.new_lineno?),
-            DiffLineKind::Removed => (DiffSide::Old, line.old_lineno?),
-            DiffLineKind::Context => (DiffSide::New, line.new_lineno?),
-            DiffLineKind::Meta => return None,
-        };
-        Some(CommentAnchor::Line {
-            path: file.path.clone(),
-            old_path: file.old_path.clone(),
-            side,
-            line: line_number,
-            old_line: line.old_lineno,
-            new_line: line.new_lineno,
-            hunk_header: hunk.header.clone(),
-            hunk_old_start: hunk.old_start,
-            hunk_old_len: hunk.old_len,
-            hunk_new_start: hunk.new_start,
-            hunk_new_len: hunk.new_len,
-            hunk_index,
-            line_index,
-            line_kind: match line.kind {
-                DiffLineKind::Context => "context",
-                DiffLineKind::Added => "added",
-                DiffLineKind::Removed => "removed",
-                DiffLineKind::Meta => "meta",
-            }
-            .to_owned(),
-            line_text: line.text.clone(),
-            line_fingerprint: fingerprint_line(
-                &file.path,
-                side,
-                line_number,
-                &line.text,
-                &file.fingerprint,
-            ),
-            diff_fingerprint: file.fingerprint.clone(),
-        })
-    }
-
     pub fn into_state(self) -> ReviewState {
         self.to_state()
     }
@@ -1153,53 +934,6 @@ impl ReviewSession {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SyntaxSide {
-    Old,
-    New,
-}
-
-fn syntax_source(file: &ReviewFile, side: SyntaxSide) -> (String, Vec<(usize, usize)>) {
-    let mut lines = Vec::new();
-    let mut indices = Vec::new();
-    for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
-        for (line_index, line) in hunk.lines.iter().enumerate() {
-            let included = match (side, line.kind) {
-                (SyntaxSide::New, DiffLineKind::Added | DiffLineKind::Context) => true,
-                (SyntaxSide::Old, DiffLineKind::Removed | DiffLineKind::Context) => true,
-                (_, DiffLineKind::Meta) => false,
-                _ => false,
-            };
-            if included {
-                lines.push(line.text.as_str());
-                indices.push((hunk_index, line_index));
-            }
-        }
-    }
-    (lines.join("\n"), indices)
-}
-
-fn syntax_highlights_by_diff_line(
-    path: &str,
-    source: &str,
-    line_indices: &[(usize, usize)],
-    config: &SyntaxConfig,
-) -> (BTreeMap<(usize, usize), Vec<SyntaxSpan>>, SyntaxCacheStatus) {
-    match crate::syntax::highlight_outcome(path, source, config) {
-        HighlightOutcome::Highlighted { lines, .. } => (
-            lines
-                .into_iter()
-                .zip(line_indices.iter())
-                .map(|(line, index)| (*index, line.spans))
-                .collect(),
-            SyntaxCacheStatus::Highlighted,
-        ),
-        HighlightOutcome::Disabled => (BTreeMap::new(), SyntaxCacheStatus::Disabled),
-        HighlightOutcome::Unsupported => (BTreeMap::new(), SyntaxCacheStatus::Unsupported),
-        HighlightOutcome::Failed { .. } => (BTreeMap::new(), SyntaxCacheStatus::Failed),
-    }
-}
-
 fn parent_dir_for_path(path: &str) -> Option<String> {
     path.rsplit_once('/')
         .map(|(directory, _)| directory.to_owned())
@@ -1226,14 +960,6 @@ fn visible_ancestor_row(tree: &FileTreeView, path: &str) -> Option<usize> {
         .into_iter()
         .rev()
         .find_map(|directory| tree.row_for_id(&TreeRowId::Directory(directory)))
-}
-
-fn nearest_commentable_row(rows: &[DiffRow], target: usize) -> Option<usize> {
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| row.anchor.is_some())
-        .min_by_key(|(index, _)| index.abs_diff(target))
-        .map(|(index, _)| index)
 }
 
 #[cfg(test)]
