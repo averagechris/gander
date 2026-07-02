@@ -11,6 +11,7 @@
 mod chooser;
 mod editor;
 mod keymap;
+mod outline;
 mod render;
 mod search;
 
@@ -42,6 +43,7 @@ use crate::{
 use chooser::TargetChooserState;
 use editor::CommentEditor;
 use keymap::{Action, KeyMap};
+use outline::SymbolOutlineState;
 use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
 use search::FileSearchState;
 
@@ -49,6 +51,7 @@ enum Mode {
     Normal,
     TargetChooser(TargetChooserState),
     FileSearch(FileSearchState),
+    SymbolOutline(SymbolOutlineState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
@@ -236,6 +239,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::SymbolOutline(outline) => {
+            if handle_symbol_outline_key(key, outline, session, keymap) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -309,6 +317,19 @@ fn handle_normal_action(
         Action::FileSearch => {
             *mode = Mode::FileSearch(FileSearchState::new(session));
         }
+        Action::SymbolOutline => {
+            let outline = SymbolOutlineState::new(session);
+            if outline.targets.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no changed symbols in this file".to_owned(),
+                });
+            } else {
+                *mode = Mode::SymbolOutline(outline);
+            }
+        }
+        Action::NextSymbol => session.jump_to_changed_symbol(1),
+        Action::PreviousSymbol => session.jump_to_changed_symbol(-1),
         Action::NextComment => session.move_to_comment(1),
         Action::PreviousComment => session.move_to_comment(-1),
         Action::ScrollDown => session.scroll_diff(12),
@@ -476,6 +497,41 @@ fn handle_file_search_key(
     }
 }
 
+fn handle_symbol_outline_key(
+    key: KeyEvent,
+    outline: &mut SymbolOutlineState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => outline.move_selection(1),
+            Action::TargetPickerMoveUp => outline.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(row_index) = outline.selected_row_index() {
+                session.jump_to_diff_row(row_index);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            outline.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            outline.move_selection(-1);
+            false
+        }
+        _ => false,
+    }
+}
+
 impl ReviewLoader<'_> {
     fn base_candidates(&self, session: &ReviewSession) -> Result<Vec<crate::jj::JjChangeSummary>> {
         self.jj.change_summaries(&session.repo)
@@ -562,7 +618,10 @@ fn handle_mouse_event(
     mode: &mut Mode,
     tui_state: &mut TuiState,
 ) {
-    if matches!(mode, Mode::CommentInput { .. } | Mode::FileSearch(_)) {
+    if matches!(
+        mode,
+        Mode::CommentInput { .. } | Mode::FileSearch(_) | Mode::SymbolOutline(_)
+    ) {
         return;
     }
 

@@ -69,6 +69,9 @@ pub struct KeybindingsConfig {
     pub next_comment: Vec<String>,
     pub previous_comment: Vec<String>,
     pub file_search: Vec<String>,
+    pub symbol_outline: Vec<String>,
+    pub next_symbol: Vec<String>,
+    pub previous_symbol: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub mark_viewed: Vec<String>,
@@ -163,6 +166,9 @@ struct KeybindingsConfigPatch {
     next_comment: Option<Vec<String>>,
     previous_comment: Option<Vec<String>>,
     file_search: Option<Vec<String>>,
+    symbol_outline: Option<Vec<String>>,
+    next_symbol: Option<Vec<String>>,
+    previous_symbol: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     mark_viewed: Option<Vec<String>>,
@@ -230,6 +236,9 @@ impl Default for KeybindingsConfig {
             next_comment: keys(["m"]),
             previous_comment: keys(["M"]),
             file_search: keys(["/"]),
+            symbol_outline: keys(["o"]),
+            next_symbol: keys(["]"]),
+            previous_symbol: keys(["["]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             mark_viewed: keys(["enter"]),
@@ -370,6 +379,9 @@ impl KeybindingsConfig {
         apply_optional(&mut self.next_comment, patch.next_comment);
         apply_optional(&mut self.previous_comment, patch.previous_comment);
         apply_optional(&mut self.file_search, patch.file_search);
+        apply_optional(&mut self.symbol_outline, patch.symbol_outline);
+        apply_optional(&mut self.next_symbol, patch.next_symbol);
+        apply_optional(&mut self.previous_symbol, patch.previous_symbol);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);

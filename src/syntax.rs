@@ -90,6 +90,16 @@ pub struct SyntaxSpan {
     pub kind: Option<HighlightKind>,
 }
 
+/// A named declaration (function/class/struct/...) found in parsed source,
+/// with 0-indexed line bounds into that source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolSpan {
+    pub name: String,
+    pub kind: &'static str,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightedLine {
     pub spans: Vec<SyntaxSpan>,
@@ -336,6 +346,66 @@ pub fn summarize_with_config(
         root_kind: root.kind().to_owned(),
         has_error: root.has_error(),
     })
+}
+
+/// Friendly labels for tree-sitter node kinds that declare a named symbol,
+/// across the built-in grammars.
+fn symbol_kind_label(node_kind: &str) -> Option<&'static str> {
+    Some(match node_kind {
+        "function_item" | "function_definition" | "function_declaration" => "fn",
+        "method_definition" | "method_declaration" => "method",
+        "class_definition" | "class_declaration" => "class",
+        "struct_item" | "struct_specifier" => "struct",
+        "enum_item" | "enum_declaration" => "enum",
+        "trait_item" => "trait",
+        "impl_item" => "impl",
+        "mod_item" => "mod",
+        "interface_declaration" => "interface",
+        "type_declaration" | "type_item" | "type_alias_declaration" => "type",
+        _ => return None,
+    })
+}
+
+/// Extract named declarations from `source`, in document order.
+pub fn symbol_spans(path: &str, source: &str, config: &SyntaxConfig) -> Vec<SymbolSpan> {
+    let Some(language) = language_for_path_with_config(path, config) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&language.language()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+
+    let mut symbols = Vec::new();
+    collect_symbols(tree.root_node(), source.as_bytes(), &mut symbols);
+    symbols
+}
+
+fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], symbols: &mut Vec<SymbolSpan>) {
+    if let Some(kind) = symbol_kind_label(node.kind()) {
+        let name = node
+            .child_by_field_name("name")
+            .or_else(|| node.child_by_field_name("type"))
+            .and_then(|name_node| name_node.utf8_text(source).ok())
+            .unwrap_or("")
+            .to_owned();
+        if !name.is_empty() {
+            symbols.push(SymbolSpan {
+                name,
+                kind,
+                start_line: node.start_position().row,
+                end_line: node.end_position().row,
+            });
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_symbols(child, source, symbols);
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +731,68 @@ mod tests {
                 .iter()
                 .any(|span| span.text == "\"hi\"" && span.kind == Some(HighlightKind::String))
         );
+    }
+
+    #[test]
+    fn extracts_rust_symbols_with_line_spans() {
+        let source = "struct Point {\n    x: i32,\n}\n\nimpl Point {\n    fn new() -> Self {\n        todo!()\n    }\n}\n";
+
+        let symbols = symbol_spans("src/lib.rs", source, &SyntaxConfig::default());
+
+        assert!(symbols.contains(&SymbolSpan {
+            name: "Point".to_owned(),
+            kind: "struct",
+            start_line: 0,
+            end_line: 2,
+        }));
+        assert!(symbols.contains(&SymbolSpan {
+            name: "Point".to_owned(),
+            kind: "impl",
+            start_line: 4,
+            end_line: 8,
+        }));
+        assert!(symbols.contains(&SymbolSpan {
+            name: "new".to_owned(),
+            kind: "fn",
+            start_line: 5,
+            end_line: 7,
+        }));
+    }
+
+    #[test]
+    fn extracts_symbols_across_languages() {
+        let cases: [(&str, &str, &str, &str); 3] = [
+            (
+                "app.py",
+                "class Widget:\n    def draw(self):\n        pass\n",
+                "class",
+                "Widget",
+            ),
+            ("main.go", "package main\n\nfunc run() {}\n", "fn", "run"),
+            ("app.ts", "export function main(): void {}\n", "fn", "main"),
+        ];
+
+        for (path, source, kind, name) in cases {
+            let symbols = symbol_spans(path, source, &SyntaxConfig::default());
+            assert!(
+                symbols
+                    .iter()
+                    .any(|symbol| symbol.kind == kind && symbol.name == name),
+                "expected {kind} {name} in {path}, got {symbols:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_or_disabled_syntax_yields_no_symbols() {
+        assert!(
+            symbol_spans("notes.unknown", "fn main() {}\n", &SyntaxConfig::default()).is_empty()
+        );
+        let disabled = SyntaxConfig {
+            enabled: false,
+            ..SyntaxConfig::default()
+        };
+        assert!(symbol_spans("src/lib.rs", "fn main() {}\n", &disabled).is_empty());
     }
 
     #[test]

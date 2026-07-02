@@ -31,7 +31,7 @@ use crate::{
 };
 
 use diff_rows::nearest_commentable_row;
-use syntax_cache::{SyntaxCacheKey, SyntaxFileCache};
+use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -114,6 +114,14 @@ pub struct DiffRangeSelection {
     pub file_path: String,
     pub file_fingerprint: String,
     pub start_cursor: usize,
+}
+
+/// A changed symbol in the selected file, resolved to its first changed
+/// diff row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedSymbolTarget {
+    pub label: String,
+    pub row_index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,6 +672,73 @@ impl ReviewSession {
         self.diff_rows_for_selected_file()
             .get(self.diff_cursor)
             .and_then(|row| row.anchor.clone())
+    }
+
+    /// Changed symbols in the selected file, resolved to diff row indices.
+    pub fn changed_symbol_targets(&self) -> Vec<ChangedSymbolTarget> {
+        let Some(file) = self.selected_visible_file() else {
+            return Vec::new();
+        };
+        let (new_source, new_line_indices) = syntax_source(file, SyntaxSide::New);
+        let (old_source, old_line_indices) = syntax_source(file, SyntaxSide::Old);
+        let cache = self.syntax_cache_for_file(
+            file,
+            &new_source,
+            &new_line_indices,
+            &old_source,
+            &old_line_indices,
+        );
+        let rows = self.diff_rows_for_selected_file();
+        cache
+            .changed_symbols
+            .iter()
+            .filter_map(|symbol| {
+                let row_index = rows.iter().position(|row| {
+                    matches!(
+                        &row.anchor,
+                        Some(CommentAnchor::Line { hunk_index, line_index, .. })
+                            if *hunk_index == symbol.hunk_index
+                                && *line_index == symbol.line_index
+                    )
+                })?;
+                Some(ChangedSymbolTarget {
+                    label: format!("{} {}", symbol.kind, symbol.name),
+                    row_index,
+                })
+            })
+            .collect()
+    }
+
+    /// Cycle the diff cursor between changed symbols (wrapping).
+    pub fn jump_to_changed_symbol(&mut self, delta: isize) {
+        let targets = self.changed_symbol_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let at_diff_cursor = self.focus == Focus::Diff;
+        let current = self.diff_cursor;
+        let next = if delta.is_negative() {
+            targets
+                .iter()
+                .rev()
+                .find(|target| !at_diff_cursor || target.row_index < current)
+                .or_else(|| targets.last())
+        } else {
+            targets
+                .iter()
+                .find(|target| !at_diff_cursor || target.row_index > current)
+                .or_else(|| targets.first())
+        };
+        if let Some(target) = next {
+            self.jump_to_diff_row(target.row_index);
+        }
+    }
+
+    /// Move to a diff row (from outline/symbol navigation), focusing the diff
+    /// pane and scrolling the row into view.
+    pub fn jump_to_diff_row(&mut self, row_index: usize) {
+        self.select_diff_row(row_index);
+        self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
     }
 
     pub fn selected_comment_anchor(&self) -> Option<CommentAnchor> {
@@ -1633,6 +1708,74 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert!(session.selected_visible_file().is_none());
         assert!(session.file_tree().rows.is_empty());
+    }
+
+    #[test]
+    fn changed_symbol_targets_resolve_added_lines_to_rows() {
+        let session = rust_syntax_session();
+
+        let targets = session.changed_symbol_targets();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].label, "fn new");
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[targets[0].row_index].text, "fn new() {");
+    }
+
+    #[test]
+    fn jump_to_changed_symbol_cycles_between_symbols() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,8 +1,8 @@
+ fn alpha() {
+-    old_alpha();
++    new_alpha();
+ }
+ 
+ fn beta() {
+-    old_beta();
++    new_beta();
+ }
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+
+        session.jump_to_changed_symbol(1);
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(rows[session.diff_cursor].text.trim(), "new_alpha();");
+
+        session.jump_to_changed_symbol(1);
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].text.trim(), "new_beta();");
+
+        // Wraps back to the first symbol.
+        session.jump_to_changed_symbol(1);
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].text.trim(), "new_alpha();");
+
+        session.jump_to_changed_symbol(-1);
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].text.trim(), "new_beta();");
+    }
+
+    #[test]
+    fn changed_symbol_targets_empty_for_unsupported_files() {
+        let session = session();
+        let mut session = session;
+        session.move_selection(1);
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+
+        // Markdown has no symbol declarations in these hunks.
+        assert!(session.changed_symbol_targets().is_empty());
     }
 
     #[test]
