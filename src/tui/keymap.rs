@@ -48,6 +48,7 @@ pub(super) enum Action {
     ToggleViewed,
     MarkAllViewed,
     ToggleGenerated,
+    CycleViewedFilter,
     ToggleFold,
     CollapseFold,
     ExpandFold,
@@ -112,6 +113,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleGenerated,
             &config.toggle_generated,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::CycleViewedFilter,
+            &config.cycle_viewed_filter,
         )?;
         add_bindings(&mut bindings, Action::ToggleFold, &config.toggle_fold)?;
         add_bindings(&mut bindings, Action::CollapseFold, &config.collapse_fold)?;

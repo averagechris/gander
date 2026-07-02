@@ -317,6 +317,7 @@ fn handle_normal_action(
         Action::ToggleViewed => session.toggle_viewed(),
         Action::MarkAllViewed => session.mark_all_viewed(),
         Action::ToggleGenerated => session.toggle_generated_visibility(),
+        Action::CycleViewedFilter => session.cycle_viewed_filter(),
         Action::ToggleFold => {
             if session.focus == Focus::Files {
                 session.toggle_tree_fold();

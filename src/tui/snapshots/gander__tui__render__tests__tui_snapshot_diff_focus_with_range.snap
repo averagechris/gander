@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 889
 expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -20,4 +19,4 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments
-trunk()..@ · focus diff (range active) · j/k line · r range · ctrl-g cancel · h hide noisy · t/p/b t
+trunk()..@ · focus diff (range active) · j/k line · r range · ctrl-g cancel · h hide noisy · f filte

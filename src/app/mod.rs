@@ -50,6 +50,7 @@ pub struct ReviewSession {
     pub focus: Focus,
     pub syntax: SyntaxConfig,
     pub hide_generated: bool,
+    pub viewed_filter: ViewedFilter,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     selected_comment_id: Option<String>,
@@ -71,6 +72,41 @@ struct FileViewport {
 pub enum Focus {
     Files,
     Diff,
+}
+
+/// Which files remain visible in the tree based on their viewed mark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ViewedFilter {
+    #[default]
+    All,
+    Unviewed,
+    Viewed,
+}
+
+impl ViewedFilter {
+    fn admits(self, viewed: bool) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unviewed => !viewed,
+            Self::Viewed => viewed,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Unviewed,
+            Self::Unviewed => Self::Viewed,
+            Self::Viewed => Self::All,
+        }
+    }
+
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Unviewed => Some("unviewed only"),
+            Self::Viewed => Some("viewed only"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +181,7 @@ impl ReviewSession {
             focus: Focus::Files,
             syntax,
             hide_generated: false,
+            viewed_filter: ViewedFilter::default(),
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             selected_comment_id: None,
@@ -208,6 +245,12 @@ impl ReviewSession {
 
     pub fn toggle_generated_visibility(&mut self) {
         self.hide_generated = !self.hide_generated;
+        self.ensure_selected_file_visible();
+    }
+
+    /// Cycle the viewed filter: all files -> unviewed only -> viewed only.
+    pub fn cycle_viewed_filter(&mut self) {
+        self.viewed_filter = self.viewed_filter.next();
         self.ensure_selected_file_visible();
     }
 
@@ -443,6 +486,7 @@ impl ReviewSession {
         if let Some(file) = self.selected_file_mut() {
             file.viewed = !file.viewed;
         }
+        self.ensure_selected_file_visible();
     }
 
     pub fn mark_selected_viewed(&mut self) {
@@ -454,12 +498,14 @@ impl ReviewSession {
         if let Some(next) = next {
             self.select_file_index(next);
         }
+        self.ensure_selected_file_visible();
     }
 
     pub fn mark_all_viewed(&mut self) {
         for file in &mut self.files {
             file.viewed = true;
         }
+        self.ensure_selected_file_visible();
     }
 
     pub fn mark_files_viewed_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
@@ -478,7 +524,7 @@ impl ReviewSession {
     }
 
     fn file_visible(&self, file: &ReviewFile) -> bool {
-        !self.hide_generated || !file.generated
+        (!self.hide_generated || !file.generated) && self.viewed_filter.admits(file.viewed)
     }
 
     fn ensure_selected_file_visible(&mut self) {
@@ -1519,6 +1565,73 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert!(session.selected_visible_file().is_none());
         assert!(session.diff_rows_for_selected_file().is_empty());
+        assert!(session.file_tree().rows.is_empty());
+    }
+
+    #[test]
+    fn unviewed_filter_hides_viewed_files_and_moves_selection() {
+        let mut session = three_file_session();
+        session.files[0].viewed = true;
+
+        session.cycle_viewed_filter();
+
+        assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
+        assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
+        assert!(session.file_tree().rows.iter().all(|row| {
+            !matches!(row.kind, FlatTreeRowKind::File { file_index } if file_index == 0)
+        }));
+    }
+
+    #[test]
+    fn viewed_filter_shows_only_viewed_files() {
+        let mut session = three_file_session();
+        session.files[2].viewed = true;
+
+        session.cycle_viewed_filter();
+        session.cycle_viewed_filter();
+
+        assert_eq!(session.viewed_filter, ViewedFilter::Viewed);
+        assert_eq!(session.selected_file().unwrap().path, "src/c.rs");
+        let file_rows = session
+            .file_tree()
+            .rows
+            .iter()
+            .filter(|row| matches!(row.kind, FlatTreeRowKind::File { .. }))
+            .count();
+        assert_eq!(file_rows, 1);
+    }
+
+    #[test]
+    fn viewed_filter_cycles_back_to_all() {
+        let mut session = session();
+
+        session.cycle_viewed_filter();
+        session.cycle_viewed_filter();
+        session.cycle_viewed_filter();
+
+        assert_eq!(session.viewed_filter, ViewedFilter::All);
+    }
+
+    #[test]
+    fn marking_viewed_under_unviewed_filter_keeps_selection_visible() {
+        let mut session = three_file_session();
+        session.cycle_viewed_filter();
+
+        session.mark_selected_viewed();
+
+        assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
+        let selected = session.selected_visible_file().unwrap();
+        assert!(!selected.viewed);
+    }
+
+    #[test]
+    fn unviewed_filter_with_everything_viewed_clears_selection() {
+        let mut session = session();
+        session.cycle_viewed_filter();
+
+        session.mark_all_viewed();
+
+        assert!(session.selected_visible_file().is_none());
         assert!(session.file_tree().rows.is_empty());
     }
 

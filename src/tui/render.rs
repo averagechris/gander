@@ -402,19 +402,20 @@ fn draw_footer(
             session,
             keymap,
             &format!(
-                "focus files{}",
+                "focus files{}{}",
                 if session.hide_generated {
                     " (noisy hidden)"
                 } else {
                     ""
-                }
+                },
+                viewed_filter_label(session),
             ),
         )),
         Mode::Normal => footer_line(diff_footer_segments(
             session,
             keymap,
             &format!(
-                "focus diff{}{}",
+                "focus diff{}{}{}",
                 if session.has_active_diff_range() {
                     " (range active)"
                 } else {
@@ -424,7 +425,8 @@ fn draw_footer(
                     " (noisy hidden)"
                 } else {
                     ""
-                }
+                },
+                viewed_filter_label(session),
             ),
         )),
         Mode::CommentInput { target, .. } => format!(
@@ -510,6 +512,7 @@ fn files_footer_segments(
         FooterHint::new([Action::MoveDown, Action::MoveUp], "tree"),
         FooterHint::new([Action::ToggleFold], "fold"),
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
+        FooterHint::new([Action::CycleViewedFilter], "filter"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -545,6 +548,7 @@ fn diff_footer_segments(
         FooterHint::new([Action::RangeComment], "range"),
         FooterHint::new([Action::CancelRangeComment], "cancel"),
         FooterHint::new([Action::ToggleGenerated], noisy_toggle_label(session)),
+        FooterHint::new([Action::CycleViewedFilter], "filter"),
         FooterHint::new(
             [
                 Action::CompareTrunk,
@@ -574,6 +578,14 @@ fn noisy_toggle_label(session: &ReviewSession) -> &'static str {
     } else {
         "hide noisy"
     }
+}
+
+fn viewed_filter_label(session: &ReviewSession) -> String {
+    session
+        .viewed_filter
+        .label()
+        .map(|label| format!(" ({label})"))
+        .unwrap_or_default()
 }
 
 fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &CommentEditor) {
