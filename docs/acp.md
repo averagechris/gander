@@ -22,20 +22,26 @@ are treated as notifications and get no response.
 
 ## Live session over the TUI socket
 
-While the TUI runs it also hosts the same protocol on a Unix socket in the
-workspace's runtime directory (`gander paths` prints it; Unix platforms
-only). Requests answered there hit the
+While the TUI runs it also hosts the same protocol on a per-instance Unix
+socket (`acp-<pid>.sock`) in the workspace's runtime directory
+(`gander paths` prints the pattern; Unix platforms only). Each instance
+also registers itself (workspace root, target, summary, socket, pid,
+`last_input_at`) in a shared instance registry, cleaned up on exit, so
+several reviews can run at once — one gander per workstream
+(docs/decisions.md D3). Requests answered there hit the
 **live** session: current viewed state, comments, and the active review
 target, and agent writes surface in the UI within one event-loop tick —
 no file polling latency.
 
 Two ways to reach it:
 
-- connect to the socket directly and speak line-delimited JSON-RPC;
-- run `gander acp` as usual: when the socket is live it transparently
-  bridges stdio to the TUI, so agent clients that spawn `gander acp` as a
-  subprocess get the live session for free. Without a running TUI it falls
-  back to serving a snapshot loaded at startup.
+- connect to an instance socket directly and speak line-delimited
+  JSON-RPC;
+- run `gander acp` as usual: it looks up the registry for a live instance
+  reviewing the current workspace (most recently touched first) and
+  transparently bridges stdio to it, so agent clients that spawn
+  `gander acp` as a subprocess get the live session for free. Without a
+  running TUI it falls back to serving a snapshot loaded at startup.
 
 If the socket cannot be bound (say, a second gander TUI on the same
 workspace)
@@ -76,6 +82,7 @@ prompt and run a subprocess works.
 | `review/files` | – | array of `{path, old_path, status, additions, deletions, viewed, generated, fingerprint}` |
 | `review/file_diff` | `{path}` | `{path, fingerprint, raw}` (raw git-style diff) |
 | `review/comments` | – | array of `{id, path, line, end_line, body, state}` |
+| `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
 | `review/overlay` | – | the full agent overlay (ordering, flags, chunks, drafts with dispositions) |
 
 ## Write methods

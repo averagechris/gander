@@ -112,6 +112,8 @@ struct TuiState {
     agent_config: AgentConfig,
     /// A summoned agent, if any. Killed on drop so quitting cannot leak it.
     agent_process: Option<AgentProcess>,
+    /// This instance's registry entry; heartbeats on input, removed on drop.
+    instance_registration: Option<crate::registry::InstanceRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,10 +150,15 @@ pub struct TuiPaths {
     pub state_file: Option<PathBuf>,
     /// The shared agent overlay polled for suggestions.
     pub agent_overlay: Option<PathBuf>,
-    /// Unix socket for the live ACP endpoint.
+    /// Unix socket for the live ACP endpoint (per instance).
     pub acp_socket: Option<PathBuf>,
     /// Where a summoned agent's output is logged.
     pub agent_log: Option<PathBuf>,
+    /// Instance registry directory; when set (with `workspace_root`), the
+    /// TUI advertises itself while running (docs/decisions.md D3).
+    pub registry_dir: Option<PathBuf>,
+    /// Canonicalized workspace root advertised in the registry.
+    pub workspace_root: Option<PathBuf>,
 }
 
 pub fn run(
@@ -168,6 +175,8 @@ pub fn run(
         agent_overlay: agent_overlay_path,
         acp_socket: acp_socket_path,
         agent_log: agent_log_path,
+        registry_dir,
+        workspace_root,
     } = paths;
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
@@ -177,21 +186,47 @@ pub fn run(
     };
 
     // Host a live ACP endpoint so agents can talk to this session while the
-    // human reviews. Failure to bind (e.g. another gander TUI on the same
-    // repo) degrades to overlay-file collaboration with a footer notice.
+    // human reviews. The socket is per-instance (docs/decisions.md D3), and
+    // a successfully bound instance advertises itself in the registry so
+    // `gander acp`/`gander mcp` can route to it by cwd. Failure to bind
+    // degrades to overlay-file collaboration with a footer notice.
     #[cfg(unix)]
-    let (mut acp_bridge, acp_notice) = match (acp_socket_path, &agent_overlay_path) {
-        (Some(socket_path), Some(overlay_path)) => {
-            match crate::acp::socket::AcpBridge::bind(socket_path, overlay_path.clone()) {
-                Ok(bridge) => (Some(bridge), None),
-                Err(error) => (None, Some(format!("acp socket unavailable: {error}"))),
+    let (mut acp_bridge, acp_notice, instance_registration) =
+        match (acp_socket_path, &agent_overlay_path) {
+            (Some(socket_path), Some(overlay_path)) => {
+                match crate::acp::socket::AcpBridge::bind(socket_path.clone(), overlay_path.clone())
+                {
+                    Ok(bridge) => {
+                        let registration = match (&registry_dir, &workspace_root) {
+                            (Some(registry_dir), Some(workspace_root)) => {
+                                let now = chrono::Utc::now();
+                                crate::registry::InstanceRegistration::register(
+                                    registry_dir,
+                                    crate::registry::InstanceInfo {
+                                        pid: std::process::id(),
+                                        workspace_root: workspace_root.clone(),
+                                        base: session.target.base.clone(),
+                                        rev: session.target.rev.clone(),
+                                        summary: session.summary_line(),
+                                        socket_path,
+                                        started_at: now,
+                                        last_input_at: now,
+                                    },
+                                )
+                                .ok()
+                            }
+                            _ => None,
+                        };
+                        (Some(bridge), None, registration)
+                    }
+                    Err(error) => (None, Some(format!("acp socket unavailable: {error}")), None),
+                }
             }
-        }
-        _ => (None, None),
-    };
+            _ => (None, None, None),
+        };
     #[cfg(not(unix))]
     let acp_notice: Option<String> = {
-        let _ = acp_socket_path;
+        let _ = (acp_socket_path, registry_dir, workspace_root);
         None
     };
 
@@ -217,6 +252,10 @@ pub fn run(
         }),
         ..TuiState::default()
     };
+    #[cfg(unix)]
+    {
+        tui_state.instance_registration = instance_registration;
+    }
     if tui_state.agent_config.autostart && tui_state.agent_config.command.is_some() {
         summon_agent(session, &mut tui_state);
     }
@@ -301,6 +340,17 @@ fn run_loop(
                 handle_mouse_event(mouse, terminal.size()?, session, mode, tui_state)
             }
             _ => {}
+        }
+
+        // Heartbeat the instance registry (throttled) so `current_focus` /
+        // `list_reviews` can rank instances by recent human input, and keep
+        // the advertised target/summary current after retargets.
+        if let Some(registration) = tui_state.instance_registration.as_mut() {
+            let _ = registration.record_input(
+                &session.target.base,
+                &session.target.rev,
+                &session.summary_line(),
+            );
         }
 
         // Persist viewed marks and comments as they change so a crash or

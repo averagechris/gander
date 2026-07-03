@@ -57,6 +57,10 @@ pub struct WorkspacePaths {
     /// Ephemeral endpoints: `<XDG_RUNTIME_DIR>/gander/<key>/`, else the
     /// state dir.
     pub runtime_dir: PathBuf,
+    /// Instance registry shared across *all* workspaces (docs/decisions.md
+    /// D3): one entry per running TUI, under the same base as the runtime
+    /// dirs.
+    pub registry_dir: PathBuf,
     /// The deprecated project-local `.gander/` directory (read-only
     /// migration fallback).
     pub legacy_dir: PathBuf,
@@ -73,18 +77,20 @@ impl WorkspacePaths {
             .clone()
             .or_else(|| env.home.as_ref().map(|home| home.join(".local/state")))
             .ok_or_else(|| eyre!("cannot resolve a state directory: set XDG_STATE_HOME or HOME"))?;
-        let state_dir = state_base.join("gander").join(&key);
-        let runtime_dir = env
+        let ephemeral_base = env
             .runtime_dir
-            .as_ref()
-            .map(|runtime| runtime.join("gander").join(&key))
-            .unwrap_or_else(|| state_dir.clone());
+            .clone()
+            .unwrap_or_else(|| state_base.clone());
+        let state_dir = state_base.join("gander").join(&key);
+        let runtime_dir = ephemeral_base.join("gander").join(&key);
+        let registry_dir = ephemeral_base.join("gander").join("registry");
         let legacy_dir = workspace_root.join(".gander");
         Ok(Self {
             workspace_root,
             key,
             state_dir,
             runtime_dir,
+            registry_dir,
             legacy_dir,
         })
     }
@@ -99,9 +105,11 @@ impl WorkspacePaths {
         self.state_dir.join("agent.json")
     }
 
-    /// Live ACP socket hosted by a running TUI.
-    pub fn socket_file(&self) -> PathBuf {
-        self.runtime_dir.join("acp.sock")
+    /// Live ACP socket for one gander instance. Sockets are per-instance
+    /// (docs/decisions.md D3) so several gander TUIs can run at once
+    /// without contending on a single path.
+    pub fn instance_socket_file(&self, pid: u32) -> PathBuf {
+        self.runtime_dir.join(format!("acp-{pid}.sock"))
     }
 
     /// Output log of a summoned review agent.
@@ -214,9 +222,16 @@ mod tests {
         assert_eq!(paths.state_dir, state_home.join("gander").join(&paths.key));
         assert_eq!(paths.state_file(), paths.state_dir.join("state.json"));
         assert_eq!(paths.overlay_file(), paths.state_dir.join("agent.json"));
-        // No runtime dir: ephemeral endpoints fall back to the state dir.
+        // No runtime dir: ephemeral endpoints fall back to the state base.
         assert_eq!(paths.runtime_dir, paths.state_dir);
-        assert_eq!(paths.socket_file(), paths.state_dir.join("acp.sock"));
+        assert_eq!(
+            paths.instance_socket_file(42),
+            paths.state_dir.join("acp-42.sock")
+        );
+        assert_eq!(
+            paths.registry_dir,
+            state_home.join("gander").join("registry")
+        );
     }
 
     #[test]
@@ -233,6 +248,7 @@ mod tests {
         assert_eq!(paths.runtime_dir, runtime.join("gander").join(&paths.key));
         assert_ne!(paths.runtime_dir, paths.state_dir);
         assert_eq!(paths.agent_log_file(), paths.runtime_dir.join("agent.log"));
+        assert_eq!(paths.registry_dir, runtime.join("gander").join("registry"));
     }
 
     #[test]

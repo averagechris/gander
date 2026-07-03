@@ -28,7 +28,8 @@ use crate::{
     agent::{
         AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, FlagPriority, ReviewChunk,
     },
-    app::ReviewSession,
+    anchor::CommentAnchor,
+    app::{Focus, ReviewSession},
 };
 
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
@@ -141,6 +142,7 @@ impl AcpHandler {
                     "review/files",
                     "review/file_diff",
                     "review/comments",
+                    "review/current_focus",
                     "review/overlay",
                     "review/set_ordering",
                     "review/flag_section",
@@ -199,6 +201,39 @@ impl AcpHandler {
             )),
             "review/overlay" => {
                 serde_json::to_value(&self.overlay).map_err(|error| error.to_string())
+            }
+            // What the human is looking at right now: selected file, focused
+            // pane, and (when the diff cursor sits on an anchorable row) the
+            // exact line/hunk. Served live through the TUI socket; a
+            // standalone snapshot server reports its initial selection.
+            "review/current_focus" => {
+                let anchor = session.selected_line_anchor();
+                let line = anchor.as_ref().and_then(|anchor| match anchor {
+                    CommentAnchor::Line {
+                        side,
+                        old_line,
+                        new_line,
+                        hunk_header,
+                        ..
+                    } => Some(json!({
+                        "side": side,
+                        "old_line": old_line,
+                        "new_line": new_line,
+                        "hunk_header": hunk_header,
+                    })),
+                    _ => None,
+                });
+                Ok(json!({
+                    "repo": session.repo.display().to_string(),
+                    "base": session.target.base,
+                    "revision": session.target.rev,
+                    "pane": match session.focus {
+                        Focus::Files => "files",
+                        Focus::Diff => "diff",
+                    },
+                    "path": session.selected_file().map(|file| file.path.clone()),
+                    "line": line,
+                }))
             }
             "review/set_ordering" => {
                 let paths = params
@@ -623,6 +658,19 @@ diff --git a/README.md b/README.md
         assert_eq!(comments.as_array().unwrap().len(), 1);
         assert_eq!(comments[0]["body"], "file note");
         assert_eq!(comments[0]["state"], "draft");
+    }
+
+    #[test]
+    fn current_focus_reports_selected_file_and_pane() {
+        let (mut server, _dir) = server();
+
+        let focus = call(&mut server, "review/current_focus", Value::Null);
+
+        assert_eq!(focus["path"], "src/app.rs");
+        assert_eq!(focus["pane"], "files");
+        assert_eq!(focus["base"], "trunk()");
+        assert_eq!(focus["revision"], "@");
+        assert!(focus.get("line").is_some());
     }
 
     #[test]

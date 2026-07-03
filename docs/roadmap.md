@@ -170,15 +170,17 @@ have your already-running harness organize and narrate the review — no
 protocol knowledge, no manual orchestration. Decision records:
 docs/decisions.md D3, D4, D5.
 
-- [ ] per-instance sockets + instance registry (one gander per workstream;
+- [x] per-instance sockets + instance registry (one gander per workstream;
   workspace root, target, summary, socket, pid, `last_input_at`; cleaned on
-  exit; replaces the "second TUI loses the socket" behavior)
+  exit; replaces the "second TUI loses the socket" behavior; `gander acp`
+  routes to the live instance by cwd via the registry)
 - [ ] `gander mcp`: MCP stdio server (prefer the `rmcp` SDK) bridging to the
   live instance by cwd; tools: `review_summary`, `review_files`,
   `file_diff`, `comments`, `set_ordering`, `flag_section`, `set_chunks`,
   `draft_comment`, `current_focus`, `list_reviews`
-- [ ] `current_focus` plumbing in the TUI (selected file/line/hunk +
-  `last_input_at` heartbeat in the registry)
+- [x] `current_focus` plumbing in the TUI (selected file/line/hunk via the
+  `review/current_focus` method + `last_input_at` heartbeat in the
+  registry)
 - [ ] large-change nudge: when a review exceeds a size threshold, hint that
   an agent can organize it (`@` or the harness)
 - [ ] tour mode (`T`): step through agent-suggested chunks in order with

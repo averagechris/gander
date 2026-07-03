@@ -10,6 +10,7 @@ mod fuzzy;
 mod generated;
 mod jj;
 mod paths;
+mod registry;
 mod state;
 mod syntax;
 mod tui;
@@ -234,8 +235,10 @@ fn main() -> color_eyre::Result<()> {
                 tui::TuiPaths {
                     state_file: Some(state_path.clone()),
                     agent_overlay: Some(workspace_paths.overlay_file()),
-                    acp_socket: Some(workspace_paths.socket_file()),
+                    acp_socket: Some(workspace_paths.instance_socket_file(std::process::id())),
                     agent_log: Some(workspace_paths.agent_log_file()),
+                    registry_dir: Some(workspace_paths.registry_dir.clone()),
+                    workspace_root: Some(workspace_paths.workspace_root.clone()),
                 },
                 config.agent.clone(),
             )?;
@@ -312,16 +315,17 @@ fn main() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::Acp => {
-            // Prefer the live TUI session when one is serving this
-            // workspace's ACP socket: agents then see current viewed state,
+            // Prefer a live TUI session for this workspace (found through
+            // the instance registry): agents then see current viewed state,
             // comments, and target instead of this process's startup
-            // snapshot.
+            // snapshot. With several instances, the most recently touched
+            // one wins.
             #[cfg(unix)]
-            {
-                let socket_path = workspace_paths.socket_file();
-                if crate::acp::socket::is_live(&socket_path) {
-                    return crate::acp::socket::bridge_stdio(&socket_path);
-                }
+            if let Some(instance) = crate::registry::find_live_for_workspace(
+                &workspace_paths.registry_dir,
+                &workspace_paths.workspace_root,
+            ) {
+                return crate::acp::socket::bridge_stdio(&instance.socket_path);
             }
             let overlay_path = workspace_paths.overlay_file();
             let mut server = crate::acp::AcpServer::new(session, overlay_path)?;
@@ -408,7 +412,11 @@ fn print_paths(
         paths.overlay_file().display(),
         presence(&paths.overlay_file())
     );
-    println!("acp socket:       {}", paths.socket_file().display());
+    println!(
+        "acp socket:       {} (per instance)",
+        paths.runtime_dir.join("acp-<pid>.sock").display()
+    );
+    println!("instance registry: {}", paths.registry_dir.display());
     println!("agent log:        {}", paths.agent_log_file().display());
     if let Some(xdg_config) = crate::config::xdg_config_path() {
         println!(
