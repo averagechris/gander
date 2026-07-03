@@ -443,6 +443,40 @@ startup. gander hands the command a built-in review prompt (customizable
 via `[agent] prompt`), logs its output to the workspace agent log, announces
 its progress in the footer, and kills it when you quit.
 
+## MCP server
+
+For agent harnesses that speak MCP (opencode, Claude Code, Codex, Zed,
+...), `gander mcp` serves the same review session as typed tools on stdio
+— no wire protocol explained in a prompt:
+
+```sh
+gander mcp
+```
+
+Tools: `review_summary`, `review_files`, `file_diff`, `comments`,
+`current_focus` (what the human is looking at right now), `set_ordering`,
+`flag_section`, `set_chunks`, `draft_comment`, and `list_reviews` (every
+running review instance). Spawned in a workspace, each tool call routes to
+that workspace's live gander TUI through the instance registry — with
+several instances, the most recently touched one wins — so the harness
+sees current viewed state and comments, and suggestions surface live in
+the reviewer's terminal. Without a running TUI it serves a snapshot loaded
+at startup.
+
+Register it with the workspace as the working directory, e.g. for
+opencode:
+
+```json
+{
+  "mcp": {
+    "gander": {
+      "type": "local",
+      "command": ["gander", "mcp"]
+    }
+  }
+}
+```
+
 ## Architecture
 
 Current module layout:
@@ -457,7 +491,9 @@ Current module layout:
 - `artifact`: JSON/Markdown review artifact serialization
 - `agent`: shared agent-overlay schema (`agent.json` in the workspace state dir)
 - `paths`: per-workspace XDG state/runtime path resolution and legacy migration
+- `registry`: instance registry (one entry per running TUI, routed by cwd)
 - `acp`: JSON-RPC stdio server for agent-collaborative review
+- `mcp`: MCP stdio server (rmcp) adapting the ACP dispatch into typed tools
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.
 See [`docs/jj-integration.md`](docs/jj-integration.md) for the decision to use

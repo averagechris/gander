@@ -9,6 +9,7 @@ mod file_tree;
 mod fuzzy;
 mod generated;
 mod jj;
+mod mcp;
 mod paths;
 mod registry;
 mod state;
@@ -118,6 +119,10 @@ enum Command {
     /// serving this workspace's ACP socket; otherwise serves a snapshot
     /// directly. See docs/acp.md.
     Acp,
+    /// Serve the review session to agent harnesses as MCP tools on stdio
+    /// (rmcp SDK). Routes each tool call to this workspace's live TUI
+    /// instance via the instance registry; without one, serves a snapshot.
+    Mcp,
     /// Print resolved state/runtime/config locations for this workspace.
     Paths,
     /// Print a terse summary of the current change.
@@ -201,6 +206,18 @@ fn main() -> color_eyre::Result<()> {
 
     let state_path = cli.state.unwrap_or_else(|| workspace_paths.state_file());
     let mut state = ReviewState::load_or_default(&state_path)?;
+    // `gander mcp` rebuilds its snapshot session on a dedicated thread
+    // (ReviewSession is single-threaded); capture the Send ingredients
+    // before they move into the main-thread session below.
+    let mcp_ingredients = matches!(command, Command::Mcp).then(|| {
+        (
+            target.clone(),
+            diff.clone(),
+            state.clone(),
+            config.clone(),
+            generated_matcher.clone(),
+        )
+    });
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff, state.clone(), &config);
     session.annotate_generated_where(|file| {
@@ -332,6 +349,25 @@ fn main() -> color_eyre::Result<()> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;
+        }
+        Command::Mcp => {
+            let (target, diff, state, config, generated_matcher) =
+                mcp_ingredients.expect("captured above for the mcp command");
+            let session_repo = repo.clone();
+            crate::mcp::run(
+                move || {
+                    let mut session =
+                        ReviewSession::new_with_config(session_repo, target, diff, state, &config);
+                    session.annotate_generated_where(|file| {
+                        generated_matcher.is_match(&file.path)
+                            || crate::generated::diff_content_looks_generated(&file.diff)
+                    });
+                    session
+                },
+                workspace_paths.overlay_file(),
+                workspace_paths.registry_dir.clone(),
+                &workspace_paths.workspace_root,
+            )?;
         }
         Command::Paths => unreachable!("handled before loading the diff"),
         Command::Summary => {

@@ -174,10 +174,11 @@ docs/decisions.md D3, D4, D5.
   workspace root, target, summary, socket, pid, `last_input_at`; cleaned on
   exit; replaces the "second TUI loses the socket" behavior; `gander acp`
   routes to the live instance by cwd via the registry)
-- [ ] `gander mcp`: MCP stdio server (prefer the `rmcp` SDK) bridging to the
-  live instance by cwd; tools: `review_summary`, `review_files`,
-  `file_diff`, `comments`, `set_ordering`, `flag_section`, `set_chunks`,
-  `draft_comment`, `current_focus`, `list_reviews`
+- [x] `gander mcp`: MCP stdio server (rmcp SDK) bridging to the live
+  instance by cwd through the instance registry, with a snapshot fallback;
+  tools: `review_summary`, `review_files`, `file_diff`, `comments`,
+  `set_ordering`, `flag_section`, `set_chunks`, `draft_comment`,
+  `current_focus`, `list_reviews`
 - [x] `current_focus` plumbing in the TUI (selected file/line/hunk via the
   `review/current_focus` method + `last_input_at` heartbeat in the
   registry)

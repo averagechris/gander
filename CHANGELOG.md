@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- `gander mcp`: an MCP stdio server (official `rmcp` SDK) exposing the
+  review session as typed tools — `review_summary`, `review_files`,
+  `file_diff`, `comments`, `current_focus`, `set_ordering`,
+  `flag_section`, `set_chunks`, `draft_comment`, `list_reviews`. Tool
+  calls route to the workspace's live TUI instance by cwd, with a
+  snapshot fallback when no TUI is running.
+- Per-instance ACP sockets (`acp-<pid>.sock`) plus a shared instance
+  registry (workspace root, target, summary, socket, pid,
+  `last_input_at`; heartbeats on input, cleaned up on exit). A second TUI
+  on the same workspace now gets its own endpoint, `gander acp` routes to
+  the most recently touched live instance for the workspace, and the new
+  `review/current_focus` method reports what the human is looking at.
+- `gander paths`: prints every resolved state/runtime/config location for
+  the current workspace.
+
 ### Changed
 
 - **Runtime state moved out of project directories.** Review state, the
