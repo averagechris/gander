@@ -74,6 +74,7 @@ pub(super) enum Action {
     ToggleLineBackground,
     ToggleGutterBar,
     ToggleFilePane,
+    ToggleDiffView,
     RangeComment,
     CancelRangeComment,
     Comment,
@@ -202,6 +203,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleFilePane,
             &config.toggle_file_pane,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleDiffView,
+            &config.toggle_diff_view,
         )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
         add_bindings(
@@ -446,6 +452,14 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('V'))),
             Some(Action::ViewOptions)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('|'))),
+            Some(Action::ToggleDiffView)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('w'))),
+            Some(Action::ToggleFilePane)
         );
         // Direct cue toggles ship unbound but stay bindable via config.
         let config = KeybindingsConfig {

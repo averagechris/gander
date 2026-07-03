@@ -37,6 +37,8 @@ This repo is intentionally early, but the first vertical slice is in place:
   toggleable at runtime (`V`) and configurable under `[diff]`
 - hides the file tree (`w`) so the diff gets the full width when you are
   focused on the code
+- offers a side-by-side removed/added view (`|`) alongside the unified
+  layout, falling back to unified on narrow terminals
 - is packaged with a Nix flake and dev shell
 
 ## Development

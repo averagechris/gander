@@ -11,14 +11,16 @@ pub(super) enum ViewOption {
     LineBackground,
     GutterBar,
     FilePane,
+    SideBySide,
 }
 
 impl ViewOption {
-    pub(super) const ALL: [Self; 4] = [
+    pub(super) const ALL: [Self; 5] = [
         Self::WordHighlight,
         Self::LineBackground,
         Self::GutterBar,
         Self::FilePane,
+        Self::SideBySide,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -27,6 +29,7 @@ impl ViewOption {
             Self::LineBackground => "line backgrounds",
             Self::GutterBar => "gutter change bar",
             Self::FilePane => "file pane",
+            Self::SideBySide => "side-by-side view",
         }
     }
 
@@ -36,6 +39,9 @@ impl ViewOption {
             Self::LineBackground => session.diff_cues.line_background,
             Self::GutterBar => session.diff_cues.gutter_bar,
             Self::FilePane => session.file_pane_visible,
+            Self::SideBySide => {
+                session.diff_cues.view == crate::config::DiffViewModeConfig::SideBySide
+            }
         }
     }
 
@@ -45,6 +51,7 @@ impl ViewOption {
             Self::LineBackground => session.toggle_line_background(),
             Self::GutterBar => session.toggle_gutter_bar(),
             Self::FilePane => session.toggle_file_pane(),
+            Self::SideBySide => session.toggle_diff_view(),
         }
     }
 }
@@ -75,7 +82,7 @@ mod tests {
         let mut state = ViewOptionsState::default();
 
         state.move_selection(10);
-        assert_eq!(state.selected_option(), ViewOption::FilePane);
+        assert_eq!(state.selected_option(), ViewOption::SideBySide);
 
         state.move_selection(-10);
         assert_eq!(state.selected_option(), ViewOption::WordHighlight);

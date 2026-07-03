@@ -216,7 +216,7 @@ Status: designed, in progress.
   session-only toggles; every toggle bindable via `[keybindings]`
 - [x] collapsible file pane (`w`) with never-trap re-show and file path in
   the diff pane title
-- [ ] side-by-side view (`|`) as a render-time projection over the unified
+- [x] side-by-side view (`|`) as a render-time projection over the unified
   rows (cursor/comments/anchors unchanged), unified fallback on narrow
   terminals
 - [ ] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy

@@ -803,6 +803,7 @@ fn handle_normal_action(
         Action::ToggleLineBackground => session.toggle_line_background(),
         Action::ToggleGutterBar => session.toggle_gutter_bar(),
         Action::ToggleFilePane => session.toggle_file_pane(),
+        Action::ToggleDiffView => session.toggle_diff_view(),
         Action::ToggleLargeDiff => session.toggle_large_diff_render(),
         Action::ToggleAgentOrder => {
             session.toggle_agent_order();

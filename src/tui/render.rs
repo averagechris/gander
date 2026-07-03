@@ -8,7 +8,8 @@ use ratatui::{
 };
 
 use crate::{
-    app::{DiffRow, DiffRowKind, Focus, ReviewSession},
+    app::{DiffRow, DiffRowKind, Focus, ReviewSession, SplitRow, split_index_of, split_rows},
+    config::DiffViewModeConfig,
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     jj::JjChangeSummary,
@@ -242,12 +243,42 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     }
 
     let rows = session.diff_rows_for_selected_file();
-    // Lazy rendering: only construct styled lines for the visible window.
-    // Rows before the scroll offset are counted (a row emits one line plus
-    // one line per attached comment) but never built, so huge files cost
-    // O(viewport) per frame instead of O(file).
+    let inner = inner_bordered(area);
+    let split_requested = session.diff_cues.view == DiffViewModeConfig::SideBySide;
+    let split_active = split_requested && inner.width >= MIN_SPLIT_WIDTH;
+    let lines = if split_active {
+        split_diff_lines(session, &rows, inner)
+    } else {
+        unified_diff_lines(session, &rows, inner)
+    };
+
+    let mut title = diff_pane_title(session);
+    if split_requested && !split_active {
+        // Two unreadable half-panes help nobody: fall back to unified on
+        // narrow terminals and say so in the title.
+        title.push_str(" · unified (narrow)");
+    }
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Minimum inner width (columns) for the side-by-side layout.
+const MIN_SPLIT_WIDTH: u16 = 100;
+
+/// Unified layout: one line per diff row plus attached comment summaries.
+/// Lazy rendering: only construct styled lines for the visible window.
+/// Rows before the scroll offset are counted (a row emits one line plus
+/// one line per attached comment) but never built, so huge files cost
+/// O(viewport) per frame instead of O(file).
+fn unified_diff_lines(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    inner: Rect,
+) -> Vec<Line<'static>> {
     let scroll = session.diff_scroll as usize;
-    let viewport_lines = inner_bordered(area).height as usize;
+    let viewport_lines = inner.height as usize;
     let window_end = scroll.saturating_add(viewport_lines);
     let mut line_index = 0usize;
     let mut lines = Vec::new();
@@ -267,124 +298,8 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             line_index += row_extent;
             continue;
         }
-        let selected = session.focus == Focus::Diff && session.diff_cursor == index;
-        let in_range = session.diff_row_in_active_range(index);
-        let style = diff_row_style(row.kind, selected, in_range);
-        let lineno = row
-            .new_lineno
-            .or(row.old_lineno)
-            .map(|n| format!("{n:>4}"))
-            .unwrap_or_else(|| "    ".to_owned());
-        let comment_count = comments.len();
-        let flagged = session.diff_row_flagged(row);
-        let (comment_mark, mark_style) = if comment_count > 0 {
-            (
-                match comment_count {
-                    1..=9 => comment_count.to_string(),
-                    _ => "+".to_owned(),
-                },
-                Style::default().fg(Color::Yellow),
-            )
-        } else if flagged {
-            // Agent-flagged section: pinned in the gutter.
-            (
-                "!".to_owned(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )
-        } else if in_range {
-            ("|".to_owned(), Style::default().fg(Color::Yellow))
-        } else {
-            (" ".to_owned(), Style::default().fg(Color::Yellow))
-        };
-
-        let line = match row.kind {
-            DiffRowKind::FileHeader => Line::from(Span::styled(
-                row.text.clone(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            DiffRowKind::SyntaxSummary => Line::from(Span::styled(
-                row.text.clone(),
-                Style::default().fg(Color::Magenta),
-            )),
-            DiffRowKind::HunkHeader => Line::from(Span::styled(
-                row.text.clone(),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            DiffRowKind::Raw => Line::from(row.text.clone()),
-            DiffRowKind::Placeholder => Line::from(Span::styled(
-                format!("  ⊘ {}", row.text),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-            DiffRowKind::ContextFold => Line::from(Span::styled(
-                format!("      {}", row.text),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-            DiffRowKind::DiffLine(line_kind) => {
-                let cues = &session.diff_cues;
-                // Cursor and range-selection backgrounds win over the cue
-                // backgrounds (docs/focused-diff-ux.md precedence rules).
-                let plain = !selected && !in_range;
-                let line_bg = (plain && cues.line_background)
-                    .then(|| match line_kind {
-                        DiffLineKind::Added => spec_bg_color(&cues.theme.added_line_bg),
-                        DiffLineKind::Removed => spec_bg_color(&cues.theme.removed_line_bg),
-                        _ => None,
-                    })
-                    .flatten();
-                let emphasis_style = (plain && cues.word_highlight && !row.emphasis.is_empty())
-                    .then(|| match line_kind {
-                        DiffLineKind::Added => Some(syntax_style_spec(&cues.theme.added_word)),
-                        DiffLineKind::Removed => Some(syntax_style_spec(&cues.theme.removed_word)),
-                        _ => None,
-                    })
-                    .flatten();
-                let (comment_mark, mark_style) = if cues.gutter_bar && comment_mark == " " {
-                    match line_kind {
-                        DiffLineKind::Added => {
-                            ("▎".to_owned(), syntax_style_spec(&cues.theme.gutter_added))
-                        }
-                        DiffLineKind::Removed => (
-                            "▎".to_owned(),
-                            syntax_style_spec(&cues.theme.gutter_removed),
-                        ),
-                        _ => (comment_mark, mark_style),
-                    }
-                } else {
-                    (comment_mark, mark_style)
-                };
-                let style = match line_bg {
-                    Some(bg) => style.bg(bg),
-                    None => style,
-                };
-                let mut spans = vec![
-                    Span::styled(comment_mark, mark_style),
-                    Span::styled(lineno, Style::default().fg(Color::DarkGray)),
-                    Span::raw(" "),
-                    Span::styled(row.prefix, style),
-                    Span::styled(" ", style),
-                ];
-                spans.extend(diff_text_spans(
-                    row,
-                    style,
-                    selected,
-                    in_range,
-                    line_bg,
-                    emphasis_style,
-                    &session.syntax.theme,
-                ));
-                Line::from(spans)
-            }
-        };
         if in_window(line_index) {
-            lines.push(line);
+            lines.push(unified_row_line(session, row, index, comments.len()));
         }
         line_index += 1;
         for comment in comments {
@@ -394,15 +309,291 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
             line_index += 1;
         }
     }
+    lines
+}
 
-    let paragraph = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(diff_pane_title(session)),
+/// Side-by-side layout: removed/context cells on the left, added/context on
+/// the right; headers and folds span the full width. The unified rows stay
+/// the source of truth for the cursor, comments, and anchors
+/// (docs/focused-diff-ux.md §4).
+fn split_diff_lines(session: &ReviewSession, rows: &[DiffRow], inner: Rect) -> Vec<Line<'static>> {
+    let split = split_rows(rows);
+    if split.is_empty() {
+        return Vec::new();
+    }
+    let viewport_lines = (inner.height as usize).max(1);
+    // Session scroll/cursor positions are unified row indices; project them
+    // into display-row space and keep the cursor inside the window.
+    let cursor_display = split_index_of(&split, session.diff_cursor);
+    let mut scroll = split_index_of(
+        &split,
+        (session.diff_scroll as usize).min(rows.len().saturating_sub(1)),
+    );
+    if cursor_display < scroll {
+        scroll = cursor_display;
+    } else if cursor_display >= scroll + viewport_lines {
+        scroll = cursor_display + 1 - viewport_lines;
+    }
+    let window_end = scroll.saturating_add(viewport_lines);
+    let in_window = |line_index: usize| line_index >= scroll && line_index < window_end;
+
+    let cell_width = ((inner.width as usize).saturating_sub(1)) / 2;
+    let divider = Span::styled("\u{2502}", Style::default().fg(Color::DarkGray));
+    let mut lines = Vec::new();
+    let mut line_index = 0usize;
+    for row in &split {
+        if line_index >= window_end {
+            break;
+        }
+        let cells: Vec<usize> = match row {
+            SplitRow::Full(index) => vec![*index],
+            SplitRow::Pair { left, right } => {
+                let mut cells: Vec<usize> = left.iter().chain(right.iter()).copied().collect();
+                cells.dedup();
+                cells
+            }
+        };
+        let cell_comments: Vec<Vec<&Comment>> = cells
+            .iter()
+            .map(|index| {
+                rows[*index]
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| session.comments_for_diff_row_anchor_details(anchor))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let comment_lines: usize = cell_comments.iter().map(Vec::len).sum();
+        if line_index + 1 + comment_lines <= scroll {
+            line_index += 1 + comment_lines;
+            continue;
+        }
+
+        if in_window(line_index) {
+            let line = match row {
+                SplitRow::Full(index) => {
+                    unified_row_line(session, &rows[*index], *index, cell_comments[0].len())
+                }
+                SplitRow::Pair { left, right } => {
+                    let mut spans = split_cell_spans(session, rows, *left, cell_width, true);
+                    spans.push(divider.clone());
+                    spans.extend(split_cell_spans(session, rows, *right, cell_width, false));
+                    Line::from(spans)
+                }
+            };
+            lines.push(line);
+        }
+        line_index += 1;
+        for comment in cell_comments.into_iter().flatten() {
+            if in_window(line_index) {
+                lines.push(comment_summary_line(comment));
+            }
+            line_index += 1;
+        }
+    }
+    lines
+}
+
+/// One side-by-side cell: the row rendered with its side-specific line
+/// number, truncated and padded to the cell width. Empty cells pad blank.
+fn split_cell_spans(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    cell: Option<usize>,
+    width: usize,
+    is_left: bool,
+) -> Vec<Span<'static>> {
+    let Some(index) = cell else {
+        return vec![Span::raw(" ".repeat(width))];
+    };
+    let row = &rows[index];
+    let lineno = if is_left {
+        row.old_lineno
+    } else {
+        row.new_lineno
+    };
+    let comment_count = row
+        .anchor
+        .as_ref()
+        .map(|anchor| session.comments_for_diff_row_anchor_details(anchor).len())
+        .unwrap_or(0);
+    fit_spans(
+        diff_line_cell_spans(session, row, index, lineno, comment_count),
+        width,
+    )
+}
+
+/// Truncate spans to a display width and pad the remainder with spaces.
+fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut result = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let span_width = span.width();
+        if used + span_width <= width {
+            used += span_width;
+            result.push(span);
+            continue;
+        }
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used + ch_width > width {
+                break;
+            }
+            used += ch_width;
+            text.push(ch);
+        }
+        if !text.is_empty() {
+            result.push(Span::styled(text, span.style));
+        }
+        break;
+    }
+    if used < width {
+        result.push(Span::raw(" ".repeat(width - used)));
+    }
+    result
+}
+
+/// One full-width line for a diff row in the unified layout (also used for
+/// full-width rows in the side-by-side layout).
+fn unified_row_line(
+    session: &ReviewSession,
+    row: &DiffRow,
+    index: usize,
+    comment_count: usize,
+) -> Line<'static> {
+    match row.kind {
+        DiffRowKind::FileHeader => Line::from(Span::styled(
+            row.text.clone(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        DiffRowKind::SyntaxSummary => Line::from(Span::styled(
+            row.text.clone(),
+            Style::default().fg(Color::Magenta),
+        )),
+        DiffRowKind::HunkHeader => Line::from(Span::styled(
+            row.text.clone(),
+            Style::default()
+                .fg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )),
+        DiffRowKind::Raw => Line::from(row.text.clone()),
+        DiffRowKind::Placeholder => Line::from(Span::styled(
+            format!("  \u{2298} {}", row.text),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )),
+        DiffRowKind::ContextFold => Line::from(Span::styled(
+            format!("      {}", row.text),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )),
+        DiffRowKind::DiffLine(_) => Line::from(diff_line_cell_spans(
+            session,
+            row,
+            index,
+            row.new_lineno.or(row.old_lineno),
+            comment_count,
+        )),
+    }
+}
+
+/// Gutter + line number + prefix + text spans for one diff line, with the
+/// visual cues applied (docs/focused-diff-ux.md precedence: cursor > range
+/// selection > word emphasis > line background).
+fn diff_line_cell_spans(
+    session: &ReviewSession,
+    row: &DiffRow,
+    index: usize,
+    lineno: Option<usize>,
+    comment_count: usize,
+) -> Vec<Span<'static>> {
+    let DiffRowKind::DiffLine(line_kind) = row.kind else {
+        return vec![Span::raw(row.text.clone())];
+    };
+    let selected = session.focus == Focus::Diff && session.diff_cursor == index;
+    let in_range = session.diff_row_in_active_range(index);
+    let style = diff_row_style(row.kind, selected, in_range);
+    let flagged = session.diff_row_flagged(row);
+    let cues = &session.diff_cues;
+    let (comment_mark, mark_style) = if comment_count > 0 {
+        (
+            match comment_count {
+                1..=9 => comment_count.to_string(),
+                _ => "+".to_owned(),
+            },
+            Style::default().fg(Color::Yellow),
         )
-        .wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    } else if flagged {
+        // Agent-flagged section: pinned in the gutter.
+        (
+            "!".to_owned(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else if in_range {
+        ("|".to_owned(), Style::default().fg(Color::Yellow))
+    } else if cues.gutter_bar && matches!(line_kind, DiffLineKind::Added | DiffLineKind::Removed) {
+        // The bar fills otherwise-empty gutter cells on changed lines.
+        match line_kind {
+            DiffLineKind::Added => (
+                "\u{258e}".to_owned(),
+                syntax_style_spec(&cues.theme.gutter_added),
+            ),
+            _ => (
+                "\u{258e}".to_owned(),
+                syntax_style_spec(&cues.theme.gutter_removed),
+            ),
+        }
+    } else {
+        (" ".to_owned(), Style::default().fg(Color::Yellow))
+    };
+
+    // Cursor and range-selection backgrounds win over the cue backgrounds.
+    let plain = !selected && !in_range;
+    let line_bg = (plain && cues.line_background)
+        .then(|| match line_kind {
+            DiffLineKind::Added => spec_bg_color(&cues.theme.added_line_bg),
+            DiffLineKind::Removed => spec_bg_color(&cues.theme.removed_line_bg),
+            _ => None,
+        })
+        .flatten();
+    let emphasis_style = (plain && cues.word_highlight && !row.emphasis.is_empty())
+        .then(|| match line_kind {
+            DiffLineKind::Added => Some(syntax_style_spec(&cues.theme.added_word)),
+            DiffLineKind::Removed => Some(syntax_style_spec(&cues.theme.removed_word)),
+            _ => None,
+        })
+        .flatten();
+    let style = match line_bg {
+        Some(bg) => style.bg(bg),
+        None => style,
+    };
+    let lineno = lineno
+        .map(|n| format!("{n:>4}"))
+        .unwrap_or_else(|| "    ".to_owned());
+    let mut spans = vec![
+        Span::styled(comment_mark, mark_style),
+        Span::styled(lineno, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(row.prefix, style),
+        Span::styled(" ", style),
+    ];
+    spans.extend(diff_text_spans(
+        row,
+        style,
+        selected,
+        in_range,
+        line_bg,
+        emphasis_style,
+        &session.syntax.theme,
+    ));
+    spans
 }
 
 /// Diff pane title: just "diff" normally; with the file pane hidden it
@@ -910,6 +1101,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::SymbolOutline], "changed symbol outline"),
         entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
         entry(&[Action::ViewOptions], "view options (visual cues)"),
+        entry(&[Action::ToggleDiffView], "toggle side-by-side view"),
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
     ];
     let right = vec![
@@ -2693,6 +2885,44 @@ diff --git a/README.md b/README.md
         session.toggle_file_pane();
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
+    }
+
+    #[test]
+    fn tui_snapshot_side_by_side_view() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.toggle_diff_view();
+        session.toggle_file_pane();
+
+        insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 130, 12));
+    }
+
+    #[test]
+    fn tui_snapshot_side_by_side_narrow_fallback() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    old();
++    new();
+ }
+"#,
+        );
+        session.toggle_diff_view();
+
+        insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 100, 12));
     }
 
     #[test]

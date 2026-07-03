@@ -36,7 +36,19 @@ pub struct DiffConfig {
     pub line_background: bool,
     /// Show a colored `▎` marker in the gutter of changed lines.
     pub gutter_bar: bool,
+    /// Diff layout: unified (default) or side-by-side removed/added panes.
+    /// Side-by-side falls back to unified on narrow terminals.
+    pub view: DiffViewModeConfig,
     pub theme: DiffThemeConfig,
+}
+
+/// Diff pane layout mode.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiffViewModeConfig {
+    #[default]
+    Unified,
+    SideBySide,
 }
 
 impl Default for DiffConfig {
@@ -45,6 +57,7 @@ impl Default for DiffConfig {
             word_highlight: true,
             line_background: true,
             gutter_bar: false,
+            view: DiffViewModeConfig::default(),
             theme: DiffThemeConfig::default(),
         }
     }
@@ -210,6 +223,7 @@ pub struct KeybindingsConfig {
     pub toggle_line_background: Vec<String>,
     pub toggle_gutter_bar: Vec<String>,
     pub toggle_file_pane: Vec<String>,
+    pub toggle_diff_view: Vec<String>,
     pub range_comment: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
@@ -266,6 +280,7 @@ struct DiffConfigPatch {
     word_highlight: Option<bool>,
     line_background: Option<bool>,
     gutter_bar: Option<bool>,
+    view: Option<DiffViewModeConfig>,
     theme: DiffThemeConfigPatch,
 }
 
@@ -376,6 +391,7 @@ struct KeybindingsConfigPatch {
     toggle_line_background: Option<Vec<String>>,
     toggle_gutter_bar: Option<Vec<String>>,
     toggle_file_pane: Option<Vec<String>>,
+    toggle_diff_view: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
@@ -469,6 +485,7 @@ impl Default for KeybindingsConfig {
             toggle_line_background: keys([]),
             toggle_gutter_bar: keys([]),
             toggle_file_pane: keys(["w"]),
+            toggle_diff_view: keys(["|"]),
             range_comment: keys(["r"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
@@ -605,6 +622,9 @@ impl Config {
         if let Some(gutter_bar) = patch.diff.gutter_bar {
             self.diff.gutter_bar = gutter_bar;
         }
+        if let Some(view) = patch.diff.view {
+            self.diff.view = view;
+        }
         apply_optional(
             &mut self.diff.theme.added_line_bg,
             patch.diff.theme.added_line_bg,
@@ -691,6 +711,7 @@ impl KeybindingsConfig {
         );
         apply_optional(&mut self.toggle_gutter_bar, patch.toggle_gutter_bar);
         apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
+        apply_optional(&mut self.toggle_diff_view, patch.toggle_diff_view);
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
@@ -923,6 +944,7 @@ prompt = "review {repo} at {base}..{rev}"
         assert!(defaults.word_highlight);
         assert!(defaults.line_background);
         assert!(!defaults.gutter_bar);
+        assert_eq!(defaults.view, DiffViewModeConfig::Unified);
         assert_eq!(defaults.theme.added_line_bg, "22");
         assert_eq!(defaults.theme.removed_word, "bold on 88");
 
@@ -934,6 +956,7 @@ prompt = "review {repo} at {base}..{rev}"
 [diff]
 word-highlight = false
 gutter-bar = true
+view = "side-by-side"
 
 [diff.theme]
 added-line-bg = "#103010"
@@ -955,6 +978,7 @@ toggle-gutter-bar = ["B"]
         assert!(!config.diff.word_highlight);
         assert!(config.diff.line_background);
         assert!(config.diff.gutter_bar);
+        assert_eq!(config.diff.view, DiffViewModeConfig::SideBySide);
         assert_eq!(config.diff.theme.added_line_bg, "#103010");
         assert_eq!(config.diff.theme.gutter_added, "cyan");
         // Untouched theme entries keep their defaults.

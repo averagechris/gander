@@ -6,10 +6,12 @@
 //! - [`syntax_cache`]: per-file tree-sitter highlight caching
 
 mod diff_rows;
+mod split_rows;
 mod syntax_cache;
 mod word_diff;
 
 pub use diff_rows::{DiffRow, DiffRowKind};
+pub use split_rows::{SplitRow, split_index_of, split_rows};
 
 use std::{
     cell::RefCell,
@@ -24,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent::{AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, ReviewChunk},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
-    config::{Config, DiffConfig, LimitsConfig},
+    config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
@@ -388,6 +390,15 @@ impl ReviewSession {
     /// Toggle the colored gutter change bar. Session-only.
     pub fn toggle_gutter_bar(&mut self) {
         self.diff_cues.gutter_bar = !self.diff_cues.gutter_bar;
+    }
+
+    /// Toggle between the unified and side-by-side diff layouts.
+    /// Session-only; config sets the default ([diff] view).
+    pub fn toggle_diff_view(&mut self) {
+        self.diff_cues.view = match self.diff_cues.view {
+            DiffViewModeConfig::Unified => DiffViewModeConfig::SideBySide,
+            DiffViewModeConfig::SideBySide => DiffViewModeConfig::Unified,
+        };
     }
 
     /// Toggle the files pane. Hiding it moves focus to the diff so the
