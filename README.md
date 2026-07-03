@@ -39,6 +39,8 @@ This repo is intentionally early, but the first vertical slice is in place:
   focused on the code
 - offers a side-by-side removed/added view (`|`) alongside the unified
   layout, falling back to unified on narrow terminals
+- expands hidden hunk context per gap (`+` by `[diff] context-step`, `=`
+  fully, `-` re-collapses), lazily fetching file contents via `jj file show`
 - is packaged with a Nix flake and dev shell
 
 ## Development
@@ -206,6 +208,9 @@ toggle-fold = ["space"]
 collapse-fold = ["left"]
 expand-fold = ["right"]
 toggle-context-fold = ["z"]
+expand-context = ["+"]
+expand-context-all = ["="]
+collapse-context = ["-"]
 file-search = ["/"]
 symbol-outline = ["o"]
 next-symbol = ["]"]
@@ -398,6 +403,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
+| `+` / `=` / `-` | expand the nearest hidden-context gap by `context-step` / fully / re-collapse it |
 | `o` | changed-symbol outline popup for the selected file |
 | `]` / `[` | jump to next / previous changed symbol in the diff |
 | `r` in diff focus | start/cancel a range selection for a multi-line comment |

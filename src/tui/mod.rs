@@ -798,6 +798,19 @@ fn handle_normal_action(
             }
         }
         Action::ToggleContextFold => session.toggle_context_fold(),
+        Action::ExpandContext => {
+            let step = session.diff_cues.context_step;
+            expand_diff_context(session, review_loader, tui_state, Some(step));
+        }
+        Action::ExpandContextAll => expand_diff_context(session, review_loader, tui_state, None),
+        Action::CollapseContext => {
+            if !session.collapse_nearest_gap() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no expanded context to collapse here".to_owned(),
+                });
+            }
+        }
         Action::ViewOptions => *mode = Mode::ViewOptions(ViewOptionsState::default()),
         Action::ToggleWordHighlight => session.toggle_word_highlight(),
         Action::ToggleLineBackground => session.toggle_line_background(),
@@ -875,6 +888,55 @@ fn handle_normal_action(
         | Action::TargetPickerMoveUp => {}
     }
     Ok(false)
+}
+
+/// Expand hidden hunk context near the diff cursor (docs/focused-diff-ux.md
+/// §5). Fetches the full file contents lazily via the jj backend on first
+/// use — the new-side revision suffices because context lines are identical
+/// on both sides. `step` is the number of lines to reveal (`None` expands
+/// the gap fully).
+fn expand_diff_context(
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+    step: Option<usize>,
+) {
+    let Some(path) = session
+        .selected_visible_file()
+        .map(|file| file.path.clone())
+    else {
+        return;
+    };
+    if !session.has_file_contents_entry(&path) {
+        match review_loader
+            .jj
+            .file_contents(&session.repo, &session.target.rev, &path)
+        {
+            Ok(contents) => session.store_file_contents(&path, Some(contents)),
+            Err(error) => {
+                // Remember the failure so gap rows stop offering expansion.
+                session.store_file_contents(&path, None);
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("context expansion unavailable: {error}"),
+                });
+                return;
+            }
+        }
+    }
+    if !session.file_contents_loaded(&path) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "context expansion unavailable for this file".to_owned(),
+        });
+        return;
+    }
+    if !session.expand_nearest_gap(step) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "no hidden context to expand here".to_owned(),
+        });
+    }
 }
 
 /// Step through the current stack (`trunk()..@`) change-by-change, reviewing
@@ -1880,6 +1942,7 @@ mod tests {
         stack: Vec<JjChangeSummary>,
         operations: Vec<crate::jj::JjOperationSummary>,
         diff_at_op: Option<String>,
+        file_contents: Option<String>,
         commands: RefCell<Vec<Vec<String>>>,
         command_result: Result<String, String>,
     }
@@ -1893,6 +1956,7 @@ mod tests {
                 stack: Vec::new(),
                 operations: Vec::new(),
                 diff_at_op: None,
+                file_contents: None,
                 commands: RefCell::new(Vec::new()),
                 command_result: Ok(String::new()),
             }
@@ -1937,6 +2001,13 @@ mod tests {
             match &self.command_result {
                 Ok(output) => Ok(output.clone()),
                 Err(error) => bail!(error.clone()),
+            }
+        }
+
+        fn file_contents(&self, _repo: &Path, _rev: &str, _path: &str) -> Result<String> {
+            match &self.file_contents {
+                Some(contents) => Ok(contents.clone()),
+                None => bail!("no file contents configured"),
             }
         }
     }
@@ -2735,6 +2806,127 @@ diff --git a/b.rs b/b.rs
             &mut tui_state,
         ));
         assert!(session.files.iter().all(|file| !file.viewed));
+    }
+
+    const CONTEXT_EXPANSION_DIFF: &str = r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -4,3 +4,3 @@
+ line 4
+-old five
++line 5
+ line 6
+@@ -12,3 +12,3 @@
+ line 12
+-old thirteen
++line 13
+ line 14
+"#;
+
+    #[test]
+    fn expand_context_fetches_file_contents_and_expands_nearest_gap() {
+        let mut session = snapshot_session(CONTEXT_EXPANSION_DIFF);
+        session.toggle_focus();
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.file_contents = Some((1..=20).map(|n| format!("line {n}\n")).collect());
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::ExpandContext,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(tui_state.notice.is_none());
+        assert!(session.file_contents_loaded("a.txt"));
+        // Ten lines fit the nearest (top) gap of three: it fully opens and
+        // lines 1-3 appear with real numbering.
+        let rows = session.diff_rows_for_selected_file();
+        assert!(rows.iter().any(|row| row.text == "line 1"));
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row.kind, crate::app::DiffRowKind::ExpandGap { .. }))
+        );
+    }
+
+    #[test]
+    fn expand_context_records_fetch_failures_as_notices() {
+        let mut session = snapshot_session(CONTEXT_EXPANSION_DIFF);
+        session.toggle_focus();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::ExpandContext,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("context expansion unavailable")
+        );
+        // The failure is remembered: gap rows stop offering expansion.
+        assert!(session.has_file_contents_entry("a.txt"));
+        assert!(!session.file_contents_loaded("a.txt"));
+        let rows = session.diff_rows_for_selected_file();
+        let gap_row = rows
+            .iter()
+            .find(|row| matches!(row.kind, crate::app::DiffRowKind::ExpandGap { .. }))
+            .unwrap();
+        assert!(!gap_row.text.contains("expand"));
+    }
+
+    #[test]
+    fn collapse_context_without_expansion_shows_a_notice() {
+        let mut session = snapshot_session(CONTEXT_EXPANSION_DIFF);
+        session.toggle_focus();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::CollapseContext,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("no expanded context to collapse")
+        );
     }
 
     #[test]

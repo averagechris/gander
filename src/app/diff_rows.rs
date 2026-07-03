@@ -11,6 +11,7 @@ use crate::{
 
 use super::{
     ReviewFile, ReviewSession,
+    context_expansion::{GapSpec, file_gaps, gap_view},
     syntax_cache::{SyntaxCacheKey, SyntaxCacheStatus, SyntaxSide, syntax_source},
     word_diff::hunk_emphasis,
 };
@@ -33,6 +34,11 @@ pub struct DiffRow {
     pub emphasis: Vec<Range<usize>>,
     pub kind: DiffRowKind,
     pub anchor: Option<CommentAnchor>,
+    /// The context-expansion gap this row belongs to: set on
+    /// [`DiffRowKind::ExpandGap`] rows and on the synthetic context rows an
+    /// expanded gap reveals, so `+`/`=`/`-` can find the gap nearest the
+    /// cursor even when the gap row itself has disappeared.
+    pub gap: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +48,13 @@ pub enum DiffRowKind {
     HunkHeader,
     DiffLine(DiffLineKind),
     ContextFold,
+    /// Hidden file lines between/around hunks that can expand via
+    /// `+`/`=`/`-` (docs/focused-diff-ux.md §5). `hidden` is the count
+    /// still collapsed.
+    ExpandGap {
+        gap_id: usize,
+        hidden: usize,
+    },
     /// Stand-in for content that is intentionally not rendered (binary
     /// files, diffs over the size threshold).
     Placeholder,
@@ -62,6 +75,7 @@ impl ReviewSession {
             self.fold_context,
             self.force_rendered.contains(&file.path),
             self.diff_cues.word_highlight,
+            self.expansion_epoch,
         );
         if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
             return cached;
@@ -81,6 +95,7 @@ impl ReviewSession {
             emphasis: Vec::new(),
             kind: DiffRowKind::FileHeader,
             anchor: None,
+            gap: None,
         }];
 
         if file.status == crate::diff::FileStatus::Binary {
@@ -121,6 +136,7 @@ impl ReviewSession {
                 emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
+                gap: None,
             });
         }
         if syntax_cache.new_status == SyntaxCacheStatus::Failed
@@ -135,6 +151,7 @@ impl ReviewSession {
                 emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
+                gap: None,
             });
         }
 
@@ -146,17 +163,38 @@ impl ReviewSession {
             .map(|(source_line, key)| (*key, source_line))
             .collect();
 
+        // Context-expansion gaps: hidden file lines above the first hunk,
+        // between hunks, and (once the full contents are known) below the
+        // last hunk (docs/focused-diff-ux.md §5).
+        let file_lines = self.cached_file_lines(&file.path);
+        let gaps = file_gaps(
+            &file.diff.hunks,
+            file_lines.as_ref().map(|lines| lines.len()),
+        );
+        let gap_spec = |gap_id: usize| gaps.iter().find(|gap| gap.gap_id == gap_id).copied();
+
         for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: hunk.header.clone(),
-                syntax: Vec::new(),
-                emphasis: Vec::new(),
-                kind: DiffRowKind::HunkHeader,
-                anchor: None,
-            });
+            let mut skip_header = false;
+            if let Some(spec) = gap_spec(hunk_index) {
+                let closed = self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref());
+                // A fully expanded interior gap merges the two hunks into
+                // one contiguous block: drop the interior header. Hunks and
+                // anchors are untouched.
+                skip_header = closed && hunk_index > 0;
+            }
+            if !skip_header {
+                rows.push(DiffRow {
+                    old_lineno: None,
+                    new_lineno: None,
+                    prefix: " ",
+                    text: hunk.header.clone(),
+                    syntax: Vec::new(),
+                    emphasis: Vec::new(),
+                    kind: DiffRowKind::HunkHeader,
+                    anchor: None,
+                    gap: None,
+                });
+            }
             let folds = if self.fold_context {
                 context_folds(hunk)
             } else {
@@ -188,6 +226,7 @@ impl ReviewSession {
                         emphasis: Vec::new(),
                         kind: DiffRowKind::ContextFold,
                         anchor: None,
+                        gap: None,
                     });
                     line_index = fold_end;
                     continue;
@@ -222,9 +261,14 @@ impl ReviewSession {
                     emphasis: emphasis.get(&line_index).cloned().unwrap_or_default(),
                     kind: DiffRowKind::DiffLine(line.kind),
                     anchor: self.line_anchor(file, hunk_index, line_index),
+                    gap: None,
                 });
                 line_index += 1;
             }
+        }
+
+        if let Some(spec) = gap_spec(file.diff.hunks.len()) {
+            self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref());
         }
 
         if file.diff.hunks.is_empty() {
@@ -237,10 +281,66 @@ impl ReviewSession {
                 emphasis: Vec::new(),
                 kind: DiffRowKind::Raw,
                 anchor: None,
+                gap: None,
             });
         }
 
         rows
+    }
+
+    /// Rows for one context-expansion gap: revealed lines at the top edge,
+    /// the gap row itself while lines stay hidden, then revealed lines at
+    /// the bottom edge. Returns whether the gap is fully expanded (closed).
+    fn push_gap_rows(
+        &self,
+        rows: &mut Vec<DiffRow>,
+        file: &ReviewFile,
+        spec: &GapSpec,
+        lines: Option<&Vec<String>>,
+    ) -> bool {
+        let expansion = lines.and_then(|_| {
+            self.context_expansion
+                .get(&(file.path.clone(), spec.gap_id))
+                .copied()
+        });
+        let view = gap_view(spec, expansion);
+        if let Some(lines) = lines {
+            for new_lineno in view.top.clone() {
+                rows.push(expanded_context_row(lines, new_lineno, spec));
+            }
+        }
+        if view.hidden > 0 {
+            let text = if self.file_contents_fetchable(&file.path) {
+                format!(
+                    "⋯ {} lines hidden  (+ expand {}, = expand all)",
+                    view.hidden, self.diff_cues.context_step
+                )
+            } else {
+                // The file failed to load (deleted on this side, binary):
+                // the gap stays visible but does not offer expansion.
+                format!("⋯ {} lines hidden", view.hidden)
+            };
+            rows.push(DiffRow {
+                old_lineno: None,
+                new_lineno: None,
+                prefix: " ",
+                text,
+                syntax: Vec::new(),
+                emphasis: Vec::new(),
+                kind: DiffRowKind::ExpandGap {
+                    gap_id: spec.gap_id,
+                    hidden: view.hidden,
+                },
+                anchor: None,
+                gap: Some(spec.gap_id),
+            });
+        }
+        if let Some(lines) = lines {
+            for new_lineno in view.bottom.clone() {
+                rows.push(expanded_context_row(lines, new_lineno, spec));
+            }
+        }
+        view.hidden == 0
     }
 
     fn line_anchor(
@@ -301,6 +401,25 @@ fn placeholder_row(text: &str) -> DiffRow {
         emphasis: Vec::new(),
         kind: DiffRowKind::Placeholder,
         anchor: None,
+        gap: None,
+    }
+}
+
+/// A synthetic context row revealed by gap expansion: real old/new line
+/// numbers (old derives from the gap's hunk offset) but no comment anchor —
+/// expanded context is not commentable in v1 (docs/focused-diff-ux.md §5).
+fn expanded_context_row(lines: &[String], new_lineno: usize, spec: &GapSpec) -> DiffRow {
+    let old_lineno = new_lineno as isize - spec.offset;
+    DiffRow {
+        old_lineno: (old_lineno > 0).then_some(old_lineno as usize),
+        new_lineno: Some(new_lineno),
+        prefix: " ",
+        text: lines.get(new_lineno - 1).cloned().unwrap_or_default(),
+        syntax: Vec::new(),
+        emphasis: Vec::new(),
+        kind: DiffRowKind::DiffLine(DiffLineKind::Context),
+        anchor: None,
+        gap: Some(spec.gap_id),
     }
 }
 

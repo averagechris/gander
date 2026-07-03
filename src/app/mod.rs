@@ -2,14 +2,17 @@
 //! comments, and viewport bookkeeping.
 //!
 //! Submodules:
+//! - [`context_expansion`]: per-gap hunk context expansion state and math
 //! - [`diff_rows`]: flattened diff-row construction for the diff pane
 //! - [`syntax_cache`]: per-file tree-sitter highlight caching
 
+mod context_expansion;
 mod diff_rows;
 mod split_rows;
 mod syntax_cache;
 mod word_diff;
 
+pub use context_expansion::Expansion;
 pub use diff_rows::{DiffRow, DiffRowKind};
 pub use split_rows::{SplitRow, split_index_of, split_rows};
 
@@ -38,8 +41,10 @@ use diff_rows::nearest_commentable_row;
 use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 
 /// Memoized diff rows keyed by file/syntax-config cache key plus the
-/// context-fold, force-render-large, and word-highlight flags.
-type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool), Rc<Vec<DiffRow>>>;
+/// context-fold, force-render-large, and word-highlight flags and the
+/// context-expansion epoch (bumped whenever expansion state or fetched file
+/// contents change).
+type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool, u64), Rc<Vec<DiffRow>>>;
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -92,6 +97,17 @@ pub struct ReviewSession {
     /// Agent-drafted comments with their dispositions.
     pub agent_drafts: Vec<AgentDraft>,
     selected_comment_id: Option<String>,
+    /// Per-gap context expansion state, keyed by `(path, gap id)`.
+    /// Session-only; joins the rows-cache key via [`Self::expansion_epoch`]
+    /// (docs/focused-diff-ux.md §5).
+    context_expansion: BTreeMap<(String, usize), Expansion>,
+    /// Lazily fetched full file contents (new side) per path, split into
+    /// lines. `None` records a failed fetch (deleted/binary file) so gap
+    /// rows stop offering expansion.
+    file_contents: BTreeMap<String, Option<Rc<Vec<String>>>>,
+    /// Bumped whenever expansion state or fetched contents change so cached
+    /// diff rows rebuild.
+    expansion_epoch: u64,
     syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
     /// context-fold flag), rebuilt only when the diff fingerprint, syntax
@@ -273,6 +289,9 @@ impl ReviewSession {
             review_chunks: Vec::new(),
             agent_drafts: Vec::new(),
             selected_comment_id: None,
+            context_expansion: BTreeMap::new(),
+            file_contents: BTreeMap::new(),
+            expansion_epoch: 0,
             syntax_cache: RefCell::new(BTreeMap::new()),
             rows_cache: RefCell::new(BTreeMap::new()),
             viewport_by_path: BTreeMap::new(),

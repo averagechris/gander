@@ -219,7 +219,7 @@ Status: designed, in progress.
 - [x] side-by-side view (`|`) as a render-time projection over the unified
   rows (cursor/comments/anchors unchanged), unified fallback on narrow
   terminals
-- [ ] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
+- [x] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
   `jj file show` content; expanded rows not commentable in v1
 - [ ] zen mode design pass (tour mode + the above + agent-curated chunks)
   once the building blocks land

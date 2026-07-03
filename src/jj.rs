@@ -28,6 +28,9 @@ pub trait JjBackend {
         target: &ReviewTarget,
         operation_id: &str,
     ) -> Result<String>;
+    /// Full contents of a file at a revision (`jj file show`), used to
+    /// expand hunk context beyond what the diff emitted.
+    fn file_contents(&self, repo: &Path, rev: &str, path: &str) -> Result<String>;
     /// Run a mutating jj helper command (e.g. `split`/`squash`). Callers must
     /// only invoke this after explicit user confirmation.
     fn run_command(&self, repo: &Path, args: &[String]) -> Result<String>;
@@ -161,6 +164,30 @@ impl JjCommand {
         Self::log_summaries(binary, repo, "ancestors(@) | trunk() | bookmarks()", false)
     }
 
+    pub fn file_contents(binary: &Path, repo: &Path, rev: &str, path: &str) -> Result<String> {
+        let output = Command::new(binary)
+            .arg("file")
+            .arg("show")
+            .arg("-r")
+            .arg(rev)
+            .arg(path)
+            .arg("--color=never")
+            .arg("--no-pager")
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        if !output.status.success() {
+            bail!(
+                "jj file show failed for {path} at {rev} with status {}:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// Changes between trunk and the working copy, oldest first, so callers
     /// can step through the stack change-by-change.
     pub fn stack_changes(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
@@ -234,6 +261,10 @@ impl JjBackend for JjCliBackend {
         operation_id: &str,
     ) -> Result<String> {
         JjCommand::run_diff(&self.binary, repo, target, Some(operation_id))
+    }
+
+    fn file_contents(&self, repo: &Path, rev: &str, path: &str) -> Result<String> {
+        JjCommand::file_contents(&self.binary, repo, rev, path)
     }
 
     fn run_command(&self, repo: &Path, args: &[String]) -> Result<String> {

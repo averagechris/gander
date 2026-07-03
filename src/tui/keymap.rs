@@ -69,6 +69,9 @@ pub(super) enum Action {
     CollapseFold,
     ExpandFold,
     ToggleContextFold,
+    ExpandContext,
+    ExpandContextAll,
+    CollapseContext,
     ViewOptions,
     ToggleWordHighlight,
     ToggleLineBackground,
@@ -182,6 +185,17 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleContextFold,
             &config.toggle_context_fold,
+        )?;
+        add_bindings(&mut bindings, Action::ExpandContext, &config.expand_context)?;
+        add_bindings(
+            &mut bindings,
+            Action::ExpandContextAll,
+            &config.expand_context_all,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::CollapseContext,
+            &config.collapse_context,
         )?;
         add_bindings(&mut bindings, Action::ViewOptions, &config.view_options)?;
         add_bindings(
@@ -303,6 +317,15 @@ fn add_bindings(bindings: &mut Vec<KeyBinding>, action: Action, keys: &[String])
 
 fn parse_key(raw: &str) -> Result<KeyPress> {
     let normalized = raw.trim().to_ascii_lowercase();
+    // Bare single characters (including `+` and `-`, which double as
+    // modifier separators below) bind directly.
+    if raw.trim().chars().count() == 1 {
+        return Ok(KeyPress {
+            code: KeyCode::Char(raw.trim().chars().next().unwrap()),
+            modifiers: KeyModifiers::empty(),
+            label: raw.to_owned(),
+        });
+    }
     if matches!(normalized.as_str(), "page-up" | "page-down") {
         return Ok(KeyPress {
             code: if normalized == "page-up" {
@@ -371,6 +394,9 @@ mod tests {
         assert_eq!(parse_key("page-down").unwrap().code, KeyCode::PageDown);
         assert_eq!(parse_key("N").unwrap().code, KeyCode::Char('N'));
         assert_eq!(parse_key("space").unwrap().code, KeyCode::Char(' '));
+        assert_eq!(parse_key("+").unwrap().code, KeyCode::Char('+'));
+        assert_eq!(parse_key("-").unwrap().code, KeyCode::Char('-'));
+        assert_eq!(parse_key("=").unwrap().code, KeyCode::Char('='));
     }
 
     #[test]
@@ -507,6 +533,24 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Right)),
             Some(Action::ExpandFold)
+        );
+    }
+
+    #[test]
+    fn default_context_expansion_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('+'))),
+            Some(Action::ExpandContext)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('='))),
+            Some(Action::ExpandContextAll)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('-'))),
+            Some(Action::CollapseContext)
         );
     }
 

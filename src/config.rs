@@ -39,6 +39,8 @@ pub struct DiffConfig {
     /// Diff layout: unified (default) or side-by-side removed/added panes.
     /// Side-by-side falls back to unified on narrow terminals.
     pub view: DiffViewModeConfig,
+    /// Lines revealed per press when expanding hidden hunk context (`+`).
+    pub context_step: usize,
     pub theme: DiffThemeConfig,
 }
 
@@ -58,6 +60,7 @@ impl Default for DiffConfig {
             line_background: true,
             gutter_bar: false,
             view: DiffViewModeConfig::default(),
+            context_step: 10,
             theme: DiffThemeConfig::default(),
         }
     }
@@ -218,6 +221,9 @@ pub struct KeybindingsConfig {
     pub collapse_fold: Vec<String>,
     pub expand_fold: Vec<String>,
     pub toggle_context_fold: Vec<String>,
+    pub expand_context: Vec<String>,
+    pub expand_context_all: Vec<String>,
+    pub collapse_context: Vec<String>,
     pub view_options: Vec<String>,
     pub toggle_word_highlight: Vec<String>,
     pub toggle_line_background: Vec<String>,
@@ -281,6 +287,7 @@ struct DiffConfigPatch {
     line_background: Option<bool>,
     gutter_bar: Option<bool>,
     view: Option<DiffViewModeConfig>,
+    context_step: Option<usize>,
     theme: DiffThemeConfigPatch,
 }
 
@@ -386,6 +393,9 @@ struct KeybindingsConfigPatch {
     collapse_fold: Option<Vec<String>>,
     expand_fold: Option<Vec<String>>,
     toggle_context_fold: Option<Vec<String>>,
+    expand_context: Option<Vec<String>>,
+    expand_context_all: Option<Vec<String>>,
+    collapse_context: Option<Vec<String>>,
     view_options: Option<Vec<String>>,
     toggle_word_highlight: Option<Vec<String>>,
     toggle_line_background: Option<Vec<String>>,
@@ -478,6 +488,9 @@ impl Default for KeybindingsConfig {
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
             toggle_context_fold: keys(["z"]),
+            expand_context: keys(["+"]),
+            expand_context_all: keys(["="]),
+            collapse_context: keys(["-"]),
             view_options: keys(["V"]),
             // Direct toggle keys ship unbound; the view options popup (V)
             // covers them and users can bind keys via [keybindings].
@@ -625,6 +638,9 @@ impl Config {
         if let Some(view) = patch.diff.view {
             self.diff.view = view;
         }
+        if let Some(context_step) = patch.diff.context_step {
+            self.diff.context_step = context_step;
+        }
         apply_optional(
             &mut self.diff.theme.added_line_bg,
             patch.diff.theme.added_line_bg,
@@ -703,6 +719,9 @@ impl KeybindingsConfig {
         apply_optional(&mut self.collapse_fold, patch.collapse_fold);
         apply_optional(&mut self.expand_fold, patch.expand_fold);
         apply_optional(&mut self.toggle_context_fold, patch.toggle_context_fold);
+        apply_optional(&mut self.expand_context, patch.expand_context);
+        apply_optional(&mut self.expand_context_all, patch.expand_context_all);
+        apply_optional(&mut self.collapse_context, patch.collapse_context);
         apply_optional(&mut self.view_options, patch.view_options);
         apply_optional(&mut self.toggle_word_highlight, patch.toggle_word_highlight);
         apply_optional(
@@ -945,8 +964,12 @@ prompt = "review {repo} at {base}..{rev}"
         assert!(defaults.line_background);
         assert!(!defaults.gutter_bar);
         assert_eq!(defaults.view, DiffViewModeConfig::Unified);
+        assert_eq!(defaults.context_step, 10);
         assert_eq!(defaults.theme.added_line_bg, "22");
         assert_eq!(defaults.theme.removed_word, "bold on 88");
+        assert_eq!(Config::default().keybindings.expand_context, ["+"]);
+        assert_eq!(Config::default().keybindings.expand_context_all, ["="]);
+        assert_eq!(Config::default().keybindings.collapse_context, ["-"]);
 
         let repo = tempfile::tempdir().unwrap();
         let config_path = repo.path().join("config.toml");
@@ -957,6 +980,7 @@ prompt = "review {repo} at {base}..{rev}"
 word-highlight = false
 gutter-bar = true
 view = "side-by-side"
+context-step = 25
 
 [diff.theme]
 added-line-bg = "#103010"
@@ -965,6 +989,7 @@ gutter-added = "cyan"
 [keybindings]
 view-options = ["ctrl-v"]
 toggle-gutter-bar = ["B"]
+expand-context = ["ctrl-e"]
 "##,
         )
         .unwrap();
@@ -979,12 +1004,15 @@ toggle-gutter-bar = ["B"]
         assert!(config.diff.line_background);
         assert!(config.diff.gutter_bar);
         assert_eq!(config.diff.view, DiffViewModeConfig::SideBySide);
+        assert_eq!(config.diff.context_step, 25);
         assert_eq!(config.diff.theme.added_line_bg, "#103010");
         assert_eq!(config.diff.theme.gutter_added, "cyan");
         // Untouched theme entries keep their defaults.
         assert_eq!(config.diff.theme.removed_line_bg, "52");
         assert_eq!(config.keybindings.view_options, ["ctrl-v"]);
         assert_eq!(config.keybindings.toggle_gutter_bar, ["B"]);
+        assert_eq!(config.keybindings.expand_context, ["ctrl-e"]);
+        assert_eq!(config.keybindings.expand_context_all, ["="]);
     }
 
     #[test]

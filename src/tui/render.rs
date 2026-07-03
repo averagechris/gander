@@ -488,7 +488,7 @@ fn unified_row_line(
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         )),
-        DiffRowKind::ContextFold => Line::from(Span::styled(
+        DiffRowKind::ContextFold | DiffRowKind::ExpandGap { .. } => Line::from(Span::styled(
             format!("      {}", row.text),
             Style::default()
                 .fg(Color::DarkGray)
@@ -1100,6 +1100,14 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         ),
         entry(&[Action::SymbolOutline], "changed symbol outline"),
         entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
+        entry(
+            &[
+                Action::ExpandContext,
+                Action::ExpandContextAll,
+                Action::CollapseContext,
+            ],
+            "expand/collapse hidden context",
+        ),
         entry(&[Action::ViewOptions], "view options (visual cues)"),
         entry(&[Action::ToggleDiffView], "toggle side-by-side view"),
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
@@ -2351,6 +2359,37 @@ diff --git a/README.md b/README.md
         );
 
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Help, 110, 32));
+    }
+
+    #[test]
+    fn tui_snapshot_context_expansion_gaps() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -4,3 +4,3 @@
+ line 4
+-old five
++line 5
+ line 6
+@@ -12,3 +12,3 @@
+ line 12
+-old thirteen
++line 13
+ line 14
+"#,
+        );
+        let contents: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+        session.store_file_contents("src/app.rs", Some(contents));
+        session.toggle_focus();
+        // Cursor on the second hunk's first context line, then partially
+        // expand the middle gap: two lines revealed above the hunk, three
+        // still hidden behind the gap row.
+        let rows = session.diff_rows_for_selected_file();
+        session.select_diff_row(rows.iter().position(|row| row.text == "line 12").unwrap());
+        session.expand_nearest_gap(Some(2));
+
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 24));
     }
 
     #[test]
