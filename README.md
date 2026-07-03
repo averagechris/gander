@@ -32,6 +32,9 @@ This repo is intentionally early, but the first vertical slice is in place:
   session and suggest ordering (`A`), flag critical sections (`F`), define
   review chunks (`S`), and draft comments the human triages (`D`)
 - syntax-highlights common languages with a built-in tree-sitter registry
+- makes changes obvious at a glance: word-level change highlights, added/
+  removed line background tints, and an optional gutter change bar, all
+  toggleable at runtime (`V`) and configurable under `[diff]`
 - is packaged with a Nix flake and dev shell
 
 ## Development

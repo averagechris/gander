@@ -208,11 +208,11 @@ strip away everything else. Design: docs/focused-diff-ux.md.
 
 Status: designed, in progress.
 
-- [ ] word-level change highlights within modified line pairs (`similar`
+- [x] word-level change highlights within modified line pairs (`similar`
   crate, similarity-thresholded), on by default
-- [ ] added/removed line background tints, on by default
-- [ ] optional colored gutter change bar
-- [ ] `[diff]` config section + view-options popup (`V`) with runtime,
+- [x] added/removed line background tints, on by default
+- [x] optional colored gutter change bar
+- [x] `[diff]` config section + view-options popup (`V`) with runtime,
   session-only toggles; every toggle bindable via `[keybindings]`
 - [ ] collapsible file pane (`w`) with never-trap re-show and file path in
   the diff pane title

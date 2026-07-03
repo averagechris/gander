@@ -22,6 +22,7 @@ mod render;
 mod revset;
 mod search;
 mod tour;
+mod view_options;
 
 use std::{
     io,
@@ -63,6 +64,7 @@ use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
 use revset::RevsetInputState;
 use search::FileSearchState;
 use tour::TourState;
+use view_options::ViewOptionsState;
 
 enum Mode {
     Normal,
@@ -80,6 +82,7 @@ enum Mode {
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
+    ViewOptions(ViewOptionsState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
@@ -588,6 +591,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::ViewOptions(state) => {
+            if handle_view_options_key(key, state, session, keymap) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -790,6 +798,10 @@ fn handle_normal_action(
             }
         }
         Action::ToggleContextFold => session.toggle_context_fold(),
+        Action::ViewOptions => *mode = Mode::ViewOptions(ViewOptionsState::default()),
+        Action::ToggleWordHighlight => session.toggle_word_highlight(),
+        Action::ToggleLineBackground => session.toggle_line_background(),
+        Action::ToggleGutterBar => session.toggle_gutter_bar(),
         Action::ToggleLargeDiff => session.toggle_large_diff_render(),
         Action::ToggleAgentOrder => {
             session.toggle_agent_order();
@@ -1181,6 +1193,35 @@ fn run_jj_helper(
                 message: format!("{} failed: {error:?}", option.command_line()),
             });
         }
+    }
+}
+
+/// Keys for the view options popup. Returns `true` when the popup closes.
+fn handle_view_options_key(
+    key: KeyEvent,
+    state: &mut ViewOptionsState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+) -> bool {
+    // The popup's own binding closes it, so `V` toggles the popup.
+    if keymap.action_for(&key) == Some(Action::ViewOptions) {
+        return true;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => true,
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            state.selected_option().toggle(session);
+            false
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.move_selection(-1);
+            false
+        }
+        _ => false,
     }
 }
 

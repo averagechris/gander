@@ -7,6 +7,7 @@
 
 mod diff_rows;
 mod syntax_cache;
+mod word_diff;
 
 pub use diff_rows::{DiffRow, DiffRowKind};
 
@@ -23,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent::{AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, ReviewChunk},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
-    config::{Config, LimitsConfig},
+    config::{Config, DiffConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
@@ -35,8 +36,8 @@ use diff_rows::nearest_commentable_row;
 use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 
 /// Memoized diff rows keyed by file/syntax-config cache key plus the
-/// context-fold and force-render-large flags.
-type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool), Rc<Vec<DiffRow>>>;
+/// context-fold, force-render-large, and word-highlight flags.
+type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool), Rc<Vec<DiffRow>>>;
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -59,6 +60,9 @@ pub struct ReviewSession {
     /// When set, long runs of unchanged context lines collapse into
     /// symbol-labelled fold rows in the diff pane.
     pub fold_context: bool,
+    /// Diff visual cues (word-level highlights, line backgrounds, gutter
+    /// bar) plus their style specs. Runtime-toggleable, session-only.
+    pub diff_cues: DiffConfig,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     /// Diffs with more lines than this render as a placeholder until the
@@ -181,13 +185,14 @@ impl ReviewSession {
         state: ReviewState,
         config: &Config,
     ) -> Self {
-        Self::new_with_syntax_and_limits(
+        Self::new_with_options(
             repo,
             target,
             diff,
             state,
             config.syntax.clone(),
             config.limits.clone(),
+            config.diff.clone(),
         )
     }
 
@@ -199,16 +204,25 @@ impl ReviewSession {
         state: ReviewState,
         syntax: SyntaxConfig,
     ) -> Self {
-        Self::new_with_syntax_and_limits(repo, target, diff, state, syntax, LimitsConfig::default())
+        Self::new_with_options(
+            repo,
+            target,
+            diff,
+            state,
+            syntax,
+            LimitsConfig::default(),
+            DiffConfig::default(),
+        )
     }
 
-    fn new_with_syntax_and_limits(
+    fn new_with_options(
         repo: PathBuf,
         target: ReviewTarget,
         diff: DiffSet,
         state: ReviewState,
         syntax: SyntaxConfig,
         limits: LimitsConfig,
+        diff_cues: DiffConfig,
     ) -> Self {
         let ReviewState {
             files, comments, ..
@@ -240,6 +254,7 @@ impl ReviewSession {
             hide_generated: false,
             viewed_filter: ViewedFilter::default(),
             fold_context: false,
+            diff_cues,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
@@ -279,7 +294,7 @@ impl ReviewSession {
                 .collect(),
             comments: self.comments.clone(),
         };
-        *self = Self::new_with_syntax_and_limits(
+        *self = Self::new_with_options(
             self.repo.clone(),
             target,
             diff,
@@ -290,6 +305,7 @@ impl ReviewSession {
                 nudge_diff_lines: self.nudge_diff_lines,
                 nudge_files: self.nudge_files,
             },
+            self.diff_cues.clone(),
         );
     }
 
@@ -352,6 +368,22 @@ impl ReviewSession {
         // Row indices shift when folds appear/disappear; snap the cursor back
         // to a commentable row.
         self.ensure_diff_cursor_commentable();
+    }
+
+    /// Toggle word-level emphasis of changed tokens within modified line
+    /// pairs. Session-only; config sets the default.
+    pub fn toggle_word_highlight(&mut self) {
+        self.diff_cues.word_highlight = !self.diff_cues.word_highlight;
+    }
+
+    /// Toggle added/removed line background tints. Session-only.
+    pub fn toggle_line_background(&mut self) {
+        self.diff_cues.line_background = !self.diff_cues.line_background;
+    }
+
+    /// Toggle the colored gutter change bar. Session-only.
+    pub fn toggle_gutter_bar(&mut self) {
+        self.diff_cues.gutter_bar = !self.diff_cues.gutter_bar;
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {

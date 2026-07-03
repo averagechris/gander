@@ -31,6 +31,7 @@ use super::{
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
     tour::TourState,
+    view_options::{ViewOption, ViewOptionsState},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,7 @@ pub(super) fn draw(
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
+        Mode::ViewOptions(state) => draw_view_options_popup(frame, frame.area(), session, state),
         Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
         Mode::Help => draw_help_popup(frame, frame.area(), keymap),
         Mode::Normal => {}
@@ -318,19 +320,57 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),
             )),
-            DiffRowKind::DiffLine(_) => {
+            DiffRowKind::DiffLine(line_kind) => {
+                let cues = &session.diff_cues;
+                // Cursor and range-selection backgrounds win over the cue
+                // backgrounds (docs/focused-diff-ux.md precedence rules).
+                let plain = !selected && !in_range;
+                let line_bg = (plain && cues.line_background)
+                    .then(|| match line_kind {
+                        DiffLineKind::Added => spec_bg_color(&cues.theme.added_line_bg),
+                        DiffLineKind::Removed => spec_bg_color(&cues.theme.removed_line_bg),
+                        _ => None,
+                    })
+                    .flatten();
+                let emphasis_style = (plain && cues.word_highlight && !row.emphasis.is_empty())
+                    .then(|| match line_kind {
+                        DiffLineKind::Added => Some(syntax_style_spec(&cues.theme.added_word)),
+                        DiffLineKind::Removed => Some(syntax_style_spec(&cues.theme.removed_word)),
+                        _ => None,
+                    })
+                    .flatten();
+                let (comment_mark, mark_style) = if cues.gutter_bar && comment_mark == " " {
+                    match line_kind {
+                        DiffLineKind::Added => {
+                            ("▎".to_owned(), syntax_style_spec(&cues.theme.gutter_added))
+                        }
+                        DiffLineKind::Removed => (
+                            "▎".to_owned(),
+                            syntax_style_spec(&cues.theme.gutter_removed),
+                        ),
+                        _ => (comment_mark, mark_style),
+                    }
+                } else {
+                    (comment_mark, mark_style)
+                };
+                let style = match line_bg {
+                    Some(bg) => style.bg(bg),
+                    None => style,
+                };
                 let mut spans = vec![
                     Span::styled(comment_mark, mark_style),
                     Span::styled(lineno, Style::default().fg(Color::DarkGray)),
                     Span::raw(" "),
                     Span::styled(row.prefix, style),
-                    Span::raw(" "),
+                    Span::styled(" ", style),
                 ];
                 spans.extend(diff_text_spans(
                     row,
                     style,
                     selected,
                     in_range,
+                    line_bg,
+                    emphasis_style,
                     &session.syntax.theme,
                 ));
                 Line::from(spans)
@@ -382,25 +422,80 @@ fn comment_state_style(state: crate::state::CommentState) -> Style {
     }
 }
 
-fn diff_text_spans<'a>(
-    row: &'a DiffRow,
+fn diff_text_spans(
+    row: &DiffRow,
     fallback_style: Style,
     selected: bool,
     in_range: bool,
+    line_bg: Option<Color>,
+    emphasis_style: Option<Style>,
     theme: &SyntaxThemeConfig,
-) -> Vec<Span<'a>> {
-    if row.syntax.is_empty() {
-        return vec![Span::styled(row.text.clone(), fallback_style)];
+) -> Vec<Span<'static>> {
+    let mut segments: Vec<(String, Style)> = if row.syntax.is_empty() {
+        vec![(row.text.clone(), fallback_style)]
+    } else {
+        row.syntax
+            .iter()
+            .map(|span| {
+                let mut style = syntax_span_style(span, selected, in_range, theme);
+                if let Some(bg) = line_bg
+                    && style.bg.is_none()
+                {
+                    style = style.bg(bg);
+                }
+                (span.text.clone(), style)
+            })
+            .collect()
+    };
+    if let Some(emphasis) = emphasis_style
+        && !row.emphasis.is_empty()
+    {
+        segments = overlay_emphasis(segments, &row.emphasis, emphasis);
     }
-    row.syntax
-        .iter()
-        .map(|span| {
-            Span::styled(
-                span.text.clone(),
-                syntax_span_style(span, selected, in_range, theme),
-            )
-        })
+    segments
+        .into_iter()
+        .map(|(text, style)| Span::styled(text, style))
         .collect()
+}
+
+/// Split styled segments at emphasis byte-range boundaries, patching the
+/// emphasis style onto the covered slices. Ranges are byte offsets into the
+/// concatenated segment text (the row text).
+fn overlay_emphasis(
+    segments: Vec<(String, Style)>,
+    ranges: &[std::ops::Range<usize>],
+    emphasis: Style,
+) -> Vec<(String, Style)> {
+    let mut result = Vec::new();
+    let mut offset = 0usize;
+    for (text, style) in segments {
+        let end = offset + text.len();
+        let mut cursor = 0usize;
+        for range in ranges {
+            let start = range.start.max(offset).min(end);
+            let stop = range.end.max(offset).min(end);
+            if start >= stop {
+                continue;
+            }
+            let (local_start, local_stop) = (start - offset, stop - offset);
+            if !text.is_char_boundary(local_start) || !text.is_char_boundary(local_stop) {
+                continue;
+            }
+            if local_start > cursor {
+                result.push((text[cursor..local_start].to_owned(), style));
+            }
+            result.push((
+                text[local_start..local_stop].to_owned(),
+                style.patch(emphasis),
+            ));
+            cursor = local_stop;
+        }
+        if cursor < text.len() {
+            result.push((text[cursor..].to_owned(), style));
+        }
+        offset = end;
+    }
+    result
 }
 
 fn syntax_span_style(
@@ -434,24 +529,68 @@ fn syntax_span_style(
 }
 
 fn syntax_style_spec(spec: &str) -> Style {
-    spec.split_whitespace()
-        .fold(Style::default(), |style, token| match token {
-            "black" => style.fg(Color::Black),
-            "blue" => style.fg(Color::Blue),
-            "cyan" => style.fg(Color::Cyan),
-            "dark-gray" | "dark-grey" => style.fg(Color::DarkGray),
-            "gray" | "grey" => style.fg(Color::Gray),
-            "green" => style.fg(Color::Green),
-            "magenta" => style.fg(Color::Magenta),
-            "red" => style.fg(Color::Red),
-            "white" => style.fg(Color::White),
-            "yellow" => style.fg(Color::Yellow),
+    let mut style = Style::default();
+    let mut background = false;
+    for token in spec.split_whitespace() {
+        if token == "on" {
+            background = true;
+            continue;
+        }
+        if let Some(color) = spec_color(token) {
+            style = if background {
+                style.bg(color)
+            } else {
+                style.fg(color)
+            };
+            background = false;
+            continue;
+        }
+        style = match token {
             "bold" => style.add_modifier(Modifier::BOLD),
             "dim" => style.add_modifier(Modifier::DIM),
             "italic" => style.add_modifier(Modifier::ITALIC),
             "underlined" | "underline" => style.add_modifier(Modifier::UNDERLINED),
             _ => style,
-        })
+        };
+    }
+    style
+}
+
+/// One color token: a named color, an indexed value (`22`), or `#rrggbb`.
+fn spec_color(token: &str) -> Option<Color> {
+    match token {
+        "black" => Some(Color::Black),
+        "blue" => Some(Color::Blue),
+        "cyan" => Some(Color::Cyan),
+        "dark-gray" | "dark-grey" => Some(Color::DarkGray),
+        "gray" | "grey" => Some(Color::Gray),
+        "green" => Some(Color::Green),
+        "magenta" => Some(Color::Magenta),
+        "red" => Some(Color::Red),
+        "white" => Some(Color::White),
+        "yellow" => Some(Color::Yellow),
+        _ => {
+            if let Some(hex) = token.strip_prefix('#') {
+                if hex.len() != 6 {
+                    return None;
+                }
+                let value = u32::from_str_radix(hex, 16).ok()?;
+                return Some(Color::Rgb(
+                    (value >> 16) as u8,
+                    (value >> 8) as u8,
+                    value as u8,
+                ));
+            }
+            token.parse::<u8>().ok().map(Color::Indexed)
+        }
+    }
+}
+
+/// Background color for `*-line-bg` theme entries: the spec's background if
+/// it uses `on <color>`, otherwise its first color read as a background.
+fn spec_bg_color(spec: &str) -> Option<Color> {
+    let style = syntax_style_spec(spec);
+    style.bg.or(style.fg)
 }
 
 fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
@@ -573,6 +712,9 @@ fn draw_footer(
         Mode::SymbolOutline(_) => "changed symbols · j/k move · enter jump · esc cancel".to_owned(),
         Mode::CommentList(_) => {
             "comments · j/k move · enter jump · s cycle state · x delete · esc close".to_owned()
+        }
+        Mode::ViewOptions(_) => {
+            "view options · j/k move · space/enter toggle · esc close".to_owned()
         }
         Mode::Help => "help · any key to close".to_owned(),
     };
@@ -739,6 +881,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         ),
         entry(&[Action::SymbolOutline], "changed symbol outline"),
         entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
+        entry(&[Action::ViewOptions], "view options (visual cues)"),
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
     ];
     let right = vec![
@@ -913,6 +1056,55 @@ fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjH
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("jj helpers"))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn draw_view_options_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    state: &ViewOptionsState,
+) {
+    let popup = centered_rect(50, 40, area);
+    frame.render_widget(Clear, popup);
+
+    let mut lines = vec![Line::from(Span::styled(
+        "Diff visual cues (session only; gander.toml [diff] sets defaults)",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    lines.push(Line::from(""));
+    for (index, option) in ViewOption::ALL.into_iter().enumerate() {
+        let selected = index == state.selected;
+        let marker = if selected { "›" } else { " " };
+        let checkbox = if option.enabled(session) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} "), style),
+            Span::styled(format!("{checkbox} "), style),
+            Span::styled(option.label().to_owned(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "j/k move · space/enter toggle · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("view options"))
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -2398,6 +2590,84 @@ diff --git a/README.md b/README.md
         assert_eq!(style.fg, Some(Color::Yellow));
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert!(style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn parses_background_indexed_and_hex_style_specs() {
+        let style = syntax_style_spec("bold on 28");
+        assert_eq!(style.bg, Some(Color::Indexed(28)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+
+        let style = syntax_style_spec("#a1b2c3 on green");
+        assert_eq!(style.fg, Some(Color::Rgb(0xa1, 0xb2, 0xc3)));
+        assert_eq!(style.bg, Some(Color::Green));
+
+        assert_eq!(syntax_style_spec("22").fg, Some(Color::Indexed(22)));
+    }
+
+    #[test]
+    fn line_bg_specs_read_bare_colors_as_backgrounds() {
+        assert_eq!(spec_bg_color("22"), Some(Color::Indexed(22)));
+        assert_eq!(spec_bg_color("on red"), Some(Color::Red));
+        assert_eq!(spec_bg_color("bold"), None);
+    }
+
+    #[test]
+    fn overlay_emphasis_splits_segments_at_range_boundaries() {
+        let base = Style::default().fg(Color::Green);
+        let emphasis = Style::default().bg(Color::Indexed(28));
+
+        let segments = overlay_emphasis(
+            vec![("let x".to_owned(), base), (" = 2;".to_owned(), base)],
+            &[4..5, 8..9],
+            emphasis,
+        );
+
+        let texts: Vec<&str> = segments.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(texts, ["let ", "x", " = ", "2", ";"]);
+        assert_eq!(segments[1].1.bg, Some(Color::Indexed(28)));
+        assert_eq!(segments[1].1.fg, Some(Color::Green));
+        assert_eq!(segments[3].1.bg, Some(Color::Indexed(28)));
+        assert_eq!(segments[0].1.bg, None);
+    }
+
+    #[test]
+    fn tui_snapshot_diff_visual_cues() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,4 @@
+ fn main() {
+-    let count = 1;
++    let count = 2;
+ }
+"#,
+        );
+        session.diff_cues.gutter_bar = true;
+
+        insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
+    }
+
+    #[test]
+    fn tui_snapshot_view_options_popup() {
+        let session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,2 +1,2 @@
+ fn main() {
+-}
++} // end
+"#,
+        );
+
+        insta::assert_snapshot!(render_tui_style_runs(
+            &session,
+            &Mode::ViewOptions(ViewOptionsState::default()),
+            80,
+            18
+        ));
     }
 
     #[test]

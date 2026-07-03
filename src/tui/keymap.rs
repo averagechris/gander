@@ -69,6 +69,10 @@ pub(super) enum Action {
     CollapseFold,
     ExpandFold,
     ToggleContextFold,
+    ViewOptions,
+    ToggleWordHighlight,
+    ToggleLineBackground,
+    ToggleGutterBar,
     RangeComment,
     CancelRangeComment,
     Comment,
@@ -176,6 +180,22 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleContextFold,
             &config.toggle_context_fold,
+        )?;
+        add_bindings(&mut bindings, Action::ViewOptions, &config.view_options)?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleWordHighlight,
+            &config.toggle_word_highlight,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleLineBackground,
+            &config.toggle_line_background,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleGutterBar,
+            &config.toggle_gutter_bar,
         )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
         add_bindings(
@@ -411,6 +431,26 @@ mod tests {
         );
         assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
         assert_eq!(keymap.hint(Action::Help), "?");
+    }
+
+    #[test]
+    fn default_view_options_keybinding_maps_to_action() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('V'))),
+            Some(Action::ViewOptions)
+        );
+        // Direct cue toggles ship unbound but stay bindable via config.
+        let config = KeybindingsConfig {
+            toggle_word_highlight: vec!["W".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('W'))),
+            Some(Action::ToggleWordHighlight)
+        );
     }
 
     #[test]

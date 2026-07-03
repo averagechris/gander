@@ -1,7 +1,7 @@
 //! Construction of the flattened diff rows rendered in the diff pane,
 //! including per-line comment anchors and symbol-aware context folding.
 
-use std::{collections::BTreeMap, rc::Rc};
+use std::{collections::BTreeMap, ops::Range, rc::Rc};
 
 use crate::{
     anchor::{CommentAnchor, DiffSide, fingerprint_line},
@@ -12,6 +12,7 @@ use crate::{
 use super::{
     ReviewFile, ReviewSession,
     syntax_cache::{SyntaxCacheKey, SyntaxCacheStatus, SyntaxSide, syntax_source},
+    word_diff::hunk_emphasis,
 };
 
 /// Context lines kept visible on each side of a fold.
@@ -26,6 +27,10 @@ pub struct DiffRow {
     pub prefix: &'static str,
     pub text: String,
     pub syntax: Vec<SyntaxSpan>,
+    /// Byte ranges of `text` to emphasize as changed words (word-level
+    /// diff within a modified line pair). Empty when word highlighting is
+    /// off or the line has no counterpart.
+    pub emphasis: Vec<Range<usize>>,
     pub kind: DiffRowKind,
     pub anchor: Option<CommentAnchor>,
 }
@@ -56,6 +61,7 @@ impl ReviewSession {
             SyntaxCacheKey::for_file(self, file),
             self.fold_context,
             self.force_rendered.contains(&file.path),
+            self.diff_cues.word_highlight,
         );
         if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
             return cached;
@@ -72,6 +78,7 @@ impl ReviewSession {
             prefix: " ",
             text: format!("{}  +{} -{}", file.path, file.additions, file.deletions),
             syntax: Vec::new(),
+            emphasis: Vec::new(),
             kind: DiffRowKind::FileHeader,
             anchor: None,
         }];
@@ -111,6 +118,7 @@ impl ReviewSession {
                     summary.language, summary.root_kind, summary.has_error
                 ),
                 syntax: Vec::new(),
+                emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
             });
@@ -124,6 +132,7 @@ impl ReviewSession {
                 prefix: " ",
                 text: "tree-sitter: highlighting unavailable".to_owned(),
                 syntax: Vec::new(),
+                emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
                 anchor: None,
             });
@@ -144,11 +153,17 @@ impl ReviewSession {
                 prefix: " ",
                 text: hunk.header.clone(),
                 syntax: Vec::new(),
+                emphasis: Vec::new(),
                 kind: DiffRowKind::HunkHeader,
                 anchor: None,
             });
             let folds = if self.fold_context {
                 context_folds(hunk)
+            } else {
+                BTreeMap::new()
+            };
+            let emphasis = if self.diff_cues.word_highlight {
+                hunk_emphasis(hunk)
             } else {
                 BTreeMap::new()
             };
@@ -170,6 +185,7 @@ impl ReviewSession {
                         prefix: " ",
                         text: format!("⋯ {hidden} unchanged lines{symbol}"),
                         syntax: Vec::new(),
+                        emphasis: Vec::new(),
                         kind: DiffRowKind::ContextFold,
                         anchor: None,
                     });
@@ -203,6 +219,7 @@ impl ReviewSession {
                     prefix,
                     text: line.text.clone(),
                     syntax,
+                    emphasis: emphasis.get(&line_index).cloned().unwrap_or_default(),
                     kind: DiffRowKind::DiffLine(line.kind),
                     anchor: self.line_anchor(file, hunk_index, line_index),
                 });
@@ -217,6 +234,7 @@ impl ReviewSession {
                 prefix: " ",
                 text: file.diff.raw.clone(),
                 syntax: Vec::new(),
+                emphasis: Vec::new(),
                 kind: DiffRowKind::Raw,
                 anchor: None,
             });
@@ -280,6 +298,7 @@ fn placeholder_row(text: &str) -> DiffRow {
         prefix: " ",
         text: text.to_owned(),
         syntax: Vec::new(),
+        emphasis: Vec::new(),
         kind: DiffRowKind::Placeholder,
         anchor: None,
     }

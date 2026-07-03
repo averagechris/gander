@@ -22,6 +22,67 @@ pub struct Config {
     pub syntax: SyntaxConfig,
     pub limits: LimitsConfig,
     pub agent: AgentConfig,
+    pub diff: DiffConfig,
+}
+
+/// Diff-pane visual cues. All runtime-toggleable from the view options
+/// popup; config sets the session defaults (docs/focused-diff-ux.md).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DiffConfig {
+    /// Emphasize changed tokens within modified line pairs.
+    pub word_highlight: bool,
+    /// Tint the background of added/removed lines.
+    pub line_background: bool,
+    /// Show a colored `▎` marker in the gutter of changed lines.
+    pub gutter_bar: bool,
+    pub theme: DiffThemeConfig,
+}
+
+impl Default for DiffConfig {
+    fn default() -> Self {
+        Self {
+            word_highlight: true,
+            line_background: true,
+            gutter_bar: false,
+            theme: DiffThemeConfig::default(),
+        }
+    }
+}
+
+/// Style specs for the diff cues. Specs use the same grammar as syntax
+/// theme entries (colors by name, `22`-style indexed values, `#rrggbb`,
+/// modifiers, and `on <color>` for backgrounds).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DiffThemeConfig {
+    /// Background color for added lines (color spec, background applied).
+    pub added_line_bg: String,
+    /// Background color for removed lines.
+    pub removed_line_bg: String,
+    /// Style patched onto emphasized (changed) tokens on added lines.
+    pub added_word: String,
+    /// Style patched onto emphasized tokens on removed lines.
+    pub removed_word: String,
+    /// Gutter bar style for added lines.
+    pub gutter_added: String,
+    /// Gutter bar style for removed lines.
+    pub gutter_removed: String,
+}
+
+impl Default for DiffThemeConfig {
+    fn default() -> Self {
+        Self {
+            // Indexed colors degrade gracefully without truecolor: dark
+            // green/red tints for lines, brighter variants for changed words.
+            added_line_bg: "22".to_owned(),
+            removed_line_bg: "52".to_owned(),
+            added_word: "bold on 28".to_owned(),
+            removed_word: "bold on 88".to_owned(),
+            gutter_added: "green".to_owned(),
+            gutter_removed: "red".to_owned(),
+        }
+    }
 }
 
 /// How to summon a review agent from the TUI. Deliberately agent-agnostic:
@@ -144,6 +205,10 @@ pub struct KeybindingsConfig {
     pub collapse_fold: Vec<String>,
     pub expand_fold: Vec<String>,
     pub toggle_context_fold: Vec<String>,
+    pub view_options: Vec<String>,
+    pub toggle_word_highlight: Vec<String>,
+    pub toggle_line_background: Vec<String>,
+    pub toggle_gutter_bar: Vec<String>,
     pub range_comment: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
@@ -191,6 +256,27 @@ struct ConfigPatch {
     syntax: Option<SyntaxConfig>,
     limits: LimitsConfigPatch,
     agent: AgentConfigPatch,
+    diff: DiffConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct DiffConfigPatch {
+    word_highlight: Option<bool>,
+    line_background: Option<bool>,
+    gutter_bar: Option<bool>,
+    theme: DiffThemeConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct DiffThemeConfigPatch {
+    added_line_bg: Option<String>,
+    removed_line_bg: Option<String>,
+    added_word: Option<String>,
+    removed_word: Option<String>,
+    gutter_added: Option<String>,
+    gutter_removed: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -284,6 +370,10 @@ struct KeybindingsConfigPatch {
     collapse_fold: Option<Vec<String>>,
     expand_fold: Option<Vec<String>>,
     toggle_context_fold: Option<Vec<String>>,
+    view_options: Option<Vec<String>>,
+    toggle_word_highlight: Option<Vec<String>>,
+    toggle_line_background: Option<Vec<String>>,
+    toggle_gutter_bar: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
@@ -370,6 +460,12 @@ impl Default for KeybindingsConfig {
             collapse_fold: keys(["left"]),
             expand_fold: keys(["right"]),
             toggle_context_fold: keys(["z"]),
+            view_options: keys(["V"]),
+            // Direct toggle keys ship unbound; the view options popup (V)
+            // covers them and users can bind keys via [keybindings].
+            toggle_word_highlight: keys([]),
+            toggle_line_background: keys([]),
+            toggle_gutter_bar: keys([]),
             range_comment: keys(["r"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
@@ -496,6 +592,37 @@ impl Config {
         if let Some(prompt) = patch.agent.prompt {
             self.agent.prompt = Some(prompt);
         }
+
+        if let Some(word_highlight) = patch.diff.word_highlight {
+            self.diff.word_highlight = word_highlight;
+        }
+        if let Some(line_background) = patch.diff.line_background {
+            self.diff.line_background = line_background;
+        }
+        if let Some(gutter_bar) = patch.diff.gutter_bar {
+            self.diff.gutter_bar = gutter_bar;
+        }
+        apply_optional(
+            &mut self.diff.theme.added_line_bg,
+            patch.diff.theme.added_line_bg,
+        );
+        apply_optional(
+            &mut self.diff.theme.removed_line_bg,
+            patch.diff.theme.removed_line_bg,
+        );
+        apply_optional(&mut self.diff.theme.added_word, patch.diff.theme.added_word);
+        apply_optional(
+            &mut self.diff.theme.removed_word,
+            patch.diff.theme.removed_word,
+        );
+        apply_optional(
+            &mut self.diff.theme.gutter_added,
+            patch.diff.theme.gutter_added,
+        );
+        apply_optional(
+            &mut self.diff.theme.gutter_removed,
+            patch.diff.theme.gutter_removed,
+        );
     }
 }
 
@@ -553,6 +680,13 @@ impl KeybindingsConfig {
         apply_optional(&mut self.collapse_fold, patch.collapse_fold);
         apply_optional(&mut self.expand_fold, patch.expand_fold);
         apply_optional(&mut self.toggle_context_fold, patch.toggle_context_fold);
+        apply_optional(&mut self.view_options, patch.view_options);
+        apply_optional(&mut self.toggle_word_highlight, patch.toggle_word_highlight);
+        apply_optional(
+            &mut self.toggle_line_background,
+            patch.toggle_line_background,
+        );
+        apply_optional(&mut self.toggle_gutter_bar, patch.toggle_gutter_bar);
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
@@ -777,6 +911,52 @@ prompt = "review {repo} at {base}..{rev}"
             config.agent.prompt.as_deref(),
             Some("review {repo} at {base}..{rev}")
         );
+    }
+
+    #[test]
+    fn diff_config_defaults_and_parses_from_toml() {
+        let defaults = Config::default().diff;
+        assert!(defaults.word_highlight);
+        assert!(defaults.line_background);
+        assert!(!defaults.gutter_bar);
+        assert_eq!(defaults.theme.added_line_bg, "22");
+        assert_eq!(defaults.theme.removed_word, "bold on 88");
+
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = repo.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r##"
+[diff]
+word-highlight = false
+gutter-bar = true
+
+[diff.theme]
+added-line-bg = "#103010"
+gutter-added = "cyan"
+
+[keybindings]
+view-options = ["ctrl-v"]
+toggle-gutter-bar = ["B"]
+"##,
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path: config_path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert!(!config.diff.word_highlight);
+        assert!(config.diff.line_background);
+        assert!(config.diff.gutter_bar);
+        assert_eq!(config.diff.theme.added_line_bg, "#103010");
+        assert_eq!(config.diff.theme.gutter_added, "cyan");
+        // Untouched theme entries keep their defaults.
+        assert_eq!(config.diff.theme.removed_line_bg, "52");
+        assert_eq!(config.keybindings.view_options, ["ctrl-v"]);
+        assert_eq!(config.keybindings.toggle_gutter_bar, ["B"]);
     }
 
     #[test]
