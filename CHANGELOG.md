@@ -3,6 +3,17 @@
 ## Unreleased
 
 
+
+## v0.2.1 - 2026-07-03
+
+### Changed
+
+- Collapse assert shortened by the opencode example fix.
+
+### Documentation
+
+- Drop nonexistent --quiet flag from opencode run examples.
+
 ## v0.2.0 - 2026-07-02
 
 ### Added
