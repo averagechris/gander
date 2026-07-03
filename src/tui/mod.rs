@@ -40,8 +40,9 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{
+    agent::AgentProcess,
     app::{Focus, ReviewSession},
-    config::KeybindingsConfig,
+    config::{AgentConfig, KeybindingsConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, ReviewTarget},
@@ -105,6 +106,10 @@ struct TuiState {
     overlay_mtime: Option<std::time::SystemTime>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
+    /// How to summon a review agent (from `[agent]` config).
+    agent_config: AgentConfig,
+    /// A summoned agent, if any. Killed on drop so quitting cannot leak it.
+    agent_process: Option<AgentProcess>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +147,7 @@ pub fn run(
     state_path: Option<PathBuf>,
     agent_overlay_path: Option<PathBuf>,
     acp_socket_path: Option<PathBuf>,
+    agent_config: AgentConfig,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
@@ -183,12 +189,16 @@ pub fn run(
     let mut tui_state = TuiState {
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
+        agent_config,
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
             message,
         }),
         ..TuiState::default()
     };
+    if tui_state.agent_config.autostart && tui_state.agent_config.command.is_some() {
+        summon_agent(session, &mut tui_state);
+    }
     let result = run_loop(
         &mut terminal,
         session,
@@ -255,6 +265,7 @@ fn run_loop(
             if let Some(overlay_path) = agent_overlay_path {
                 maybe_reload_agent_overlay(session, overlay_path, tui_state, true);
             }
+            notice_agent_exit(tui_state);
             continue;
         }
 
@@ -279,6 +290,71 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+/// Launch the configured review agent (`[agent] command`), agent-agnostic:
+/// the command is any CLI that accepts a prompt. Output is logged to
+/// `.gander/agent.log`; suggestions arrive through ACP like any other agent.
+fn summon_agent(session: &ReviewSession, tui_state: &mut TuiState) {
+    if let Some(process) = &mut tui_state.agent_process
+        && process.try_status().is_none()
+    {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "agent already running".to_owned(),
+        });
+        return;
+    }
+    let Some(command) = tui_state.agent_config.command.clone() else {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "no [agent] command configured (see gander.toml)".to_owned(),
+        });
+        return;
+    };
+    let prompt = crate::agent::review_prompt(
+        tui_state.agent_config.prompt.as_deref(),
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    );
+    let log_path = AgentProcess::default_log_path(&session.repo);
+    match AgentProcess::spawn(&session.repo, &command, &prompt, &log_path) {
+        Ok(process) => {
+            tui_state.agent_process = Some(process);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "agent summoned (output: .gander/agent.log)".to_owned(),
+            });
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to summon agent: {error}"),
+            });
+        }
+    }
+}
+
+/// Announce a summoned agent's exit exactly once and release the handle so
+/// it can be summoned again.
+fn notice_agent_exit(tui_state: &mut TuiState) {
+    if let Some(process) = &mut tui_state.agent_process
+        && let Some(status) = process.try_status()
+    {
+        tui_state.agent_process = None;
+        tui_state.notice = Some(if status.success() {
+            UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "agent finished its review".to_owned(),
+            }
+        } else {
+            UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("agent exited with {status} (see .gander/agent.log)"),
+            }
+        });
+    }
 }
 
 /// Reload the agent overlay when its mtime changes, applying suggestions to
@@ -439,6 +515,7 @@ fn handle_normal_action(
     match action {
         Action::Quit => return Ok(true),
         Action::Help => *mode = Mode::Help,
+        Action::SummonAgent => summon_agent(session, tui_state),
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => session.move_diff_cursor(1),

@@ -21,6 +21,23 @@ pub struct Config {
     pub generated: GeneratedConfig,
     pub syntax: SyntaxConfig,
     pub limits: LimitsConfig,
+    pub agent: AgentConfig,
+}
+
+/// How to summon a review agent from the TUI. Deliberately agent-agnostic:
+/// any CLI that accepts a prompt works (`opencode run`, `claude -p`, ...).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct AgentConfig {
+    /// Shell command that runs the agent. The review prompt is appended as
+    /// a final shell-quoted argument, or substituted for a `{prompt}`
+    /// placeholder when present.
+    pub command: Option<String>,
+    /// Spawn the agent automatically when the TUI starts.
+    pub autostart: bool,
+    /// Custom prompt template; `{repo}`, `{base}`, and `{rev}` are
+    /// substituted. Defaults to a built-in prompt describing the ACP methods.
+    pub prompt: Option<String>,
 }
 
 /// Size thresholds that keep huge inputs from overwhelming the TUI.
@@ -74,6 +91,7 @@ pub struct ArtifactConfig {
 pub struct KeybindingsConfig {
     pub quit: Vec<String>,
     pub help: Vec<String>,
+    pub summon_agent: Vec<String>,
     pub move_down: Vec<String>,
     pub move_up: Vec<String>,
     pub toggle_focus: Vec<String>,
@@ -159,6 +177,15 @@ struct ConfigPatch {
     generated: GeneratedConfigPatch,
     syntax: Option<SyntaxConfig>,
     limits: LimitsConfigPatch,
+    agent: AgentConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct AgentConfigPatch {
+    command: Option<String>,
+    autostart: Option<bool>,
+    prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -201,6 +228,7 @@ struct ArtifactConfigPatch {
 struct KeybindingsConfigPatch {
     quit: Option<Vec<String>>,
     help: Option<Vec<String>>,
+    summon_agent: Option<Vec<String>>,
     move_down: Option<Vec<String>>,
     move_up: Option<Vec<String>>,
     toggle_focus: Option<Vec<String>>,
@@ -285,6 +313,7 @@ impl Default for KeybindingsConfig {
             // (range selection, notices, popups) so it stays safe to mash.
             quit: keys(["q"]),
             help: keys(["?"]),
+            summon_agent: keys(["@"]),
             move_down: keys(["j", "down"]),
             move_up: keys(["k", "up"]),
             toggle_focus: keys(["tab"]),
@@ -432,6 +461,16 @@ impl Config {
         if let Some(max_diff_lines) = patch.limits.max_diff_lines {
             self.limits.max_diff_lines = max_diff_lines;
         }
+
+        if let Some(command) = patch.agent.command {
+            self.agent.command = Some(command);
+        }
+        if let Some(autostart) = patch.agent.autostart {
+            self.agent.autostart = autostart;
+        }
+        if let Some(prompt) = patch.agent.prompt {
+            self.agent.prompt = Some(prompt);
+        }
     }
 }
 
@@ -448,6 +487,7 @@ impl KeybindingsConfig {
     fn apply_patch(&mut self, patch: KeybindingsConfigPatch) {
         apply_optional(&mut self.quit, patch.quit);
         apply_optional(&mut self.help, patch.help);
+        apply_optional(&mut self.summon_agent, patch.summon_agent);
         apply_optional(&mut self.move_down, patch.move_down);
         apply_optional(&mut self.move_up, patch.move_up);
         apply_optional(&mut self.toggle_focus, patch.toggle_focus);
@@ -660,6 +700,42 @@ submit-comment = ["ctrl-s"]
         assert_eq!(
             artifact.output_path(repo.path(), ArtifactFormatConfig::Json),
             repo.path().join(".gander").join("review.json")
+        );
+    }
+
+    #[test]
+    fn agent_config_defaults_off_and_parses_from_toml() {
+        assert_eq!(Config::default().agent, AgentConfig::default());
+        assert!(Config::default().agent.command.is_none());
+        assert!(!Config::default().agent.autostart);
+
+        let repo = tempfile::tempdir().unwrap();
+        let config_path = repo.path().join("config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[agent]
+command = "opencode run --quiet"
+autostart = true
+prompt = "review {repo} at {base}..{rev}"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path: config_path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert_eq!(
+            config.agent.command.as_deref(),
+            Some("opencode run --quiet")
+        );
+        assert!(config.agent.autostart);
+        assert_eq!(
+            config.agent.prompt.as_deref(),
+            Some("review {repo} at {base}..{rev}")
         );
     }
 

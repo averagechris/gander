@@ -33,6 +33,30 @@ If the socket cannot be bound (say, a second gander TUI on the same repo)
 the TUI shows a notice and collaboration degrades gracefully to the overlay
 file.
 
+## Summoning an agent from the TUI
+
+Instead of orchestrating the agent yourself, configure one and let gander
+launch it:
+
+```toml
+[agent]
+# Any CLI that accepts a prompt. gander appends its review prompt as the
+# final shell-quoted argument, or substitutes a {prompt} placeholder.
+command = "opencode run --quiet"
+# command = "claude -p"
+# command = "opencode run --attach http://localhost:4096"  # reuse a running server
+autostart = false   # true: summon on TUI startup
+# prompt = "custom template; {repo}, {base}, {rev} are substituted"
+```
+
+Press `@` in the TUI (or use `autostart`) and gander spawns the command in
+the repo root with a prompt explaining the ACP workflow. The agent runs
+`gander acp`, which bridges to the live socket, and its suggestions stream
+into the UI. Output is logged to `.gander/agent.log`; the footer announces
+summon, completion, or failure, and the process is killed if you quit
+mid-review. gander itself stays agent-agnostic — anything that can take a
+prompt and run a subprocess works.
+
 ## Read methods
 
 | Method | Params | Result |

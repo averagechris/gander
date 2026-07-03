@@ -206,6 +206,12 @@ comment-list = ["C"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
 quit = ["q"]
+
+[agent]
+# Optional: a shell command that summons a review agent (press @ in the TUI,
+# or set autostart). Agent-agnostic: any CLI that accepts a prompt works.
+command = "opencode run --quiet"
+autostart = false
 ```
 
 CLI `--ignore` values are appended to configured ignore globs. Use
@@ -352,6 +358,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | Key | Action |
 | --- | --- |
 | `?` | help overlay with the full keymap |
+| `@` | summon the configured review agent (`[agent] command`) |
 | `j` / Down | next file |
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |
@@ -417,6 +424,14 @@ automatically bridges stdio to that socket when it exists, so agents that
 spawn `gander acp` see current viewed state, comments, and target instead
 of a startup snapshot. See [`docs/acp.md`](docs/acp.md) for the method
 reference.
+
+To pull an agent into the loop without leaving the review, configure
+`[agent] command` (any prompt-taking CLI: `opencode run`, `claude -p`,
+`opencode run --attach http://localhost:4096` to reuse a running server,
+...) and press `@` in the TUI, or set `autostart = true` to summon it on
+startup. gander hands the command a built-in review prompt (customizable
+via `[agent] prompt`), logs its output to `.gander/agent.log`, announces
+its progress in the footer, and kills it when you quit.
 
 ## Architecture
 

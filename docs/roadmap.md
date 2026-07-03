@@ -135,6 +135,9 @@ Client Protocol schema compliance is future work.
 - [x] live ACP endpoint hosted by the TUI on `.gander/acp.sock` (Unix);
   `gander acp` bridges stdio to it when live, so agent-spawned servers see
   the current session instead of a startup snapshot
+- [x] summon a configured agent from the TUI (`[agent] command` + `@` key or
+  autostart; agent-agnostic shell command, logged to `.gander/agent.log`,
+  lifecycle owned by gander)
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 

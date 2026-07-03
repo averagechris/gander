@@ -209,6 +209,7 @@ fn main() -> color_eyre::Result<()> {
                 Some(state_path.clone()),
                 Some(crate::agent::AgentOverlay::default_path(&repo)),
                 Some(crate::acp::default_socket_path(&repo)),
+                config.agent.clone(),
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;

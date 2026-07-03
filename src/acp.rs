@@ -888,9 +888,19 @@ diff --git a/README.md b/README.md
             // Dropping removed the socket file; a stale file also rebinds.
             std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
             assert!(!socket_path.exists());
-            let _stale = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
-            drop(_stale);
-            assert!(socket_path.exists() && !socket::is_live(&socket_path));
+            let stale = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            drop(stale);
+            assert!(socket_path.exists());
+            // macOS can briefly complete connects against a freshly closed
+            // listener's backlog; wait until the socket reads as dead like a
+            // genuinely stale one would.
+            for _ in 0..200 {
+                if !socket::is_live(&socket_path) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!socket::is_live(&socket_path));
             AcpBridge::bind(socket_path, overlay_path).unwrap();
         }
     }

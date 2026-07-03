@@ -28,6 +28,7 @@ struct KeyPress {
 pub(super) enum Action {
     Quit,
     Help,
+    SummonAgent,
     MoveDown,
     MoveUp,
     ToggleFocus,
@@ -86,6 +87,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         let mut bindings = Vec::new();
         add_bindings(&mut bindings, Action::Quit, &config.quit)?;
         add_bindings(&mut bindings, Action::Help, &config.help)?;
+        add_bindings(&mut bindings, Action::SummonAgent, &config.summon_agent)?;
         add_bindings(&mut bindings, Action::MoveDown, &config.move_down)?;
         add_bindings(&mut bindings, Action::MoveUp, &config.move_up)?;
         add_bindings(&mut bindings, Action::ToggleFocus, &config.toggle_focus)?;
