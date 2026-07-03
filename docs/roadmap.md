@@ -201,6 +201,29 @@ below).
   `current_focus` flow covers the need — the human asks "what am I looking
   at?" in the harness chat. Revisit only if that leaves a real gap.
 
+## Milestone 10: focused diff UX
+
+A diff pane that makes changes obvious at a glance and lets the reviewer
+strip away everything else. Design: docs/focused-diff-ux.md.
+
+Status: designed, in progress.
+
+- [ ] word-level change highlights within modified line pairs (`similar`
+  crate, similarity-thresholded), on by default
+- [ ] added/removed line background tints, on by default
+- [ ] optional colored gutter change bar
+- [ ] `[diff]` config section + view-options popup (`V`) with runtime,
+  session-only toggles; every toggle bindable via `[keybindings]`
+- [ ] collapsible file pane (`w`) with never-trap re-show and file path in
+  the diff pane title
+- [ ] side-by-side view (`|`) as a render-time projection over the unified
+  rows (cursor/comments/anchors unchanged), unified fallback on narrow
+  terminals
+- [ ] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
+  `jj file show` content; expanded rows not commentable in v1
+- [ ] zen mode design pass (tour mode + the above + agent-curated chunks)
+  once the building blocks land
+
 ## Known debt (from the 2026-07 pre-MVP code review)
 
 Fixed during the review: base picker filter dropped `g`/`G`/shifted chars,
