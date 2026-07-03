@@ -6,6 +6,14 @@
 //! write review suggestions (ordering, flagged sections, chunks, draft
 //! comments) into the shared agent overlay that the TUI surfaces live.
 //!
+//! Two hosting modes share the same [`AcpHandler`] dispatch:
+//! - standalone: [`AcpServer`] owns a session snapshot and serves stdio
+//!   (used when no TUI is running);
+//! - live: the TUI binds a Unix socket (see [`socket`]) and answers requests
+//!   from its event loop against the live session, so agents see current
+//!   viewed state, comments, and the active target. `gander acp` bridges
+//!   stdio to that socket automatically when it exists.
+//!
 //! See docs/acp.md for the method reference.
 
 use std::{
@@ -25,19 +33,29 @@ use crate::{
 
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
 
-pub struct AcpServer {
-    session: ReviewSession,
+/// Default Unix socket path where a running TUI hosts the live ACP session.
+pub fn default_socket_path(repo: &std::path::Path) -> PathBuf {
+    repo.join(".gander").join("acp.sock")
+}
+
+/// Method dispatch plus overlay persistence, independent of transport and of
+/// who owns the session (snapshot or live TUI session).
+pub struct AcpHandler {
     overlay: AgentOverlay,
     overlay_path: PathBuf,
 }
 
+/// Standalone stdio server owning a session snapshot.
+pub struct AcpServer {
+    session: ReviewSession,
+    handler: AcpHandler,
+}
+
 impl AcpServer {
     pub fn new(session: ReviewSession, overlay_path: PathBuf) -> Result<Self> {
-        let overlay = AgentOverlay::load_or_default(&overlay_path)?;
         Ok(Self {
             session,
-            overlay,
-            overlay_path,
+            handler: AcpHandler::new(overlay_path)?,
         })
     }
 
@@ -48,7 +66,7 @@ impl AcpServer {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(response) = self.handle_line(&line) {
+            if let Some(response) = self.handler.handle_line(&self.session, &line) {
                 serde_json::to_writer(&mut output, &response)?;
                 output.write_all(b"\n")?;
                 output.flush()?;
@@ -57,9 +75,36 @@ impl AcpServer {
         Ok(())
     }
 
+    #[cfg(test)]
+    fn handle_line(&mut self, line: &str) -> Option<Value> {
+        self.handler.handle_line(&self.session, line)
+    }
+}
+
+impl AcpHandler {
+    pub fn new(overlay_path: PathBuf) -> Result<Self> {
+        let overlay = AgentOverlay::load_or_default(&overlay_path)?;
+        Ok(Self {
+            overlay,
+            overlay_path,
+        })
+    }
+
+    /// Re-read the overlay from disk so reads reflect dispositions another
+    /// process (the TUI or a standalone server) wrote since our last look.
+    pub fn refresh_overlay(&mut self) {
+        if let Ok(overlay) = AgentOverlay::load_or_default(&self.overlay_path) {
+            self.overlay = overlay;
+        }
+    }
+
+    pub fn overlay(&self) -> &AgentOverlay {
+        &self.overlay
+    }
+
     /// Handle one raw JSON-RPC message; `None` means no response is due
     /// (notification).
-    pub fn handle_line(&mut self, line: &str) -> Option<Value> {
+    pub fn handle_line(&mut self, session: &ReviewSession, line: &str) -> Option<Value> {
         let request: Value = match serde_json::from_str(line) {
             Ok(request) => request,
             Err(error) => {
@@ -78,7 +123,7 @@ impl AcpServer {
             .to_owned();
         let params = request.get("params").cloned().unwrap_or(Value::Null);
 
-        let result = self.dispatch(&method, &params);
+        let result = self.dispatch(session, &method, &params);
         let id = id?;
         Some(match result {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -86,7 +131,12 @@ impl AcpServer {
         })
     }
 
-    fn dispatch(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+    fn dispatch(
+        &mut self,
+        session: &ReviewSession,
+        method: &str,
+        params: &Value,
+    ) -> Result<Value, String> {
         match method {
             "initialize" => Ok(json!({
                 "protocol": "gander-acp",
@@ -104,13 +154,13 @@ impl AcpServer {
                 ],
             })),
             "review/summary" => Ok(json!({
-                "repo": self.session.repo.display().to_string(),
-                "base": self.session.target.base,
-                "revision": self.session.target.rev,
-                "summary": self.session.summary_line(),
+                "repo": session.repo.display().to_string(),
+                "base": session.target.base,
+                "revision": session.target.rev,
+                "summary": session.summary_line(),
             })),
             "review/files" => Ok(json!(
-                self.session
+                session
                     .files
                     .iter()
                     .map(|file| json!({
@@ -127,8 +177,7 @@ impl AcpServer {
             )),
             "review/file_diff" => {
                 let path = require_str(params, "path")?;
-                let file = self
-                    .session
+                let file = session
                     .files
                     .iter()
                     .find(|file| file.path == path)
@@ -140,7 +189,7 @@ impl AcpServer {
                 }))
             }
             "review/comments" => Ok(json!(
-                self.session
+                session
                     .comments
                     .iter()
                     .map(|comment| json!({
@@ -170,7 +219,7 @@ impl AcpServer {
                     .collect::<Result<Vec<_>, _>>()?;
                 let unknown: Vec<&String> = paths
                     .iter()
-                    .filter(|path| self.session.files.iter().all(|file| &file.path != *path))
+                    .filter(|path| session.files.iter().all(|file| &file.path != *path))
                     .collect();
                 if !unknown.is_empty() {
                     return Err(format!("unknown files in ordering: {unknown:?}"));
@@ -311,13 +360,187 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     })
 }
 
+/// Unix-socket hosting: the TUI binds `.gander/acp.sock` and answers
+/// requests from its event loop, so agents talk to the *live* session.
+#[cfg(unix)]
+pub mod socket {
+    use std::{
+        fs,
+        io::{BufRead, BufReader, Write},
+        os::unix::net::{UnixListener, UnixStream},
+        path::{Path, PathBuf},
+        sync::mpsc,
+        thread,
+    };
+
+    use color_eyre::eyre::{Context, Result, bail};
+
+    use super::AcpHandler;
+    use crate::app::ReviewSession;
+
+    /// One JSON-RPC line from a connected agent, plus where to send the
+    /// response. `None` responses (notifications) send nothing.
+    pub struct AcpSocketRequest {
+        line: String,
+        reply: mpsc::Sender<Option<String>>,
+    }
+
+    /// Live ACP host owned by the TUI: a listener thread feeds requests
+    /// through a channel; the TUI event loop drains them between input
+    /// events via [`AcpBridge::process_pending`].
+    pub struct AcpBridge {
+        handler: AcpHandler,
+        receiver: mpsc::Receiver<AcpSocketRequest>,
+        socket_path: PathBuf,
+    }
+
+    impl AcpBridge {
+        /// Bind the socket and spawn the accept loop. Fails if another live
+        /// server is already bound; silently replaces a stale socket file
+        /// left behind by a crashed process.
+        pub fn bind(socket_path: PathBuf, overlay_path: PathBuf) -> Result<Self> {
+            if let Some(parent) = socket_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let listener = match UnixListener::bind(&socket_path) {
+                Ok(listener) => listener,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    if UnixStream::connect(&socket_path).is_ok() {
+                        bail!(
+                            "another ACP server is already listening on {}",
+                            socket_path.display()
+                        );
+                    }
+                    // Stale socket from a dead process: replace it.
+                    fs::remove_file(&socket_path).with_context(|| {
+                        format!("failed to remove stale socket {}", socket_path.display())
+                    })?;
+                    UnixListener::bind(&socket_path).with_context(|| {
+                        format!("failed to bind ACP socket {}", socket_path.display())
+                    })?
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to bind ACP socket {}", socket_path.display())
+                    });
+                }
+            };
+
+            let (sender, receiver) = mpsc::channel();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(stream) = stream else { break };
+                    let sender = sender.clone();
+                    thread::spawn(move || serve_connection(stream, &sender));
+                }
+            });
+
+            Ok(Self {
+                handler: AcpHandler::new(overlay_path)?,
+                receiver,
+                socket_path,
+            })
+        }
+
+        /// Answer all queued agent requests against the live session and
+        /// apply any overlay changes to it. Returns whether the overlay
+        /// changed (i.e. an agent wrote suggestions); latency is bounded by
+        /// the event-loop tick.
+        pub fn process_pending(&mut self, session: &mut ReviewSession) -> bool {
+            let mut overlay_changed = false;
+            while let Ok(request) = self.receiver.try_recv() {
+                // Pick up dispositions the TUI wrote since the last request
+                // so reads (review/overlay) are never stale.
+                self.handler.refresh_overlay();
+                let before = self.handler.overlay().clone();
+                let response = self.handler.handle_line(session, &request.line);
+                if self.handler.overlay() != &before {
+                    session.apply_agent_overlay(self.handler.overlay());
+                    overlay_changed = true;
+                }
+                // A dropped receiver just means the agent hung up.
+                let _ = request
+                    .reply
+                    .send(response.map(|response| response.to_string()));
+            }
+            overlay_changed
+        }
+    }
+
+    impl Drop for AcpBridge {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.socket_path);
+        }
+    }
+
+    /// Per-connection loop: forward lines to the TUI, write responses back.
+    fn serve_connection(stream: UnixStream, sender: &mpsc::Sender<AcpSocketRequest>) {
+        let Ok(read_half) = stream.try_clone() else {
+            return;
+        };
+        let mut writer = stream;
+        for line in BufReader::new(read_half).lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let (reply_sender, reply_receiver) = mpsc::channel();
+            if sender
+                .send(AcpSocketRequest {
+                    line,
+                    reply: reply_sender,
+                })
+                .is_err()
+            {
+                // TUI shut down; close the connection.
+                break;
+            }
+            match reply_receiver.recv() {
+                Ok(Some(response)) => {
+                    if writeln!(writer, "{response}")
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Bridge stdio to a live TUI socket: stdin lines go to the socket,
+    /// socket lines go to stdout. Returns when both sides close. Used by
+    /// `gander acp` so agent-spawned servers reach the live session.
+    pub fn bridge_stdio(socket_path: &Path) -> Result<()> {
+        let stream = UnixStream::connect(socket_path)
+            .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
+        let mut write_half = stream.try_clone()?;
+        let stdin_pump = thread::spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut write_half);
+            // Propagate stdin EOF so the TUI-side connection loop ends.
+            let _ = write_half.shutdown(std::net::Shutdown::Write);
+        });
+        let mut reader = stream;
+        std::io::copy(&mut reader, &mut std::io::stdout().lock())?;
+        let _ = stdin_pump.join();
+        Ok(())
+    }
+
+    /// True if a live server currently accepts connections on `socket_path`.
+    pub fn is_live(socket_path: &Path) -> bool {
+        UnixStream::connect(socket_path).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{diff::DiffSet, jj::ReviewTarget, state::ReviewState};
 
-    fn server() -> (AcpServer, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
+    fn session(dir: &std::path::Path) -> ReviewSession {
         let diff = DiffSet::parse(
             r#"diff --git a/src/app.rs b/src/app.rs
 --- a/src/app.rs
@@ -335,12 +558,18 @@ diff --git a/README.md b/README.md
         )
         .unwrap();
         let mut session = ReviewSession::new(
-            dir.path().to_path_buf(),
+            dir.to_path_buf(),
             ReviewTarget::trunk_to_current(),
             diff,
             ReviewState::default(),
         );
         session.add_comment("file note".into());
+        session
+    }
+
+    fn server() -> (AcpServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let session = session(dir.path());
         let overlay_path = AgentOverlay::default_path(dir.path());
         (AcpServer::new(session, overlay_path).unwrap(), dir)
     }
@@ -537,5 +766,132 @@ diff --git a/README.md b/README.md
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0]["id"], 1);
         assert_eq!(lines[1]["result"]["base"], "trunk()");
+    }
+
+    #[cfg(unix)]
+    mod socket_tests {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        use super::*;
+        use crate::acp::socket::AcpBridge;
+
+        /// Drive the bridge like the TUI event loop until the client's
+        /// request has been answered.
+        fn pump_until<T>(
+            bridge: &mut AcpBridge,
+            session: &mut ReviewSession,
+            mut ready: impl FnMut() -> Option<T>,
+        ) -> T {
+            for _ in 0..200 {
+                bridge.process_pending(session);
+                if let Some(value) = ready() {
+                    return value;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            panic!("socket request was never answered");
+        }
+
+        fn call_over_socket(
+            bridge: &mut AcpBridge,
+            session: &mut ReviewSession,
+            client: &mut BufReader<UnixStream>,
+            request: &Value,
+        ) -> Value {
+            client
+                .get_mut()
+                .write_all(format!("{request}\n").as_bytes())
+                .unwrap();
+            // Reads from the socket block, so poll the bridge from a helper
+            // thread reading in the background is overkill: instead pump the
+            // bridge, then do a blocking read once the reply is queued.
+            let response = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
+            let response_in_thread = response.clone();
+            let mut stream = client.get_ref().try_clone().unwrap();
+            let reader_thread = std::thread::spawn(move || {
+                let mut line = String::new();
+                let mut reader = BufReader::new(&mut stream);
+                if reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                    *response_in_thread.lock().unwrap() = Some(line);
+                }
+            });
+            let line = pump_until(bridge, session, || response.lock().unwrap().take());
+            reader_thread.join().unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+
+        #[test]
+        fn socket_serves_live_session_and_applies_writes() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut session = session(dir.path());
+            let socket_path = default_socket_path(dir.path());
+            let overlay_path = AgentOverlay::default_path(dir.path());
+            let mut bridge = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
+            assert!(socket::is_live(&socket_path));
+
+            let mut client = BufReader::new(UnixStream::connect(&socket_path).unwrap());
+
+            let response = call_over_socket(
+                &mut bridge,
+                &mut session,
+                &mut client,
+                &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            );
+            assert_eq!(response["result"]["protocol"], "gander-acp");
+
+            // Live read: session mutations made "in the TUI" are visible.
+            session.mark_all_viewed();
+            let response = call_over_socket(
+                &mut bridge,
+                &mut session,
+                &mut client,
+                &json!({ "jsonrpc": "2.0", "id": 2, "method": "review/files" }),
+            );
+            assert_eq!(response["result"][0]["viewed"], true);
+
+            // Write: applied to the live session and persisted to disk.
+            let response = call_over_socket(
+                &mut bridge,
+                &mut session,
+                &mut client,
+                &json!({
+                    "jsonrpc": "2.0", "id": 3,
+                    "method": "review/draft_comment",
+                    "params": { "path": "README.md", "body": "typo" },
+                }),
+            );
+            let draft_id = response["result"]["id"].as_str().unwrap();
+            assert!(
+                session
+                    .agent_drafts
+                    .iter()
+                    .any(|draft| draft.id == draft_id)
+            );
+            let overlay = AgentOverlay::load_or_default(&overlay_path).unwrap();
+            assert_eq!(overlay.drafts.len(), 1);
+        }
+
+        #[test]
+        fn bind_rejects_live_socket_but_replaces_stale_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = default_socket_path(dir.path());
+            let overlay_path = AgentOverlay::default_path(dir.path());
+
+            let live = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
+            let Err(error) = AcpBridge::bind(socket_path.clone(), overlay_path.clone()) else {
+                panic!("second bind must fail while the first is live");
+            };
+            assert!(error.to_string().contains("already listening"));
+            drop(live);
+
+            // Dropping removed the socket file; a stale file also rebinds.
+            std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+            assert!(!socket_path.exists());
+            let _stale = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+            drop(_stale);
+            assert!(socket_path.exists() && !socket::is_live(&socket_path));
+            AcpBridge::bind(socket_path, overlay_path).unwrap();
+        }
     }
 }

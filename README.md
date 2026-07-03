@@ -409,8 +409,14 @@ Agents can read the diff, comments, and viewed state, and write suggestions
 into `.gander/agent.json`: a review ordering, flagged critical sections,
 review chunks, and draft comments. A running TUI polls the overlay and
 surfaces suggestions live; draft dispositions (accept/edit/discard) are
-written back so agents observe the outcome. See [`docs/acp.md`](docs/acp.md)
-for the method reference.
+written back so agents observe the outcome.
+
+While the TUI is running it also serves the same protocol on a Unix socket
+(`.gander/acp.sock`) backed by the **live** session — and `gander acp`
+automatically bridges stdio to that socket when it exists, so agents that
+spawn `gander acp` see current viewed state, comments, and target instead
+of a startup snapshot. See [`docs/acp.md`](docs/acp.md) for the method
+reference.
 
 ## Architecture
 

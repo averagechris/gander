@@ -132,6 +132,9 @@ Client Protocol schema compliance is future work.
   to the overlay for agents to observe)
 - [x] artifact profile for agent consumption with raw excerpts and stable
   anchors (see milestone 4)
+- [x] live ACP endpoint hosted by the TUI on `.gander/acp.sock` (Unix);
+  `gander acp` bridges stdio to it when live, so agent-spawned servers see
+  the current session instead of a startup snapshot
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 
@@ -168,9 +171,9 @@ Known debt, in priority order:
   published Agent Client Protocol schema; adopting the real schema (session
   lifecycle, capabilities negotiation, streaming) is the next step for
   milestone 7.
-- The ACP server snapshots the diff/comments at startup; long-running agent
-  sessions do not see mid-review comment edits until restarted (viewed-state
-  writes land in `state.json`, drafts merge safely via the overlay).
+- The standalone `gander acp` server (no TUI running) snapshots the
+  diff/comments at startup; with a live TUI the socket bridge serves current
+  state, so this only affects agents working without a human in the loop.
 - Diff-pane scroll offsets count logical rows, not wrapped display lines, so
   scrolling within files containing very long wrapped lines is approximate
   (pre-existing behavior, kept by the lazy renderer).

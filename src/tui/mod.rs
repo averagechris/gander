@@ -132,6 +132,7 @@ struct ReviewLoader<'a> {
     jj: &'a dyn JjBackend,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
@@ -140,6 +141,7 @@ pub fn run(
     jj: &dyn JjBackend,
     state_path: Option<PathBuf>,
     agent_overlay_path: Option<PathBuf>,
+    acp_socket_path: Option<PathBuf>,
 ) -> Result<()> {
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
@@ -147,6 +149,26 @@ pub fn run(
         generated_matcher,
         jj,
     };
+
+    // Host a live ACP endpoint so agents can talk to this session while the
+    // human reviews. Failure to bind (e.g. another gander TUI on the same
+    // repo) degrades to overlay-file collaboration with a footer notice.
+    #[cfg(unix)]
+    let (mut acp_bridge, acp_notice) = match (acp_socket_path, &agent_overlay_path) {
+        (Some(socket_path), Some(overlay_path)) => {
+            match crate::acp::socket::AcpBridge::bind(socket_path, overlay_path.clone()) {
+                Ok(bridge) => (Some(bridge), None),
+                Err(error) => (None, Some(format!("acp socket unavailable: {error}"))),
+            }
+        }
+        _ => (None, None),
+    };
+    #[cfg(not(unix))]
+    let acp_notice: Option<String> = {
+        let _ = acp_socket_path;
+        None
+    };
+
     enable_raw_mode()?;
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
     // This lets `gander > review.md` capture only the post-quit artifact.
@@ -161,6 +183,10 @@ pub fn run(
     let mut tui_state = TuiState {
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
+        notice: acp_notice.map(|message| UiNotice {
+            level: UiNoticeLevel::Info,
+            message,
+        }),
         ..TuiState::default()
     };
     let result = run_loop(
@@ -172,6 +198,8 @@ pub fn run(
         &mut tui_state,
         state_path.as_deref(),
         agent_overlay_path.as_deref(),
+        #[cfg(unix)]
+        acp_bridge.as_mut(),
     );
 
     disable_raw_mode()?;
@@ -194,11 +222,31 @@ fn run_loop(
     tui_state: &mut TuiState,
     state_path: Option<&Path>,
     agent_overlay_path: Option<&Path>,
+    #[cfg(unix)] mut acp_bridge: Option<&mut crate::acp::socket::AcpBridge>,
 ) -> Result<()> {
     if let Some(overlay_path) = agent_overlay_path {
         maybe_reload_agent_overlay(session, overlay_path, tui_state, false);
     }
     loop {
+        // Answer queued agent requests against the live session before
+        // drawing so their effects render this frame.
+        #[cfg(unix)]
+        if let Some(bridge) = acp_bridge.as_deref_mut()
+            && bridge.process_pending(session)
+        {
+            // The bridge already applied overlay changes; skip the redundant
+            // "file changed" reload+notice for our own writes.
+            if let Some(overlay_path) = agent_overlay_path {
+                tui_state.overlay_mtime = std::fs::metadata(overlay_path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok();
+            }
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "agent suggestions updated".to_owned(),
+            });
+        }
+
         terminal.draw(|frame| draw(frame, session, mode, keymap, tui_state.notice.as_ref()))?;
 
         if !event::poll(Duration::from_millis(150))? {

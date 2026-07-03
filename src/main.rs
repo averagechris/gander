@@ -110,7 +110,9 @@ enum Command {
     /// Mark generated/noisy files as viewed without opening the TUI.
     MarkGeneratedViewed,
     /// Serve the review session to agents over line-delimited JSON-RPC on
-    /// stdio (ACP). See docs/acp.md.
+    /// stdio (ACP). Bridges to a running TUI's live session when one is
+    /// serving `.gander/acp.sock`; otherwise serves a snapshot directly.
+    /// See docs/acp.md.
     Acp,
     /// Print a terse summary of the current change.
     Summary,
@@ -206,6 +208,7 @@ fn main() -> color_eyre::Result<()> {
                 &jj,
                 Some(state_path.clone()),
                 Some(crate::agent::AgentOverlay::default_path(&repo)),
+                Some(crate::acp::default_socket_path(&repo)),
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;
@@ -282,6 +285,16 @@ fn main() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::Acp => {
+            // Prefer the live TUI session when one is serving the repo's
+            // ACP socket: agents then see current viewed state, comments,
+            // and target instead of this process's startup snapshot.
+            #[cfg(unix)]
+            {
+                let socket_path = crate::acp::default_socket_path(&repo);
+                if crate::acp::socket::is_live(&socket_path) {
+                    return crate::acp::socket::bridge_stdio(&socket_path);
+                }
+            }
             let overlay_path = crate::agent::AgentOverlay::default_path(&repo);
             let mut server = crate::acp::AcpServer::new(session, overlay_path)?;
             let stdin = std::io::stdin();

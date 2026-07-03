@@ -13,6 +13,26 @@ gander --base 'trunk()' --rev '@' acp
 Each request/response is one JSON object per line. Requests without an `id`
 are treated as notifications and get no response.
 
+## Live session over the TUI socket
+
+While the TUI runs it also hosts the same protocol on a Unix socket,
+`.gander/acp.sock` (Unix platforms only). Requests answered there hit the
+**live** session: current viewed state, comments, and the active review
+target, and agent writes surface in the UI within one event-loop tick —
+no file polling latency.
+
+Two ways to reach it:
+
+- connect to `.gander/acp.sock` directly and speak line-delimited JSON-RPC;
+- run `gander acp` as usual: when the socket is live it transparently
+  bridges stdio to the TUI, so agent clients that spawn `gander acp` as a
+  subprocess get the live session for free. Without a running TUI it falls
+  back to serving a snapshot loaded at startup.
+
+If the socket cannot be bound (say, a second gander TUI on the same repo)
+the TUI shows a notice and collaboration degrades gracefully to the overlay
+file.
+
 ## Read methods
 
 | Method | Params | Result |
