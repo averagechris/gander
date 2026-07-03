@@ -106,6 +106,8 @@ struct TuiState {
     overlay_mtime: Option<std::time::SystemTime>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
+    /// Where a summoned agent's output is logged.
+    agent_log_path: Option<PathBuf>,
     /// How to summon a review agent (from `[agent]` config).
     agent_config: AgentConfig,
     /// A summoned agent, if any. Killed on drop so quitting cannot leak it.
@@ -137,18 +139,36 @@ struct ReviewLoader<'a> {
     jj: &'a dyn JjBackend,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Filesystem locations the TUI reads and writes during a session, resolved
+/// by the caller (see [`crate::paths`]); `None` disables the corresponding
+/// behavior (useful in tests).
+#[derive(Debug, Clone, Default)]
+pub struct TuiPaths {
+    /// Durable review state (viewed marks, comments), autosaved per event.
+    pub state_file: Option<PathBuf>,
+    /// The shared agent overlay polled for suggestions.
+    pub agent_overlay: Option<PathBuf>,
+    /// Unix socket for the live ACP endpoint.
+    pub acp_socket: Option<PathBuf>,
+    /// Where a summoned agent's output is logged.
+    pub agent_log: Option<PathBuf>,
+}
+
 pub fn run(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
-    state_path: Option<PathBuf>,
-    agent_overlay_path: Option<PathBuf>,
-    acp_socket_path: Option<PathBuf>,
+    paths: TuiPaths,
     agent_config: AgentConfig,
 ) -> Result<()> {
+    let TuiPaths {
+        state_file: state_path,
+        agent_overlay: agent_overlay_path,
+        acp_socket: acp_socket_path,
+        agent_log: agent_log_path,
+    } = paths;
     let keymap = KeyMap::try_from(keybindings)?;
     let review_loader = ReviewLoader {
         ignore_globs,
@@ -189,6 +209,7 @@ pub fn run(
     let mut tui_state = TuiState {
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
+        agent_log_path,
         agent_config,
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
@@ -293,8 +314,9 @@ fn run_loop(
 }
 
 /// Launch the configured review agent (`[agent] command`), agent-agnostic:
-/// the command is any CLI that accepts a prompt. Output is logged to
-/// `.gander/agent.log`; suggestions arrive through ACP like any other agent.
+/// the command is any CLI that accepts a prompt. Output is logged to the
+/// workspace's agent log (see `gander paths`); suggestions arrive through
+/// ACP like any other agent.
 fn summon_agent(session: &ReviewSession, tui_state: &mut TuiState) {
     if let Some(process) = &mut tui_state.agent_process
         && process.try_status().is_none()
@@ -312,19 +334,25 @@ fn summon_agent(session: &ReviewSession, tui_state: &mut TuiState) {
         });
         return;
     };
+    let Some(log_path) = tui_state.agent_log_path.clone() else {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Error,
+            message: "no agent log path resolved; cannot summon an agent".to_owned(),
+        });
+        return;
+    };
     let prompt = crate::agent::review_prompt(
         tui_state.agent_config.prompt.as_deref(),
         &session.repo,
         &session.target.base,
         &session.target.rev,
     );
-    let log_path = AgentProcess::default_log_path(&session.repo);
     match AgentProcess::spawn(&session.repo, &command, &prompt, &log_path) {
         Ok(process) => {
             tui_state.agent_process = Some(process);
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: "agent summoned (output: .gander/agent.log)".to_owned(),
+                message: format!("agent summoned (output: {})", log_path.display()),
             });
         }
         Err(error) => {
@@ -351,7 +379,7 @@ fn notice_agent_exit(tui_state: &mut TuiState) {
         } else {
             UiNotice {
                 level: UiNoticeLevel::Error,
-                message: format!("agent exited with {status} (see .gander/agent.log)"),
+                message: format!("agent exited with {status} (see the agent log: gander paths)"),
             }
         });
     }

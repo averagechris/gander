@@ -9,6 +9,7 @@ mod file_tree;
 mod fuzzy;
 mod generated;
 mod jj;
+mod paths;
 mod state;
 mod syntax;
 mod tui;
@@ -16,7 +17,7 @@ mod tui;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use color_eyre::eyre::Context;
+use color_eyre::eyre::{Context, eyre};
 
 use crate::{
     app::ReviewSession,
@@ -28,6 +29,7 @@ use crate::{
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::{JjBackend, JjCliBackend, ReviewTarget},
+    paths::{PathsEnv, WorkspacePaths},
     state::ReviewState,
 };
 
@@ -62,7 +64,8 @@ struct Cli {
     #[arg(long, global = true)]
     state: Option<PathBuf>,
 
-    /// Path to a gander config file. Defaults to .gander/config.toml if present.
+    /// Path to a gander config file. Layered over XDG user config and a
+    /// committed gander.toml at the repo root.
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
@@ -111,9 +114,11 @@ enum Command {
     MarkGeneratedViewed,
     /// Serve the review session to agents over line-delimited JSON-RPC on
     /// stdio (ACP). Bridges to a running TUI's live session when one is
-    /// serving `.gander/acp.sock`; otherwise serves a snapshot directly.
-    /// See docs/acp.md.
+    /// serving this workspace's ACP socket; otherwise serves a snapshot
+    /// directly. See docs/acp.md.
     Acp,
+    /// Print resolved state/runtime/config locations for this workspace.
+    Paths,
     /// Print a terse summary of the current change.
     Summary,
 }
@@ -162,14 +167,25 @@ fn main() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
-    let jj = JjCliBackend::from_configured(&config.jj.binary)?;
-    let target = ReviewTarget::new(cli.base, cli.rev);
+    warn_deprecated_config_layer(&repo);
+    let workspace_paths = WorkspacePaths::resolve(&repo, &PathsEnv::from_env())?;
     let command = cli.command.unwrap_or(Command::Tui {
         artifact_on_quit: None,
         artifact_format: None,
         artifact_profile: None,
         artifact_output: None,
     });
+    if matches!(command, Command::Paths) {
+        print_paths(&workspace_paths, &repo, cli.state.as_deref());
+        return Ok(());
+    }
+    // One-release migration fallback (docs/decisions.md D6): pick up legacy
+    // `.gander/` state before anything reads the new locations.
+    workspace_paths
+        .migrate_legacy_state()
+        .wrap_err("failed to migrate legacy .gander state")?;
+    let jj = JjCliBackend::from_configured(&config.jj.binary)?;
+    let target = ReviewTarget::new(cli.base, cli.rev);
     let generated_policy = merge_generated(&config, cli.generated_preset, cli.generated_glob);
     let generated_matcher = GeneratedMatcher::new(&generated_policy)?;
 
@@ -182,9 +198,7 @@ fn main() -> color_eyre::Result<()> {
         diff.apply_ignores(&ignore_globs)?;
     }
 
-    let state_path = cli
-        .state
-        .unwrap_or_else(|| repo.join(".gander").join("state.json"));
+    let state_path = cli.state.unwrap_or_else(|| workspace_paths.state_file());
     let mut state = ReviewState::load_or_default(&state_path)?;
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff, state.clone(), &config);
@@ -200,27 +214,34 @@ fn main() -> color_eyre::Result<()> {
             artifact_profile,
             artifact_output,
         } => {
-            tui::run(
-                &mut session,
-                &config.keybindings,
-                ignore_globs,
-                generated_matcher,
-                &jj,
-                Some(state_path.clone()),
-                Some(crate::agent::AgentOverlay::default_path(&repo)),
-                Some(crate::acp::default_socket_path(&repo)),
-                config.agent.clone(),
-            )?;
-            state = session.clone().into_state();
-            state.save(&state_path)?;
-            if let Some(request) = resolve_tui_artifact_options(
+            // Resolve before entering the TUI so a misconfiguration (write
+            // mode without a destination) fails fast instead of after the
+            // review session.
+            let artifact_request = resolve_tui_artifact_options(
                 &repo,
                 &config,
                 artifact_on_quit,
                 artifact_format,
                 artifact_profile,
                 artifact_output,
-            ) {
+            )?;
+            tui::run(
+                &mut session,
+                &config.keybindings,
+                ignore_globs,
+                generated_matcher,
+                &jj,
+                tui::TuiPaths {
+                    state_file: Some(state_path.clone()),
+                    agent_overlay: Some(workspace_paths.overlay_file()),
+                    acp_socket: Some(workspace_paths.socket_file()),
+                    agent_log: Some(workspace_paths.agent_log_file()),
+                },
+                config.agent.clone(),
+            )?;
+            state = session.clone().into_state();
+            state.save(&state_path)?;
+            if let Some(request) = artifact_request {
                 let format = match request.format {
                     OutputFormat::Json => ArtifactFormat::Json,
                     OutputFormat::Markdown => ArtifactFormat::Markdown,
@@ -242,17 +263,22 @@ fn main() -> color_eyre::Result<()> {
             output,
             profile,
         } => {
-            let (format, output, profile) =
+            let (format, destination, profile) =
                 resolve_export_options(&repo, &config, format, output, profile);
-            write_artifact(
-                &session,
-                match format {
-                    OutputFormat::Json => ArtifactFormat::Json,
-                    OutputFormat::Markdown => ArtifactFormat::Markdown,
-                },
-                ArtifactProfile::from(profile),
-                &output,
-            )?;
+            let format = match format {
+                OutputFormat::Json => ArtifactFormat::Json,
+                OutputFormat::Markdown => ArtifactFormat::Markdown,
+            };
+            let profile = ArtifactProfile::from(profile);
+            match destination {
+                TuiArtifactDestination::File(path) => {
+                    write_artifact(&session, format, profile, &path)?
+                }
+                TuiArtifactDestination::Stdout => {
+                    let stdout = std::io::stdout();
+                    write_artifact_to(&session, format, profile, stdout.lock())?;
+                }
+            }
         }
         Command::Import { input } => {
             let contents = std::fs::read_to_string(&input)
@@ -286,22 +312,24 @@ fn main() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::Acp => {
-            // Prefer the live TUI session when one is serving the repo's
-            // ACP socket: agents then see current viewed state, comments,
-            // and target instead of this process's startup snapshot.
+            // Prefer the live TUI session when one is serving this
+            // workspace's ACP socket: agents then see current viewed state,
+            // comments, and target instead of this process's startup
+            // snapshot.
             #[cfg(unix)]
             {
-                let socket_path = crate::acp::default_socket_path(&repo);
+                let socket_path = workspace_paths.socket_file();
                 if crate::acp::socket::is_live(&socket_path) {
                     return crate::acp::socket::bridge_stdio(&socket_path);
                 }
             }
-            let overlay_path = crate::agent::AgentOverlay::default_path(&repo);
+            let overlay_path = workspace_paths.overlay_file();
             let mut server = crate::acp::AcpServer::new(session, overlay_path)?;
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;
         }
+        Command::Paths => unreachable!("handled before loading the diff"),
         Command::Summary => {
             println!("Reviewing {}", session.target);
             println!("{}", session.summary_line());
@@ -341,17 +369,88 @@ fn merge_ignores(config: &Config, cli_ignores: Vec<String>) -> Vec<String> {
     ignores
 }
 
+/// The `.gander/config.toml` layer is deprecated along with the rest of the
+/// project-local directory (docs/decisions.md D6). It still loads for one
+/// release; nudge users toward the committed `gander.toml`.
+fn warn_deprecated_config_layer(repo: &std::path::Path) {
+    let legacy = repo.join(".gander").join("config.toml");
+    if legacy.exists() {
+        eprintln!(
+            "warning: {} is deprecated and will stop loading in a future release; \
+             move it to gander.toml at the repo root or the XDG user config",
+            legacy.display()
+        );
+    }
+}
+
+/// `gander paths`: print resolved locations so users can find state, debug
+/// endpoint issues, and verify config layering.
+fn print_paths(
+    paths: &WorkspacePaths,
+    repo: &std::path::Path,
+    state_override: Option<&std::path::Path>,
+) {
+    let presence = |path: &std::path::Path| if path.exists() { "present" } else { "absent" };
+    println!("workspace root:   {}", paths.workspace_root.display());
+    println!("workspace key:    {}", paths.key);
+    println!("state dir:        {}", paths.state_dir.display());
+    println!("runtime dir:      {}", paths.runtime_dir.display());
+    let state_file = state_override
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| paths.state_file());
+    println!(
+        "review state:     {} ({})",
+        state_file.display(),
+        presence(&state_file)
+    );
+    println!(
+        "agent overlay:    {} ({})",
+        paths.overlay_file().display(),
+        presence(&paths.overlay_file())
+    );
+    println!("acp socket:       {}", paths.socket_file().display());
+    println!("agent log:        {}", paths.agent_log_file().display());
+    if let Some(xdg_config) = crate::config::xdg_config_path() {
+        println!(
+            "user config:      {} ({})",
+            xdg_config.display(),
+            presence(&xdg_config)
+        );
+    }
+    let project_config = repo.join("gander.toml");
+    println!(
+        "project config:   {} ({})",
+        project_config.display(),
+        presence(&project_config)
+    );
+    let legacy_config = paths.legacy_dir.join("config.toml");
+    println!(
+        "legacy config:    {} ({}, deprecated)",
+        legacy_config.display(),
+        presence(&legacy_config)
+    );
+    println!(
+        "legacy state dir: {} ({}, deprecated)",
+        paths.legacy_dir.display(),
+        presence(&paths.legacy_dir)
+    );
+}
+
 fn resolve_export_options(
     repo: &std::path::Path,
     config: &Config,
     cli_format: Option<OutputFormat>,
     cli_output: Option<PathBuf>,
     cli_profile: Option<OutputProfile>,
-) -> (OutputFormat, PathBuf, OutputProfile) {
+) -> (OutputFormat, TuiArtifactDestination, OutputProfile) {
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
-    let output = cli_output.unwrap_or_else(|| config.artifact.output_path(repo, format.into()));
+    // Default artifact output is stdout (docs/decisions.md D6): files are
+    // written only to explicit CLI paths or a configured output dir.
+    let destination = cli_output
+        .or_else(|| config.artifact.output_path(repo, format.into()))
+        .map_or(TuiArtifactDestination::Stdout, TuiArtifactDestination::File);
     let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
-    (format, output, profile)
+    (format, destination, profile)
 }
 
 fn resolve_tui_artifact_options(
@@ -361,27 +460,35 @@ fn resolve_tui_artifact_options(
     cli_format: Option<OutputFormat>,
     cli_profile: Option<OutputProfile>,
     cli_output: Option<PathBuf>,
-) -> Option<TuiArtifactRequest> {
+) -> color_eyre::Result<Option<TuiArtifactRequest>> {
     let mode = cli_mode
         .map(TuiArtifactOnQuitConfig::from)
         .unwrap_or(config.artifact.on_tui_quit);
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
     let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
-    match mode {
+    Ok(match mode {
         TuiArtifactOnQuitConfig::Never => None,
-        TuiArtifactOnQuitConfig::Write => Some(TuiArtifactRequest {
-            format,
-            profile,
-            destination: TuiArtifactDestination::File(
-                cli_output.unwrap_or_else(|| config.artifact.output_path(repo, format.into())),
-            ),
-        }),
+        TuiArtifactOnQuitConfig::Write => {
+            let output = cli_output
+                .or_else(|| config.artifact.output_path(repo, format.into()))
+                .ok_or_else(|| {
+                    eyre!(
+                        "artifact on-tui-quit `write` needs a destination: \
+                         pass --artifact-output or set [artifact] output-dir"
+                    )
+                })?;
+            Some(TuiArtifactRequest {
+                format,
+                profile,
+                destination: TuiArtifactDestination::File(output),
+            })
+        }
         TuiArtifactOnQuitConfig::Stdout => Some(TuiArtifactRequest {
             format,
             profile,
             destination: TuiArtifactDestination::Stdout,
         }),
-    }
+    })
 }
 
 impl From<ArtifactFormatConfig> for OutputFormat {
@@ -460,24 +567,25 @@ mod tests {
     }
 
     #[test]
-    fn export_options_use_config_defaults() {
+    fn export_options_default_to_stdout() {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let (format, output, profile) =
+        let (format, destination, profile) =
             resolve_export_options(repo.path(), &config, None, None, None);
 
         assert_eq!(format, OutputFormat::Markdown);
-        assert_eq!(output, repo.path().join(".gander").join("review.md"));
+        assert_eq!(destination, TuiArtifactDestination::Stdout);
         assert_eq!(profile, OutputProfile::Human);
     }
 
     #[test]
-    fn export_options_cli_format_changes_derived_extension() {
+    fn export_options_use_configured_output_dir() {
         let repo = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let mut config = Config::default();
+        config.artifact.output_dir = Some(PathBuf::from("artifacts"));
 
-        let (format, output, profile) = resolve_export_options(
+        let (format, destination, profile) = resolve_export_options(
             repo.path(),
             &config,
             Some(OutputFormat::Json),
@@ -486,8 +594,30 @@ mod tests {
         );
 
         assert_eq!(format, OutputFormat::Json);
-        assert_eq!(output, repo.path().join(".gander").join("review.json"));
+        assert_eq!(
+            destination,
+            TuiArtifactDestination::File(repo.path().join("artifacts").join("review.json"))
+        );
         assert_eq!(profile, OutputProfile::Agent);
+    }
+
+    #[test]
+    fn export_options_cli_output_wins() {
+        let repo = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let (_, destination, _) = resolve_export_options(
+            repo.path(),
+            &config,
+            None,
+            Some(PathBuf::from("/tmp/out.md")),
+            None,
+        );
+
+        assert_eq!(
+            destination,
+            TuiArtifactDestination::File(PathBuf::from("/tmp/out.md"))
+        );
     }
 
     #[test]
@@ -518,8 +648,9 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let request =
-            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap();
+        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None, None)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(request.format, OutputFormat::Markdown);
         assert_eq!(request.profile, OutputProfile::Human);
@@ -531,15 +662,29 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.artifact.on_tui_quit = TuiArtifactOnQuitConfig::Write;
+        config.artifact.output_dir = Some(PathBuf::from("artifacts"));
 
-        let request =
-            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap();
+        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None, None)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(request.format, OutputFormat::Markdown);
         assert_eq!(
             request.destination,
-            TuiArtifactDestination::File(repo.path().join(".gander").join("review.md"))
+            TuiArtifactDestination::File(repo.path().join("artifacts").join("review.md"))
         );
+    }
+
+    #[test]
+    fn tui_artifact_write_without_destination_errors() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.artifact.on_tui_quit = TuiArtifactOnQuitConfig::Write;
+
+        let error =
+            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap_err();
+
+        assert!(error.to_string().contains("--artifact-output"));
     }
 
     #[test]
@@ -556,6 +701,7 @@ mod tests {
             Some(OutputProfile::Agent),
             None,
         )
+        .unwrap()
         .unwrap();
 
         assert_eq!(request.format, OutputFormat::Json);

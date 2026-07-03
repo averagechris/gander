@@ -121,7 +121,7 @@ Client Protocol schema compliance is future work.
   and viewed state (`gander acp`: line-delimited JSON-RPC 2.0 on stdio)
 - [x] agent-suggested review ordering: rearrange the review by priority and
   risk instead of file order (`review/set_ordering` + `A` toggle; the TUI
-  polls the shared `.gander/agent.json` overlay live)
+  polls the shared agent overlay live)
 - [x] agent-flagged critical sections that are surfaced/pinned in the UI
   (`review/flag_section`; red `!` gutter/file pins + `F` flag list popup)
 - [x] review chunks: break a change into reviewable units that can span or
@@ -133,33 +133,34 @@ Client Protocol schema compliance is future work.
   to the overlay for agents to observe)
 - [x] artifact profile for agent consumption with raw excerpts and stable
   anchors (see milestone 4)
-- [x] live ACP endpoint hosted by the TUI on `.gander/acp.sock` (Unix);
+- [x] live ACP endpoint hosted by the TUI on a Unix socket (see `gander paths`);
   `gander acp` bridges stdio to it when live, so agent-spawned servers see
   the current session instead of a startup snapshot
 - [x] summon a configured agent from the TUI (`[agent] command` + `@` key or
-  autostart; agent-agnostic shell command, logged to `.gander/agent.log`,
+  autostart; agent-agnostic shell command, logged to the workspace agent log,
   lifecycle owned by gander)
 
 ## Milestone 8: state hygiene — get out of the project directory
 
-Runtime state currently lands in a project-local `.gander/` dir that users
-must gitignore in every repo. That is tool droppings, not polish. Decision
-record: docs/decisions.md D6. This milestone should land **before**
-milestone 9, since the instance registry and MCP routing build on the new
-locations.
+Runtime state used to land in a project-local `.gander/` dir that users had
+to gitignore in every repo. Decision record: docs/decisions.md D6.
 
-- [ ] resolve per-workspace state under the XDG state dir
+Status: complete. Legacy `.gander/` state is still read (copied forward) for
+one release; the `.gander/config.toml` layer still loads with a deprecation
+warning.
+
+- [x] resolve per-workspace state under the XDG state dir
   (`~/.local/state/gander/<workspace-key>/`), keyed by a hash+slug of the
   canonicalized workspace root; respect `XDG_STATE_HOME`
-- [ ] ephemeral endpoints (ACP/MCP sockets, instance registry, agent logs)
+- [x] ephemeral endpoints (ACP/MCP sockets, instance registry, agent logs)
   under `XDG_RUNTIME_DIR` when set, else the state dir
-- [ ] keep committed `gander.toml` and XDG user config; deprecate the
-  `.gander/config.toml` layer
-- [ ] default artifact output moves off `.gander/review.*` (stdout or
-  explicit paths)
-- [ ] one-release migration fallback: read legacy `.gander/` state when the
-  new location is empty
-- [ ] a `gander paths`-style command that prints resolved locations for
+- [x] keep committed `gander.toml` and XDG user config; deprecate the
+  `.gander/config.toml` layer (still loads, with a startup warning)
+- [x] default artifact output moves off `.gander/review.*` (stdout unless
+  an explicit path or `[artifact] output-dir` is given)
+- [x] one-release migration fallback: read legacy `.gander/` state when the
+  new location is empty (copied forward on startup)
+- [x] a `gander paths` command that prints resolved locations for
   debugging
 
 ## Milestone 9: seamless agent workflows (MCP + multi-instance)
@@ -220,8 +221,6 @@ whether or not the terminal reports the SHIFT modifier.
 
 Known debt, in priority order:
 
-- Runtime state pollutes project directories (`.gander/`); superseded by
-  milestone 8 (docs/decisions.md D6).
 - The ACP surface is a minimal JSON-RPC method set (`gander-acp` v1), not the
   published Agent Client Protocol schema. Direction changed (docs/decisions.md
   D5): the agent-facing surface becomes MCP tools (milestone 9); the JSON-RPC

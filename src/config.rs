@@ -81,7 +81,10 @@ pub struct GeneratedConfig {
 pub struct ArtifactConfig {
     pub format: ArtifactFormatConfig,
     pub profile: ArtifactProfileConfig,
-    pub output_dir: PathBuf,
+    /// Directory for written artifacts. `None` (the default) means artifacts
+    /// go to stdout unless an explicit output path is given; gander no
+    /// longer drops files into the project directory by default.
+    pub output_dir: Option<PathBuf>,
     pub basename: String,
     pub on_tui_quit: TuiArtifactOnQuitConfig,
 }
@@ -291,7 +294,7 @@ impl Default for ArtifactConfig {
         Self {
             format: ArtifactFormatConfig::Markdown,
             profile: ArtifactProfileConfig::default(),
-            output_dir: PathBuf::from(".gander"),
+            output_dir: None,
             basename: "review".to_owned(),
             on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
         }
@@ -384,6 +387,8 @@ impl Config {
             path: repo.join("gander.toml"),
             required: false,
         });
+        // Deprecated layer (docs/decisions.md D6): still loads for one
+        // release; main prints a warning when it exists.
         sources.push(ConfigSource {
             path: repo.join(".gander").join("config.toml"),
             required: false,
@@ -436,7 +441,7 @@ impl Config {
             self.artifact.profile = profile;
         }
         if let Some(output_dir) = patch.artifact.output_dir {
-            self.artifact.output_dir = output_dir;
+            self.artifact.output_dir = Some(output_dir);
         }
         if let Some(basename) = patch.artifact.basename {
             self.artifact.basename = basename;
@@ -546,7 +551,7 @@ fn apply_optional<T>(target: &mut T, value: Option<T>) {
     }
 }
 
-fn xdg_config_path() -> Option<PathBuf> {
+pub fn xdg_config_path() -> Option<PathBuf> {
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(config_home).join("gander/config.toml"));
     }
@@ -556,17 +561,20 @@ fn xdg_config_path() -> Option<PathBuf> {
 }
 
 impl ArtifactConfig {
-    pub fn output_path(&self, repo: &Path, format: ArtifactFormatConfig) -> PathBuf {
+    /// Resolved artifact file path, or `None` when no output directory is
+    /// configured (artifacts then default to stdout).
+    pub fn output_path(&self, repo: &Path, format: ArtifactFormatConfig) -> Option<PathBuf> {
+        let output_dir = self.output_dir.as_ref()?;
         let extension = match format {
             ArtifactFormatConfig::Json => "json",
             ArtifactFormatConfig::Markdown => "md",
         };
-        let output_dir = if self.output_dir.is_absolute() {
-            self.output_dir.clone()
+        let output_dir = if output_dir.is_absolute() {
+            output_dir.clone()
         } else {
-            repo.join(&self.output_dir)
+            repo.join(output_dir)
         };
-        output_dir.join(format!("{}.{extension}", self.basename))
+        Some(output_dir.join(format!("{}.{extension}", self.basename)))
     }
 }
 
@@ -684,22 +692,36 @@ submit-comment = ["ctrl-s"]
             config
                 .artifact
                 .output_path(repo.path(), ArtifactFormatConfig::Json),
-            repo.path().join("artifacts").join("review-current.json")
+            Some(repo.path().join("artifacts").join("review-current.json"))
         );
     }
 
     #[test]
     fn output_path_uses_selected_format_extension() {
         let repo = tempfile::tempdir().unwrap();
+        let artifact = ArtifactConfig {
+            output_dir: Some(PathBuf::from("artifacts")),
+            ..ArtifactConfig::default()
+        };
+
+        assert_eq!(
+            artifact.output_path(repo.path(), ArtifactFormatConfig::Markdown),
+            Some(repo.path().join("artifacts").join("review.md"))
+        );
+        assert_eq!(
+            artifact.output_path(repo.path(), ArtifactFormatConfig::Json),
+            Some(repo.path().join("artifacts").join("review.json"))
+        );
+    }
+
+    #[test]
+    fn output_path_is_none_without_configured_output_dir() {
+        let repo = tempfile::tempdir().unwrap();
         let artifact = ArtifactConfig::default();
 
         assert_eq!(
             artifact.output_path(repo.path(), ArtifactFormatConfig::Markdown),
-            repo.path().join(".gander").join("review.md")
-        );
-        assert_eq!(
-            artifact.output_path(repo.path(), ArtifactFormatConfig::Json),
-            repo.path().join(".gander").join("review.json")
+            None
         );
     }
 

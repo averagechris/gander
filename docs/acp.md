@@ -2,16 +2,16 @@
 
 > **Direction note.** This custom JSON-RPC surface is transitional: the
 > agent-facing tool surface is moving to MCP (`gander mcp`, roadmap
-> milestone 9), which harnesses discover natively, and project-local
-> `.gander/` paths are moving to per-user state directories (milestone 8).
-> See docs/decisions.md D5/D6. The protocol below keeps working in the
-> meantime and remains the internal TUI-bridge plumbing.
+> milestone 9), which harnesses discover natively. See docs/decisions.md
+> D5. The protocol below keeps working in the meantime and remains the
+> internal TUI-bridge plumbing.
 
 `gander acp` hosts the review session for agents: a line-delimited JSON-RPC
 2.0 server on stdio (the transport style used by the Agent Client Protocol).
 Agents read the diff, comments, and viewed state, and write review
-suggestions into the shared **agent overlay** (`.gander/agent.json`), which
-the running TUI polls and surfaces live.
+suggestions into the shared **agent overlay** (`agent.json` in the
+per-workspace state directory; run `gander paths` to see where), which the
+running TUI polls and surfaces live.
 
 ```sh
 gander --base 'trunk()' --rev '@' acp
@@ -22,21 +22,23 @@ are treated as notifications and get no response.
 
 ## Live session over the TUI socket
 
-While the TUI runs it also hosts the same protocol on a Unix socket,
-`.gander/acp.sock` (Unix platforms only). Requests answered there hit the
+While the TUI runs it also hosts the same protocol on a Unix socket in the
+workspace's runtime directory (`gander paths` prints it; Unix platforms
+only). Requests answered there hit the
 **live** session: current viewed state, comments, and the active review
 target, and agent writes surface in the UI within one event-loop tick —
 no file polling latency.
 
 Two ways to reach it:
 
-- connect to `.gander/acp.sock` directly and speak line-delimited JSON-RPC;
+- connect to the socket directly and speak line-delimited JSON-RPC;
 - run `gander acp` as usual: when the socket is live it transparently
   bridges stdio to the TUI, so agent clients that spawn `gander acp` as a
   subprocess get the live session for free. Without a running TUI it falls
   back to serving a snapshot loaded at startup.
 
-If the socket cannot be bound (say, a second gander TUI on the same repo)
+If the socket cannot be bound (say, a second gander TUI on the same
+workspace)
 the TUI shows a notice and collaboration degrades gracefully to the overlay
 file.
 
@@ -59,7 +61,8 @@ autostart = false   # true: summon on TUI startup
 Press `@` in the TUI (or use `autostart`) and gander spawns the command in
 the repo root with a prompt explaining the ACP workflow. The agent runs
 `gander acp`, which bridges to the live socket, and its suggestions stream
-into the UI. Output is logged to `.gander/agent.log`; the footer announces
+into the UI. Output is logged to the workspace's agent log (see
+`gander paths`); the footer announces
 summon, completion, or failure, and the process is killed if you quit
 mid-review. gander itself stays agent-agnostic — anything that can take a
 prompt and run a subprocess works.

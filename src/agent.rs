@@ -2,12 +2,12 @@
 //!
 //! Agents connected over ACP (see [`crate::acp`]) write suggested review
 //! ordering, flagged sections, review chunks, and draft comments into a
-//! plain JSON overlay file (`.gander/agent.json` by default). The TUI loads
-//! and polls this file, surfaces the suggestions, and writes back draft
-//! dispositions so the collaboration is two-way while both processes stay
-//! independent.
+//! plain JSON overlay file (`agent.json` in the per-workspace state dir,
+//! see [`crate::paths`]). The TUI loads and polls this file, surfaces the
+//! suggestions, and writes back draft dispositions so the collaboration is
+//! two-way while both processes stay independent.
 
-use std::{fs, path::Path, path::PathBuf};
+use std::{fs, path::Path};
 
 use color_eyre::eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -114,10 +114,6 @@ impl DraftState {
 }
 
 impl AgentOverlay {
-    pub fn default_path(repo: &Path) -> PathBuf {
-        repo.join(".gander").join("agent.json")
-    }
-
     pub fn load_or_default(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {
@@ -155,10 +151,6 @@ pub struct AgentProcess {
 }
 
 impl AgentProcess {
-    pub fn default_log_path(repo: &Path) -> PathBuf {
-        repo.join(".gander").join("agent.log")
-    }
-
     /// Spawn `command` through the shell with `prompt` appended as a final
     /// shell-quoted argument (or substituted for a `{prompt}` placeholder).
     /// Output goes to `log_path`; stdio stays free for the TUI.
@@ -295,8 +287,7 @@ mod tests {
     fn missing_overlay_defaults_to_current_version() {
         let dir = tempfile::tempdir().unwrap();
 
-        let overlay =
-            AgentOverlay::load_or_default(&AgentOverlay::default_path(dir.path())).unwrap();
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
 
         assert_eq!(overlay.version, AGENT_OVERLAY_VERSION);
         assert!(overlay.ordering.is_empty());
@@ -313,7 +304,7 @@ mod tests {
     #[test]
     fn agent_process_runs_command_with_quoted_prompt_and_logs_output() {
         let dir = tempfile::tempdir().unwrap();
-        let log_path = AgentProcess::default_log_path(dir.path());
+        let log_path = dir.path().join("logs").join("agent.log");
 
         let mut process = AgentProcess::spawn(
             dir.path(),

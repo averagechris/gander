@@ -4,6 +4,18 @@
 
 ### Changed
 
+- **Runtime state moved out of project directories.** Review state, the
+  agent overlay, the live ACP socket, and agent logs now live in
+  per-workspace directories under the XDG state dir
+  (`~/.local/state/gander/<workspace-key>/`; `XDG_STATE_HOME` respected),
+  with sockets/logs preferring `XDG_RUNTIME_DIR` when set. Legacy
+  `.gander/` state is migrated automatically (one release of read
+  fallback), and the new `gander paths` command prints every resolved
+  location. The `.gander/config.toml` layer is deprecated (still loads,
+  with a warning) — use a committed `gander.toml` or the XDG user config.
+- Artifacts default to stdout: `gander export` and
+  `--artifact-on-quit write` only write files for explicit output paths or
+  a configured `[artifact] output-dir` (previously `.gander/review.*`).
 - CI (flake check, fmt, clippy, tests) now runs on builds.sr.ht for every
   push via `.builds/ci.yml`; the Linux release manifest moved to
   `builds/release-linux-x86_64.yml` so artifacts and the downloads page are

@@ -112,7 +112,9 @@ loaded in this order, with later files overriding earlier files field-by-field:
 2. XDG user config at `$XDG_CONFIG_HOME/gander/config.toml`, or
    `~/.config/gander/config.toml` when `XDG_CONFIG_HOME` is unset
 3. shareable project config at `gander.toml`
-4. ignored project-local config at `.gander/config.toml`
+4. project-local config at `.gander/config.toml` (**deprecated**: still
+   loads for one release with a warning; move it to `gander.toml` or the
+   XDG user config)
 5. an explicit `--config <path>`, when provided
 
 Example config:
@@ -134,7 +136,7 @@ max-diff-lines = 5000 # larger diffs render a placeholder until expanded with L
 [artifact]
 format = "markdown"
 profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JSON)
-output_dir = ".gander"
+# output_dir = "artifacts" # unset (the default): artifacts go to stdout
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
 
@@ -274,9 +276,9 @@ Syntax highlights are cached by file path, diff fingerprint, and syntax matching
 config. Unsupported files remain plain text, and supported-language highlight
 failures fall back to unhighlighted text without interrupting review.
 
-This repo's `.gitignore` excludes `.gander/`, so you can keep
-personal project-local keybindings there without committing them. For example,
-Colemak Mod-DH-friendly vertical movement can use:
+Personal keybindings belong in the XDG user config
+(`~/.config/gander/config.toml`), which applies across all repositories.
+For example, Colemak Mod-DH-friendly vertical movement can use:
 
 ```toml
 [keybindings]
@@ -336,13 +338,19 @@ Set `[artifact].on_tui_quit = "never"` to disable this default, or `"write"` to
 write the artifact to the configured artifact path instead. `write` is mainly
 useful when you want a config-driven save without shell redirection.
 
-Persistent state defaults to:
+Persistent state lives outside the repository, in a per-workspace
+directory under the XDG state dir (`~/.local/state/gander/<workspace-key>/`
+by default; `XDG_STATE_HOME` is respected). Ephemeral endpoints (the live
+ACP socket, agent logs) prefer `XDG_RUNTIME_DIR` when set. Run:
 
-```text
-.gander/state.json
+```sh
+gander paths
 ```
 
-Use `--state <path>` to override it.
+to print every resolved location for the current workspace. Use
+`--state <path>` to override the state file. Legacy state in a project-local
+`.gander/` directory is migrated to the new location automatically (one
+release of fallback).
 State stores the last reviewed base/revision metadata alongside viewed files and
 comments so future resume/import behavior can detect target mismatches safely.
 The TUI autosaves state whenever viewed marks or comments change, so a crash or
@@ -413,13 +421,15 @@ cargo run -- acp
 ```
 
 Agents can read the diff, comments, and viewed state, and write suggestions
-into `.gander/agent.json`: a review ordering, flagged critical sections,
+into the shared agent overlay (`agent.json` in the per-workspace state
+dir): a review ordering, flagged critical sections,
 review chunks, and draft comments. A running TUI polls the overlay and
 surfaces suggestions live; draft dispositions (accept/edit/discard) are
 written back so agents observe the outcome.
 
 While the TUI is running it also serves the same protocol on a Unix socket
-(`.gander/acp.sock`) backed by the **live** session — and `gander acp`
+(in the workspace runtime dir; see `gander paths`) backed by the **live**
+session — and `gander acp`
 automatically bridges stdio to that socket when it exists, so agents that
 spawn `gander acp` see current viewed state, comments, and target instead
 of a startup snapshot. See [`docs/acp.md`](docs/acp.md) for the method
@@ -430,7 +440,7 @@ To pull an agent into the loop without leaving the review, configure
 `opencode run --attach http://localhost:4096` to reuse a running server,
 ...) and press `@` in the TUI, or set `autostart = true` to summon it on
 startup. gander hands the command a built-in review prompt (customizable
-via `[agent] prompt`), logs its output to `.gander/agent.log`, announces
+via `[agent] prompt`), logs its output to the workspace agent log, announces
 its progress in the footer, and kills it when you quit.
 
 ## Architecture
@@ -445,7 +455,8 @@ Current module layout:
 - `tui`: Ratatui/Crossterm interface
 - `syntax`: built-in language registry and tree-sitter highlighting
 - `artifact`: JSON/Markdown review artifact serialization
-- `agent`: shared agent-overlay schema (`.gander/agent.json`)
+- `agent`: shared agent-overlay schema (`agent.json` in the workspace state dir)
+- `paths`: per-workspace XDG state/runtime path resolution and legacy migration
 - `acp`: JSON-RPC stdio server for agent-collaborative review
 
 The design goal is to keep jj interaction, parsing, review state, rendering, and artifact export separable so future work can be delegated safely.

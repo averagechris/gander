@@ -33,11 +33,6 @@ use crate::{
 
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
 
-/// Default Unix socket path where a running TUI hosts the live ACP session.
-pub fn default_socket_path(repo: &std::path::Path) -> PathBuf {
-    repo.join(".gander").join("acp.sock")
-}
-
 /// Method dispatch plus overlay persistence, independent of transport and of
 /// who owns the session (snapshot or live TUI session).
 pub struct AcpHandler {
@@ -360,8 +355,9 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
     })
 }
 
-/// Unix-socket hosting: the TUI binds `.gander/acp.sock` and answers
-/// requests from its event loop, so agents talk to the *live* session.
+/// Unix-socket hosting: the TUI binds the workspace's runtime-dir socket
+/// (see [`crate::paths`]) and answers requests from its event loop, so
+/// agents talk to the *live* session.
 #[cfg(unix)]
 pub mod socket {
     use std::{
@@ -570,7 +566,7 @@ diff --git a/README.md b/README.md
     fn server() -> (AcpServer, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let session = session(dir.path());
-        let overlay_path = AgentOverlay::default_path(dir.path());
+        let overlay_path = dir.path().join("agent.json");
         (AcpServer::new(session, overlay_path).unwrap(), dir)
     }
 
@@ -656,8 +652,7 @@ diff --git a/README.md b/README.md
             json!({ "path": "README.md", "body": "typo in the title" }),
         );
 
-        let overlay =
-            AgentOverlay::load_or_default(&AgentOverlay::default_path(dir.path())).unwrap();
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
         assert_eq!(overlay.ordering, ["README.md", "src/app.rs"]);
         assert_eq!(overlay.flags.len(), 1);
         assert_eq!(overlay.flags[0].id, flag["id"].as_str().unwrap());
@@ -700,7 +695,7 @@ diff --git a/README.md b/README.md
         let draft_id = draft["id"].as_str().unwrap().to_owned();
 
         // Simulate the TUI accepting the draft on disk.
-        let overlay_path = AgentOverlay::default_path(dir.path());
+        let overlay_path = dir.path().join("agent.json");
         let mut on_disk = AgentOverlay::load_or_default(&overlay_path).unwrap();
         on_disk.drafts[0].state = DraftState::Accepted;
         on_disk.drafts[0].accepted_comment_id = Some("comment-1".to_owned());
@@ -825,8 +820,8 @@ diff --git a/README.md b/README.md
         fn socket_serves_live_session_and_applies_writes() {
             let dir = tempfile::tempdir().unwrap();
             let mut session = session(dir.path());
-            let socket_path = default_socket_path(dir.path());
-            let overlay_path = AgentOverlay::default_path(dir.path());
+            let socket_path = dir.path().join("acp.sock");
+            let overlay_path = dir.path().join("agent.json");
             let mut bridge = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
             assert!(socket::is_live(&socket_path));
 
@@ -875,8 +870,8 @@ diff --git a/README.md b/README.md
         #[test]
         fn bind_rejects_live_socket_but_replaces_stale_one() {
             let dir = tempfile::tempdir().unwrap();
-            let socket_path = default_socket_path(dir.path());
-            let overlay_path = AgentOverlay::default_path(dir.path());
+            let socket_path = dir.path().join("acp.sock");
+            let overlay_path = dir.path().join("agent.json");
 
             let live = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
             let Err(error) = AcpBridge::bind(socket_path.clone(), overlay_path.clone()) else {
