@@ -89,14 +89,17 @@ pub struct DiffThemeConfig {
 impl Default for DiffThemeConfig {
     fn default() -> Self {
         Self {
-            // Indexed colors degrade gracefully without truecolor: dark
-            // green/red tints for lines, brighter variants for changed words.
-            added_line_bg: "22".to_owned(),
-            removed_line_bg: "52".to_owned(),
-            added_word: "bold on 28".to_owned(),
-            removed_word: "bold on 88".to_owned(),
-            gutter_added: "green".to_owned(),
-            gutter_removed: "red".to_owned(),
+            // GitHub-dark-inspired truecolor tints: line backgrounds are the
+            // add/remove accents alpha-blended at ~15% over a dark base,
+            // word emphasis at ~40%. Terminals without truecolor support get
+            // these quantized to the nearest indexed color at TUI startup
+            // (see tui::render::downgrade_diff_theme).
+            added_line_bg: "#12261e".to_owned(),
+            removed_line_bg: "#301b1f".to_owned(),
+            added_word: "bold on #1a4a29".to_owned(),
+            removed_word: "bold on #6b2b2b".to_owned(),
+            gutter_added: "#3fb950".to_owned(),
+            gutter_removed: "#f85149".to_owned(),
         }
     }
 }
@@ -965,8 +968,8 @@ prompt = "review {repo} at {base}..{rev}"
         assert!(!defaults.gutter_bar);
         assert_eq!(defaults.view, DiffViewModeConfig::Unified);
         assert_eq!(defaults.context_step, 10);
-        assert_eq!(defaults.theme.added_line_bg, "22");
-        assert_eq!(defaults.theme.removed_word, "bold on 88");
+        assert_eq!(defaults.theme.added_line_bg, "#12261e");
+        assert_eq!(defaults.theme.removed_word, "bold on #6b2b2b");
         assert_eq!(Config::default().keybindings.expand_context, ["+"]);
         assert_eq!(Config::default().keybindings.expand_context_all, ["="]);
         assert_eq!(Config::default().keybindings.collapse_context, ["-"]);
@@ -1008,7 +1011,7 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.diff.theme.added_line_bg, "#103010");
         assert_eq!(config.diff.theme.gutter_added, "cyan");
         // Untouched theme entries keep their defaults.
-        assert_eq!(config.diff.theme.removed_line_bg, "52");
+        assert_eq!(config.diff.theme.removed_line_bg, "#301b1f");
         assert_eq!(config.keybindings.view_options, ["ctrl-v"]);
         assert_eq!(config.keybindings.toggle_gutter_bar, ["B"]);
         assert_eq!(config.keybindings.expand_context, ["ctrl-e"]);

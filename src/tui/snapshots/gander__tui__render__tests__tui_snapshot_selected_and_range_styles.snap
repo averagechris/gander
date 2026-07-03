@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2584
+assertion_line: 2948
 expression: "render_tui_style_runs(&session, &Mode::Normal, 80, 14)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -27,7 +27,7 @@ y=05 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
 y=05 x=47..58 fg=Some(Green) bg=Some(DarkGray) add=BOLD sub=NONE text="+     new();"
 y=06 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=06 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   3"
-y=06 x=47..60 fg=Some(Green) bg=Some(Indexed(22)) add=NONE sub=NONE text="+     extra();"
+y=06 x=47..60 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="+     extra();"
 y=07 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=07 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   4"
 y=07 x=47..49 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"

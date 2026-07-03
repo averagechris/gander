@@ -811,6 +811,108 @@ fn spec_bg_color(spec: &str) -> Option<Color> {
     style.bg.or(style.fg)
 }
 
+/// Whether the terminal advertises 24-bit color support.
+pub(super) fn terminal_supports_truecolor() -> bool {
+    std::env::var("COLORTERM")
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("truecolor") || value.contains("24bit")
+        })
+        .unwrap_or(false)
+}
+
+/// Rewrite `#rrggbb` tokens in the diff cue theme to their nearest
+/// xterm-256 indexed colors, for terminals without truecolor support
+/// (docs/focused-diff-ux.md §1). Named and indexed tokens pass through.
+pub(super) fn downgrade_diff_theme(theme: &mut crate::config::DiffThemeConfig) {
+    for spec in [
+        &mut theme.added_line_bg,
+        &mut theme.removed_line_bg,
+        &mut theme.added_word,
+        &mut theme.removed_word,
+        &mut theme.gutter_added,
+        &mut theme.gutter_removed,
+    ] {
+        *spec = quantize_spec(spec);
+    }
+}
+
+fn quantize_spec(spec: &str) -> String {
+    spec.split_whitespace()
+        .map(|token| match token.strip_prefix('#') {
+            Some(hex) if hex.len() == 6 => match u32::from_str_radix(hex, 16) {
+                Ok(value) => nearest_indexed((value >> 16) as u8, (value >> 8) as u8, value as u8)
+                    .to_string(),
+                Err(_) => token.to_owned(),
+            },
+            _ => token.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Nearest xterm-256 color index for an RGB value, considering both the
+/// 6x6x6 color cube (16..=231) and the grayscale ramp (232..=255).
+fn nearest_indexed(red: u8, green: u8, blue: u8) -> u8 {
+    fn cube_component(value: u8) -> (u8, u8) {
+        // Cube levels: 0, 95, 135, 175, 215, 255.
+        let levels = [0u8, 95, 135, 175, 215, 255];
+        let mut best = (0u8, u16::MAX);
+        for (index, level) in levels.into_iter().enumerate() {
+            let distance = value.abs_diff(level) as u16;
+            if distance < best.1 {
+                best = (index as u8, distance);
+            }
+        }
+        (best.0, [0u8, 95, 135, 175, 215, 255][best.0 as usize])
+    }
+    fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+        let dr = a.0.abs_diff(b.0) as u32;
+        let dg = a.1.abs_diff(b.1) as u32;
+        let db = a.2.abs_diff(b.2) as u32;
+        dr * dr + dg * dg + db * db
+    }
+
+    let (ri, rv) = cube_component(red);
+    let (gi, gv) = cube_component(green);
+    let (bi, bv) = cube_component(blue);
+    let cube_index = 16 + 36 * ri + 6 * gi + bi;
+
+    // Only near-gray colors may land on the grayscale ramp: dark tints are
+    // often numerically closer to a gray, but flattening the hue defeats
+    // the point of a green/red cue.
+    let spread = red.max(green).max(blue) - red.min(green).min(blue);
+    if spread >= 12 {
+        if cube_index == 16 {
+            // A dark tint should stay a tint: bump the dominant channel to
+            // the first cube level instead of flattening to black.
+            let max = red.max(green).max(blue);
+            return if red == max {
+                16 + 36
+            } else if green == max {
+                16 + 6
+            } else {
+                16 + 1
+            };
+        }
+        return cube_index;
+    }
+
+    let cube_distance = distance((red, green, blue), (rv, gv, bv));
+    // Grayscale ramp: 8, 18, ..., 238.
+    let gray = (red as u16 + green as u16 + blue as u16) / 3;
+    let gray_step = ((gray.saturating_sub(8)).div_ceil(10)).min(23) as u8;
+    let gray_value = 8 + 10 * gray_step;
+    let gray_index = 232 + gray_step;
+    let gray_distance = distance((red, green, blue), (gray_value, gray_value, gray_value));
+
+    if gray_distance < cube_distance {
+        gray_index
+    } else {
+        cube_index
+    }
+}
+
 fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
     let style = match kind {
         DiffRowKind::DiffLine(DiffLineKind::Context) => Style::default().fg(Color::Gray),
@@ -2869,6 +2971,47 @@ diff --git a/README.md b/README.md
         assert_eq!(spec_bg_color("22"), Some(Color::Indexed(22)));
         assert_eq!(spec_bg_color("on red"), Some(Color::Red));
         assert_eq!(spec_bg_color("bold"), None);
+    }
+
+    #[test]
+    fn quantizes_hex_tokens_to_nearest_indexed_colors() {
+        // Exact cube colors map to their cube index.
+        assert_eq!(nearest_indexed(0, 0, 0), 16);
+        assert_eq!(nearest_indexed(255, 255, 255), 231);
+        assert_eq!(nearest_indexed(0, 95, 0), 22);
+        // Near-grays prefer the grayscale ramp over the coarse cube.
+        assert_eq!(nearest_indexed(0x12, 0x12, 0x12), 233);
+        // Dark tints keep their hue instead of flattening to black/gray.
+        assert_eq!(nearest_indexed(0x12, 0x26, 0x1e), 22);
+        assert_eq!(nearest_indexed(0x30, 0x1b, 0x1f), 52);
+
+        assert_eq!(quantize_spec("bold on #1a4a29"), "bold on 22");
+        assert_eq!(quantize_spec("#3fb950"), "71");
+        // Named and indexed tokens pass through untouched.
+        assert_eq!(quantize_spec("green bold"), "green bold");
+        assert_eq!(quantize_spec("28"), "28");
+    }
+
+    #[test]
+    fn downgrade_diff_theme_rewrites_all_hex_entries() {
+        let mut theme = crate::config::DiffThemeConfig::default();
+
+        downgrade_diff_theme(&mut theme);
+
+        for spec in [
+            &theme.added_line_bg,
+            &theme.removed_line_bg,
+            &theme.added_word,
+            &theme.removed_word,
+            &theme.gutter_added,
+            &theme.gutter_removed,
+        ] {
+            assert!(!spec.contains('#'), "hex survived downgrade: {spec}");
+            assert!(
+                syntax_style_spec(spec) != Style::default(),
+                "spec parses: {spec}"
+            );
+        }
     }
 
     #[test]

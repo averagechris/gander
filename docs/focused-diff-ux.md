@@ -49,18 +49,21 @@ line-background = true
 gutter-bar = false
 
 [diff.theme]
-added-line-bg = "22"        # style specs reuse syntax_style_spec grammar
-removed-line-bg = "52"
-added-word = "bold on 28"
-removed-word = "bold on 88"
-gutter-added = "green"
-gutter-removed = "red"
+added-line-bg = "#12261e"   # style specs reuse syntax_style_spec grammar
+removed-line-bg = "#301b1f"
+added-word = "bold on #1a4a29"
+removed-word = "bold on #6b2b2b"
+gutter-added = "#3fb950"
+gutter-removed = "#f85149"
 ```
 
-Defaults use indexed colors (dark green 22 / dark red 52, brighter 28/88 for
-word emphasis) so they degrade gracefully without truecolor. The existing
-style-spec parser (`render.rs::syntax_style_spec`) grows an `on <color>`
-background clause; syntax theme specs get it for free.
+Defaults are GitHub-dark-inspired truecolor tints (the add/remove accents
+alpha-blended at ~15% for line backgrounds and ~40% for word emphasis).
+Terminals that do not advertise truecolor (`COLORTERM`) get the hex values
+quantized to the nearest xterm-256 indexed color at TUI startup, so the
+defaults stay usable in e.g. macOS Terminal.app. The existing style-spec
+parser (`render.rs::syntax_style_spec`) grows an `on <color>` background
+clause; syntax theme specs get it for free.
 
 ### Word-level diff algorithm
 
@@ -280,8 +283,6 @@ gap/expansion math) and insta snapshot coverage, and passes `jj lint`.
 
 ## Open questions
 
-- Indexed-color defaults for backgrounds look different across terminal
-  palettes; may want truecolor defaults with indexed fallback detection.
 - Side-by-side + very long lines: is truncation acceptable long-term, or is
   horizontal scroll/wrap needed?
 
@@ -293,3 +294,6 @@ gap/expansion math) and insta snapshot coverage, and passes `jj lint`.
 - Runtime view toggles are session-only; config sets defaults.
 - Keybind defaults (`V`, `w`, `|`, `+`/`=`/`-`) accepted; all remappable
   through `[keybindings]`.
+- Cue color defaults are truecolor hex with automatic nearest-indexed
+  quantization on non-truecolor terminals (resolves the former open
+  question about indexed defaults).

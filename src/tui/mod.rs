@@ -60,7 +60,10 @@ use helpers::JjHelperState;
 use keymap::{Action, KeyMap};
 use ops::OperationPickerState;
 use outline::SymbolOutlineState;
-use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
+use render::{
+    downgrade_diff_theme, draw, inner_bordered, point_in_rect, row_in_inner,
+    terminal_supports_truecolor, ui_layout,
+};
 use revset::RevsetInputState;
 use search::FileSearchState;
 use tour::TourState;
@@ -187,6 +190,11 @@ pub fn run(
         workspace_root,
     } = paths;
     let keymap = KeyMap::try_from(keybindings)?;
+    // Truecolor cue defaults quantize to indexed colors on terminals that
+    // do not advertise 24-bit support (docs/focused-diff-ux.md §1).
+    if !terminal_supports_truecolor() {
+        downgrade_diff_theme(&mut session.diff_cues.theme);
+    }
     let review_loader = ReviewLoader {
         ignore_globs,
         generated_matcher,

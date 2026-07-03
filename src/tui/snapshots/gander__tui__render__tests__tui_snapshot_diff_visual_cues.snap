@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2653
+assertion_line: 3052
 expression: "render_tui_style_runs(&session, &Mode::Normal, 80, 12)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -19,16 +19,16 @@ y=02 x=41..55 fg=Some(Blue) bg=Some(Reset) add=BOLD sub=NONE text="@@ -1,4 +1,4 
 y=03 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=03 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   1"
 y=03 x=47..59 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  fn main() {"
-y=04 x=41..41 fg=Some(Red) bg=Some(Reset) add=NONE sub=NONE text="▎"
+y=04 x=41..41 fg=Some(Rgb(248, 81, 73)) bg=Some(Reset) add=NONE sub=NONE text="▎"
 y=04 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
-y=04 x=47..64 fg=Some(Red) bg=Some(Indexed(52)) add=NONE sub=NONE text="-     let count = "
-y=04 x=65..65 fg=Some(Red) bg=Some(Indexed(88)) add=BOLD sub=NONE text="1"
-y=04 x=66..66 fg=Some(Red) bg=Some(Indexed(52)) add=NONE sub=NONE text=";"
-y=05 x=41..41 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="▎"
+y=04 x=47..64 fg=Some(Red) bg=Some(Rgb(48, 27, 31)) add=NONE sub=NONE text="-     let count = "
+y=04 x=65..65 fg=Some(Red) bg=Some(Rgb(107, 43, 43)) add=BOLD sub=NONE text="1"
+y=04 x=66..66 fg=Some(Red) bg=Some(Rgb(48, 27, 31)) add=NONE sub=NONE text=";"
+y=05 x=41..41 fg=Some(Rgb(63, 185, 80)) bg=Some(Reset) add=NONE sub=NONE text="▎"
 y=05 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
-y=05 x=47..64 fg=Some(Green) bg=Some(Indexed(22)) add=NONE sub=NONE text="+     let count = "
-y=05 x=65..65 fg=Some(Green) bg=Some(Indexed(28)) add=BOLD sub=NONE text="2"
-y=05 x=66..66 fg=Some(Green) bg=Some(Indexed(22)) add=NONE sub=NONE text=";"
+y=05 x=47..64 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="+     let count = "
+y=05 x=65..65 fg=Some(Green) bg=Some(Rgb(26, 74, 41)) add=BOLD sub=NONE text="2"
+y=05 x=66..66 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text=";"
 y=06 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=06 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   3"
 y=06 x=47..49 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"

@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2669
+assertion_line: 3124
 expression: "render_tui_style_runs(&session,\n&Mode::ViewOptions(ViewOptionsState::default()), 80, 18)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -21,7 +21,7 @@ y=03 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   1"
 y=03 x=47..59 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  fn main() {"
 y=04 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=04 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
-y=04 x=47..49 fg=Some(Red) bg=Some(Indexed(52)) add=NONE sub=NONE text="- }"
+y=04 x=47..49 fg=Some(Red) bg=Some(Rgb(48, 27, 31)) add=NONE sub=NONE text="- }"
 y=06 x=21..51 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="Diff visual cues (session only;"
 y=07 x=21..53 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="gander.toml [diff] sets defaults)"
 y=09 x=21..54 fg=Some(Yellow) bg=Some(Reset) add=BOLD sub=NONE text="› [x] word-level change highlights"

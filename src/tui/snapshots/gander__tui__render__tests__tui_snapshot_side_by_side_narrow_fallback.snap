@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2921
+assertion_line: 3108
 expression: "render_tui_style_runs(&session, &Mode::Normal, 100, 12)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -21,14 +21,14 @@ y=03 x=46..49 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   1"
 y=03 x=51..63 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  fn main() {"
 y=04 x=45..45 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=04 x=46..49 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
-y=04 x=51..56 fg=Some(Red) bg=Some(Indexed(52)) add=NONE sub=NONE text="-     "
-y=04 x=57..59 fg=Some(Red) bg=Some(Indexed(88)) add=BOLD sub=NONE text="old"
-y=04 x=60..62 fg=Some(Red) bg=Some(Indexed(52)) add=NONE sub=NONE text="();"
+y=04 x=51..56 fg=Some(Red) bg=Some(Rgb(48, 27, 31)) add=NONE sub=NONE text="-     "
+y=04 x=57..59 fg=Some(Red) bg=Some(Rgb(107, 43, 43)) add=BOLD sub=NONE text="old"
+y=04 x=60..62 fg=Some(Red) bg=Some(Rgb(48, 27, 31)) add=NONE sub=NONE text="();"
 y=05 x=45..45 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=05 x=46..49 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   2"
-y=05 x=51..56 fg=Some(Green) bg=Some(Indexed(22)) add=NONE sub=NONE text="+     "
-y=05 x=57..59 fg=Some(Green) bg=Some(Indexed(28)) add=BOLD sub=NONE text="new"
-y=05 x=60..62 fg=Some(Green) bg=Some(Indexed(22)) add=NONE sub=NONE text="();"
+y=05 x=51..56 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="+     "
+y=05 x=57..59 fg=Some(Green) bg=Some(Rgb(26, 74, 41)) add=BOLD sub=NONE text="new"
+y=05 x=60..62 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="();"
 y=06 x=45..45 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=06 x=46..49 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   3"
 y=06 x=51..53 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"
