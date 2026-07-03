@@ -821,6 +821,9 @@
             clippy
             rustc
           ])
+          # Linux CI images have no system cc for rustc to link with; on
+          # darwin the host /usr/bin/cc links against system libs (iconv).
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.stdenv.cc]
           ++ nativeBuildInputs
           ++ buildInputs;
       };
@@ -832,6 +835,7 @@
             cargo
             rustc
           ])
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.stdenv.cc]
           ++ nativeBuildInputs
           ++ buildInputs;
       };
