@@ -3,6 +3,46 @@
 ## Unreleased
 
 
+## v0.3.0 - 2026-07-03
+
+### Added
+
+- Diff visual cues that make changes obvious at a glance
+  (docs/focused-diff-ux.md): word-level change highlights within modified
+  line pairs (unicode word diff, similarity-thresholded so rewrites don't
+  over-highlight) and subtle added/removed line background tints, both on
+  by default, plus an opt-in colored gutter change bar. Configured under
+  the new `[diff]` / `[diff.theme]` sections; defaults are
+  GitHub-dark-inspired truecolor tints that quantize to the nearest
+  indexed color on terminals without truecolor support.
+- View options popup (`V`): session-only runtime toggles for the visual
+  cues, the file pane, and the side-by-side view. Every toggle also has a
+  bindable action under `[keybindings]`.
+- Collapsible file pane (`w`): hide the file tree to give the diff the
+  full terminal width. Hiding moves focus to the diff, focusing the files
+  pane re-shows it (never traps), and the diff pane title carries the
+  selected file path and viewed mark while the tree is hidden.
+- Side-by-side diff view (`|`, or `[diff] view = "side-by-side"`):
+  removed/context cells on the left, added/context on the right, with
+  side-specific line numbers and word-level emphasis aligned across the
+  divider. Implemented as a render-time projection over the unified rows,
+  so the cursor, comments, anchors, flags, and range selection behave
+  identically in both layouts. Falls back to unified on terminals
+  narrower than 100 columns.
+- Per-gap hunk context expansion (`+` expand by `[diff] context-step`
+  (default 10), `=` expand fully, `-` re-collapse): pull in file lines
+  beyond what the jj diff emitted, above, between, and below hunks.
+  Content is fetched lazily via `jj file show` with real line numbers on
+  the expanded rows; adjacent hunks render contiguously when a gap
+  closes. Expanded context rows are not commentable in this release.
+- Style specs (diff cue theme and syntax themes) now support `on <color>`
+  backgrounds, indexed colors (`22`), and hex (`#rrggbb`).
+
+### Documentation
+
+- docs/focused-diff-ux.md: design for the focused diff UX work above and
+  the direction for a future agent-guided "zen mode" walkthrough
+  (roadmap milestone 10).
 
 ## v0.2.1 - 2026-07-03
 
