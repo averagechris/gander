@@ -1,7 +1,7 @@
 lints = [
-  { name = "cargo fmt", command = "nix develop --accept-flake-config -c cargo fmt --check" },
-  { name = "cargo clippy", command = "nix develop --accept-flake-config -c cargo clippy --all-targets -- -D warnings" },
-  { name = "cargo test", command = "nix develop --accept-flake-config -c cargo test" },
+  { name = "cargo fmt", command = "nix run --accept-flake-config .#ci-fmt" },
+  { name = "cargo clippy", command = "nix run --accept-flake-config .#ci-clippy" },
+  { name = "cargo test", command = "nix run --accept-flake-config .#ci-test" },
   { name = "cargo audit", command = "nix develop --accept-flake-config -c cargo audit" },
   { name = "cargo deny", command = "nix develop --accept-flake-config -c cargo deny check" },
   { name = "cargo machete", command = "nix develop --accept-flake-config -c cargo machete" },

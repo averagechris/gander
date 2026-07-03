@@ -182,15 +182,11 @@
             body = match.group("body")
             sentence = body[0].upper() + body[1:]
             if match.group("breaking"):
-                return "Breaking", sentence
+                return "Changed", f"Breaking: {sentence}"
             if kind == "feat":
                 return "Added", sentence
             if kind == "fix":
                 return "Fixed", sentence
-            if kind == "docs":
-                return "Documentation", sentence
-            if kind == "perf":
-                return "Performance", sentence
             return "Changed", sentence
 
         def generated_changelog(commits: list[str]) -> str:
@@ -200,7 +196,7 @@
             for summary in commits:
                 section, bullet = bullet_from_commit(summary)
                 sections.setdefault(section, []).append(bullet.rstrip("."))
-            order = ["Breaking", "Added", "Changed", "Fixed", "Performance", "Documentation"]
+            order = ["Added", "Changed", "Fixed"]
             parts: list[str] = []
             for section in order:
                 bullets = sections.get(section)
@@ -774,6 +770,31 @@
         fi
       '';
 
+      # Pin the C toolchain so cc-rs builds (tree-sitter grammars) do not
+      # depend on whatever CC the caller's environment sets. RUSTC_WRAPPER
+      # (sccache) is intentionally honored so the host's shared compilation
+      # cache keeps working; a historical failure here was a poisoned sccache
+      # server daemon, fixed by the supervised sccache-server launchd agent
+      # in dotfiles (see docs/suremac.md there).
+      ciCargoEnv = ''
+        export CC=${lib.getExe' pkgs.stdenv.cc "cc"}
+        export CXX=${lib.getExe' pkgs.stdenv.cc "c++"}
+      '';
+
+      ciFmtScript = ''
+        cargo fmt --check
+      '';
+
+      ciClippyScript = ''
+        ${ciCargoEnv}
+        cargo clippy --all-targets -- -D warnings
+      '';
+
+      ciTestScript = ''
+        ${ciCargoEnv}
+        cargo test
+      '';
+
       mkRepoScript = {
         name,
         runtimeInputs ? [],
@@ -783,6 +804,37 @@
           inherit name runtimeInputs text;
         };
 
+      ci-fmt = mkRepoScript {
+        name = "ci-fmt";
+        text = ciFmtScript;
+        runtimeInputs = with pkgs; [
+          cargo
+          rustfmt
+        ];
+      };
+      ci-clippy = mkRepoScript {
+        name = "ci-clippy";
+        text = ciClippyScript;
+        runtimeInputs =
+          (with pkgs; [
+            cargo
+            clippy
+            rustc
+          ])
+          ++ nativeBuildInputs
+          ++ buildInputs;
+      };
+      ci-test = mkRepoScript {
+        name = "ci-test";
+        text = ciTestScript;
+        runtimeInputs =
+          (with pkgs; [
+            cargo
+            rustc
+          ])
+          ++ nativeBuildInputs
+          ++ buildInputs;
+      };
       prepare-release = mkRepoScript {
         name = "prepare-release";
         text = prepareReleaseScript;
@@ -835,7 +887,7 @@
       packages =
         {
           default = gander;
-          inherit build-pages prepare-release publish-pages release release-tag;
+          inherit build-pages ci-clippy ci-fmt ci-test prepare-release publish-pages release release-tag;
         }
         // lib.optionalAttrs (releaseArtifact != null) {
           release-artifact = releaseArtifact;
@@ -847,6 +899,9 @@
           program = lib.getExe gander;
           meta.description = cargoToml.package.description;
         };
+        ci-fmt = flake-utils.lib.mkApp {drv = ci-fmt;};
+        ci-clippy = flake-utils.lib.mkApp {drv = ci-clippy;};
+        ci-test = flake-utils.lib.mkApp {drv = ci-test;};
         prepare-release = flake-utils.lib.mkApp {drv = prepare-release;};
         release-tag = flake-utils.lib.mkApp {drv = release-tag;};
         build-pages = flake-utils.lib.mkApp {drv = build-pages;};

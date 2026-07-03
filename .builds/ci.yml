@@ -8,10 +8,12 @@ tasks:
   - flake-check: |
       cd gander
       nix flake check --accept-flake-config
-  - lint: |
+  - fmt: |
       cd gander
-      nix develop --accept-flake-config -c cargo fmt --check
-      nix develop --accept-flake-config -c cargo clippy --all-targets -- -D warnings
+      nix run --accept-flake-config .#ci-fmt
+  - clippy: |
+      cd gander
+      nix run --accept-flake-config .#ci-clippy
   - test: |
       cd gander
-      nix develop --accept-flake-config -c cargo test
+      nix run --accept-flake-config .#ci-test
