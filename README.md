@@ -214,7 +214,7 @@ quit = ["q"]
 [agent]
 # Optional: a shell command that summons a review agent (press @ in the TUI,
 # or set autostart). Agent-agnostic: any CLI that accepts a prompt works.
-command = "opencode run --quiet"
+command = "opencode run"
 autostart = false
 ```
 

@@ -130,7 +130,7 @@ workspace agent log (`gander paths`).
 
 ```toml
 [agent]
-command = "opencode run --quiet"   # or: claude -p
+command = "opencode run"   # or: claude -p
 autostart = false                  # true: summon on TUI startup
 ```
 
@@ -142,7 +142,7 @@ attach flag in the command:
 ```toml
 [agent]
 # opencode: reuse a running `opencode serve` (default port 4096)
-command = "opencode run --attach http://localhost:4096 --quiet"
+command = "opencode run --attach http://localhost:4096"
 ```
 
 ```toml

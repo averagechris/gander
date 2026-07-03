@@ -57,7 +57,7 @@ launch it:
 [agent]
 # Any CLI that accepts a prompt. gander appends its review prompt as the
 # final shell-quoted argument, or substitutes a {prompt} placeholder.
-command = "opencode run --quiet"
+command = "opencode run"
 # command = "claude -p"
 # command = "opencode run --attach http://localhost:4096"  # reuse a running server
 autostart = false   # true: summon on TUI startup

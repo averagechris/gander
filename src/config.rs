@@ -758,7 +758,7 @@ submit-comment = ["ctrl-s"]
             &config_path,
             r#"
 [agent]
-command = "opencode run --quiet"
+command = "opencode run"
 autostart = true
 prompt = "review {repo} at {base}..{rev}"
 "#,
@@ -773,7 +773,7 @@ prompt = "review {repo} at {base}..{rev}"
 
         assert_eq!(
             config.agent.command.as_deref(),
-            Some("opencode run --quiet")
+            Some("opencode run")
         );
         assert!(config.agent.autostart);
         assert_eq!(
