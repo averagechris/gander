@@ -170,6 +170,9 @@ have your already-running harness organize and narrate the review — no
 protocol knowledge, no manual orchestration. Decision records:
 docs/decisions.md D3, D4, D5.
 
+Status: complete (the exploratory ask popup was deliberately not built; see
+below).
+
 - [x] per-instance sockets + instance registry (one gander per workstream;
   workspace root, target, summary, socket, pid, `last_input_at`; cleaned on
   exit; replaces the "second TUI loses the socket" behavior; `gander acp`
@@ -182,16 +185,21 @@ docs/decisions.md D3, D4, D5.
 - [x] `current_focus` plumbing in the TUI (selected file/line/hunk via the
   `review/current_focus` method + `last_input_at` heartbeat in the
   registry)
-- [ ] large-change nudge: when a review exceeds a size threshold, hint that
-  an agent can organize it (`@` or the harness)
-- [ ] tour mode (`T`): step through agent-suggested chunks in order with
-  rationale displayed; auto-mark viewed on advance; esc returns to free
-  navigation
-- [ ] (exploratory, may not ship) ask popup: one-shot "explain this line"
-  question routed to the harness, single streamed answer in a popup — only
-  if the split-pane + `current_focus` flow leaves a real gap
-- [ ] docs: harness setup recipes (opencode/claude MCP registration,
-  split-pane workflow, attach-to-running-server summon commands)
+- [x] large-change nudge: when a review exceeds the `[limits]`
+  nudge thresholds (`nudge-diff-lines`/`nudge-files`, 0 disables) and no
+  agent has organized it yet, the footer hints that an agent can (`@` or
+  the harness); re-raised on retarget
+- [x] tour mode (`T`): step through agent-suggested chunks in order with
+  rationale displayed in a bottom panel; auto-mark viewed on advance; esc
+  returns to free navigation
+- [x] docs: harness setup recipes (docs/harness-setup.md — opencode/claude/
+  codex MCP registration, split-pane workflow, attach-to-running-server
+  summon commands)
+- ~~ask popup~~ deliberately deferred (2026-07): one-shot "explain this
+  line" routed to the harness would require gander to become a
+  harness-API/spec-ACP client (docs/decisions.md D4). The split-pane +
+  `current_focus` flow covers the need — the human asks "what am I looking
+  at?" in the harness chat. Revisit only if that leaves a real gap.
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 

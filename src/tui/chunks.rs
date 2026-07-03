@@ -44,7 +44,7 @@ impl ChunkListState {
     }
 }
 
-fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
+pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
     if chunk.parts.is_empty() {
         return vec![ChunkRow {
             title: chunk.title.clone(),

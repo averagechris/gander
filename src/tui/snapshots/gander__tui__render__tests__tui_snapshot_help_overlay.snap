@@ -26,8 +26,8 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │         j/k  move cursor                                   A  toggle agent-suggested order      │    │
 │     │         d/u  scroll                                        F  agent-flagged sections            │    │
 │     │         g/G  jump top/bottom                               S  agent review chunks               │    │
-│     │         ]/[  next/previous changed symbol                  D  agent draft comments              │    │
-│     │           o  changed symbol outline                                                             │    │
+│     │         ]/[  next/previous changed symbol                  T  tour agent chunks in order        │    │
+│     │           o  changed symbol outline                        D  agent draft comments              │    │
 │     │           z  fold/unfold context lines                                                          │    │
 │     │           L  expand/collapse huge diff                                                          │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │

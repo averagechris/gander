@@ -132,6 +132,8 @@ globs = ["schemas/*.json"]
 
 [limits]
 max-diff-lines = 5000 # larger diffs render a placeholder until expanded with L
+nudge-diff-lines = 1000 # changed-line count that triggers the large-change nudge (0 disables)
+nudge-files = 25 # changed-file count that triggers the large-change nudge (0 disables)
 
 [artifact]
 format = "markdown"
@@ -385,6 +387,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | `A` | toggle agent-suggested review ordering |
 | `F` | agent-flagged sections popup |
 | `S` | agent review chunks popup |
+| `T` | tour mode: step through agent chunks in order, marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
@@ -476,6 +479,16 @@ opencode:
   }
 }
 ```
+
+When a review is large (thresholds under `[limits]`), the TUI nudges you
+that an agent can organize it: summon one with `@` or ask your harness,
+then press `T` to **tour** the suggested chunks in order — each stop shows
+the agent's rationale and advancing marks the file viewed; Esc returns to
+free navigation.
+
+See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:
+MCP registration for opencode/Claude Code/Codex, the split-pane workflow,
+and attach-to-running-server summon commands.
 
 ## Architecture
 

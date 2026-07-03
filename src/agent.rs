@@ -222,8 +222,10 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              3. Flag sections needing extra scrutiny with review/flag_section \
              (params: {{\"path\", \"line\", \"reason\", \"priority\": \
              critical|high|medium|low}}).\n\
-             4. Optionally group the change into logical review units with \
-             review/set_chunks.\n\
+             4. Group the change into logical review units with \
+             review/set_chunks; the human steps through them in order in \
+             the TUI's tour mode, so give each chunk a title and a short \
+             rationale explaining why it should be read together.\n\
              5. For concrete issues, add review/draft_comment \
              (params: {{\"path\", \"line\", \"body\"}}); the human accepts or \
              discards these in the TUI.\n\
@@ -364,6 +366,8 @@ mod tests {
         assert!(prompt.contains("trunk()..@"));
         assert!(prompt.contains("gander acp"));
         assert!(prompt.contains("review/set_ordering"));
+        assert!(prompt.contains("review/set_chunks"));
+        assert!(prompt.contains("tour mode"));
         assert!(prompt.contains("review/draft_comment"));
         assert!(prompt.contains("Do not modify the repository."));
     }

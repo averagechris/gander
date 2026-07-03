@@ -21,6 +21,7 @@ mod outline;
 mod render;
 mod revset;
 mod search;
+mod tour;
 
 use std::{
     io,
@@ -61,6 +62,7 @@ use outline::SymbolOutlineState;
 use render::{draw, inner_bordered, point_in_rect, row_in_inner, ui_layout};
 use revset::RevsetInputState;
 use search::FileSearchState;
+use tour::TourState;
 
 enum Mode {
     Normal,
@@ -71,6 +73,9 @@ enum Mode {
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
     ChunkList(ChunkListState),
+    /// Stepping through agent-suggested chunks in order (tour mode). Not a
+    /// modal popup: the diff stays visible and follows the current stop.
+    Tour(TourState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
@@ -296,6 +301,17 @@ fn run_loop(
 ) -> Result<()> {
     if let Some(overlay_path) = agent_overlay_path {
         maybe_reload_agent_overlay(session, overlay_path, tui_state, false);
+    }
+    // Large-change nudge: on a big review with no agent structure yet,
+    // point at the collaboration affordances instead of leaving the human
+    // to grind through the file list alone.
+    if tui_state.notice.is_none()
+        && let Some(nudge) = session.large_change_nudge()
+    {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: nudge,
+        });
     }
     loop {
         // Answer queued agent requests against the live session before
@@ -547,6 +563,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::Tour(tour) => {
+            if handle_tour_key(key, tour, session, keymap, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::DraftList(list) => {
             if let Some(next_mode) = handle_draft_list_key(key, list, session, keymap, tui_state) {
                 *mode = next_mode;
@@ -686,6 +707,25 @@ fn handle_normal_action(
                 *mode = Mode::ChunkList(ChunkListState::new(session));
             }
         }
+        Action::Tour => match TourState::new(session) {
+            Some(tour) => {
+                if let Some(stop) = tour.current().cloned() {
+                    tour::jump_to_stop(session, &stop);
+                }
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("tour started: {} stop(s)", tour.len()),
+                });
+                *mode = Mode::Tour(tour);
+            }
+            None => {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no review chunks to tour — summon an agent (@) or ask your harness"
+                        .to_owned(),
+                });
+            }
+        },
         Action::DraftList => {
             let drafts = DraftListState::new(session);
             if drafts.drafts.is_empty() {
@@ -1214,6 +1254,91 @@ fn handle_chunk_list_key(
     }
 }
 
+/// Tour mode: enter/n/→ advance (marking the current stop's file viewed),
+/// p/← step back, esc (or the tour key) ends the tour. Movement and scroll
+/// keys still work so each stop can be read in place. Returns true when the
+/// tour should end.
+fn handle_tour_key(
+    key: KeyEvent,
+    tour: &mut TourState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "tour ended".to_owned(),
+            });
+            return true;
+        }
+        KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right => {
+            let Some(stop) = tour.current().cloned() else {
+                return true;
+            };
+            tour::mark_stop_viewed(session, &stop);
+            if tour.advance() {
+                if let Some(next) = tour.current().cloned() {
+                    tour::jump_to_stop(session, &next);
+                }
+                tui_state.notice = None;
+                return false;
+            }
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "tour complete — all stops visited".to_owned(),
+            });
+            return true;
+        }
+        KeyCode::Char('p') | KeyCode::Left => {
+            if tour.back()
+                && let Some(stop) = tour.current().cloned()
+            {
+                tour::jump_to_stop(session, &stop);
+            }
+            return false;
+        }
+        _ => {}
+    }
+    // Free movement within a stop: delegate read-only navigation to the
+    // normal keymap; pressing the tour key again also ends the tour.
+    match keymap.action_for(&key) {
+        Some(Action::Tour) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "tour ended".to_owned(),
+            });
+            true
+        }
+        Some(Action::MoveDown) => {
+            session.move_diff_cursor(1);
+            false
+        }
+        Some(Action::MoveUp) => {
+            session.move_diff_cursor(-1);
+            false
+        }
+        Some(Action::ScrollDown) => {
+            session.scroll_diff(12);
+            false
+        }
+        Some(Action::ScrollUp) => {
+            session.scroll_diff(-12);
+            false
+        }
+        Some(Action::DiffTop) => {
+            session.diff_scroll = 0;
+            false
+        }
+        Some(Action::DiffBottom) => {
+            session.scroll_diff_to_bottom();
+            false
+        }
+        _ => false,
+    }
+}
+
 /// Returns the next mode when the popup should change state.
 fn handle_draft_list_key(
     key: KeyEvent,
@@ -1503,9 +1628,15 @@ fn load_review_target(
 ) {
     match review_loader.load(session, target.clone()) {
         Ok(()) => {
+            // Re-raise the large-change nudge when the newly loaded target
+            // is itself big and unorganized.
+            let message = match session.large_change_nudge() {
+                Some(nudge) => format!("loaded {target} — {nudge}"),
+                None => format!("loaded {target}"),
+            };
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: format!("loaded {target}"),
+                message,
             });
         }
         Err(error) => {
@@ -2465,6 +2596,161 @@ diff --git a/b.rs b/b.rs
         assert!(notice.message.contains("gone.rs"));
         let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
         assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Pending);
+    }
+
+    fn tour_session() -> ReviewSession {
+        let mut session = snapshot_session(
+            r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "core flow".to_owned(),
+                rationale: Some("read together".to_owned()),
+                parts: vec![
+                    crate::agent::ChunkPart {
+                        path: "a.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    },
+                    crate::agent::ChunkPart {
+                        path: "b.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    },
+                ],
+            }],
+            ..Default::default()
+        });
+        session
+    }
+
+    #[test]
+    fn tour_advances_through_stops_marking_files_viewed() {
+        let mut session = tour_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut tour = TourState::new(&session).unwrap();
+
+        // Advancing past the first stop marks a.rs viewed and moves on.
+        assert!(!handle_tour_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut tour,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert!(
+            session
+                .files
+                .iter()
+                .find(|file| file.path == "a.rs")
+                .unwrap()
+                .viewed
+        );
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+
+        // Advancing past the last stop ends the tour with a notice.
+        assert!(handle_tour_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut tour,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert!(session.files.iter().all(|file| file.viewed));
+        assert!(tui_state.notice.unwrap().message.contains("tour complete"));
+    }
+
+    #[test]
+    fn tour_esc_returns_to_free_navigation_without_marking_viewed() {
+        let mut session = tour_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut tour = TourState::new(&session).unwrap();
+
+        assert!(handle_tour_key(
+            KeyEvent::from(KeyCode::Esc),
+            &mut tour,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert!(session.files.iter().all(|file| !file.viewed));
+    }
+
+    #[test]
+    fn starting_a_tour_without_chunks_shows_a_notice() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::Tour,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(matches!(mode, Mode::Normal));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("no review chunks to tour")
+        );
+    }
+
+    #[test]
+    fn large_change_nudge_appends_to_load_notice() {
+        let mut session = snapshot_session("");
+        session.nudge_files = 1;
+        let backend = MockJjBackend::with_diff(Ok(r#"diff --git a/new.rs b/new.rs
+--- a/new.rs
++++ b/new.rs
+@@ -1 +1 @@
+-old
++new
+"#
+        .to_owned()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+
+        load_review_target(
+            &loader,
+            &mut session,
+            ReviewTarget::parent_to_current(),
+            &mut tui_state,
+        );
+
+        let notice = tui_state.notice.unwrap();
+        assert!(notice.message.contains("loaded @-..@"));
+        assert!(notice.message.contains("large change"));
     }
 
     #[test]

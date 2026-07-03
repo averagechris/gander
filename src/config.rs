@@ -47,12 +47,21 @@ pub struct LimitsConfig {
     /// Diffs with more lines than this render as a placeholder until
     /// explicitly expanded.
     pub max_diff_lines: usize,
+    /// Reviews with at least this many changed lines trigger the
+    /// large-change nudge suggesting an agent organize the review.
+    /// 0 disables the line criterion.
+    pub nudge_diff_lines: usize,
+    /// Reviews with at least this many changed files trigger the
+    /// large-change nudge. 0 disables the file criterion.
+    pub nudge_files: usize,
 }
 
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_diff_lines: 5000,
+            nudge_diff_lines: 1000,
+            nudge_files: 25,
         }
     }
 }
@@ -112,6 +121,7 @@ pub struct KeybindingsConfig {
     pub toggle_agent_order: Vec<String>,
     pub flag_list: Vec<String>,
     pub chunk_list: Vec<String>,
+    pub tour: Vec<String>,
     pub draft_list: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
@@ -195,6 +205,8 @@ struct AgentConfigPatch {
 #[serde(default, rename_all = "kebab-case")]
 struct LimitsConfigPatch {
     max_diff_lines: Option<usize>,
+    nudge_diff_lines: Option<usize>,
+    nudge_files: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -249,6 +261,7 @@ struct KeybindingsConfigPatch {
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
     chunk_list: Option<Vec<String>>,
+    tour: Option<Vec<String>>,
     draft_list: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
@@ -334,6 +347,7 @@ impl Default for KeybindingsConfig {
             toggle_agent_order: keys(["A"]),
             flag_list: keys(["F"]),
             chunk_list: keys(["S"]),
+            tour: keys(["T"]),
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
@@ -466,6 +480,12 @@ impl Config {
         if let Some(max_diff_lines) = patch.limits.max_diff_lines {
             self.limits.max_diff_lines = max_diff_lines;
         }
+        if let Some(nudge_diff_lines) = patch.limits.nudge_diff_lines {
+            self.limits.nudge_diff_lines = nudge_diff_lines;
+        }
+        if let Some(nudge_files) = patch.limits.nudge_files {
+            self.limits.nudge_files = nudge_files;
+        }
 
         if let Some(command) = patch.agent.command {
             self.agent.command = Some(command);
@@ -510,6 +530,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
         apply_optional(&mut self.flag_list, patch.flag_list);
         apply_optional(&mut self.chunk_list, patch.chunk_list);
+        apply_optional(&mut self.tour, patch.tour);
         apply_optional(&mut self.draft_list, patch.draft_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);

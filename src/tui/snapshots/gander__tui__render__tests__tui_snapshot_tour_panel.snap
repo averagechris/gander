@@ -1,0 +1,24 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &mode, 100, 20)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• ▾ src 0/1                               ││src/app.rs  +2 -1                                     │
+│  • mod     app.rs                        ││@@ -1,4 +1,5 @@                                       │
+│                                          ││    1   fn main() {                                   │
+│                                          ││    2 -     old();                                    │
+│                                          ││    2 +     new();                                    │
+│                                          ││    3 +     extra();                                  │
+│                                          ││    4   }                                             │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
+┌tour 1/2──────────────────────────────────────────────────────────────────────────────────────────┐
+│core change (part 1/2)  src/app.rs:2-3                                                            │
+│start here                                                                                        │
+│                                                                                                  │
+│enter/n next (marks viewed) · p back · j/k/d/u read · esc end tour                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments
+tour 1/2 · enter/n next (marks viewed) · p back · j/k/d/u read · esc end

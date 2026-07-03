@@ -30,6 +30,7 @@ use super::{
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
+    tour::TourState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,7 @@ pub(super) fn draw(
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
         Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
+        Mode::Tour(tour) => draw_tour_panel(frame, frame.area(), tour),
         Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
@@ -553,6 +555,11 @@ fn draw_footer(
         }
         Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
         Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
+        Mode::Tour(tour) => format!(
+            "tour {}/{} · enter/n next (marks viewed) · p back · j/k/d/u read · esc end",
+            tour.index + 1,
+            tour.len(),
+        ),
         Mode::DraftList(_) => {
             "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
         }
@@ -764,6 +771,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
         entry(&[Action::FlagList], "agent-flagged sections"),
         entry(&[Action::ChunkList], "agent review chunks"),
+        entry(&[Action::Tour], "tour agent chunks in order"),
         entry(&[Action::DraftList], "agent draft comments"),
     ];
 
@@ -1074,6 +1082,69 @@ fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Chun
             )
             .wrap(Wrap { trim: false }),
         popup,
+    );
+}
+
+/// A compact bottom-anchored panel (not a modal popup): the diff pane stays
+/// visible and follows the current stop while the panel shows progress,
+/// location, and the agent's rationale.
+fn draw_tour_panel(frame: &mut ratatui::Frame<'_>, area: Rect, tour: &TourState) {
+    let height = 6u16.min(area.height);
+    let panel = Rect {
+        x: area.x,
+        y: area
+            .y
+            .saturating_add(area.height.saturating_sub(height + 2)),
+        width: area.width,
+        height,
+    };
+    frame.render_widget(Clear, panel);
+
+    let mut lines = Vec::new();
+    if let Some(stop) = tour.current() {
+        let position = stop
+            .part_position
+            .map(|(part, total)| format!(" (part {part}/{total})"))
+            .unwrap_or_default();
+        let location = match &stop.part {
+            Some(part) => match (part.start_line, part.end_line) {
+                (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
+                (Some(start), None) => format!("{}:{start}", part.path),
+                _ => part.path.clone(),
+            },
+            None => "(no location)".to_owned(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{}{position}  ", stop.title),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(location, Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            stop.rationale
+                .clone()
+                .unwrap_or_else(|| "(no rationale given)".to_owned()),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "enter/n next (marks viewed) · p back · j/k/d/u read · esc end tour",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(format!(
+                "tour {}/{}",
+                tour.index + 1,
+                tour.len()
+            )))
+            .wrap(Wrap { trim: false }),
+        panel,
     );
 }
 
@@ -2213,6 +2284,45 @@ diff --git a/README.md b/README.md
             ..Default::default()
         });
         let mode = Mode::ChunkList(ChunkListState::new(&session));
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
+    }
+
+    #[test]
+    fn tui_snapshot_tour_panel() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,5 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
+"#,
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "core change".to_owned(),
+                rationale: Some("start here".to_owned()),
+                parts: vec![
+                    crate::agent::ChunkPart {
+                        path: "src/app.rs".to_owned(),
+                        start_line: Some(2),
+                        end_line: Some(3),
+                    },
+                    crate::agent::ChunkPart {
+                        path: "src/app.rs".to_owned(),
+                        start_line: Some(4),
+                        end_line: None,
+                    },
+                ],
+            }],
+            ..Default::default()
+        });
+        let mode = Mode::Tour(TourState::new(&session).unwrap());
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
     }

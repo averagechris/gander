@@ -4,6 +4,18 @@
 
 ### Added
 
+- Tour mode (`T`): step through agent-suggested review chunks in order
+  with the agent's rationale shown in a bottom panel; advancing marks the
+  current stop's file viewed, Esc returns to free navigation. Movement and
+  scroll keys keep working within a stop.
+- Large-change nudge: when a review exceeds the new `[limits]`
+  `nudge-diff-lines` (default 1000) or `nudge-files` (default 25)
+  thresholds and no agent has organized it yet, the footer suggests
+  summoning an agent (`@`) or asking the harness; re-raised when loading a
+  new target. Set a threshold to 0 to disable that criterion.
+- `docs/harness-setup.md`: harness setup recipes — MCP registration for
+  opencode/Claude Code/Codex, the split-pane review workflow, and
+  attach-to-running-server `[agent] command` examples.
 - `gander mcp`: an MCP stdio server (official `rmcp` SDK) exposing the
   review session as typed tools — `review_summary`, `review_files`,
   `file_diff`, `comments`, `current_focus`, `set_ordering`,

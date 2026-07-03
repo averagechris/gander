@@ -64,6 +64,10 @@ pub struct ReviewSession {
     /// Diffs with more lines than this render as a placeholder until the
     /// file is explicitly expanded.
     pub max_diff_lines: usize,
+    /// Large-change nudge thresholds (changed lines / changed files); 0
+    /// disables a criterion. See [`Self::large_change_nudge`].
+    pub nudge_diff_lines: usize,
+    pub nudge_files: usize,
     /// Files the user expanded past the large-diff threshold.
     pub force_rendered: BTreeSet<String>,
     /// Agent-suggested review order (highest priority first), from the
@@ -239,6 +243,8 @@ impl ReviewSession {
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
+            nudge_diff_lines: limits.nudge_diff_lines,
+            nudge_files: limits.nudge_files,
             force_rendered: BTreeSet::new(),
             agent_ordering: Vec::new(),
             use_agent_order: true,
@@ -281,6 +287,8 @@ impl ReviewSession {
             self.syntax.clone(),
             LimitsConfig {
                 max_diff_lines: self.max_diff_lines,
+                nudge_diff_lines: self.nudge_diff_lines,
+                nudge_files: self.nudge_files,
             },
         );
     }
@@ -578,6 +586,30 @@ impl ReviewSession {
         }) {
             self.jump_to_diff_row(row_index);
         }
+    }
+
+    /// A nudge for large changes: when the diff exceeds the size thresholds
+    /// and no agent has organized the review yet (no chunks or ordering in
+    /// the overlay), suggest summoning one. `None` when the change is small,
+    /// nudging is disabled, or an agent already structured the review.
+    pub fn large_change_nudge(&self) -> Option<String> {
+        if !self.review_chunks.is_empty() || !self.agent_ordering.is_empty() {
+            return None;
+        }
+        let files = self.files.len();
+        let lines: usize = self
+            .files
+            .iter()
+            .map(|file| file.additions + file.deletions)
+            .sum();
+        let many_lines = self.nudge_diff_lines > 0 && lines >= self.nudge_diff_lines;
+        let many_files = self.nudge_files > 0 && files >= self.nudge_files;
+        if !many_lines && !many_files {
+            return None;
+        }
+        Some(format!(
+            "large change ({files} files, {lines} changed lines) — @ summons an agent to organize it, T tours the chunks"
+        ))
     }
 
     /// Flags sorted for display: critical first, then by path and line.
@@ -1706,6 +1738,45 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(session.focus, Focus::Diff);
         let rows = session.diff_rows_for_selected_file();
         assert!(rows[session.diff_cursor].new_lineno.unwrap() >= 3);
+    }
+
+    #[test]
+    fn large_change_nudge_triggers_on_thresholds_only() {
+        let mut session = session();
+
+        // Small change under both thresholds: no nudge.
+        assert!(session.large_change_nudge().is_none());
+
+        // Lower the line threshold under the session's changed-line count.
+        session.nudge_diff_lines = 1;
+        let nudge = session.large_change_nudge().unwrap();
+        assert!(nudge.contains("large change"));
+        assert!(nudge.contains('@'));
+
+        // 0 disables the line criterion; the file criterion still applies.
+        session.nudge_diff_lines = 0;
+        assert!(session.large_change_nudge().is_none());
+        session.nudge_files = 1;
+        assert!(session.large_change_nudge().is_some());
+    }
+
+    #[test]
+    fn large_change_nudge_suppressed_once_an_agent_organized_the_review() {
+        let mut session = session();
+        session.nudge_files = 1;
+        assert!(session.large_change_nudge().is_some());
+
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "core".to_owned(),
+                rationale: None,
+                parts: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        assert!(session.large_change_nudge().is_none());
     }
 
     #[test]
