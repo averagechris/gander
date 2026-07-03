@@ -1,5 +1,12 @@
 # Agent-collaborative review (ACP)
 
+> **Direction note.** This custom JSON-RPC surface is transitional: the
+> agent-facing tool surface is moving to MCP (`gander mcp`, roadmap
+> milestone 9), which harnesses discover natively, and project-local
+> `.gander/` paths are moving to per-user state directories (milestone 8).
+> See docs/decisions.md D5/D6. The protocol below keeps working in the
+> meantime and remains the internal TUI-bridge plumbing.
+
 `gander acp` hosts the review session for agents: a line-delimited JSON-RPC
 2.0 server on stdio (the transport style used by the Agent Client Protocol).
 Agents read the diff, comments, and viewed state, and write review

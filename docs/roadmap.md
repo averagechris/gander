@@ -1,8 +1,9 @@
 # Roadmap
 
 This project should become a fast, local-first review cockpit for jj changes,
-and eventually a collaborative one: agents connected over ACP should be able to
-help conduct the review, not just watch it (see milestone 7).
+and eventually a collaborative one: agents should be able to help conduct the
+review, not just watch it (see milestones 7-9 and docs/decisions.md for the
+directional decisions behind them).
 
 ## Product principles
 
@@ -139,6 +140,55 @@ Client Protocol schema compliance is future work.
   autostart; agent-agnostic shell command, logged to `.gander/agent.log`,
   lifecycle owned by gander)
 
+## Milestone 8: state hygiene — get out of the project directory
+
+Runtime state currently lands in a project-local `.gander/` dir that users
+must gitignore in every repo. That is tool droppings, not polish. Decision
+record: docs/decisions.md D6. This milestone should land **before**
+milestone 9, since the instance registry and MCP routing build on the new
+locations.
+
+- [ ] resolve per-workspace state under the XDG state dir
+  (`~/.local/state/gander/<workspace-key>/`), keyed by a hash+slug of the
+  canonicalized workspace root; respect `XDG_STATE_HOME`
+- [ ] ephemeral endpoints (ACP/MCP sockets, instance registry, agent logs)
+  under `XDG_RUNTIME_DIR` when set, else the state dir
+- [ ] keep committed `gander.toml` and XDG user config; deprecate the
+  `.gander/config.toml` layer
+- [ ] default artifact output moves off `.gander/review.*` (stdout or
+  explicit paths)
+- [ ] one-release migration fallback: read legacy `.gander/` state when the
+  new location is empty
+- [ ] a `gander paths`-style command that prints resolved locations for
+  debugging
+
+## Milestone 9: seamless agent workflows (MCP + multi-instance)
+
+The target flow: open gander in a workstream, see the change is large, and
+have your already-running harness organize and narrate the review — no
+protocol knowledge, no manual orchestration. Decision records:
+docs/decisions.md D3, D4, D5.
+
+- [ ] per-instance sockets + instance registry (one gander per workstream;
+  workspace root, target, summary, socket, pid, `last_input_at`; cleaned on
+  exit; replaces the "second TUI loses the socket" behavior)
+- [ ] `gander mcp`: MCP stdio server (prefer the `rmcp` SDK) bridging to the
+  live instance by cwd; tools: `review_summary`, `review_files`,
+  `file_diff`, `comments`, `set_ordering`, `flag_section`, `set_chunks`,
+  `draft_comment`, `current_focus`, `list_reviews`
+- [ ] `current_focus` plumbing in the TUI (selected file/line/hunk +
+  `last_input_at` heartbeat in the registry)
+- [ ] large-change nudge: when a review exceeds a size threshold, hint that
+  an agent can organize it (`@` or the harness)
+- [ ] tour mode (`T`): step through agent-suggested chunks in order with
+  rationale displayed; auto-mark viewed on advance; esc returns to free
+  navigation
+- [ ] (exploratory, may not ship) ask popup: one-shot "explain this line"
+  question routed to the harness, single streamed answer in a popup — only
+  if the split-pane + `current_focus` flow leaves a real gap
+- [ ] docs: harness setup recipes (opencode/claude MCP registration,
+  split-pane workflow, attach-to-running-server summon commands)
+
 ## Known debt (from the 2026-07 pre-MVP code review)
 
 Fixed during the review: base picker filter dropped `g`/`G`/shifted chars,
@@ -170,10 +220,12 @@ whether or not the terminal reports the SHIFT modifier.
 
 Known debt, in priority order:
 
+- Runtime state pollutes project directories (`.gander/`); superseded by
+  milestone 8 (docs/decisions.md D6).
 - The ACP surface is a minimal JSON-RPC method set (`gander-acp` v1), not the
-  published Agent Client Protocol schema; adopting the real schema (session
-  lifecycle, capabilities negotiation, streaming) is the next step for
-  milestone 7.
+  published Agent Client Protocol schema. Direction changed (docs/decisions.md
+  D5): the agent-facing surface becomes MCP tools (milestone 9); the JSON-RPC
+  socket remains internal plumbing rather than growing toward spec ACP.
 - The standalone `gander acp` server (no TUI running) snapshots the
   diff/comments at startup; with a live TUI the socket bridge serves current
   state, so this only affects agents working without a human in the loop.
