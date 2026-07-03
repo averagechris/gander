@@ -35,6 +35,8 @@ This repo is intentionally early, but the first vertical slice is in place:
 - makes changes obvious at a glance: word-level change highlights, added/
   removed line background tints, and an optional gutter change bar, all
   toggleable at runtime (`V`) and configurable under `[diff]`
+- hides the file tree (`w`) so the diff gets the full width when you are
+  focused on the code
 - is packaged with a Nix flake and dev shell
 
 ## Development

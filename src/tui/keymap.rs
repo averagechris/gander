@@ -73,6 +73,7 @@ pub(super) enum Action {
     ToggleWordHighlight,
     ToggleLineBackground,
     ToggleGutterBar,
+    ToggleFilePane,
     RangeComment,
     CancelRangeComment,
     Comment,
@@ -196,6 +197,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleGutterBar,
             &config.toggle_gutter_bar,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleFilePane,
+            &config.toggle_file_pane,
         )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
         add_bindings(

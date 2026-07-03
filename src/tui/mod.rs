@@ -802,6 +802,7 @@ fn handle_normal_action(
         Action::ToggleWordHighlight => session.toggle_word_highlight(),
         Action::ToggleLineBackground => session.toggle_line_background(),
         Action::ToggleGutterBar => session.toggle_gutter_bar(),
+        Action::ToggleFilePane => session.toggle_file_pane(),
         Action::ToggleLargeDiff => session.toggle_large_diff_render(),
         Action::ToggleAgentOrder => {
             session.toggle_agent_order();
@@ -1755,7 +1756,10 @@ fn handle_mouse_event(
         return;
     }
 
-    let layout = ui_layout(Rect::new(0, 0, terminal_size.width, terminal_size.height));
+    let layout = ui_layout(
+        Rect::new(0, 0, terminal_size.width, terminal_size.height),
+        session.file_pane_visible,
+    );
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             handle_left_down(mouse.column, mouse.row, layout, session, tui_state);

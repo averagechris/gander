@@ -63,6 +63,9 @@ pub struct ReviewSession {
     /// Diff visual cues (word-level highlights, line backgrounds, gutter
     /// bar) plus their style specs. Runtime-toggleable, session-only.
     pub diff_cues: DiffConfig,
+    /// Whether the files pane is shown. Session-only; hiding it gives the
+    /// diff the full width for focused reading (docs/focused-diff-ux.md §2).
+    pub file_pane_visible: bool,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     /// Diffs with more lines than this render as a placeholder until the
@@ -255,6 +258,7 @@ impl ReviewSession {
             viewed_filter: ViewedFilter::default(),
             fold_context: false,
             diff_cues,
+            file_pane_visible: true,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
@@ -384,6 +388,17 @@ impl ReviewSession {
     /// Toggle the colored gutter change bar. Session-only.
     pub fn toggle_gutter_bar(&mut self) {
         self.diff_cues.gutter_bar = !self.diff_cues.gutter_bar;
+    }
+
+    /// Toggle the files pane. Hiding it moves focus to the diff so the
+    /// keyboard keeps working on what is visible; focusing the files pane
+    /// while hidden re-shows it (never trap the user).
+    pub fn toggle_file_pane(&mut self) {
+        self.file_pane_visible = !self.file_pane_visible;
+        if !self.file_pane_visible && self.focus == Focus::Files {
+            self.focus = Focus::Diff;
+            self.ensure_diff_cursor_commentable();
+        }
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {
@@ -945,6 +960,10 @@ impl ReviewSession {
             Focus::Files => Focus::Diff,
             Focus::Diff => Focus::Files,
         };
+        // Never trap: focusing the files pane while it is hidden re-shows it.
+        if self.focus == Focus::Files {
+            self.file_pane_visible = true;
+        }
         self.ensure_diff_cursor_commentable();
     }
 
@@ -1483,6 +1502,41 @@ mod tests {
         state::ReviewState,
         syntax::{HighlightKind, SyntaxSpan},
     };
+
+    #[test]
+    fn hiding_the_file_pane_moves_focus_to_the_diff() {
+        let mut session = session();
+        assert!(session.file_pane_visible);
+        assert_eq!(session.focus, Focus::Files);
+
+        session.toggle_file_pane();
+
+        assert!(!session.file_pane_visible);
+        assert_eq!(session.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn focusing_the_files_pane_reshows_it() {
+        let mut session = session();
+        session.toggle_file_pane();
+        assert!(!session.file_pane_visible);
+
+        // Never trap: tab back to the files pane brings it back.
+        session.toggle_focus();
+
+        assert_eq!(session.focus, Focus::Files);
+        assert!(session.file_pane_visible);
+    }
+
+    #[test]
+    fn showing_the_file_pane_again_keeps_diff_focus() {
+        let mut session = session();
+        session.toggle_file_pane();
+        session.toggle_file_pane();
+
+        assert!(session.file_pane_visible);
+        assert_eq!(session.focus, Focus::Diff);
+    }
 
     fn session() -> ReviewSession {
         let diff = DiffSet::parse(

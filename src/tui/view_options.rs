@@ -10,16 +10,23 @@ pub(super) enum ViewOption {
     WordHighlight,
     LineBackground,
     GutterBar,
+    FilePane,
 }
 
 impl ViewOption {
-    pub(super) const ALL: [Self; 3] = [Self::WordHighlight, Self::LineBackground, Self::GutterBar];
+    pub(super) const ALL: [Self; 4] = [
+        Self::WordHighlight,
+        Self::LineBackground,
+        Self::GutterBar,
+        Self::FilePane,
+    ];
 
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::WordHighlight => "word-level change highlights",
             Self::LineBackground => "line backgrounds",
             Self::GutterBar => "gutter change bar",
+            Self::FilePane => "file pane",
         }
     }
 
@@ -28,6 +35,7 @@ impl ViewOption {
             Self::WordHighlight => session.diff_cues.word_highlight,
             Self::LineBackground => session.diff_cues.line_background,
             Self::GutterBar => session.diff_cues.gutter_bar,
+            Self::FilePane => session.file_pane_visible,
         }
     }
 
@@ -36,6 +44,7 @@ impl ViewOption {
             Self::WordHighlight => session.toggle_word_highlight(),
             Self::LineBackground => session.toggle_line_background(),
             Self::GutterBar => session.toggle_gutter_bar(),
+            Self::FilePane => session.toggle_file_pane(),
         }
     }
 }
@@ -66,7 +75,7 @@ mod tests {
         let mut state = ViewOptionsState::default();
 
         state.move_selection(10);
-        assert_eq!(state.selected_option(), ViewOption::GutterBar);
+        assert_eq!(state.selected_option(), ViewOption::FilePane);
 
         state.move_selection(-10);
         assert_eq!(state.selected_option(), ViewOption::WordHighlight);

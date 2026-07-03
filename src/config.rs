@@ -209,6 +209,7 @@ pub struct KeybindingsConfig {
     pub toggle_word_highlight: Vec<String>,
     pub toggle_line_background: Vec<String>,
     pub toggle_gutter_bar: Vec<String>,
+    pub toggle_file_pane: Vec<String>,
     pub range_comment: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
@@ -374,6 +375,7 @@ struct KeybindingsConfigPatch {
     toggle_word_highlight: Option<Vec<String>>,
     toggle_line_background: Option<Vec<String>>,
     toggle_gutter_bar: Option<Vec<String>>,
+    toggle_file_pane: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
@@ -466,6 +468,7 @@ impl Default for KeybindingsConfig {
             toggle_word_highlight: keys([]),
             toggle_line_background: keys([]),
             toggle_gutter_bar: keys([]),
+            toggle_file_pane: keys(["w"]),
             range_comment: keys(["r"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
@@ -687,6 +690,7 @@ impl KeybindingsConfig {
             patch.toggle_line_background,
         );
         apply_optional(&mut self.toggle_gutter_bar, patch.toggle_gutter_bar);
+        apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);

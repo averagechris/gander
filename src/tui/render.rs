@@ -48,9 +48,11 @@ pub(super) fn draw(
     keymap: &KeyMap,
     notice: Option<&UiNotice>,
 ) {
-    let layout = ui_layout(frame.area());
+    let layout = ui_layout(frame.area(), session.file_pane_visible);
 
-    draw_files(frame, layout.files, session);
+    if session.file_pane_visible {
+        draw_files(frame, layout.files, session);
+    }
     draw_diff(frame, layout.diff, session);
     draw_footer(frame, layout.footer, session, mode, keymap, notice);
 
@@ -73,14 +75,15 @@ pub(super) fn draw(
     }
 }
 
-pub(super) fn ui_layout(area: Rect) -> UiLayout {
+pub(super) fn ui_layout(area: Rect, files_visible: bool) -> UiLayout {
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(2)])
         .split(area);
+    let files_width = if files_visible { 44 } else { 0 };
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(44), Constraint::Min(40)])
+        .constraints([Constraint::Length(files_width), Constraint::Min(40)])
         .split(main[0]);
 
     UiLayout {
@@ -227,7 +230,11 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                 Line::from(generated_hint),
             ])
             .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL).title("diff"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(diff_pane_title(session)),
+            )
             .wrap(Wrap { trim: false }),
             area,
         );
@@ -389,9 +396,29 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     }
 
     let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("diff"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(diff_pane_title(session)),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+/// Diff pane title: just "diff" normally; with the file pane hidden it
+/// carries the selected file path and viewed mark so context is never lost.
+fn diff_pane_title(session: &ReviewSession) -> String {
+    if session.file_pane_visible {
+        return "diff".to_owned();
+    }
+    match session.selected_visible_file() {
+        Some(file) => format!(
+            "diff · {}{}",
+            file.path,
+            if file.viewed { " ✓" } else { "" }
+        ),
+        None => "diff".to_owned(),
+    }
 }
 
 fn comment_summary_line(comment: &Comment) -> Line<'static> {
@@ -851,6 +878,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
             &[Action::ToggleFocus],
             "switch focus between files and diff",
         ),
+        entry(&[Action::ToggleFilePane], "hide/show file pane"),
         entry(&[Action::Help], "this help"),
         entry(&[Action::CancelRangeComment], "dismiss range/notice"),
         entry(&[Action::Quit], "quit (writes artifact)"),
@@ -2645,6 +2673,24 @@ diff --git a/README.md b/README.md
 "#,
         );
         session.diff_cues.gutter_bar = true;
+
+        insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
+    }
+
+    #[test]
+    fn tui_snapshot_hidden_file_pane() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    old();
++    new();
+ }
+"#,
+        );
+        session.toggle_file_pane();
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
     }
