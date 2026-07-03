@@ -771,10 +771,7 @@ prompt = "review {repo} at {base}..{rev}"
         }])
         .unwrap();
 
-        assert_eq!(
-            config.agent.command.as_deref(),
-            Some("opencode run")
-        );
+        assert_eq!(config.agent.command.as_deref(), Some("opencode run"));
         assert!(config.agent.autostart);
         assert_eq!(
             config.agent.prompt.as_deref(),
