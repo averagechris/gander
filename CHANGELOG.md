@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.2.0 - 2026-07-02
+
 ### Added
 
 - Tour mode (`T`): step through agent-suggested review chunks in order
@@ -49,7 +52,6 @@
   push via `.builds/ci.yml`; the Linux release manifest moved to
   `builds/release-linux-x86_64.yml` so artifacts and the downloads page are
   only built and published for explicit releases.
-
 
 ## v0.1.0 - 2026-07-01
 
