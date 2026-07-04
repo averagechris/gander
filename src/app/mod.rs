@@ -261,8 +261,18 @@ impl ReviewSession {
         diff_cues: DiffConfig,
     ) -> Self {
         let ReviewState {
-            files, comments, ..
+            files,
+            mut comments,
+            ..
         } = state;
+        let diff_is_empty = diff.files.is_empty();
+        // A workspace's default target (`trunk()..@`) becomes empty after the
+        // reviewed changes are shipped. Persisted comments/viewed marks belong
+        // to the old review at that point; carrying them forward makes a fresh
+        // TUI/zen session look like it is still reviewing the shipped content.
+        if diff_is_empty {
+            comments.clear();
+        }
         let mut session = Self {
             repo,
             target,
@@ -1913,6 +1923,33 @@ diff --git a/src/c.rs b/src/c.rs
 
         session.toggle_viewed();
         assert!(session.selected_file().unwrap().viewed);
+    }
+
+    #[test]
+    fn empty_diff_drops_persisted_comments_from_shipped_review() {
+        let state = ReviewState {
+            comments: vec![Comment {
+                id: "old".to_owned(),
+                path: "src/app.rs".to_owned(),
+                line: Some(1),
+                end_line: None,
+                anchor: None,
+                body: "old review".to_owned(),
+                state: CommentState::Draft,
+                created_at: Utc::now(),
+            }],
+            ..Default::default()
+        };
+
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse("").unwrap(),
+            state,
+        );
+
+        assert!(session.files.is_empty());
+        assert!(session.comments.is_empty());
     }
 
     #[test]

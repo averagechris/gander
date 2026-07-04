@@ -128,6 +128,13 @@ impl ZenState {
     /// change briefs). Without chunks, every file becomes a stop under a
     /// single opening chapter. `None` when there is nothing to walk through.
     pub(super) fn new(session: &ReviewSession, stack: &[JjChangeSummary]) -> Option<Self> {
+        // Agent overlays are workspace-scoped. After `jj ship`, the default
+        // review target can be empty while the overlay still contains the
+        // previous review's chunks/briefs. Treat an empty diff as nothing to
+        // review so zen does not tour stale shipped content.
+        if session.files.is_empty() {
+            return None;
+        }
         let (chunk_stops, glance_rows, source) = if session.review_chunks.is_empty() {
             (file_stops(session), Vec::new(), ZenSource::Files)
         } else {
@@ -608,6 +615,22 @@ diff --git a/b.rs b/b.rs
     fn zen_requires_something_to_review() {
         let session = snapshot_session("");
         assert!(ZenState::new(&session, &[]).is_none());
+    }
+
+    #[test]
+    fn zen_ignores_stale_chunks_when_diff_is_empty() {
+        let mut session = snapshot_session("");
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![spotlight("old", "Old shipped chunk", None, "a.rs")],
+            briefs: vec![ChangeBrief {
+                change_id: "aaabbbcc".to_owned(),
+                summary: "old brief".to_owned(),
+                artifacts: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        assert!(ZenState::new(&session, &stack()).is_none());
     }
 
     #[test]
