@@ -2,23 +2,17 @@
   description = "gander: take a gander at your jj changes in a fast review TUI";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    # Dedicated newer pin for vhs only: the main pin's ttyd build fails on
-    # darwin ("failed to load evlib_uv" -> vhs cannot reach its terminal).
-    # Drop this input once the main nixpkgs pin ships a working ttyd.
-    nixpkgs-vhs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
   outputs = {
     self,
     nixpkgs,
-    nixpkgs-vhs,
-    flake-utils,
-  }:
-    flake-utils.lib.eachDefaultSystem (system: let
+  }: let
+    systems = ["aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux"];
+    forAllSystems = nixpkgs.lib.genAttrs systems;
+    perSystem = system: let
       pkgs = import nixpkgs {inherit system;};
-      vhsPkgs = import nixpkgs-vhs {inherit system;};
       inherit (pkgs) lib;
       cargoToml = lib.importTOML ./Cargo.toml;
       nativeBuildInputs = with pkgs; [pkg-config];
@@ -764,7 +758,7 @@
       # when the tape and fixture are unchanged, and re-render + commit the
       # gif when they change.
       renderDemoScript = ''
-        repo_root="$(git rev-parse --show-toplevel)"
+        repo_root="$(git rev-parse --show-toplevel 2>/dev/null || jj workspace root)"
         cd "$repo_root"
 
         check_only=0
@@ -1054,8 +1048,7 @@
           git
           jujutsu
           nix
-          # vhs comes from the dedicated newer nixpkgs pin; see inputs.
-          vhsPkgs.vhs
+          vhs
         ];
       };
       release = mkRepoScript {
@@ -1080,21 +1073,27 @@
           release-artifact = releaseArtifact;
         };
 
-      apps = {
+      apps = let
+        mkApp = drv: {
+          type = "app";
+          program = lib.getExe drv;
+          meta.description = "gander repo script: ${drv.name}";
+        };
+      in {
         default = {
           type = "app";
           program = lib.getExe gander;
           meta.description = cargoToml.package.description;
         };
-        ci-fmt = flake-utils.lib.mkApp {drv = ci-fmt;};
-        ci-clippy = flake-utils.lib.mkApp {drv = ci-clippy;};
-        ci-test = flake-utils.lib.mkApp {drv = ci-test;};
-        prepare-release = flake-utils.lib.mkApp {drv = prepare-release;};
-        release-tag = flake-utils.lib.mkApp {drv = release-tag;};
-        build-pages = flake-utils.lib.mkApp {drv = build-pages;};
-        publish-pages = flake-utils.lib.mkApp {drv = publish-pages;};
-        render-demo = flake-utils.lib.mkApp {drv = render-demo;};
-        release = flake-utils.lib.mkApp {drv = release;};
+        ci-fmt = mkApp ci-fmt;
+        ci-clippy = mkApp ci-clippy;
+        ci-test = mkApp ci-test;
+        prepare-release = mkApp prepare-release;
+        release-tag = mkApp release-tag;
+        build-pages = mkApp build-pages;
+        publish-pages = mkApp publish-pages;
+        render-demo = mkApp render-demo;
+        release = mkApp release;
       };
 
       devShells.default = pkgs.mkShell {
@@ -1121,5 +1120,10 @@
         inherit nativeBuildInputs buildInputs;
         RUST_BACKTRACE = "1";
       };
-    });
+    };
+  in {
+    packages = forAllSystems (system: (perSystem system).packages);
+    apps = forAllSystems (system: (perSystem system).apps);
+    devShells = forAllSystems (system: (perSystem system).devShells);
+  };
 }

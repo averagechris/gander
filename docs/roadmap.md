@@ -343,8 +343,8 @@ session can start here without re-deriving them:
 6. ~~**Re-render docs/demo.gif**~~ Done: `nix run .#render-demo` renders the
    tape with the flake-built binary, and CI (`.builds/demo.yml`) re-renders
    and commits the GIF whenever the tape or fixture change (guarded by
-   docs/demo.gif.inputs-sha256 to avoid render loops). Note: vhs comes from a
-   dedicated `nixpkgs-vhs` flake input until the main pin's ttyd is fixed.
+   docs/demo.gif.inputs-sha256 to avoid render loops). The flake now uses a
+   single `nixpkgs-unstable` pin with a working ttyd/vhs on darwin.
 7. **Sample review size** (M15 polish). docs/pages/sample-review.html is
    ~1.6 MB because it embeds the full diff; consider regenerating from a
    smaller change or trimming hunks for the tour link.
