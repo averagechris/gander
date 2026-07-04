@@ -78,8 +78,16 @@ pub struct ChunkPartParams {
 pub struct ChunkParams {
     /// Short human-readable title for the reviewable unit.
     pub title: String,
+    /// spotlight for the few stops worth touring; glance for routine/context
+    /// hunks that should stay in the at-a-glance rail instead of interrupting
+    /// the walkthrough.
+    pub importance: Option<String>,
     /// Why these parts belong together.
     pub rationale: Option<String>,
+    /// For spotlight chunks: 2-5 sentences that teach the change (what the
+    /// code does, why it changed, what could break). Shown full-screen on
+    /// the zen focus card.
+    pub explanation: Option<String>,
     pub parts: Vec<ChunkPartParams>,
 }
 
@@ -316,8 +324,11 @@ impl ServerHandler for GanderMcp {
                 "gander hosts a code review of a jj change for a human reviewer. \
                  Read the change with review_summary, review_files, and file_diff; \
                  see what the human is looking at with current_focus; then help \
-                 organize the review with set_ordering, flag_section, set_chunks, \
-                 and draft_comment — suggestions appear live in the reviewer's \
+                 organize the review with set_ordering, flag_section, set_chunks \
+                 (3-7 importance=spotlight chunks with a teaching `explanation` \
+                 each; importance=glance for the routine rest — the human tours \
+                 spotlights full-screen and skims glance items in bulk), and \
+                 draft_comment — suggestions appear live in the reviewer's \
                  terminal, and drafted comments are triaged by the human. \
                  list_reviews shows every running review instance. Do not modify \
                  the repository.",
@@ -443,7 +454,9 @@ mod tests {
             .set_chunks(Parameters(SetChunksParams {
                 chunks: vec![ChunkParams {
                     title: "core change".to_owned(),
+                    importance: Some("spotlight".to_owned()),
                     rationale: None,
+                    explanation: Some("Explains the core change.".to_owned()),
                     parts: vec![ChunkPartParams {
                         path: "src/app.rs".to_owned(),
                         start_line: Some(1),
@@ -457,6 +470,10 @@ mod tests {
             crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
         assert_eq!(overlay.drafts.len(), 1);
         assert_eq!(overlay.chunks[0].title, "core change");
+        assert_eq!(
+            overlay.chunks[0].explanation.as_deref(),
+            Some("Explains the core change.")
+        );
     }
 
     #[test]

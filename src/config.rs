@@ -201,7 +201,7 @@ pub struct KeybindingsConfig {
     pub toggle_agent_order: Vec<String>,
     pub flag_list: Vec<String>,
     pub chunk_list: Vec<String>,
-    pub tour: Vec<String>,
+    pub zen: Vec<String>,
     pub draft_list: Vec<String>,
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
@@ -373,7 +373,9 @@ struct KeybindingsConfigPatch {
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
     chunk_list: Option<Vec<String>>,
-    tour: Option<Vec<String>>,
+    /// Accepts the pre-0.4 name `tour` so existing configs keep working.
+    #[serde(alias = "tour")]
+    zen: Option<Vec<String>>,
     draft_list: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
@@ -468,7 +470,7 @@ impl Default for KeybindingsConfig {
             toggle_agent_order: keys(["A"]),
             flag_list: keys(["F"]),
             chunk_list: keys(["S"]),
-            tour: keys(["T"]),
+            zen: keys(["T", "Z"]),
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
@@ -699,7 +701,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
         apply_optional(&mut self.flag_list, patch.flag_list);
         apply_optional(&mut self.chunk_list, patch.chunk_list);
-        apply_optional(&mut self.tour, patch.tour);
+        apply_optional(&mut self.zen, patch.zen);
         apply_optional(&mut self.draft_list, patch.draft_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);

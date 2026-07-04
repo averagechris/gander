@@ -1,0 +1,22 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 18)"
+---
+┌ zen · at a glance ───────────────────────────────────────────────────────────────────────────────┐
+│1 spotlight stop(s) toured. 1 remaining item(s) below — skim, then `a` marks them all viewed.     │
+│                                                                                                  │
+│› • test churn tests/app.rs:1-1 +1 -1 — mechanical rename in tests                                │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
+zen glance · 1 item(s) · j/k move · enter jump · a mark all viewed & finish · p back · esc end

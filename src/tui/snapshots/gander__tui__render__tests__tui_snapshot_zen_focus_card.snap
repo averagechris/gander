@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
+---
+┌ zen · stop 1/1 · then 1 at a glance ─────────────────────────────────────────────────────────────┐
+│●                                                                                                 │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                        ╭ core change · src/app.rs:2-3 ──────────────────╮                        │
+│                        │    1   fn main() {                             │                        │
+│                        │    2 -     old();                              │                        │
+│                        │    2 +     new();                              │                        │
+│                        │    3 +     extra();                            │                        │
+│                        │    4   }                                       │                        │
+│                        │ why this matters ──────────────────────────────│                        │
+│                        │ main() now calls new() and adds extra() — the  │                        │
+│                        │ old single-call contract is gone, so every     │                        │
+│                        │ caller that relied on old() firing once must   │                        │
+│                        │ be re-checked.                                 │                        │
+│                        ╰────────────────────────────────────────────────╯                        │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
+zen 1/1 · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comm

@@ -28,7 +28,7 @@ Tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
 `set_ordering`, `flag_section`, `set_chunks`, `draft_comment`,
 `list_reviews`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
-via `S` and tour mode `T`, drafts via `D`).
+via `S` and zen mode `T`/`Z`, drafts via `D`).
 
 `gander paths` prints every resolved location (state dir, overlay, socket
 pattern, registry) when you need to debug a connection.
@@ -107,7 +107,7 @@ D4). The recommended setup is two panes in the same directory:
 3. talk to the harness about the review. Useful prompts:
    - *"Use gander's review_summary and set_chunks to break this change
      into reviewable units, ordered by risk."* — then press `T` in gander
-     to tour the chunks;
+     for a zen walkthrough of the chunks;
    - *"Flag anything security-sensitive with flag_section."* — flags show
      as red `!` pins, `F` lists them;
    - *"What am I looking at?"* / *"Explain this function."* — the harness

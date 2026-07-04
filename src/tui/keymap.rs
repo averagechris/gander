@@ -46,7 +46,7 @@ pub(super) enum Action {
     ToggleAgentOrder,
     FlagList,
     ChunkList,
-    Tour,
+    Zen,
     DraftList,
     TargetPickerMoveDown,
     TargetPickerMoveUp,
@@ -127,7 +127,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         )?;
         add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
         add_bindings(&mut bindings, Action::ChunkList, &config.chunk_list)?;
-        add_bindings(&mut bindings, Action::Tour, &config.tour)?;
+        add_bindings(&mut bindings, Action::Zen, &config.zen)?;
         add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
         add_bindings(
             &mut bindings,
@@ -445,7 +445,11 @@ mod tests {
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('T'))),
-            Some(Action::Tour)
+            Some(Action::Zen)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('Z'))),
+            Some(Action::Zen)
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('D'))),

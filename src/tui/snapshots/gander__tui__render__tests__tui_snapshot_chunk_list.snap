@@ -8,8 +8,8 @@ expression: "render_tui_text(&session, &mode, 100, 20)"
 │                                          ││    1   fn main() {                                   │
 │        ┌review chunks───────────────────────────────────────────────────────────────────┐        │
 │        │Agent-suggested review units (can span or subdivide files)                      │        │
-│        │› core change (1/2) src/app.rs:2-3 — start here                                 │        │
-│        │  core change (2/2) src/app.rs:4 — start here                                   │        │
+│        │› core change (1/2) [spotlight] src/app.rs:2-3 — start here                     │        │
+│        │  core change (2/2) [spotlight] src/app.rs:4 — start here                       │        │
 │        │                                                                                │        │
 │        │↑/↓ or j/k move · enter jump · esc close                                        │        │
 │        │                                                                                │        │

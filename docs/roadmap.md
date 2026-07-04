@@ -191,7 +191,7 @@ below).
   the harness); re-raised on retarget
 - [x] tour mode (`T`): step through agent-suggested chunks in order with
   rationale displayed in a bottom panel; auto-mark viewed on advance; esc
-  returns to free navigation
+  returns to free navigation (evolved into zen mode in milestone 10)
 - [x] docs: harness setup recipes (docs/harness-setup.md — opencode/claude/
   codex MCP registration, split-pane workflow, attach-to-running-server
   summon commands)
@@ -221,8 +221,11 @@ Status: designed, in progress.
   terminals
 - [x] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
   `jj file show` content; expanded rows not commentable in v1
-- [ ] zen mode design pass (tour mode + the above + agent-curated chunks)
-  once the building blocks land
+- [x] zen mode (tour mode + the above + agent-curated chunks): tour
+  evolved into a non-modal walkthrough layer (`T`/`Z`) — file pane
+  hidden, out-of-stop rows dimmed, progress panel, chunkless file-order
+  fallback, full review vocabulary available mid-walkthrough
+  (docs/focused-diff-ux.md §6)
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 

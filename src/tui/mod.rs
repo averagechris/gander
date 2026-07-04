@@ -21,8 +21,8 @@ mod outline;
 mod render;
 mod revset;
 mod search;
-mod tour;
 mod view_options;
+mod zen;
 
 use std::{
     io,
@@ -66,8 +66,8 @@ use render::{
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
-use tour::TourState;
 use view_options::ViewOptionsState;
+use zen::ZenState;
 
 enum Mode {
     Normal,
@@ -78,9 +78,6 @@ enum Mode {
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
     ChunkList(ChunkListState),
-    /// Stepping through agent-suggested chunks in order (tour mode). Not a
-    /// modal popup: the diff stays visible and follows the current stop.
-    Tour(TourState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
@@ -125,6 +122,9 @@ struct TuiState {
     agent_process: Option<AgentProcess>,
     /// This instance's registry entry; heartbeats on input, removed on drop.
     instance_registration: Option<crate::registry::InstanceRegistration>,
+    /// The zen walkthrough layer, when active. A layer, not a mode: normal
+    /// review actions keep working underneath it (docs/focused-diff-ux.md §6).
+    zen: Option<ZenState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,7 +344,31 @@ fn run_loop(
             });
         }
 
-        terminal.draw(|frame| draw(frame, session, mode, keymap, tui_state.notice.as_ref()))?;
+        // A retarget (t/p/b/R, stack step, operation picker) invalidates the
+        // walkthrough stops; end zen rather than touring a stale map.
+        if tui_state
+            .zen
+            .as_ref()
+            .is_some_and(|zen| zen.is_stale(session))
+        {
+            let zen = tui_state.zen.take().expect("checked above");
+            zen::end(session, &zen);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "zen ended — review target changed".to_owned(),
+            });
+        }
+
+        terminal.draw(|frame| {
+            draw(
+                frame,
+                session,
+                mode,
+                keymap,
+                tui_state.notice.as_ref(),
+                tui_state.zen.as_ref(),
+            )
+        })?;
 
         if !event::poll(Duration::from_millis(150))? {
             // Idle ticks are the natural moment to pick up agent overlay
@@ -534,6 +558,24 @@ fn handle_key_event(
 
     match mode {
         Mode::Normal => {
+            // The zen layer intercepts stop-navigation keys and lets
+            // everything else fall through to the normal vocabulary, so
+            // commenting/flagging/view toggles keep working mid-walkthrough.
+            if let Some(mut zen) = tui_state.zen.take() {
+                match handle_zen_key(key, &mut zen, session, keymap, tui_state) {
+                    ZenKeyOutcome::Consumed => {
+                        tui_state.zen = Some(zen);
+                        return Ok(false);
+                    }
+                    ZenKeyOutcome::End => {
+                        zen::end(session, &zen);
+                        return Ok(false);
+                    }
+                    ZenKeyOutcome::Fallthrough => {
+                        tui_state.zen = Some(zen);
+                    }
+                }
+            }
             if let Some(action) = keymap.action_for(&key)
                 && handle_normal_action(action, session, mode, review_loader, tui_state)?
             {
@@ -571,11 +613,6 @@ fn handle_key_event(
         }
         Mode::ChunkList(list) => {
             if handle_chunk_list_key(key, list, session, keymap) {
-                *mode = Mode::Normal;
-            }
-        }
-        Mode::Tour(tour) => {
-            if handle_tour_key(key, tour, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -723,22 +760,34 @@ fn handle_normal_action(
                 *mode = Mode::ChunkList(ChunkListState::new(session));
             }
         }
-        Action::Tour => match TourState::new(session) {
-            Some(tour) => {
-                if let Some(stop) = tour.current().cloned() {
-                    tour::jump_to_stop(session, &stop);
+        Action::Zen => match ZenState::new(session) {
+            Some(zen) => {
+                session.file_pane_visible = false;
+                if let Some(stop) = zen.current().cloned() {
+                    zen::jump_to_stop(session, &stop);
                 }
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: format!("tour started: {} stop(s)", tour.len()),
+                    message: match zen.source {
+                        zen::ZenSource::Chunks => {
+                            format!(
+                                "zen: {} focus stop(s), {} at a glance",
+                                zen.len(),
+                                zen.glance_rows.len()
+                            )
+                        }
+                        zen::ZenSource::Files => format!(
+                            "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
+                            zen.len()
+                        ),
+                    },
                 });
-                *mode = Mode::Tour(tour);
+                tui_state.zen = Some(zen);
             }
             None => {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: "no review chunks to tour — summon an agent (@) or ask your harness"
-                        .to_owned(),
+                    message: "nothing to review — no changed files in this target".to_owned(),
                 });
             }
         },
@@ -1367,88 +1416,190 @@ fn handle_chunk_list_key(
     }
 }
 
-/// Tour mode: enter/n/→ advance (marking the current stop's file viewed),
-/// p/← step back, esc (or the tour key) ends the tour. Movement and scroll
-/// keys still work so each stop can be read in place. Returns true when the
-/// tour should end.
-fn handle_tour_key(
+/// What the zen layer decided about a key press.
+enum ZenKeyOutcome {
+    /// The key was a zen navigation key and has been handled.
+    Consumed,
+    /// The walkthrough is over; the caller clears the layer.
+    End,
+    /// Not a zen key: let the normal-mode vocabulary handle it.
+    Fallthrough,
+}
+
+/// Zen layer keys, phase-aware. On the focus card and reading view:
+/// enter/n/→ advance (marking the current stop's file viewed; past the last
+/// stop the glance board opens), p/← step back, tab/o toggle the focus card
+/// against the dimmed reading view, g opens the glance board, esc (or the
+/// zen key) ends the walkthrough. Everything else falls through to the
+/// normal keymap so the full review vocabulary (comments, flags, context
+/// expansion, view toggles) keeps working mid-walkthrough. The glance board
+/// captures navigation keys itself: j/k move, enter jumps and ends zen,
+/// a bulk-marks every glance file viewed and finishes.
+fn handle_zen_key(
     key: KeyEvent,
-    tour: &mut TourState,
+    zen: &mut ZenState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
     tui_state: &mut TuiState,
-) -> bool {
+) -> ZenKeyOutcome {
+    if zen.phase == zen::ZenPhase::Glance {
+        return handle_zen_glance_key(key, zen, session, keymap, tui_state);
+    }
     match key.code {
         KeyCode::Esc => {
+            // Esc peels layers in order: an active range selection is more
+            // transient than the walkthrough, so cancel it first.
+            if session.has_active_diff_range() {
+                return ZenKeyOutcome::Fallthrough;
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: "tour ended".to_owned(),
+                message: "zen ended".to_owned(),
             });
-            return true;
+            return ZenKeyOutcome::End;
         }
         KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right => {
-            let Some(stop) = tour.current().cloned() else {
-                return true;
+            let Some(stop) = zen.current().cloned() else {
+                return ZenKeyOutcome::End;
             };
-            tour::mark_stop_viewed(session, &stop);
-            if tour.advance() {
-                if let Some(next) = tour.current().cloned() {
-                    tour::jump_to_stop(session, &next);
+            zen::mark_stop_viewed(session, &stop);
+            if zen.advance() {
+                if let Some(next) = zen.current().cloned() {
+                    zen::jump_to_stop(session, &next);
                 }
                 tui_state.notice = None;
-                return false;
+                return ZenKeyOutcome::Consumed;
+            }
+            // Past the last spotlight: the glance board finishes the
+            // briefing, so the boilerplate is skimmed rather than skipped.
+            if zen.has_glance() {
+                zen.phase = zen::ZenPhase::Glance;
+                tui_state.notice = None;
+                return ZenKeyOutcome::Consumed;
             }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: "tour complete — all stops visited".to_owned(),
+                message: "zen complete — all stops visited".to_owned(),
             });
-            return true;
+            return ZenKeyOutcome::End;
         }
         KeyCode::Char('p') | KeyCode::Left => {
-            if tour.back()
-                && let Some(stop) = tour.current().cloned()
+            if zen.back()
+                && let Some(stop) = zen.current().cloned()
             {
-                tour::jump_to_stop(session, &stop);
+                zen::jump_to_stop(session, &stop);
             }
-            return false;
+            return ZenKeyOutcome::Consumed;
+        }
+        KeyCode::Tab => {
+            zen.phase = match zen.phase {
+                zen::ZenPhase::Focus => zen::ZenPhase::Reading,
+                _ => zen::ZenPhase::Focus,
+            };
+            return ZenKeyOutcome::Consumed;
+        }
+        KeyCode::Char('.') => {
+            // Refocus: snap the cursor/scroll back to the current stop after
+            // wandering off it with line navigation.
+            if let Some(stop) = zen.current().cloned() {
+                zen::jump_to_stop(session, &stop);
+            }
+            return ZenKeyOutcome::Consumed;
+        }
+        KeyCode::Char('g') if zen.phase == zen::ZenPhase::Focus => {
+            if zen.has_glance() {
+                zen.phase = zen::ZenPhase::Glance;
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "nothing on the glance board — every change is a stop".to_owned(),
+                });
+            }
+            return ZenKeyOutcome::Consumed;
         }
         _ => {}
     }
-    // Free movement within a stop: delegate read-only navigation to the
-    // normal keymap; pressing the tour key again also ends the tour.
-    match keymap.action_for(&key) {
-        Some(Action::Tour) => {
+    // Pressing the zen key again also ends the walkthrough.
+    if keymap.action_for(&key) == Some(Action::Zen) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "zen ended".to_owned(),
+        });
+        return ZenKeyOutcome::End;
+    }
+    ZenKeyOutcome::Fallthrough
+}
+
+/// Glance board keys. Unlike the focus/reading surfaces the board captures
+/// everything (it is a bulk-skim screen, not a diff view): j/k/↑/↓ move,
+/// enter jumps to the selected entry in the normal UI and ends zen, `a`
+/// marks every glance file viewed and finishes, p/← returns to the last
+/// spotlight stop, esc ends.
+fn handle_zen_glance_key(
+    key: KeyEvent,
+    zen: &mut ZenState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> ZenKeyOutcome {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            zen.move_glance_selection(1);
+            ZenKeyOutcome::Consumed
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            zen.move_glance_selection(-1);
+            ZenKeyOutcome::Consumed
+        }
+        KeyCode::Enter => {
+            if let Some(row) = zen.selected_glance().cloned()
+                && let Some(part) = &row.part
+            {
+                session.jump_to_chunk_part(part);
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("zen ended — jumped to {}", part.path),
+                });
+            }
+            ZenKeyOutcome::End
+        }
+        KeyCode::Char('a') => {
+            zen::mark_glance_viewed(session, zen);
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: "tour ended".to_owned(),
+                message: format!(
+                    "zen complete — {} glance item(s) marked viewed",
+                    zen.glance_rows.len()
+                ),
             });
-            true
+            ZenKeyOutcome::End
         }
-        Some(Action::MoveDown) => {
-            session.move_diff_cursor(1);
-            false
+        KeyCode::Char('p') | KeyCode::Left => {
+            zen.phase = zen::ZenPhase::Focus;
+            if let Some(stop) = zen.current().cloned() {
+                zen::jump_to_stop(session, &stop);
+            }
+            ZenKeyOutcome::Consumed
         }
-        Some(Action::MoveUp) => {
-            session.move_diff_cursor(-1);
-            false
+        KeyCode::Esc => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "zen ended".to_owned(),
+            });
+            ZenKeyOutcome::End
         }
-        Some(Action::ScrollDown) => {
-            session.scroll_diff(12);
-            false
+        _ => {
+            if keymap.action_for(&key) == Some(Action::Zen) {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "zen ended".to_owned(),
+                });
+                return ZenKeyOutcome::End;
+            }
+            // The board is modal: swallow everything else so invisible
+            // normal-mode actions cannot fire underneath it.
+            ZenKeyOutcome::Consumed
         }
-        Some(Action::ScrollUp) => {
-            session.scroll_diff(-12);
-            false
-        }
-        Some(Action::DiffTop) => {
-            session.diff_scroll = 0;
-            false
-        }
-        Some(Action::DiffBottom) => {
-            session.scroll_diff_to_bottom();
-            false
-        }
-        _ => false,
     }
 }
 
@@ -2723,7 +2874,7 @@ diff --git a/b.rs b/b.rs
         assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Pending);
     }
 
-    fn tour_session() -> ReviewSession {
+    fn zen_session() -> ReviewSession {
         let mut session = snapshot_session(
             r#"diff --git a/a.rs b/a.rs
 --- a/a.rs
@@ -2743,6 +2894,8 @@ diff --git a/b.rs b/b.rs
             chunks: vec![crate::agent::ReviewChunk {
                 id: "c1".to_owned(),
                 title: "core flow".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                explanation: None,
                 rationale: Some("read together".to_owned()),
                 parts: vec![
                     crate::agent::ChunkPart {
@@ -2763,19 +2916,22 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn tour_advances_through_stops_marking_files_viewed() {
-        let mut session = tour_session();
+    fn zen_advances_through_stops_marking_files_viewed() {
+        let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut tui_state = TuiState::default();
-        let mut tour = TourState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session).unwrap();
 
         // Advancing past the first stop marks a.rs viewed and moves on.
-        assert!(!handle_tour_key(
-            KeyEvent::from(KeyCode::Enter),
-            &mut tour,
-            &mut session,
-            &keymap,
-            &mut tui_state,
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
         ));
         assert!(
             session
@@ -2786,34 +2942,260 @@ diff --git a/b.rs b/b.rs
                 .viewed
         );
         assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
 
-        // Advancing past the last stop ends the tour with a notice.
-        assert!(handle_tour_key(
-            KeyEvent::from(KeyCode::Enter),
-            &mut tour,
-            &mut session,
-            &keymap,
-            &mut tui_state,
+        // Advancing past the last stop ends the walkthrough with a notice.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::End
         ));
         assert!(session.files.iter().all(|file| file.viewed));
-        assert!(tui_state.notice.unwrap().message.contains("tour complete"));
+        assert!(tui_state.notice.unwrap().message.contains("zen complete"));
     }
 
     #[test]
-    fn tour_esc_returns_to_free_navigation_without_marking_viewed() {
-        let mut session = tour_session();
+    fn zen_esc_ends_the_walkthrough_without_marking_viewed() {
+        let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut tui_state = TuiState::default();
-        let mut tour = TourState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session).unwrap();
 
-        assert!(handle_tour_key(
-            KeyEvent::from(KeyCode::Esc),
-            &mut tour,
-            &mut session,
-            &keymap,
-            &mut tui_state,
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Esc),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::End
         ));
         assert!(session.files.iter().all(|file| !file.viewed));
+    }
+
+    #[test]
+    fn zen_esc_cancels_an_active_range_selection_first() {
+        let mut session = zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+        session.toggle_diff_range_selection();
+        assert!(session.has_active_diff_range());
+
+        // Esc falls through to the normal vocabulary, which cancels the
+        // range; the walkthrough survives.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Esc),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Fallthrough
+        ));
+    }
+
+    #[test]
+    fn zen_lets_review_keys_fall_through() {
+        let mut session = zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+
+        // A comment key is not a zen navigation key: the caller routes it
+        // to the normal-mode vocabulary.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('c')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Fallthrough
+        ));
+    }
+
+    #[test]
+    fn zen_key_ends_the_walkthrough() {
+        let mut session = zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('Z')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::End
+        ));
+        assert!(tui_state.notice.unwrap().message.contains("zen ended"));
+    }
+
+    /// A session where the spotlight covers only a.rs, leaving b.rs for the
+    /// glance board.
+    fn zen_session_with_glance() -> ReviewSession {
+        let mut session = zen_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "the important bit".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                rationale: None,
+                explanation: Some("This is the heart of the change.".to_owned()),
+                parts: vec![crate::agent::ChunkPart {
+                    path: "a.rs".to_owned(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                }],
+            }],
+            ..Default::default()
+        });
+        session
+    }
+
+    #[test]
+    fn zen_opens_the_glance_board_after_the_last_stop() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        assert_eq!(zen.len(), 1);
+        assert!(zen.has_glance());
+
+        // Advancing past the only stop lands on the glance board instead of
+        // ending, so the boilerplate is skimmed rather than skipped.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert_eq!(zen.phase, zen::ZenPhase::Glance);
+
+        // `a` bulk-acknowledges the glance items and finishes the briefing.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('a')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::End
+        ));
+        assert!(session.files.iter().all(|file| file.viewed));
+        assert!(tui_state.notice.unwrap().message.contains("zen complete"));
+    }
+
+    #[test]
+    fn zen_dot_refocuses_the_current_stop_after_wandering() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+        let home = session.diff_cursor;
+
+        // Wander off the stop with normal line navigation.
+        session.move_diff_cursor(-1);
+        assert_ne!(session.diff_cursor, home);
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('.')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert_eq!(session.diff_cursor, home);
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
+    }
+
+    #[test]
+    fn zen_tab_toggles_between_focus_card_and_reading_view() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        assert_eq!(zen.phase, zen::ZenPhase::Focus);
+
+        for expected in [zen::ZenPhase::Reading, zen::ZenPhase::Focus] {
+            assert!(matches!(
+                handle_zen_key(
+                    KeyEvent::from(KeyCode::Tab),
+                    &mut zen,
+                    &mut session,
+                    &keymap,
+                    &mut tui_state,
+                ),
+                ZenKeyOutcome::Consumed
+            ));
+            assert_eq!(zen.phase, expected);
+        }
+    }
+
+    #[test]
+    fn glance_board_enter_jumps_to_the_entry_and_ends_zen() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        zen.phase = zen::ZenPhase::Glance;
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::End
+        ));
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        assert!(tui_state.notice.unwrap().message.contains("jumped to b.rs"));
+    }
+
+    #[test]
+    fn glance_board_swallows_normal_mode_keys() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        zen.phase = zen::ZenPhase::Glance;
+
+        // 'c' would open a comment editor in normal mode; the board is a
+        // bulk-skim screen, so it must not fire invisibly underneath.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('c')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
     }
 
     const CONTEXT_EXPANSION_DIFF: &str = r#"diff --git a/a.txt b/a.txt
@@ -2938,7 +3320,7 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn starting_a_tour_without_chunks_shows_a_notice() {
+    fn starting_zen_with_no_files_shows_a_notice() {
         let mut session = snapshot_session("");
         let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
@@ -2950,7 +3332,7 @@ diff --git a/b.rs b/b.rs
         let mut mode = Mode::Normal;
 
         handle_normal_action(
-            Action::Tour,
+            Action::Zen,
             &mut session,
             &mut mode,
             &loader,
@@ -2959,12 +3341,50 @@ diff --git a/b.rs b/b.rs
         .unwrap();
 
         assert!(matches!(mode, Mode::Normal));
+        assert!(tui_state.zen.is_none());
         assert!(
             tui_state
                 .notice
                 .unwrap()
                 .message
-                .contains("no review chunks to tour")
+                .contains("nothing to review")
+        );
+    }
+
+    #[test]
+    fn starting_zen_without_chunks_tours_files_and_hides_the_pane() {
+        let mut session = zen_session();
+        session.review_chunks.clear();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::Zen,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(matches!(mode, Mode::Normal));
+        let zen = tui_state.zen.as_ref().unwrap();
+        assert_eq!(zen.len(), 2);
+        assert!(zen.restore_file_pane);
+        assert!(!session.file_pane_visible);
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("touring 2 file(s)")
         );
     }
 

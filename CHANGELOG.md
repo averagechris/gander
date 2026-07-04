@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Added
+
+- Zen mode (`T`/`Z`): a focused, agent-curated briefing with three
+  surfaces (docs/focused-diff-ux.md §6). The **focus card** is a
+  full-screen stop per spotlight chunk: only the critical lines,
+  extracted and vertically centered, with the agent's multi-sentence
+  `explanation` rendered beside them ("why this matters"). `tab` drops
+  into the **reading view** — the normal diff with out-of-range rows
+  dimmed and the full review vocabulary (comments, flags, context
+  expansion, view toggles) available. After the last stop (or via `g`)
+  the **glance board** lists every glance chunk *and* every file no
+  chunk covers on one skimmable screen with stats and one-liners;
+  `enter` jumps into the diff, `a` bulk-marks the lot viewed and
+  finishes. Agents label chunks `importance=spotlight` (capped at 3–7 by
+  the summon prompt, each requiring an explanation that teaches the
+  change) or `importance=glance` for the mechanical rest. Without an
+  agent, zen falls back to one stop per file. Retargeting the review
+  ends the briefing safely.
+
+### Changed
+
+- The `tour` keybinding is renamed `zen` (old configs with
+  `[keybindings] tour` keep working); the default binding gains `Z`
+  alongside `T`.
 
 ## v0.3.0 - 2026-07-03
 

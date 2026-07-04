@@ -65,10 +65,39 @@ impl FlagPriority {
 pub struct ReviewChunk {
     pub id: String,
     pub title: String,
+    /// How aggressively the UI should feature this chunk. Spotlight chunks
+    /// become zen walkthrough stops; glance chunks stay in the overview rail
+    /// so routine hunks can be acknowledged without being toured one-by-one.
+    #[serde(default)]
+    pub importance: ChunkImportance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// The teaching text for a spotlight stop: a few sentences that explain
+    /// what the code does, why the change exists, and what could break.
+    /// Rendered prominently on the zen focus card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     #[serde(default)]
     pub parts: Vec<ChunkPart>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChunkImportance {
+    /// Worth pausing on in the focused walkthrough.
+    #[default]
+    Spotlight,
+    /// Useful context, but not worth a dedicated tour stop.
+    Glance,
+}
+
+impl ChunkImportance {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spotlight => "spotlight",
+            Self::Glance => "glance",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,10 +251,20 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              3. Flag sections needing extra scrutiny with review/flag_section \
              (params: {{\"path\", \"line\", \"reason\", \"priority\": \
              critical|high|medium|low}}).\n\
-             4. Group the change into logical review units with \
-             review/set_chunks; the human steps through them in order in \
-             the TUI's tour mode, so give each chunk a title and a short \
-             rationale explaining why it should be read together.\n\
+             4. Curate a focused walkthrough with review/set_chunks. The human \
+             sees spotlight chunks as full-screen stops (a code excerpt plus \
+             your explanation) and skims everything else on a glance board, \
+             so budget their attention: pick at most 3-7 chunks with \
+             importance=spotlight — only the places a reviewer must actually \
+             understand (new invariants, tricky logic, security-sensitive \
+             paths, the heart of the change). Each spotlight needs a title, \
+             precise start_line/end_line parts covering only the critical \
+             lines (not whole files), and an `explanation` of 2-5 sentences \
+             that teaches the change: what the code does, why it changed, and \
+             what could break. Group ALL remaining hunks into a few \
+             importance=glance chunks (mechanical renames, boilerplate, \
+             config churn, test scaffolding) with a one-line rationale each; \
+             the human acknowledges those in bulk without visiting them.\n\
              5. For concrete issues, add review/draft_comment \
              (params: {{\"path\", \"line\", \"body\"}}); the human accepts or \
              discards these in the TUI.\n\
@@ -261,7 +300,9 @@ mod tests {
             chunks: vec![ReviewChunk {
                 id: "chunk-1".to_owned(),
                 title: "auth flow".to_owned(),
+                importance: ChunkImportance::Spotlight,
                 rationale: Some("spans handler and middleware".to_owned()),
+                explanation: Some("The middleware now refuses tokens without an audience claim; the handler assumes that invariant.".to_owned()),
                 parts: vec![ChunkPart {
                     path: "src/risky.rs".to_owned(),
                     start_line: Some(10),
@@ -367,7 +408,10 @@ mod tests {
         assert!(prompt.contains("gander acp"));
         assert!(prompt.contains("review/set_ordering"));
         assert!(prompt.contains("review/set_chunks"));
-        assert!(prompt.contains("tour mode"));
+        assert!(prompt.contains("importance=spotlight"));
+        assert!(prompt.contains("importance=glance"));
+        assert!(prompt.contains("explanation"));
+        assert!(prompt.contains("3-7"));
         assert!(prompt.contains("review/draft_comment"));
         assert!(prompt.contains("Do not modify the repository."));
     }

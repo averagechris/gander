@@ -71,12 +71,13 @@ status.
   *this* line" gap without making gander a chat app. Likely built on the
   harness's API or MCP sampling; requires gander to act as a spec-ACP
   *client* or harness-API client — deliberately deferred.
-- **tour mode** (`T`): step through agent-suggested chunks in order with
-  their rationale displayed; gander-native, reads the overlay, needs no live
+- **zen mode** (`T`/`Z`, formerly tour mode): a focused-walkthrough layer
+  stepping through agent-suggested chunks (or files, chunkless) with their
+  rationale displayed; gander-native, reads the overlay, needs no live
   agent.
 
 **Why.** The chat panel is where TUIs go to get complicated (focus
-management, scrollback, streaming layout). Tour mode + drafts + `current_focus`
+management, scrollback, streaming layout). Zen mode + drafts + `current_focus`
 in the harness chat cover most of the value at a fraction of the complexity.
 
 ## D3 (2026-07): one gander instance per workstream; cwd routing plus an instance registry

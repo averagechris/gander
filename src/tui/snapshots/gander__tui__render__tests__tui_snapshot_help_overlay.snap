@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2153
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
 ┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
@@ -27,9 +26,9 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │diff                                                        A  toggle agent-suggested order      │    │
 │     │         j/k  move cursor                                   F  agent-flagged sections            │    │
 │     │         d/u  scroll                                        S  agent review chunks               │    │
-│     │         g/G  jump top/bottom                               T  tour agent chunks in order        │    │
-│     │         ]/[  next/previous changed symbol                  D  agent draft comments              │    │
-│     │           o  changed symbol outline                                                             │    │
+│     │         g/G  jump top/bottom                               T  zen briefing (focus stops +       │    │
+│     │         ]/[  next/previous changed symbol       glance)                                         │    │
+│     │           o  changed symbol outline                        D  agent draft comments              │    │
 │     │           z  fold/unfold context lines                                                          │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘

@@ -73,6 +73,11 @@ pub struct ReviewSession {
     /// Whether the files pane is shown. Session-only; hiding it gives the
     /// diff the full width for focused reading (docs/focused-diff-ux.md §2).
     pub file_pane_visible: bool,
+    /// The zen-mode focus frame: the current stop's file and optional line
+    /// range. Diff rows outside it render dimmed so the stop visually pops.
+    /// Session-only view state owned by the TUI zen layer
+    /// (docs/focused-diff-ux.md §6); reset on retarget like all view state.
+    pub zen_focus: Option<ZenFocus>,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     /// Diffs with more lines than this render as a placeholder until the
@@ -162,6 +167,14 @@ impl ViewedFilter {
             Self::Viewed => Some("viewed only"),
         }
     }
+}
+
+/// What zen mode is currently framing: a file, optionally narrowed to a
+/// line range (new-side line numbers, matching [`crate::agent::ChunkPart`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZenFocus {
+    pub path: String,
+    pub lines: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +290,7 @@ impl ReviewSession {
             fold_context: false,
             diff_cues,
             file_pane_visible: true,
+            zen_focus: None,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
@@ -435,6 +449,22 @@ impl ReviewSession {
         if let Some(candidate) = self.next_unviewed_index(delta, None) {
             self.select_file_index(candidate);
         }
+    }
+
+    /// Visible file paths in display order (agent order when active,
+    /// tree order otherwise), ignoring directory fold state. Used by the
+    /// zen walkthrough's chunkless fallback (docs/focused-diff-ux.md §6).
+    pub fn ordered_visible_file_paths(&self) -> Vec<String> {
+        self.full_file_tree()
+            .rows
+            .iter()
+            .filter_map(|row| match row.kind {
+                FlatTreeRowKind::Directory { .. } => None,
+                FlatTreeRowKind::File { file_index } => {
+                    self.files.get(file_index).map(|file| file.path.clone())
+                }
+            })
+            .collect()
     }
 
     fn next_unviewed_index(&self, delta: isize, exclude: Option<usize>) -> Option<usize> {
@@ -685,7 +715,7 @@ impl ReviewSession {
             return None;
         }
         Some(format!(
-            "large change ({files} files, {lines} changed lines) — @ summons an agent to organize it, T tours the chunks"
+            "large change ({files} files, {lines} changed lines) — @ summons an agent to organize it, T starts a zen walkthrough"
         ))
     }
 
@@ -1838,6 +1868,8 @@ diff --git a/src/c.rs b/src/c.rs
             chunks: vec![crate::agent::ReviewChunk {
                 id: "c1".to_owned(),
                 title: "core".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                explanation: None,
                 rationale: None,
                 parts: vec![crate::agent::ChunkPart {
                     path: "src/app.rs".to_owned(),
@@ -1886,6 +1918,8 @@ diff --git a/src/c.rs b/src/c.rs
             chunks: vec![crate::agent::ReviewChunk {
                 id: "c1".to_owned(),
                 title: "core".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                explanation: None,
                 rationale: None,
                 parts: Vec::new(),
             }],

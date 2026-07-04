@@ -4,8 +4,9 @@ Design for the next round of diff-pane UX work: stronger visual change cues,
 a collapsible file pane, per-hunk context expansion, a side-by-side view, and
 the longer-term "zen mode" focused walkthrough these all feed into.
 
-Status: design agreed, implementation not started. Suggested sequencing is
-bottom-up by risk: cues → file pane → side-by-side → context expansion → zen.
+Status: implemented through §6 (zen mode shipped 2026-07). Suggested
+sequencing was bottom-up by risk: cues → file pane → side-by-side →
+context expansion → zen.
 
 ## Motivation
 
@@ -251,22 +252,50 @@ Interaction with `z` folding: folding applies to diff-emitted context only;
 expanded rows collapse back via `-` rather than participating in symbol
 folds. Keeps the two features orthogonal.
 
-## 6. Zen mode (direction, not yet designed)
+## 6. Zen mode (designed and shipped, 2026-07; refocused as a briefing)
 
-Everything above is deliberately composable into a focused walkthrough:
+Everything above composed into a focused briefing. The organizing idea:
+a reviewer's attention is the scarce resource, so the agent budgets it —
+a handful of full-screen *focus stops* that teach the critical lines,
+then everything mechanical acknowledged in bulk. Design decisions:
 
-- file pane hidden (§2), single hunk/chunk framed at a time with generous
-  context available on demand (§5), strongest visual cues (§1), unified or
-  split per change shape (§4)
-- ordering supplied by the reviewer (file order) or by an agent via the
-  existing ACP/MCP surface (`set_ordering`, review chunks, tour mode in
-  `tui/tour.rs`)
-- a progress line ("chunk 3/14 · auth refactor · 2 flagged") replacing the
-  tree as the orientation device
+- **Zen subsumes tour mode.** The old modal `Mode::Tour` is gone; `T`
+  (or `Z`) now enters zen. One walkthrough mode, not two.
+- **Three surfaces, one state machine** (`ZenPhase`):
+  - *Focus card* (default): a full-screen takeover per spotlight stop —
+    progress dots, the stop's critical lines excerpted ± 2 context rows
+    and vertically centered, and the agent's `explanation` in a "why
+    this matters" panel. One object of attention; no panes.
+  - *Reading view* (`tab`/`o` toggles): the normal review UI with
+    out-of-range rows dimmed (`Modifier::DIM`, render-time only) and a
+    bottom orientation panel. The full normal-mode vocabulary —
+    comments, flags, context expansion, split view, search — works here;
+    only stop-navigation keys are intercepted.
+  - *Glance board* (`g`, or automatically after the last stop): every
+    glance chunk plus every file no chunk part covers, one line each
+    (title, location, ±stats, rationale, viewed check). `enter` jumps
+    into the diff and ends zen; `a` bulk-marks all glance files viewed
+    and finishes. The board is modal — other keys are swallowed so
+    normal actions cannot fire invisibly.
+- **Attention budget is agent-enforced.** The summon prompt instructs
+  agents: at most 3–7 `importance=spotlight` chunks, each with precise
+  line ranges and a 2–5 sentence `explanation` that teaches the change;
+  ALL remaining hunks grouped into `importance=glance` chunks. Uncovered
+  files still land on the glance board, so the briefing always covers
+  the whole change even with a sloppy agent.
+- **Chunkless fallback.** With no agent chunks, stops are one-per-file in
+  display order (agent `set_ordering` respected). Zen is useful
+  standalone; agents upgrade it from "flip through files" to "be taught
+  the change".
+- **Framing.** The file pane hides on entry (visibility restored on
+  exit). In the reading view, rows outside the stop's range dim; the
+  cursor row never dims. Whole-file stops dim nothing.
+- **Safety.** Retargeting (t/p/b/R, stack step, operation picker)
+  invalidates the stops; the walkthrough ends with a notice rather than
+  touring a stale map. Runtime state is session-only, consistent with §3.
 
-The existing tour mode is the seed: zen mode is tour mode plus §1–§5 plus
-agent-curated chunk framing. It gets its own design pass once the building
-blocks land; no zen-specific code is part of this plan.
+Config: the `tour` keybinding is renamed `zen` (serde alias keeps old
+configs working); defaults are `T` and `Z`.
 
 ## Sequencing
 
@@ -276,7 +305,7 @@ blocks land; no zen-specific code is part of this plan.
 3. **Side-by-side** (§4) — render-side projection over unchanged model.
 4. **Context expansion** (§5) — the only piece needing new jj plumbing and
    the most cache/anchor care.
-5. **Zen mode** — separate design after 1–4 are in use.
+5. **Zen mode** — separate design after 1–4 are in use (done; see §6).
 
 Each step lands with unit tests (word-diff LCS via proptest, pairing,
 gap/expansion math) and insta snapshot coverage, and passes `jj lint`.

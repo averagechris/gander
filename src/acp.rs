@@ -26,7 +26,8 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{
-        AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, FlagPriority, ReviewChunk,
+        AgentDraft, AgentFlag, AgentOverlay, ChunkImportance, ChunkPart, DraftState, FlagPriority,
+        ReviewChunk,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -366,12 +367,27 @@ fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
             .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         title,
+        importance: parse_chunk_importance(value.get("importance").and_then(Value::as_str))?,
         rationale: value
             .get("rationale")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        explanation: value
+            .get("explanation")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         parts,
     })
+}
+
+fn parse_chunk_importance(value: Option<&str>) -> Result<ChunkImportance, String> {
+    match value.unwrap_or("spotlight").to_ascii_lowercase().as_str() {
+        "spotlight" | "tour" | "focus" | "important" => Ok(ChunkImportance::Spotlight),
+        "glance" | "skim" | "overview" | "routine" => Ok(ChunkImportance::Glance),
+        other => Err(format!(
+            "invalid chunk importance: {other} (expected spotlight or glance)"
+        )),
+    }
 }
 
 fn require_str(params: &Value, key: &str) -> Result<String, String> {

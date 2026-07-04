@@ -2,7 +2,7 @@
 //! files. The popup lists every chunk part and jumps to its location.
 
 use crate::{
-    agent::{ChunkPart, ReviewChunk},
+    agent::{ChunkImportance, ChunkPart, ReviewChunk},
     app::ReviewSession,
 };
 
@@ -16,7 +16,10 @@ pub(super) struct ChunkListState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ChunkRow {
     pub(super) title: String,
+    pub(super) importance: ChunkImportance,
     pub(super) rationale: Option<String>,
+    /// Teaching text for the zen focus card (spotlight chunks).
+    pub(super) explanation: Option<String>,
     pub(super) part: Option<ChunkPart>,
     /// Position of this part within its chunk, e.g. (1, 3) for "part 1/3".
     pub(super) part_position: Option<(usize, usize)>,
@@ -48,7 +51,9 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
     if chunk.parts.is_empty() {
         return vec![ChunkRow {
             title: chunk.title.clone(),
+            importance: chunk.importance,
             rationale: chunk.rationale.clone(),
+            explanation: chunk.explanation.clone(),
             part: None,
             part_position: None,
         }];
@@ -60,7 +65,9 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         .enumerate()
         .map(|(index, part)| ChunkRow {
             title: chunk.title.clone(),
+            importance: chunk.importance,
             rationale: chunk.rationale.clone(),
+            explanation: chunk.explanation.clone(),
             part: Some(part.clone()),
             part_position: (total > 1).then_some((index + 1, total)),
         })
@@ -89,12 +96,16 @@ mod tests {
                 ReviewChunk {
                     id: "c1".to_owned(),
                     title: "auth flow".to_owned(),
+                    importance: ChunkImportance::Spotlight,
+                    explanation: None,
                     rationale: Some("spans two files".to_owned()),
                     parts: vec![part("a.rs", 1, 10), part("b.rs", 5, 20)],
                 },
                 ReviewChunk {
                     id: "c2".to_owned(),
                     title: "docs only".to_owned(),
+                    importance: ChunkImportance::Glance,
+                    explanation: None,
                     rationale: None,
                     parts: Vec::new(),
                 },
@@ -119,6 +130,8 @@ mod tests {
             chunks: vec![ReviewChunk {
                 id: "c1".to_owned(),
                 title: "single".to_owned(),
+                importance: ChunkImportance::Spotlight,
+                explanation: None,
                 rationale: None,
                 parts: vec![part("a.rs", 1, 2)],
             }],

@@ -199,6 +199,7 @@ toggle-large-diff = ["L"]
 toggle-agent-order = ["A"]
 flag-list = ["F"]
 chunk-list = ["S"]
+zen = ["T", "Z"]
 draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
@@ -399,7 +400,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | `A` | toggle agent-suggested review ordering |
 | `F` | agent-flagged sections popup |
 | `S` | agent review chunks popup |
-| `T` | tour mode: step through agent chunks in order, marking files viewed |
+| `T` / `Z` | zen mode: focused walkthrough of agent chunks (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
@@ -495,9 +496,13 @@ opencode:
 
 When a review is large (thresholds under `[limits]`), the TUI nudges you
 that an agent can organize it: summon one with `@` or ask your harness,
-then press `T` to **tour** the suggested chunks in order — each stop shows
-the agent's rationale and advancing marks the file viewed; Esc returns to
-free navigation.
+then press `T` (or `Z`) for **zen mode** — a focused walkthrough of the
+suggested chunks in order. The file pane hides, rows outside the current
+stop dim so the chunk pops, and a bottom panel shows progress and the
+agent's rationale; advancing (Enter/`n`) marks the file viewed. Without
+agent chunks, zen walks the files in review order instead. Every normal
+review key (comments, flags, context expansion, view toggles) keeps
+working mid-walkthrough; Esc returns to free navigation.
 
 See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:
 MCP registration for opencode/Claude Code/Codex, the split-pane workflow,
