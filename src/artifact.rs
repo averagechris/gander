@@ -781,6 +781,8 @@ mod tests {
             end_line: None,
             anchor: None,
             body: "already here".to_owned(),
+            kind: None,
+            action: None,
             state: crate::state::CommentState::default(),
             created_at: chrono::DateTime::parse_from_rfc3339("2026-06-30T00:00:00Z")
                 .unwrap()

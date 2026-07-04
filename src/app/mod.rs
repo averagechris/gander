@@ -57,6 +57,7 @@ pub struct ReviewSession {
     pub target: ReviewTarget,
     pub files: Vec<ReviewFile>,
     pub comments: Vec<Comment>,
+    pub sessions: Vec<crate::state::ReviewSession>,
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
@@ -263,6 +264,7 @@ impl ReviewSession {
         let ReviewState {
             files,
             mut comments,
+            sessions,
             ..
         } = state;
         let diff_is_empty = diff.files.is_empty();
@@ -292,6 +294,7 @@ impl ReviewSession {
                 })
                 .collect(),
             comments,
+            sessions,
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
@@ -345,6 +348,7 @@ impl ReviewSession {
                 })
                 .collect(),
             comments: self.comments.clone(),
+            sessions: self.sessions.clone(),
         };
         *self = Self::new_with_options(
             self.repo.clone(),
@@ -1474,6 +1478,8 @@ impl ReviewSession {
                 .filter(|end_line| Some(*end_line) != anchor.line()),
             anchor: Some(anchor),
             body,
+            kind: None,
+            action: None,
             state: CommentState::default(),
             created_at,
         });
@@ -1570,6 +1576,7 @@ impl ReviewSession {
                 })
                 .collect(),
             comments: self.comments.clone(),
+            sessions: self.sessions.clone(),
         }
     }
 
@@ -1935,6 +1942,8 @@ diff --git a/src/c.rs b/src/c.rs
                 end_line: None,
                 anchor: None,
                 body: "old review".to_owned(),
+                kind: None,
+                action: None,
                 state: CommentState::Draft,
                 created_at: Utc::now(),
             }],
@@ -1950,6 +1959,34 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert!(session.files.is_empty());
         assert!(session.comments.is_empty());
+    }
+
+    #[test]
+    fn tui_state_snapshots_preserve_durable_sessions() {
+        let durable = crate::state::ReviewSession {
+            id: "review-1".to_owned(),
+            title: Some("CLI session".to_owned()),
+            ..Default::default()
+        };
+        let state = ReviewState {
+            sessions: vec![durable.clone()],
+            ..Default::default()
+        };
+        let diff = DiffSet::parse(
+            "diff --git a/src/app.rs b/src/app.rs\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff.clone(),
+            state,
+        );
+
+        assert_eq!(session.to_state().sessions, vec![durable.clone()]);
+        session.replace_diff(ReviewTarget::trunk_to_current(), diff);
+        assert_eq!(session.into_state().sessions, vec![durable]);
     }
 
     #[test]

@@ -4400,6 +4400,8 @@ diff --git a/tests/app.rs b/tests/app.rs
             end_line: None,
             anchor: Some(anchor.clone()),
             body: "first note".to_owned(),
+            kind: None,
+            action: None,
             state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
         });
@@ -4410,6 +4412,8 @@ diff --git a/tests/app.rs b/tests/app.rs
             end_line: None,
             anchor: Some(anchor),
             body: "second note".to_owned(),
+            kind: None,
+            action: None,
             state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
         });

@@ -12,14 +12,17 @@ mod jj;
 mod mcp;
 mod paths;
 mod registry;
+mod review;
 mod state;
 mod syntax;
 mod tui;
+mod walkthrough;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{Context, eyre};
+use serde::Serialize;
 
 use crate::{
     app::ReviewSession,
@@ -32,7 +35,11 @@ use crate::{
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::{JjBackend, JjCliBackend, ReviewTarget},
     paths::{PathsEnv, WorkspacePaths},
-    state::ReviewState,
+    review::SessionTargetSpec,
+    state::{
+        ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
+        WalkthroughStep,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -127,6 +134,173 @@ enum Command {
     Paths,
     /// Print a terse summary of the current change.
     Summary,
+    /// Machine-readable file queries for the current review session.
+    Files {
+        #[command(subcommand)]
+        command: FilesCommand,
+    },
+    /// Machine-readable hunk queries for the current review session.
+    Hunks {
+        #[command(subcommand)]
+        command: HunksCommand,
+    },
+    /// Machine-readable comment queries for the current review session.
+    Comments {
+        #[command(subcommand)]
+        command: CommentsCommand,
+    },
+    /// Durable review session lifecycle commands.
+    Reviews {
+        #[command(subcommand)]
+        command: ReviewsCommand,
+    },
+    /// Machine-readable task queries for the current review session.
+    Tasks {
+        #[command(subcommand)]
+        command: TasksCommand,
+    },
+    /// Walkthrough queries and exports over persisted local review state.
+    Walkthrough {
+        #[command(subcommand)]
+        command: WalkthroughCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FilesCommand {
+    /// List changed files as JSON.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum HunksCommand {
+    /// List hunks as JSON. Optionally narrow to one file.
+    List {
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Show one hunk as JSON by id (`<path>:<index>`, as returned by list).
+    Show { id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum CommentsCommand {
+    /// List comments as JSON.
+    List,
+    Add {
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line")]
+        end_line: Option<usize>,
+        #[arg(long)]
+        body: String,
+        #[arg(long, value_enum)]
+        kind: Option<CommentKindArg>,
+        #[arg(long, value_enum)]
+        action: Option<ActionIntentArg>,
+    },
+    Resolve {
+        id: String,
+    },
+    SetState {
+        id: String,
+        #[arg(long, value_enum)]
+        state: CommentStateArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewsCommand {
+    Create {
+        #[arg(long)]
+        title: Option<String>,
+    },
+    List,
+    Show {
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TasksCommand {
+    /// List tasks as JSON. Currently returns comment-backed todo items.
+    List,
+    Add {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long, value_enum)]
+        action: Option<ActionIntentArg>,
+        #[arg(long = "comment")]
+        comment: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        line: Option<usize>,
+    },
+    Complete {
+        id: String,
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    Reopen {
+        id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WalkthroughCommand {
+    /// Export persisted walkthroughs as Markdown.
+    Export,
+    AddStep {
+        #[arg(long)]
+        title: String,
+        #[arg(long = "file")]
+        file: Option<String>,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line")]
+        end_line: Option<usize>,
+        #[arg(long)]
+        symbol: Option<String>,
+        #[arg(long)]
+        why: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
+    RemoveStep {
+        id: String,
+    },
+    MoveStep {
+        id: String,
+        #[arg(long = "to")]
+        to: usize,
+    },
+    Show,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CommentKindArg {
+    Note,
+    Issue,
+    Question,
+    Praise,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ActionIntentArg {
+    Fix,
+    Explain,
+    Test,
+    FollowUp,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CommentStateArg {
+    Draft,
+    Todo,
+    Resolved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -388,9 +562,347 @@ fn main() -> color_eyre::Result<()> {
                 );
             }
         }
+        Command::Files { command } => match command {
+            FilesCommand::List => print_json(&session_files_json(&session))?,
+        },
+        Command::Hunks { command } => match command {
+            HunksCommand::List { file } => {
+                print_json(&session_hunks_json(&session, file.as_deref()))?
+            }
+            HunksCommand::Show { id } => {
+                let hunk = session_hunk_json(&session, &id)
+                    .ok_or_else(|| eyre!("unknown hunk id `{id}`"))?;
+                print_json(&hunk)?;
+            }
+        },
+        Command::Comments { command } => match command {
+            CommentsCommand::List => print_json(&session_comments_json(&session))?,
+            CommentsCommand::Add {
+                path,
+                line,
+                end_line,
+                body,
+                kind,
+                action,
+            } => {
+                ensure_diff_file(&session, &path)?;
+                let spec = session_target_spec(&repo, &session.target);
+                let id = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
+                let comment = review::add_comment(
+                    &mut state.sessions[idx],
+                    &mut state.comments,
+                    review::NewComment {
+                        path,
+                        line,
+                        end_line,
+                        body,
+                        kind: kind.map(Into::into),
+                        action: action.map(Into::into),
+                    },
+                );
+                state.save(&state_path)?;
+                print_json(&comment)?;
+            }
+            CommentsCommand::Resolve { id } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let comment =
+                    review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)?;
+                state.save(&state_path)?;
+                print_json(&comment)?;
+            }
+            CommentsCommand::SetState {
+                id,
+                state: new_state,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let comment = review::set_comment_state(
+                    &mut state.sessions[idx],
+                    &mut state.comments,
+                    &id,
+                    new_state.into(),
+                )?;
+                state.save(&state_path)?;
+                print_json(&comment)?;
+            }
+        },
+        Command::Reviews { command } => match command {
+            ReviewsCommand::Create { title } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let review_session =
+                    review::ensure_session(&mut state, &spec, title.as_deref()).clone();
+                state.save(&state_path)?;
+                print_json(&review_session)?;
+            }
+            ReviewsCommand::List => {
+                print_json(&serde_json::json!({ "sessions": review::list_sessions(&state) }))?
+            }
+            ReviewsCommand::Show { id } => print_json(review::find_session(&state, &id)?)?,
+        },
+        Command::Tasks { command } => match command {
+            TasksCommand::List => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None).clone();
+                print_json(
+                    &serde_json::json!({ "tasks": review::list_tasks(&rs, &state.comments) }),
+                )?;
+            }
+            TasksCommand::Add {
+                title,
+                body,
+                action,
+                comment,
+                path,
+                line,
+            } => {
+                if let Some(path) = path.as_deref() {
+                    ensure_diff_file(&session, path)?;
+                }
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let target = path.map(|file| StateReviewTarget {
+                    file: Some(file),
+                    line,
+                    ..StateReviewTarget::default()
+                });
+                let task = review::add_task(
+                    rs,
+                    title,
+                    body,
+                    action.map(Into::into).unwrap_or_default(),
+                    comment,
+                    target,
+                );
+                state.save(&state_path)?;
+                print_json(&task)?;
+            }
+            TasksCommand::Complete { id, summary } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let task = review::complete_task(rs, &id, summary)?;
+                state.save(&state_path)?;
+                print_json(&task)?;
+            }
+            TasksCommand::Reopen { id } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let task = review::reopen_task(rs, &id)?;
+                state.save(&state_path)?;
+                print_json(&task)?;
+            }
+        },
+        Command::Walkthrough { command } => match command {
+            WalkthroughCommand::Export => {
+                print!("{}", walkthrough::render_walkthroughs_markdown(&state));
+            }
+            WalkthroughCommand::AddStep {
+                title,
+                file,
+                line,
+                end_line,
+                symbol,
+                why,
+                body,
+            } => {
+                if let Some(file) = file.as_deref() {
+                    ensure_diff_file(&session, file)?;
+                }
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let step = review::add_walkthrough_step(
+                    rs,
+                    WalkthroughStep {
+                        id: String::new(),
+                        title: Some(title),
+                        body,
+                        why,
+                        target: StateReviewTarget {
+                            file,
+                            line,
+                            end_line,
+                            symbol,
+                            ..StateReviewTarget::default()
+                        },
+                    },
+                );
+                state.save(&state_path)?;
+                print_json(&step)?;
+            }
+            WalkthroughCommand::RemoveStep { id } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let step = review::remove_walkthrough_step(rs, &id)?;
+                state.save(&state_path)?;
+                print_json(&step)?;
+            }
+            WalkthroughCommand::MoveStep { id, to } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let step = review::move_walkthrough_step(rs, &id, to)?;
+                state.save(&state_path)?;
+                print_json(&step)?;
+            }
+            WalkthroughCommand::Show => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None).clone();
+                print_json(&serde_json::json!({ "walkthroughs": rs.walkthroughs }))?;
+            }
+        },
     }
 
     Ok(())
+}
+
+fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {
+    let stdout = std::io::stdout();
+    serde_json::to_writer_pretty(stdout.lock(), value)?;
+    println!();
+    Ok(())
+}
+
+fn session_target_spec(repo: &std::path::Path, target: &ReviewTarget) -> SessionTargetSpec {
+    SessionTargetSpec {
+        repo: Some(repo.display().to_string()),
+        base: Some(target.base.clone()),
+        revision: Some(target.rev.clone()),
+        revset: Some(target.to_string()),
+    }
+}
+
+fn ensure_diff_file(session: &ReviewSession, path: &str) -> color_eyre::Result<()> {
+    if session.files.iter().any(|file| file.path == path) {
+        Ok(())
+    } else {
+        Err(eyre!("`{path}` is not a file in the current diff"))
+    }
+}
+
+impl From<CommentKindArg> for CommentKind {
+    fn from(value: CommentKindArg) -> Self {
+        match value {
+            CommentKindArg::Note => Self::Note,
+            CommentKindArg::Issue => Self::Issue,
+            CommentKindArg::Question => Self::Question,
+            CommentKindArg::Praise => Self::Praise,
+        }
+    }
+}
+impl From<ActionIntentArg> for ActionIntent {
+    fn from(value: ActionIntentArg) -> Self {
+        match value {
+            ActionIntentArg::Fix => Self::Fix,
+            ActionIntentArg::Explain => Self::Explain,
+            ActionIntentArg::Test => Self::Test,
+            ActionIntentArg::FollowUp => Self::FollowUp,
+        }
+    }
+}
+impl From<CommentStateArg> for CommentState {
+    fn from(value: CommentStateArg) -> Self {
+        match value {
+            CommentStateArg::Draft => Self::Draft,
+            CommentStateArg::Todo => Self::Todo,
+            CommentStateArg::Resolved => Self::Resolved,
+        }
+    }
+}
+
+fn session_files_json(session: &ReviewSession) -> serde_json::Value {
+    serde_json::json!({
+        "files": session.files.iter().map(|file| serde_json::json!({
+            "path": file.path,
+            "old_path": file.old_path,
+            "status": file.status.to_string(),
+            "additions": file.additions,
+            "deletions": file.deletions,
+            "generated": file.generated,
+            "viewed": file.viewed,
+            "fingerprint": file.fingerprint,
+            "hunk_count": file.diff.hunks.len(),
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn hunk_id(path: &str, index: usize) -> String {
+    format!("{path}:{index}")
+}
+
+fn session_hunks_json(session: &ReviewSession, file_filter: Option<&str>) -> serde_json::Value {
+    let hunks = session
+        .files
+        .iter()
+        .filter(|file| file_filter.is_none_or(|filter| file.path == filter))
+        .flat_map(|file| {
+            file.diff
+                .hunks
+                .iter()
+                .enumerate()
+                .map(move |(index, hunk)| {
+                    serde_json::json!({
+                        "id": hunk_id(&file.path, index),
+                        "file": file.path,
+                        "index": index,
+                        "old_start": hunk.old_start,
+                        "old_len": hunk.old_len,
+                        "new_start": hunk.new_start,
+                        "new_len": hunk.new_len,
+                        "header": hunk.header,
+                        "line_count": hunk.lines.len(),
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "hunks": hunks })
+}
+
+fn session_hunk_json(session: &ReviewSession, id: &str) -> Option<serde_json::Value> {
+    let (path, index) = id.rsplit_once(':')?;
+    let index: usize = index.parse().ok()?;
+    let file = session.files.iter().find(|file| file.path == path)?;
+    let hunk = file.diff.hunks.get(index)?;
+    Some(serde_json::json!({
+        "id": id,
+        "file": file.path,
+        "index": index,
+        "old_start": hunk.old_start,
+        "old_len": hunk.old_len,
+        "new_start": hunk.new_start,
+        "new_len": hunk.new_len,
+        "header": hunk.header,
+        "lines": hunk.lines,
+    }))
+}
+
+fn session_comments_json(session: &ReviewSession) -> serde_json::Value {
+    serde_json::json!({ "comments": session.comments })
+}
+
+#[cfg(test)]
+fn session_tasks_json(session: &ReviewSession) -> serde_json::Value {
+    let tasks = session
+        .comments
+        .iter()
+        .filter(|comment| comment.state == crate::state::CommentState::Todo)
+        .map(|comment| {
+            serde_json::json!({
+                "id": comment.id,
+                "source": "comment",
+                "comment_id": comment.id,
+                "path": comment.path,
+                "line": comment.line,
+                "end_line": comment.end_line,
+                "status": "open",
+                "kind": comment.kind,
+                "action": comment.action,
+                "body": comment.body,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "tasks": tasks })
 }
 
 fn merge_generated(
@@ -597,6 +1109,7 @@ impl From<TuiArtifactOnQuitArg> for TuiArtifactOnQuitConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn merge_ignores_appends_cli_to_config() {
@@ -754,5 +1267,58 @@ mod tests {
         assert_eq!(request.format, OutputFormat::Json);
         assert_eq!(request.profile, OutputProfile::Agent);
         assert_eq!(request.destination, TuiArtifactDestination::Stdout);
+    }
+
+    fn sample_session() -> ReviewSession {
+        let diff = DiffSet::parse(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,3 @@\n fn main() {\n-    old();\n+    new();\n+    extra();\n }",
+        )
+        .unwrap();
+        let mut state = ReviewState::default();
+        state.comments.push(crate::state::Comment {
+            id: "c1".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            line: Some(2),
+            end_line: None,
+            anchor: None,
+            body: "please fix".to_owned(),
+            kind: Some(crate::state::CommentKind::Issue),
+            action: Some(crate::state::ActionIntent::Fix),
+            state: crate::state::CommentState::Todo,
+            created_at: chrono::Utc.with_ymd_and_hms(2026, 7, 4, 0, 0, 0).unwrap(),
+        });
+        ReviewSession::new(
+            PathBuf::from("/repo"),
+            ReviewTarget::new("main".to_owned(), "@".to_owned()),
+            diff,
+            state,
+        )
+    }
+
+    #[test]
+    fn files_json_has_stable_list_shape() {
+        let json = session_files_json(&sample_session());
+
+        assert_eq!(json["files"][0]["path"], "src/lib.rs");
+        assert_eq!(json["files"][0]["status"], "mod");
+        assert_eq!(json["files"][0]["hunk_count"], 1);
+    }
+
+    #[test]
+    fn hunks_json_can_list_and_show_by_id() {
+        let session = sample_session();
+        let list = session_hunks_json(&session, None);
+
+        assert_eq!(list["hunks"][0]["id"], "src/lib.rs:0");
+        let shown = session_hunk_json(&session, "src/lib.rs:0").unwrap();
+        assert_eq!(shown["lines"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn comments_and_tasks_json_use_existing_comment_state() {
+        let session = sample_session();
+
+        assert_eq!(session_comments_json(&session)["comments"][0]["id"], "c1");
+        assert_eq!(session_tasks_json(&session)["tasks"][0]["comment_id"], "c1");
     }
 }

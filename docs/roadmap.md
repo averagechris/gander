@@ -238,28 +238,31 @@ Status: designed, in progress.
 
 Design: [docs/vision.md](vision.md).
 
-Status: planned.
+Status: in progress. First persistence slice landed: serializable session,
+task, walkthrough, comment kind, and action-intent fields are now part of
+`ReviewState` with backward-compatible deserialization.
 
-- [ ] promote the durable session to Gander's core product object, above raw
+- [x] promote the durable session to Gander's core product object, above raw
   diff/artifact exports
-- [ ] model comments, action-tagged review tasks, walkthrough steps, authors,
-  timestamps, stable targets, and migration-friendly versioning in the domain
-  layer
-- [ ] keep existing viewed-state/comment/artifact behavior working through the
+- [x] model comments, action-tagged review tasks, walkthrough steps, stable
+  targets, and migration-friendly defaults in the state layer
+- [ ] add reviewer/author metadata and richer session lifecycle commands
+- [x] keep existing viewed-state/comment/artifact behavior working through the
   new session model
-- [ ] maintain the product boundary: write Gander review state, not code state
+- [x] maintain the product boundary: write Gander review state, not code state
   or remote-provider state
 
 ## Milestone 12: complete CLI automation surface
 
-Status: planned.
+Status: in progress. First JSON query slice landed for files, hunks, comments,
+comment-backed tasks, and Markdown walkthrough export.
 
 - [ ] add scriptable commands for sessions, files, hunks, comments, tasks,
   walkthroughs, and exports
-- [ ] provide stable `--json` output suitable for harnesses and agents
+- [x] provide initial stable JSON output suitable for harnesses and agents
 - [ ] ensure every MCP capability has a documented CLI equivalent backed by the
   same core service
-- [ ] make CLI automation usable without MCP, for users who avoid MCP context
+- [x] make CLI automation usable without MCP, for users who avoid MCP context
   pollution
 
 ## Milestone 13: TUI over the shared session core
