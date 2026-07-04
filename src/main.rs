@@ -17,6 +17,7 @@ mod state;
 mod syntax;
 mod tui;
 mod walkthrough;
+mod web_export;
 
 use std::path::PathBuf;
 
@@ -307,6 +308,7 @@ enum CommentStateArg {
 enum OutputFormat {
     Json,
     Markdown,
+    Html,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -437,18 +439,30 @@ fn main() -> color_eyre::Result<()> {
             state = session.clone().into_state();
             state.save(&state_path)?;
             if let Some(request) = artifact_request {
-                let format = match request.format {
-                    OutputFormat::Json => ArtifactFormat::Json,
-                    OutputFormat::Markdown => ArtifactFormat::Markdown,
-                };
-                let profile = ArtifactProfile::from(request.profile);
-                match request.destination {
-                    TuiArtifactDestination::File(path) => {
-                        write_artifact(&session, format, profile, &path)?
+                if request.format == OutputFormat::Html {
+                    let html = web_export::render_html(&session, &state);
+                    match request.destination {
+                        TuiArtifactDestination::File(path) => std::fs::write(&path, html)
+                            .with_context(|| {
+                                format!("failed to write artifact {}", path.display())
+                            })?,
+                        TuiArtifactDestination::Stdout => print!("{html}"),
                     }
-                    TuiArtifactDestination::Stdout => {
-                        let stdout = std::io::stdout();
-                        write_artifact_to(&session, format, profile, stdout.lock())?;
+                } else {
+                    let format = match request.format {
+                        OutputFormat::Json => ArtifactFormat::Json,
+                        OutputFormat::Markdown => ArtifactFormat::Markdown,
+                        OutputFormat::Html => unreachable!(),
+                    };
+                    let profile = ArtifactProfile::from(request.profile);
+                    match request.destination {
+                        TuiArtifactDestination::File(path) => {
+                            write_artifact(&session, format, profile, &path)?
+                        }
+                        TuiArtifactDestination::Stdout => {
+                            let stdout = std::io::stdout();
+                            write_artifact_to(&session, format, profile, stdout.lock())?;
+                        }
                     }
                 }
             }
@@ -460,18 +474,28 @@ fn main() -> color_eyre::Result<()> {
         } => {
             let (format, destination, profile) =
                 resolve_export_options(&repo, &config, format, output, profile);
-            let format = match format {
-                OutputFormat::Json => ArtifactFormat::Json,
-                OutputFormat::Markdown => ArtifactFormat::Markdown,
-            };
-            let profile = ArtifactProfile::from(profile);
-            match destination {
-                TuiArtifactDestination::File(path) => {
-                    write_artifact(&session, format, profile, &path)?
+            if format == OutputFormat::Html {
+                let html = web_export::render_html(&session, &state);
+                match destination {
+                    TuiArtifactDestination::File(path) => std::fs::write(&path, html)
+                        .with_context(|| format!("failed to write artifact {}", path.display()))?,
+                    TuiArtifactDestination::Stdout => print!("{html}"),
                 }
-                TuiArtifactDestination::Stdout => {
-                    let stdout = std::io::stdout();
-                    write_artifact_to(&session, format, profile, stdout.lock())?;
+            } else {
+                let format = match format {
+                    OutputFormat::Json => ArtifactFormat::Json,
+                    OutputFormat::Markdown => ArtifactFormat::Markdown,
+                    OutputFormat::Html => unreachable!(),
+                };
+                let profile = ArtifactProfile::from(profile);
+                match destination {
+                    TuiArtifactDestination::File(path) => {
+                        write_artifact(&session, format, profile, &path)?
+                    }
+                    TuiArtifactDestination::Stdout => {
+                        let stdout = std::io::stdout();
+                        write_artifact_to(&session, format, profile, stdout.lock())?;
+                    }
                 }
             }
         }
@@ -1055,6 +1079,7 @@ impl From<ArtifactFormatConfig> for OutputFormat {
         match value {
             ArtifactFormatConfig::Json => Self::Json,
             ArtifactFormatConfig::Markdown => Self::Markdown,
+            ArtifactFormatConfig::Html => Self::Html,
         }
     }
 }
@@ -1082,6 +1107,7 @@ impl From<OutputFormat> for ArtifactFormatConfig {
         match value {
             OutputFormat::Json => Self::Json,
             OutputFormat::Markdown => Self::Markdown,
+            OutputFormat::Html => Self::Html,
         }
     }
 }

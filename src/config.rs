@@ -250,6 +250,7 @@ pub struct KeybindingsConfig {
 pub enum ArtifactFormatConfig {
     Json,
     Markdown,
+    Html,
 }
 
 /// Artifact audience: agent adds raw hunks and comment excerpts to JSON.
@@ -772,6 +773,7 @@ impl ArtifactConfig {
         let extension = match format {
             ArtifactFormatConfig::Json => "json",
             ArtifactFormatConfig::Markdown => "md",
+            ArtifactFormatConfig::Html => "html",
         };
         let output_dir = if output_dir.is_absolute() {
             output_dir.clone()
