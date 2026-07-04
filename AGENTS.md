@@ -1,10 +1,24 @@
 # Coding Agent Guidelines for gander
 
-gander is a fast jj (Jujutsu) change-review TUI: take a gander at your jj
-changes with durable viewed-state, comments, and exportable review
-artifacts. Rust (edition 2024), ratatui + crossterm UI, tree-sitter syntax
-highlighting, and an rmcp-based MCP server. Canonical repo:
+gander is a fast, local-first jj (Jujutsu) review workspace: take a gander at
+jj-visible changes with durable review sessions, viewed-state, comments,
+walkthroughs, action-oriented review tasks, and exportable artifacts. Rust
+(edition 2024), ratatui + crossterm UI, tree-sitter syntax highlighting, and an
+rmcp-based MCP server. Canonical repo:
 [git.sr.ht/~averagechris/gander](https://git.sr.ht/~averagechris/gander).
+
+Product direction lives in `docs/vision.md`. Preserve these boundaries unless
+the user explicitly changes the vision:
+
+- Gander reads code state and writes review state. Do not add direct
+  GitHub/GitLab/forge fetching or posting flows for now.
+- Do not mutate the user's code workspace as a side effect of review state
+  operations. External harnesses/agents may edit/fetch/post; Gander should
+  inspect jj-visible work and persist local review sessions.
+- CLI parity is mandatory: every MCP/TUI/future-web capability should have a
+  scriptable CLI equivalent over the same core business logic.
+- MCP is optional, not privileged; many users prefer CLI automation to avoid
+  MCP context pollution.
 
 ## Build, lint, and test
 

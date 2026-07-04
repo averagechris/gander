@@ -2,7 +2,11 @@
 
 Current schema version: `4`.
 
-Artifacts are intentionally simple and serializable. JSON is the canonical tool format; Markdown is rendered for humans.
+Artifacts are intentionally simple and serializable. JSON is the canonical tool
+format; Markdown is rendered for humans. The schema is evolving toward the
+durable review-session model described in docs/vision.md: comments, tasks, and
+walkthroughs are local review state that external harnesses may consume or
+publish elsewhere.
 
 ## Profiles
 
@@ -112,6 +116,10 @@ Notes:
 ## Planned schema additions
 
 - explicit artifact `source` block with jj operation/change IDs
+- first-class review session id/subject metadata
+- walkthrough steps anchored to files/hunks/ranges/symbols
+- action-tagged review tasks derived from comments or created directly
 - per-file ignored/collapsed metadata
 - reviewer identity/profile metadata
-- review disposition (`comment`, `approve`, `needs-work`, etc.)
+- review disposition/intent (`comment`, `approve`, `needs-work`, etc.) as
+  local state, not a direct forge-posting integration

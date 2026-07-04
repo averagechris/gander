@@ -1,12 +1,41 @@
 # Harness setup recipes
 
 How to wire gander into an agent harness (opencode, Claude Code, Codex,
-Zed, ...) so the target flow works with zero protocol knowledge: open
-gander in a workstream, see the change is large, and have your
-already-running harness organize and narrate the review.
+Zed, shell scripts, ...) so the target flow works with zero forge-specific
+behavior in gander: prepare work in a jj workspace, open gander there, and let
+your harness organize, narrate, act on, or publish review state externally.
 
-The agent-facing surface is MCP (`gander mcp`, docs/decisions.md D5).
-Everything below assumes `gander` is on `PATH`.
+The baseline automation surface is the CLI, with MCP as an optional adapter
+(`gander mcp`, docs/decisions.md D7). Everything below assumes `gander` is on
+`PATH`.
+
+## Boundary: harness prepares and acts; gander reviews
+
+Gander expects the change to already be visible to jj in the current
+workspace. A user or harness can fetch a teammate branch, prepare an agent
+workspace, post selected comments to a forge, or edit files in response to
+tasks. Gander itself should not fetch PRs, mutate code, or post remote reviews;
+it persists local review sessions, comments, tasks, walkthroughs, and exports.
+
+## CLI-first automation
+
+Prefer the CLI when you want explicit, low-context interactions or when MCP
+tool definitions would pollute an agent prompt. Commands should expose the same
+capabilities as MCP tools over the same core business logic.
+
+Representative future shape (see docs/vision.md milestones 11-14):
+
+```sh
+gander reviews list --json
+gander reviews show <id> --json
+gander hunks show --review <id> --hunk <hunk-id> --json
+gander comments list --review <id> --status open --json
+gander tasks list --review <id> --status open --json
+gander tasks complete <task-id> --summary "Handled by agent workspace changes"
+gander walkthrough export --review <id> --format markdown
+```
+
+Use MCP when your harness benefits from typed tools and live `current_focus`.
 
 ## How routing works (why cwd matters)
 
@@ -23,7 +52,7 @@ to its per-instance socket. That means:
 - without a running TUI, tools serve a snapshot loaded at startup — still
   useful for headless review passes.
 
-Tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
+Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (file/line/hunk the human is looking at right now),
 `stack_changes` (the `trunk()..@` stack, oldest first — treat it like
 stacked PRs), `change_diff` (one change against its parent),
@@ -36,7 +65,10 @@ via `S` and zen mode `T`/`Z`, drafts via `D`).
 `gander paths` prints every resolved location (state dir, overlay, socket
 pattern, registry) when you need to debug a connection.
 
-## Register the MCP server
+Future tools should document their CLI equivalents and remain no more capable
+than the CLI surface.
+
+## Register the optional MCP server
 
 ### opencode
 

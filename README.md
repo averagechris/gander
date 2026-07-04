@@ -1,6 +1,14 @@
 # gander
 
-Take a gander at your [`jj`](https://jj-vcs.github.io/jj/latest/) changes: a fast terminal UI for reviewing changes more ergonomically than raw `jj show`.
+Take a gander at your [`jj`](https://jj-vcs.github.io/jj/latest/) changes: a
+fast, local-first review workspace for turning jj diffs into durable, guided,
+actionable review sessions for humans and agents.
+
+Gander's product direction is documented in [docs/vision.md](docs/vision.md):
+it reads jj-visible code state, writes review state, and stays forge-agnostic.
+Users or external harnesses prepare the workspace and can post/export results;
+Gander focuses on review sessions, comments, tasks, walkthroughs, TUI/CLI
+automation, and optional MCP access over the same core logic.
 
 ![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
 
@@ -468,8 +476,10 @@ its progress in the footer, and kills it when you quit.
 ## MCP server
 
 For agent harnesses that speak MCP (opencode, Claude Code, Codex, Zed,
-...), `gander mcp` serves the same review session as typed tools on stdio
-— no wire protocol explained in a prompt:
+...), `gander mcp` serves the same review session as typed tools on stdio.
+MCP is optional: the CLI is the baseline automation contract, and every MCP
+capability should have an equivalent scriptable CLI path over the same core
+logic:
 
 ```sh
 gander mcp
@@ -513,8 +523,8 @@ review key (comments, flags, context expansion, view toggles) keeps
 working mid-walkthrough; Esc returns to free navigation.
 
 See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:
-MCP registration for opencode/Claude Code/Codex, the split-pane workflow,
-and attach-to-running-server summon commands.
+CLI-first automation, optional MCP registration for opencode/Claude Code/Codex,
+the split-pane workflow, and attach-to-running-server summon commands.
 
 ## Architecture
 
@@ -540,11 +550,14 @@ the `jj` CLI boundary instead of embedding `jj-lib` for now.
 
 ## Near-term roadmap
 
-See [`docs/roadmap.md`](docs/roadmap.md) for a longer backlog. Highest-value next steps:
+See [`docs/vision.md`](docs/vision.md) and [`docs/roadmap.md`](docs/roadmap.md)
+for the longer product plan. Highest-value next steps:
 
-1. Helix-inspired external grammar/query loading for custom languages
-2. full Agent Client Protocol schema compliance for `gander acp`
-3. live session updates for long-running agent connections
+1. first-class durable review sessions with comments, action-tagged tasks, and
+   walkthroughs
+2. complete CLI automation with stable JSON output and parity with MCP/TUI
+3. TUI affordances for key hunks, walkthrough editing, and agent-action tasks
+4. static web walkthrough export after the session model stabilizes
 
 ## License
 

@@ -1,15 +1,22 @@
 # Roadmap
 
-This project should become a fast, local-first review cockpit for jj changes,
-and eventually a collaborative one: agents should be able to help conduct the
-review, not just watch it (see milestones 7-9 and docs/decisions.md for the
-directional decisions behind them).
+This project should become a fast, local-first review workspace for jj-visible
+changes: humans and agents use durable review sessions to understand, annotate,
+walk through, and act on code changes. See [docs/vision.md](vision.md) for the
+north star, non-goals, and post-MVP milestone plan.
 
 ## Product principles
 
 - **Speed first.** Startup should feel instant on normal changes. Generated or huge files must be easy to hide or collapse.
 - **Review state is durable but conservative.** A file is considered viewed only if the current diff fingerprint matches the saved fingerprint.
 - **Local artifacts are first-class.** JSON is for agents/tools; Markdown is for humans in Slack/email/docs.
+- **Gander reads code state and writes review state.** Users or external
+  harnesses prepare/fetch work; Gander inspects jj state and persists review
+  sessions, comments, tasks, and walkthroughs without mutating the code
+  workspace or posting to forges.
+- **CLI parity is required.** Anything available through MCP, the TUI, or a
+  future web UI must have an equivalent scriptable CLI path over the same core
+  services.
 - **Syntax awareness should help navigation.** Tree-sitter should power highlighting, symbol context, and changed-symbol outlines instead of being cosmetic only.
 - **The TUI should not trap the user.** Common operations need obvious keys, non-interactive equivalents, and plain files on disk.
 
@@ -227,6 +234,71 @@ Status: designed, in progress.
   fallback, full review vocabulary available mid-walkthrough
   (docs/focused-diff-ux.md §6)
 
+## Milestone 11: first-class review sessions
+
+Design: [docs/vision.md](vision.md).
+
+Status: planned.
+
+- [ ] promote the durable session to Gander's core product object, above raw
+  diff/artifact exports
+- [ ] model comments, action-tagged review tasks, walkthrough steps, authors,
+  timestamps, stable targets, and migration-friendly versioning in the domain
+  layer
+- [ ] keep existing viewed-state/comment/artifact behavior working through the
+  new session model
+- [ ] maintain the product boundary: write Gander review state, not code state
+  or remote-provider state
+
+## Milestone 12: complete CLI automation surface
+
+Status: planned.
+
+- [ ] add scriptable commands for sessions, files, hunks, comments, tasks,
+  walkthroughs, and exports
+- [ ] provide stable `--json` output suitable for harnesses and agents
+- [ ] ensure every MCP capability has a documented CLI equivalent backed by the
+  same core service
+- [ ] make CLI automation usable without MCP, for users who avoid MCP context
+  pollution
+
+## Milestone 13: TUI over the shared session core
+
+Status: planned.
+
+- [ ] make TUI state mutations call the same services as the CLI/MCP adapters
+- [ ] add first-class key hunk and walkthrough editing affordances
+- [ ] support action-tagged comments/tasks (`explain`, `research`, `fix`,
+  `write-tests`, `document`, `export`) for agent handoff
+- [ ] keep zen/focused review modes as views over walkthrough/session state
+
+## Milestone 14: MCP parity adapter
+
+Status: planned.
+
+- [ ] make `gander mcp` a thin adapter over the same core API used by the CLI
+- [ ] retain live-instance routing and `current_focus` where useful
+- [ ] document the CLI equivalent for each tool
+- [ ] avoid making MCP the only or most capable automation path
+
+## Milestone 15: static web walkthrough export
+
+Status: planned.
+
+- [ ] export a self-contained local HTML artifact with walkthrough navigation,
+  key hunks, comments, and task state
+- [ ] keep export local/static first, with no hosted sync or direct forge
+  integration
+- [ ] use the same session data as JSON/Markdown exports
+
+## Milestone 16: optional local web UI
+
+Status: future.
+
+- [ ] add an interactive local browser UI only after the session core is stable
+- [ ] expose the same capabilities as the TUI/CLI where appropriate
+- [ ] preserve the no-code-mutation and forge-agnostic boundaries
+
 ## Known debt (from the 2026-07 pre-MVP code review)
 
 Fixed during the review: base picker filter dropped `g`/`G`/shifted chars,
@@ -259,9 +331,10 @@ whether or not the terminal reports the SHIFT modifier.
 Known debt, in priority order:
 
 - The ACP surface is a minimal JSON-RPC method set (`gander-acp` v1), not the
-  published Agent Client Protocol schema. Direction changed (docs/decisions.md
-  D5): the agent-facing surface becomes MCP tools (milestone 9); the JSON-RPC
-  socket remains internal plumbing rather than growing toward spec ACP.
+  published Agent Client Protocol schema. Direction changed twice: D5 moved the
+  agent-facing surface toward MCP, and D7 clarifies that MCP is an optional
+  adapter with mandatory CLI parity. The JSON-RPC socket remains internal
+  plumbing rather than growing toward spec ACP.
 - The standalone `gander acp` server (no TUI running) snapshots the
   diff/comments at startup; with a live TUI the socket bridge serves current
   state, so this only affects agents working without a human in the loop.

@@ -1,0 +1,169 @@
+# Product vision
+
+Gander's north star is to be a **local-first review workspace for jj-visible
+changes**: the place where humans and agents jointly understand, annotate,
+walk through, and act on code changes without Gander owning remote-provider or
+working-copy orchestration.
+
+In one sentence:
+
+> Gander turns jj diffs into durable, guided, actionable review sessions for
+> humans and agents.
+
+## What Gander owns
+
+Gander should read code state and write review state.
+
+It owns:
+
+- reading jj changes, revsets, files, hunks, symbols, and diff context;
+- durable review sessions, viewed state, comments, tasks, walkthroughs, and
+  exported artifacts;
+- local review navigation in the TUI and future web/static views;
+- machine-readable automation through a complete CLI surface and optional MCP
+  adapter;
+- safe handoff points where external human or agent harnesses can decide what
+  to do next.
+
+It should not own:
+
+- fetching pull requests or remote branches;
+- posting reviews to GitHub/GitLab/SourceHut or other forges;
+- rebasing, checking out, editing, committing, or otherwise mutating code as
+  part of review state management;
+- a general-purpose agent chat UI;
+- MCP as the only automation path.
+
+The expected integration model is that a user or harness prepares a workspace
+where the work is already visible to jj, then invokes Gander there:
+
+```sh
+gander review create --revset @
+gander tui
+```
+
+External harnesses can fetch code, run agents, post review comments, create
+issues, or edit files. Gander provides the structured review artifact and the
+local commands/protocols those harnesses can consume.
+
+## Design rules
+
+1. **Local-first and forge-agnostic.** Review sessions are rooted in the local
+   jj repository/workspace, not in GitHub/GitLab/etc. Hosting-provider
+   integrations belong in harnesses or wrappers until a later explicit product
+   decision changes that boundary.
+2. **Do not mutate the user's code workspace.** Inspect jj state freely and
+   persist Gander state, but do not fetch, checkout, rebase, commit, edit files,
+   or move bookmarks as a side effect of reviewing. Any helper that would run a
+   jj mutation must be explicit, confirmed, and outside the review-state core.
+3. **Core first; interfaces are adapters.** TUI, CLI, MCP, and future web UI
+   must call the same review-domain services. No interface gets separate
+   business logic.
+4. **CLI parity is mandatory.** Every capability exposed through MCP or the TUI
+   must have a scriptable CLI equivalent, preferably with stable `--json`
+   output. Many agent workflows should work without MCP to avoid context
+   pollution.
+5. **MCP is optional, not privileged.** MCP is a convenience adapter for
+   harnesses that want typed tools. It should be thin over the same core API and
+   no more capable than the CLI.
+6. **Durable review sessions are the core product object.** A diff is input;
+   the durable session is the thing Gander creates, resumes, exports, and shares
+   with agents.
+7. **Private thinking precedes publishing.** Comments, tasks, and walkthroughs
+   are local/private until an external tool exports or posts them. Gander should
+   make review intent explicit but not surprise users by publishing anything.
+
+## Review session model
+
+The next-generation review session should include:
+
+- subject: jj revset/change stack/base+tip already visible in the workspace;
+- files, hunks, stable anchors, fingerprints, viewed state, and symbols;
+- comments with kind, status, action intent, author, timestamps, and target;
+- tasks derived from comments or created directly, such as `explain`,
+  `research`, `fix`, `write-tests`, `document`, or `export`;
+- walkthroughs: ordered steps pointing at files/hunks/ranges/symbols with
+  explanations and rationale;
+- exports in JSON, Markdown, and eventually static HTML.
+
+This model is the shared substrate for self-review, reviewing agent-generated
+changes, onboarding new contributors, and collaborative teammate review.
+
+## Milestone plan
+
+### M11: Core review sessions
+
+- Promote sessions to first-class durable objects.
+- Model comments, action-tagged tasks, walkthrough steps, and stable targets in
+  the domain layer.
+- Keep artifacts serializable and migratable.
+- Preserve existing viewed-state/comment behavior through the new model.
+
+### M12: Complete CLI surface
+
+- Add scriptable commands for sessions, files, hunks, comments, tasks,
+  walkthroughs, and exports.
+- Ensure mutating review-state commands write only Gander state.
+- Provide stable `--json` output for harnesses and agents.
+- Treat the CLI as the automation contract, not just a human convenience.
+
+Example shape:
+
+```sh
+gander reviews list --json
+gander reviews show <id> --json
+gander hunks list --review <id> --file src/lib.rs --json
+gander comments add --review <id> --hunk <hunk-id> --kind issue --action fix
+gander tasks list --review <id> --status open --json
+gander walkthrough add-hunk --review <id> --hunk <hunk-id> --why "Entry point"
+gander walkthrough export --review <id> --format markdown
+```
+
+### M13: TUI over the session core
+
+- Make the TUI read and write the same session objects as the CLI.
+- Add first-class affordances for key hunks, walkthrough editing, action-tagged
+  comments, and open review tasks.
+- Keep focused/zen review modes as presentations of walkthrough/session state.
+
+### M14: MCP parity adapter
+
+- Rework MCP tools as thin wrappers over the same services used by the CLI.
+- Keep the current live-instance routing and `current_focus` value where useful.
+- Document the CLI equivalent for every MCP tool.
+
+### M15: Static web walkthroughs
+
+- Export a self-contained HTML review/walkthrough artifact for sharing or
+  onboarding.
+- Include key hunks, comments, task state, and walkthrough navigation.
+- Keep it local/static first; no hosted sync or forge integration.
+
+### M16: Optional local web UI
+
+- Add an interactive local browser UI only after the session model stabilizes.
+- Use the same core services and respect the no-code-mutation boundary.
+
+## Canonical workflows
+
+### Self-review
+
+```sh
+gander review create --revset @
+gander tui
+gander tasks list --status open --json
+gander walkthrough export --format markdown
+```
+
+### Reviewing an agent's changes
+
+An external agent edits code in a jj workspace. Gander inspects the resulting
+change, the human leaves action-tagged tasks, and the agent harness consumes
+those tasks through CLI or MCP. The agent may edit files; Gander only records
+and resolves review state.
+
+### Reviewing teammate changes
+
+A user or harness fetches/checks out/prepares the teammate change. Gander opens
+against the local jj-visible revset. Any posting to a remote review system is a
+separate harness concern using Gander's exported comments/artifacts.

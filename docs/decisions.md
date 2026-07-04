@@ -4,6 +4,37 @@ Short ADR-style log of directional decisions. Newest first. Each entry
 records the decision, the reasoning, and what it supersedes, so future
 sessions (human or agent) can pick up implementation without relitigating.
 
+## D7 (2026-07): local review core, CLI parity, and no direct forge integration
+
+**Decision.** Gander's core object is a durable local review session over
+jj-visible changes. Users or external harnesses are responsible for fetching,
+checking out, or otherwise preparing teammate/agent work in a workspace where
+jj can see it. Gander reads that code state and writes review state: viewed
+marks, comments, tasks, walkthroughs, and artifacts.
+
+Gander should not directly integrate with GitHub/GitLab/SourceHut for now: no
+PR fetching, no review posting, no forge-specific comment sync. Harnesses can
+consume Gander artifacts/CLI output and post elsewhere if desired.
+
+**Interface rule.** The CLI is the baseline automation contract. Every
+capability exposed through MCP, the TUI, or a future web UI must have a
+scriptable CLI equivalent, and all interfaces must call the same core business
+logic. MCP remains valuable, but it is an optional adapter rather than the
+privileged path; some users avoid MCP because tool definitions and state can
+pollute agent context.
+
+**Workspace rule.** Review-state operations must not mutate the user's code
+workspace. Inspecting jj state is fine; fetching, rebasing, checking out,
+editing files, committing, moving bookmarks, or posting remote reviews belongs
+to explicit user/harness workflows outside the review-state core. Existing
+confirmed jj helpers remain exceptional, user-confirmed affordances rather than
+implicit session behavior.
+
+**Supersedes/refines.** D5's phrasing that harnesses should "arrive via MCP".
+MCP is still supported, but CLI parity is mandatory and direct forge
+integration is out of scope for the current product direction. See
+docs/vision.md and roadmap milestones 11-16.
+
 ## D6 (2026-07): runtime state moves out of the repo (no more `.gander/` pollution)
 
 **Decision.** Stop writing runtime state into the project directory. The
@@ -34,7 +65,7 @@ working-copy root.
 
 ## D5 (2026-07): MCP is the agent-facing tool surface; the custom `gander-acp` vocabulary is transitional
 
-**Decision.** Expose the review session to harnesses as an MCP server
+**Decision (refined by D7).** Expose the review session to harnesses as an MCP server
 (`gander mcp`, stdio), implemented as a thin adapter over the same
 `AcpHandler`/live-socket plumbing that exists today. Tools: `review_summary`,
 `review_files`, `file_diff`, `comments`, `set_ordering`, `flag_section`,
@@ -44,12 +75,13 @@ registry). Prefer the official Rust MCP SDK (`rmcp`) over hand-rolling;
 MCP's surface (initialization, capabilities, tool schemas) is larger than
 what we hand-rolled for the ACP slice.
 
-**Why.** MCP is what harnesses (opencode, Claude Code, Codex, Zed) discover
+**Why.** MCP is what many harnesses (opencode, Claude Code, Codex, Zed) discover
 natively: typed tools, no wire protocol explained in a prompt. It dissolves
 the "custom vocabulary" debt of `gander-acp` v1 — the tool schemas *are* the
 discovery layer. The line-delimited JSON-RPC socket stays as internal
-plumbing (TUI liveness bridge) and for raw scripting, but agents should
-arrive via MCP.
+plumbing (TUI liveness bridge) and for raw scripting. D7 later clarifies that
+MCP is optional and must stay at parity with the CLI rather than becoming the
+only or most capable agent path.
 
 **Supersedes.** The plan to adopt full spec-ACP server compliance for the
 review surface (roadmap milestone 7 debt note). Spec ACP may still matter
