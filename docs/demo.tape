@@ -17,7 +17,7 @@ Set TypingSpeed 60ms
 Set Shell bash
 
 Hide
-Type "bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '"
+Type "export PATH='/Users/chris/projects/gander/target/release':$PATH; bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '"
 Enter
 Sleep 6s
 Type "clear"
@@ -25,45 +25,55 @@ Enter
 Sleep 1s
 Show
 
-# A quick text summary of the change under review.
-Type "gander -b main --generated-preset lockfiles summary"
-Sleep 500ms
-Enter
-Sleep 3s
-
-# Launch the review TUI.
-Type "clear"
-Enter
+# Open gander directly: review starts in the TUI.
 Type "gander -b main --generated-preset lockfiles"
 Sleep 500ms
 Enter
 Sleep 2.5s
 
-# Walk the file tree to the parser change.
-Type "jjj"
+# Start with zen mode: a focused walkthrough of the change.
+Type "T"
+Sleep 3s
+Enter
+Sleep 2s
+Escape
 Sleep 1s
-Type "j"
+
+# Jump straight to the parser change, then use the changed-symbol outline.
+Type "/"
+Sleep 800ms
+Type "parser"
+Sleep 800ms
+Enter
+Sleep 1s
+Tab
+Sleep 800ms
+Type "o"
+Sleep 1.8s
+Enter
 Sleep 1.2s
 
-# Focus the diff pane and scroll through the parser change.
-Tab
-Sleep 1s
-Type "jjj"
-Sleep 1s
-Type "jj"
+# Toggle side-by-side and hide the tree for a focused read.
+Type "|"
+Sleep 1.2s
+Type "w"
 Sleep 1.5s
+Type "jjjjjj"
+Sleep 1.5s
+Type "w"
+Sleep 800ms
 
-# Select a range and leave a line comment.
+# Select the normalization lines and leave a relevant review comment.
 Type "r"
 Sleep 800ms
-Type "jj"
+Type "jjj"
 Sleep 1s
 Type "c"
 Sleep 1s
-Type "consider a Tag newtype instead of raw strings"
-Sleep 1s
+Type "lowercasing is a behavior change; keep the README note and tests in sync"
+Sleep 1.6s
 Ctrl+S
-Sleep 1.5s
+Sleep 2s
 
 # Back to the tree; mark files viewed as we go.
 Tab

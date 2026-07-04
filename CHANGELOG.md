@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.4.0 - 2026-07-04
+
 ### Added
 
 - Zen mode (`T`/`Z`): a focused, agent-curated briefing with three

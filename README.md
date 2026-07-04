@@ -4,6 +4,11 @@ Take a gander at your [`jj`](https://jj-vcs.github.io/jj/latest/) changes: a fas
 
 ![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
 
+The tour is recorded from [`docs/demo.tape`](docs/demo.tape). When adding a
+visual feature that would make the first impression clearer, consider refreshing
+this GIF in the same change so the README keeps showing gander's current review
+flow.
+
 This repo is intentionally early, but the first vertical slice is in place:
 
 - reads `jj show --git` for a target revision
