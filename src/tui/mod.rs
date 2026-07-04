@@ -2314,6 +2314,10 @@ fn handle_mouse_event(
     mode: &mut Mode,
     tui_state: &mut TuiState,
 ) {
+    if handle_zen_mouse_event(mouse, terminal_size, session, tui_state) {
+        return;
+    }
+
     if matches!(
         mode,
         Mode::Help
@@ -2352,6 +2356,79 @@ fn handle_mouse_event(
             session.scroll_diff(-3);
         }
         _ => {}
+    }
+}
+
+fn handle_zen_mouse_event(
+    mouse: MouseEvent,
+    terminal_size: ratatui::prelude::Size,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) -> bool {
+    let Some(zen) = tui_state.zen.as_mut() else {
+        return false;
+    };
+    let layout = ui_layout(
+        Rect::new(0, 0, terminal_size.width, terminal_size.height),
+        session.file_pane_visible,
+    );
+    let body = Rect {
+        height: terminal_size.height.saturating_sub(2),
+        ..Rect::new(0, 0, terminal_size.width, terminal_size.height)
+    };
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown => match zen.phase {
+            zen::ZenPhase::Artifact { index, scroll }
+                if point_in_rect(mouse.column, mouse.row, body) =>
+            {
+                zen.phase = zen::ZenPhase::Artifact {
+                    index,
+                    scroll: scroll.saturating_add(3),
+                };
+                true
+            }
+            zen::ZenPhase::Glance if point_in_rect(mouse.column, mouse.row, body) => {
+                zen.move_glance_selection(1);
+                true
+            }
+            zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
+                session.focus = Focus::Diff;
+                session.move_diff_cursor(3);
+                true
+            }
+            zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
+                session.scroll_diff(3);
+                true
+            }
+            _ => false,
+        },
+        MouseEventKind::ScrollUp => match zen.phase {
+            zen::ZenPhase::Artifact { index, scroll }
+                if point_in_rect(mouse.column, mouse.row, body) =>
+            {
+                zen.phase = zen::ZenPhase::Artifact {
+                    index,
+                    scroll: scroll.saturating_sub(3),
+                };
+                true
+            }
+            zen::ZenPhase::Glance if point_in_rect(mouse.column, mouse.row, body) => {
+                zen.move_glance_selection(-1);
+                true
+            }
+            zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
+                session.focus = Focus::Diff;
+                session.move_diff_cursor(-3);
+                true
+            }
+            zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
+                session.scroll_diff(-3);
+                true
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -3696,6 +3773,83 @@ diff --git a/b.rs b/b.rs
         press(KeyCode::Char('c'), &mut zen, &mut session);
         press(KeyCode::Esc, &mut zen, &mut session);
         assert_eq!(zen.phase, zen::ZenPhase::Focus);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_zen_artifact_viewer() {
+        let mut session = zen_session_with_glance();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.phase = zen::ZenPhase::Artifact {
+            index: 0,
+            scroll: 0,
+        };
+        let mut tui_state = TuiState {
+            zen: Some(zen),
+            ..TuiState::default()
+        };
+
+        assert!(handle_zen_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            ratatui::prelude::Size::new(80, 24),
+            &mut session,
+            &mut tui_state,
+        ));
+        assert_eq!(
+            tui_state.zen.as_ref().unwrap().phase,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 3
+            }
+        );
+
+        assert!(handle_zen_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            ratatui::prelude::Size::new(80, 24),
+            &mut session,
+            &mut tui_state,
+        ));
+        assert_eq!(
+            tui_state.zen.as_ref().unwrap().phase,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 0
+            }
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_zen_focus_snippet() {
+        let mut session = zen_session_with_glance();
+        let original_cursor = session.diff_cursor;
+        let zen = ZenState::new(&session, &[]).unwrap();
+        let mut tui_state = TuiState {
+            zen: Some(zen),
+            ..TuiState::default()
+        };
+
+        assert!(handle_zen_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            ratatui::prelude::Size::new(80, 24),
+            &mut session,
+            &mut tui_state,
+        ));
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(session.diff_cursor > original_cursor);
     }
 
     #[test]
