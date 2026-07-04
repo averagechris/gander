@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{
-        AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkImportance, ChunkPart, DraftState,
-        FlagPriority, ReviewChunk,
+        AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief, ChunkImportance,
+        ChunkPart, DraftState, FlagPriority, ReviewChunk,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -489,6 +489,7 @@ fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
             .get("explanation")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        artifacts: parse_artifacts(value)?,
         parts,
     })
 }
@@ -506,7 +507,48 @@ fn parse_change_brief(value: &Value) -> Result<ChangeBrief, String> {
     Ok(ChangeBrief {
         change_id: change_id.to_owned(),
         summary,
+        artifacts: parse_artifacts(value)?,
     })
+}
+
+fn parse_artifacts(value: &Value) -> Result<Vec<Artifact>, String> {
+    value
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .map(|artifacts| {
+            artifacts
+                .iter()
+                .map(|artifact| {
+                    let title = require_str(artifact, "title")?;
+                    if title.trim().is_empty() {
+                        return Err("artifact title must not be empty".to_owned());
+                    }
+                    let body = require_str(artifact, "body")?;
+                    if body.trim().is_empty() {
+                        return Err("artifact body must not be empty".to_owned());
+                    }
+                    Ok(Artifact {
+                        title,
+                        kind: parse_artifact_kind(artifact.get("kind").and_then(Value::as_str))?,
+                        body,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn parse_artifact_kind(value: Option<&str>) -> Result<ArtifactKind, String> {
+    match value.unwrap_or("example").to_ascii_lowercase().as_str() {
+        "example" | "usage" => Ok(ArtifactKind::Example),
+        "output" | "run" | "result" => Ok(ArtifactKind::Output),
+        "diagram" | "chart" => Ok(ArtifactKind::Diagram),
+        "note" | "text" => Ok(ArtifactKind::Note),
+        other => Err(format!(
+            "invalid artifact kind: {other} (expected example, output, diagram, or note)"
+        )),
+    }
 }
 
 fn parse_chunk_importance(value: Option<&str>) -> Result<ChunkImportance, String> {
@@ -1065,6 +1107,61 @@ diff --git a/README.md b/README.md
             let request = json!({
                 "jsonrpc": "2.0", "id": 9,
                 "method": "review/set_change_briefs",
+                "params": bad,
+            })
+            .to_string();
+            let response = server.handle_line(&request).unwrap();
+            assert!(response.get("error").is_some(), "expected error for {bad}");
+        }
+    }
+
+    #[test]
+    fn chunks_and_briefs_carry_artifacts() {
+        let (mut server, dir) = server();
+
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [
+                {
+                    "title": "core change",
+                    "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }],
+                    "artifacts": [
+                        { "title": "usage", "body": "let app = App::new();" },
+                        { "title": "test run", "kind": "output", "body": "3 passed" },
+                    ],
+                }
+            ] }),
+        );
+        call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [
+                {
+                    "change_id": "abc",
+                    "summary": "Reworks the core loop.",
+                    "artifacts": [{ "title": "flow", "kind": "diagram", "body": "a -> b" }],
+                },
+            ] }),
+        );
+
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        let artifacts = &overlay.chunks[0].artifacts;
+        assert_eq!(artifacts.len(), 2);
+        // Kind defaults to `example` when omitted.
+        assert_eq!(artifacts[0].kind, ArtifactKind::Example);
+        assert_eq!(artifacts[1].kind, ArtifactKind::Output);
+        assert_eq!(overlay.briefs[0].artifacts.len(), 1);
+        assert_eq!(overlay.briefs[0].artifacts[0].kind, ArtifactKind::Diagram);
+
+        for bad in [
+            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": " ", "body": "y" }] }] }),
+            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": "y", "body": "  " }] }] }),
+            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": "y", "kind": "movie", "body": "z" }] }] }),
+        ] {
+            let request = json!({
+                "jsonrpc": "2.0", "id": 11,
+                "method": "review/set_chunks",
                 "params": bad,
             })
             .to_string();

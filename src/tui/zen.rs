@@ -19,7 +19,7 @@
 //! agent and gets dramatically better with one. Gander-native: it only
 //! reads the overlay, no live agent required (docs/decisions.md D4).
 
-use crate::agent::{ChunkImportance, ChunkPart};
+use crate::agent::{Artifact, ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
 use crate::jj::{JjChangeSummary, ReviewTarget};
 
@@ -75,15 +75,20 @@ pub(super) struct ChapterCard {
     pub(super) bookmarks: String,
     /// The agent's high-level narrative for this change, when briefed.
     pub(super) summary: Option<String>,
+    /// Exhibits attached to the change brief, opened with `e`.
+    pub(super) artifacts: Vec<Artifact>,
 }
 
 /// The zen surfaces. Focus is the default landing surface for each stop;
-/// Reading drops into the (dimmed) normal UI; Glance is the bulk-skim board.
+/// Reading drops into the (dimmed) normal UI; Glance is the bulk-skim board;
+/// Artifact is a scrollable viewer over the current stop's exhibits,
+/// layered on the focus card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ZenPhase {
     Focus,
     Reading,
     Glance,
+    Artifact { index: usize, scroll: u16 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +233,15 @@ impl ZenState {
     }
 }
 
+/// The exhibits attached to a stop: chunk artifacts for spotlight stops,
+/// change-brief artifacts for chapter cards.
+pub(super) fn stop_artifacts(stop: &ZenStop) -> &[Artifact] {
+    match stop {
+        ZenStop::Chapter(chapter) => &chapter.artifacts,
+        ZenStop::Chunk(row) => &row.artifacts,
+    }
+}
+
 /// Weave chapter cards into the stop list: every run of stops anchored to
 /// the same jj change opens with a card introducing that change. Unanchored
 /// runs (and the chunkless fallback) open with a card for the home target,
@@ -283,7 +297,6 @@ fn chapter_card(
                 .change_briefs
                 .iter()
                 .find(|brief| change_ids_match(&brief.change_id, &change_id))
-                .map(|brief| brief.summary.clone())
         });
     ChapterCard {
         change_id: anchor,
@@ -295,7 +308,10 @@ fn chapter_card(
         bookmarks: summary
             .map(|change| change.bookmarks.clone())
             .unwrap_or_default(),
-        summary: brief,
+        summary: brief.map(|brief| brief.summary.clone()),
+        artifacts: brief
+            .map(|brief| brief.artifacts.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -354,6 +370,7 @@ fn whole_file_row(path: String) -> ChunkRow {
         change_id: None,
         rationale: None,
         explanation: None,
+        artifacts: Vec::new(),
         part: Some(ChunkPart {
             path,
             start_line: None,
@@ -498,6 +515,7 @@ diff --git a/b.rs b/b.rs
                 change_id: None,
                 rationale: Some("read these together".to_owned()),
                 explanation: Some("The rename changes the contract.".to_owned()),
+                artifacts: Vec::new(),
                 parts: vec![
                     ChunkPart {
                         path: "a.rs".to_owned(),
@@ -524,6 +542,7 @@ diff --git a/b.rs b/b.rs
             change_id: change_id.map(str::to_owned),
             rationale: None,
             explanation: None,
+            artifacts: Vec::new(),
             parts: vec![ChunkPart {
                 path: path.to_owned(),
                 start_line: Some(1),
@@ -611,6 +630,7 @@ diff --git a/b.rs b/b.rs
                 // A shorter prefix of the stack id still matches.
                 change_id: "dddee".to_owned(),
                 summary: "Builds the follow-up on the first change.".to_owned(),
+                artifacts: Vec::new(),
             }],
             ..Default::default()
         });
@@ -645,6 +665,39 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn stop_artifacts_come_from_chunks_and_change_briefs() {
+        let mut session = snapshot_session(two_file_diff());
+        let mut chunk = spotlight("s1", "first stop", Some("aaabbbcc"), "a.rs");
+        chunk.artifacts = vec![Artifact {
+            title: "usage".to_owned(),
+            kind: crate::agent::ArtifactKind::Example,
+            body: "let x = new();".to_owned(),
+        }];
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![chunk],
+            briefs: vec![ChangeBrief {
+                change_id: "aaabbbcc".to_owned(),
+                summary: "Lays the groundwork.".to_owned(),
+                artifacts: vec![Artifact {
+                    title: "flow".to_owned(),
+                    kind: crate::agent::ArtifactKind::Diagram,
+                    body: "a -> b".to_owned(),
+                }],
+            }],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        // The chapter card exhibits the brief's artifacts, the stop its
+        // chunk's.
+        assert_eq!(stop_artifacts(&zen.stops[0]).len(), 1);
+        assert_eq!(stop_artifacts(&zen.stops[0])[0].title, "flow");
+        assert_eq!(stop_artifacts(&zen.stops[1]).len(), 1);
+        assert_eq!(stop_artifacts(&zen.stops[1])[0].title, "usage");
+    }
+
+    #[test]
     fn home_chapter_describes_a_single_change_target() {
         // Reviewing one change against its parent: the opening chapter
         // carries that change's description and brief.
@@ -654,6 +707,7 @@ diff --git a/b.rs b/b.rs
             briefs: vec![ChangeBrief {
                 change_id: "dddeeeff".to_owned(),
                 summary: "Reworks the retry loop.".to_owned(),
+                artifacts: Vec::new(),
             }],
             ..Default::default()
         });
@@ -691,6 +745,7 @@ diff --git a/b.rs b/b.rs
                     change_id: None,
                     rationale: None,
                     explanation: Some("This changes the retry loop.".to_owned()),
+                    artifacts: Vec::new(),
                     parts: vec![ChunkPart {
                         path: "a.rs".to_owned(),
                         start_line: Some(1),
@@ -704,6 +759,7 @@ diff --git a/b.rs b/b.rs
                     change_id: None,
                     rationale: None,
                     explanation: None,
+                    artifacts: Vec::new(),
                     parts: vec![ChunkPart {
                         path: "b.rs".to_owned(),
                         start_line: Some(1),

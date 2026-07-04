@@ -96,9 +96,15 @@ within one poll tick.
 | --- | --- | --- |
 | `review/set_ordering` | `{paths: [string]}` | suggested review order, highest priority first; unknown paths are rejected |
 | `review/flag_section` | `{path, line?, reason, priority?}` | flag a critical section (`priority`: `critical`/`high`/`medium`/`low`, default `high`) |
-| `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change |
-| `review/set_change_briefs` | `{briefs: [{change_id, summary}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's stops |
+| `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
+| `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's stops |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; returns `{id}` |
+
+`artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
+one of `example` (default), `output`, `diagram`, or `note`: exhibits that
+*show* the change — a usage example of the changed API, output captured by
+running the code, a small ASCII diagram. The human opens them from the zen
+focus or chapter card with `e` (scrollable, `h`/`l` cycles).
 
 ## Two-way draft flow
 

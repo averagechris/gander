@@ -309,6 +309,13 @@ then everything mechanical acknowledged in bulk. Design decisions:
   picture. Chapter cards mark nothing viewed; the progress strip renders
   chapters as `▎` bars grouping the stop dots; human-facing stop numbers
   count spotlight stops only.
+- **Artifacts** (2026-07 follow-up). Agents can *show* instead of only
+  telling: spotlight chunks and change briefs may carry `artifacts`
+  (`{title, kind: example|output|diagram|note, body}`) — a usage example
+  of the changed API, output the agent captured by running the code, an
+  ASCII diagram of the new flow. Cards with exhibits show an `e` hint;
+  `e` opens a modal scrollable viewer over the focus card (`j`/`k`
+  scroll, `h`/`l` cycle, `esc` closes). Bodies render verbatim.
 - **Safety.** *User* retargeting (t/p/b/R, stack step, operation picker)
   invalidates the stops; the walkthrough ends with a notice rather than
   touring a stale map. A live refresh of the same target (new changes

@@ -42,6 +42,14 @@
   Every walkthrough starts with an opening chapter for its target, the
   progress strip groups stop dots by chapter (`▎` bars), and chapter
   cards mark nothing viewed.
+- Zen artifacts: agents can attach exhibits to spotlight chunks and
+  change briefs (`artifacts: [{title, kind: example|output|diagram|note,
+  body}]`) — a usage example of the changed API, output captured by
+  exercising the code, an ASCII diagram of the new flow. Cards with
+  exhibits show an `e` hint; `e` opens a modal scrollable viewer over
+  the focus card (`j`/`k` scroll, `h`/`l` cycle between exhibits,
+  `esc` closes). The summon prompt and MCP instructions teach agents to
+  show, not just tell.
 - Live review refresh: the TUI polls jj on idle (throttled, ~2s) and,
   when the reviewed range changes — new changes landing, rewrites,
   working-copy edits — reloads the diff in place with a footer notice.

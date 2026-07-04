@@ -2017,6 +2017,7 @@ diff --git a/src/c.rs b/src/c.rs
                 change_id: None,
                 explanation: None,
                 rationale: None,
+                artifacts: Vec::new(),
                 parts: vec![crate::agent::ChunkPart {
                     path: "src/app.rs".to_owned(),
                     start_line: Some(3),
@@ -2068,6 +2069,7 @@ diff --git a/src/c.rs b/src/c.rs
                 change_id: None,
                 explanation: None,
                 rationale: None,
+                artifacts: Vec::new(),
                 parts: Vec::new(),
             }],
             ..Default::default()

@@ -2,7 +2,7 @@
 //! files. The popup lists every chunk part and jumps to its location.
 
 use crate::{
-    agent::{ChunkImportance, ChunkPart, ReviewChunk},
+    agent::{Artifact, ChunkImportance, ChunkPart, ReviewChunk},
     app::ReviewSession,
 };
 
@@ -23,6 +23,9 @@ pub(super) struct ChunkRow {
     pub(super) rationale: Option<String>,
     /// Teaching text for the zen focus card (spotlight chunks).
     pub(super) explanation: Option<String>,
+    /// Agent-produced exhibits (examples, output, diagrams) for the zen
+    /// artifact viewer.
+    pub(super) artifacts: Vec<Artifact>,
     pub(super) part: Option<ChunkPart>,
     /// Position of this part within its chunk, e.g. (1, 3) for "part 1/3".
     pub(super) part_position: Option<(usize, usize)>,
@@ -58,6 +61,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
             change_id: chunk.change_id.clone(),
             rationale: chunk.rationale.clone(),
             explanation: chunk.explanation.clone(),
+            artifacts: chunk.artifacts.clone(),
             part: None,
             part_position: None,
         }];
@@ -73,6 +77,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
             change_id: chunk.change_id.clone(),
             rationale: chunk.rationale.clone(),
             explanation: chunk.explanation.clone(),
+            artifacts: chunk.artifacts.clone(),
             part: Some(part.clone()),
             part_position: (total > 1).then_some((index + 1, total)),
         })
@@ -105,6 +110,7 @@ mod tests {
                     change_id: None,
                     explanation: None,
                     rationale: Some("spans two files".to_owned()),
+                    artifacts: Vec::new(),
                     parts: vec![part("a.rs", 1, 10), part("b.rs", 5, 20)],
                 },
                 ReviewChunk {
@@ -114,6 +120,7 @@ mod tests {
                     change_id: None,
                     explanation: None,
                     rationale: None,
+                    artifacts: Vec::new(),
                     parts: Vec::new(),
                 },
             ],
@@ -141,6 +148,7 @@ mod tests {
                 change_id: None,
                 explanation: None,
                 rationale: None,
+                artifacts: Vec::new(),
                 parts: vec![part("a.rs", 1, 2)],
             }],
             ..Default::default()

@@ -75,6 +75,17 @@ pub struct ChunkPartParams {
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ArtifactParams {
+    /// Short title for the exhibit.
+    pub title: String,
+    /// example | output | diagram | note (default example).
+    pub kind: Option<String>,
+    /// Plain text body (code, captured output, ASCII diagram, prose),
+    /// rendered verbatim in a scrollable viewer.
+    pub body: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChunkParams {
     /// Short human-readable title for the reviewable unit.
     pub title: String,
@@ -95,6 +106,10 @@ pub struct ChunkParams {
     /// code does, why it changed, what could break). Shown full-screen on
     /// the zen focus card.
     pub explanation: Option<String>,
+    /// Optional exhibits that show the change rather than describe it — a
+    /// usage example, output captured by exercising the code, a small
+    /// diagram. The human opens them from the stop's card with `e`.
+    pub artifacts: Option<Vec<ArtifactParams>>,
     pub parts: Vec<ChunkPartParams>,
 }
 
@@ -114,6 +129,9 @@ pub struct ChangeBriefParams {
     /// it. Shown on the chapter intro card before that change's walkthrough
     /// stops.
     pub summary: String,
+    /// Optional exhibits for the chapter card: examples, captured output,
+    /// diagrams. The human opens them with `e`.
+    pub artifacts: Option<Vec<ArtifactParams>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -402,7 +420,9 @@ impl ServerHandler for GanderMcp {
                  items in bulk; on a stack, give each chunk the change_id it \
                  belongs to with line numbers from that change_diff, in stack \
                  order, so the walkthrough flows through the stack change by \
-                 change), and draft_comment — suggestions appear live in the \
+                 change; spotlight chunks and briefs may attach artifacts — \
+                 examples, captured output, diagrams the human opens with `e`), \
+                 and draft_comment — suggestions appear live in the \
                  reviewer's terminal, and drafted comments are triaged by the \
                  human. The review refreshes automatically as new changes land. \
                  list_reviews shows every running review instance. Do not modify \
@@ -536,6 +556,7 @@ mod tests {
                     change_id: Some("abc".to_owned()),
                     rationale: None,
                     explanation: Some("Explains the core change.".to_owned()),
+                    artifacts: None,
                     parts: vec![ChunkPartParams {
                         path: "src/app.rs".to_owned(),
                         start_line: Some(1),
@@ -550,6 +571,7 @@ mod tests {
                 briefs: vec![ChangeBriefParams {
                     change_id: "abc".to_owned(),
                     summary: "Reworks the core loop before the follow-ups build on it.".to_owned(),
+                    artifacts: None,
                 }],
             }))
             .unwrap();

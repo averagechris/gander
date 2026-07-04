@@ -43,6 +43,47 @@ pub struct ChangeBrief {
     pub change_id: String,
     /// A few sentences of narrative, prose not bullet points.
     pub summary: String,
+    /// Exhibits that show the change rather than describe it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
+}
+
+/// An agent-produced exhibit attached to a spotlight chunk or a change
+/// brief: a usage example, output the agent captured, a small ASCII
+/// diagram, or a free-form note. Zen offers these behind an `e` hint on
+/// the focus and chapter cards — show, don't just tell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub title: String,
+    #[serde(default)]
+    pub kind: ArtifactKind,
+    /// Plain text, rendered verbatim in a scrollable viewer.
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactKind {
+    /// Example usage of the changed code.
+    #[default]
+    Example,
+    /// Captured output: a run, a test, a rendered result.
+    Output,
+    /// An ASCII/unicode diagram of the flow or structure.
+    Diagram,
+    /// Anything else worth showing.
+    Note,
+}
+
+impl ArtifactKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Example => "example",
+            Self::Output => "output",
+            Self::Diagram => "diagram",
+            Self::Note => "note",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +141,10 @@ pub struct ReviewChunk {
     /// Rendered prominently on the zen focus card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// Exhibits behind an `e` hint on the stop's focus card: examples,
+    /// captured output, diagrams (see [`Artifact`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
     #[serde(default)]
     pub parts: Vec<ChunkPart>,
 }
@@ -307,7 +352,13 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              importance=glance chunks (mechanical renames, boilerplate, \
              config churn, test scaffolding) with a one-line rationale each; \
              the human acknowledges those in bulk without visiting them.\n\
-             7. For concrete issues, add review/draft_comment \
+             7. Optionally attach artifacts to change briefs and spotlight \
+             chunks (\"artifacts\": [{{\"title\", \"kind\": \
+             example|output|diagram|note, \"body\"}}]): show, don't just \
+             tell — a usage example of the changed API, output you captured \
+             by exercising the code, or a small ASCII diagram of the new \
+             flow. The human opens them from the walkthrough card with `e`.\n\
+             8. For concrete issues, add review/draft_comment \
              (params: {{\"path\", \"line\", \"body\"}}); the human accepts or \
              discards these in the TUI.\n\
              Your suggestions appear live in the reviewer's terminal. \
@@ -346,6 +397,11 @@ mod tests {
                 change_id: Some("xyzkwqrs".to_owned()),
                 rationale: Some("spans handler and middleware".to_owned()),
                 explanation: Some("The middleware now refuses tokens without an audience claim; the handler assumes that invariant.".to_owned()),
+                artifacts: vec![Artifact {
+                    title: "rejecting a token without an audience".to_owned(),
+                    kind: ArtifactKind::Output,
+                    body: "$ curl -H \"Authorization: Bearer $NO_AUD\" /api\n401 {\"error\":\"missing aud claim\"}".to_owned(),
+                }],
                 parts: vec![ChunkPart {
                     path: "src/risky.rs".to_owned(),
                     start_line: Some(10),
@@ -355,6 +411,11 @@ mod tests {
             briefs: vec![ChangeBrief {
                 change_id: "xyzkwqrs".to_owned(),
                 summary: "Tightens the auth middleware so downstream handlers can assume an audience claim.".to_owned(),
+                artifacts: vec![Artifact {
+                    title: "token flow".to_owned(),
+                    kind: ArtifactKind::Diagram,
+                    body: "client -> middleware(aud?) -> handler".to_owned(),
+                }],
             }],
             drafts: vec![AgentDraft {
                 id: "draft-1".to_owned(),
@@ -460,6 +521,8 @@ mod tests {
         assert!(prompt.contains("stacked PRs"));
         assert!(prompt.contains("review/set_change_briefs"));
         assert!(prompt.contains("chapter intro"));
+        assert!(prompt.contains("artifacts"));
+        assert!(prompt.contains("example|output|diagram|note"));
         assert!(prompt.contains("review/set_chunks"));
         assert!(prompt.contains("importance=spotlight"));
         assert!(prompt.contains("importance=glance"));

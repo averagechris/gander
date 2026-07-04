@@ -65,6 +65,21 @@ pub(super) fn draw(
             draw_zen_focus(frame, body, session, zen.expect("checked above"));
             draw_footer(frame, layout.footer, session, mode, keymap, notice, zen);
         }
+        Some(ZenPhase::Artifact { index, scroll }) => {
+            let body = body_area(frame.area());
+            let zen = zen.expect("checked above");
+            draw_zen_focus(frame, body, session, zen);
+            draw_zen_artifact(frame, body, zen, index, scroll);
+            draw_footer(
+                frame,
+                layout.footer,
+                session,
+                mode,
+                keymap,
+                notice,
+                Some(zen),
+            );
+        }
         Some(ZenPhase::Glance) => {
             let body = body_area(frame.area());
             draw_zen_glance(frame, body, session, zen.expect("checked above"));
@@ -1048,6 +1063,16 @@ fn draw_footer(
                     "zen glance · {} item(s) · j/k move · enter jump · a mark all viewed & finish · p back · esc end",
                     zen.glance_rows.len(),
                 ),
+                ZenPhase::Artifact { index, .. } => {
+                    let count = zen
+                        .current()
+                        .map(|stop| super::zen::stop_artifacts(stop).len())
+                        .unwrap_or(0);
+                    format!(
+                        "zen artifact {}/{count} · j/k scroll · h/l switch · esc close",
+                        (index + 1).min(count),
+                    )
+                }
             }
         }
         Mode::Normal if session.focus == Focus::Files => footer_line(files_footer_segments(
@@ -1927,7 +1952,13 @@ fn draw_zen_chapter(
         "{} file(s) · +{additions} −{deletions}",
         session.files.len()
     );
-    let stops_hint = format!("n tours the {} stop(s) in this chapter", chapter.stop_count);
+    let mut stops_hint = format!("n tours the {} stop(s) in this chapter", chapter.stop_count);
+    if !chapter.artifacts.is_empty() {
+        stops_hint.push_str(&format!(
+            " · e opens {} artifact(s)",
+            chapter.artifacts.len()
+        ));
+    }
 
     let mut body: Vec<Line<'static>> = vec![
         Line::from(Span::styled(
@@ -2177,6 +2208,12 @@ fn draw_zen_stop(
                     Style::default().fg(Color::Cyan),
                 ),
             ];
+            if !stop.artifacts.is_empty() {
+                spans.push(Span::styled(
+                    format!("· e {} artifact(s) ", stop.artifacts.len()),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
             if wandered {
                 spans.push(Span::styled(
                     "· off the stop — . refocuses ",
@@ -2332,6 +2369,85 @@ fn zen_excerpt_indices(
         }
     }
     (indices, false)
+}
+
+/// A modal exhibit viewer layered over the focus card: one agent-produced
+/// artifact (usage example, captured output, diagram) rendered verbatim and
+/// scrollable. `h`/`l` cycle when the stop carries several exhibits.
+fn draw_zen_artifact(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    zen: &ZenState,
+    index: usize,
+    scroll: u16,
+) {
+    let Some(stop) = zen.current() else {
+        return;
+    };
+    let artifacts = super::zen::stop_artifacts(stop);
+    let Some(artifact) = artifacts.get(index.min(artifacts.len().saturating_sub(1))) else {
+        return;
+    };
+
+    // Size the popup to the exhibit (plus chrome), bounded by the screen.
+    let widest = artifact
+        .body
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let max_width = area.width.saturating_sub(6).max(20);
+    let width = (widest + 4).clamp(40.min(max_width), max_width);
+    let body_lines = artifact.body.lines().count() as u16;
+    let max_height = area.height.saturating_sub(2).max(6);
+    let height = (body_lines + 3).clamp(6.min(max_height), max_height);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup);
+    let mut title_spans = vec![
+        Span::styled(
+            format!(" {} ", artifact.title),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("· {} ", artifact.kind.label()),
+            Style::default().fg(Color::Magenta),
+        ),
+    ];
+    if artifacts.len() > 1 {
+        title_spans.push(Span::styled(
+            format!("· {}/{} (h/l switch) ", index + 1, artifacts.len()),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(Line::from(title_spans))
+        .title_bottom(Line::from(Span::styled(
+            " j/k scroll · esc close ",
+            Style::default().fg(Color::DarkGray),
+        )));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Clamp so scrolling stops at the last line instead of a blank void.
+    let max_scroll = (artifact.body.lines().count() as u16).saturating_sub(inner.height);
+    frame.render_widget(
+        Paragraph::new(artifact.body.clone())
+            .style(Style::default().fg(Color::Gray))
+            .block(Block::default().padding(Padding::horizontal(1)))
+            .scroll((scroll.min(max_scroll), 0)),
+        inner,
+    );
 }
 
 /// The zen glance board: everything not worth a full stop — glance chunks
@@ -3592,6 +3708,7 @@ diff --git a/README.md b/README.md
                 change_id: None,
                 explanation: None,
                 rationale: Some("start here".to_owned()),
+                artifacts: Vec::new(),
                 parts: vec![
                     crate::agent::ChunkPart {
                         path: "src/app.rs".to_owned(),
@@ -3645,6 +3762,11 @@ diff --git a/tests/app.rs b/tests/app.rs
                             .to_owned(),
                     ),
                     rationale: Some("start here".to_owned()),
+                    artifacts: vec![crate::agent::Artifact {
+                        title: "startup output".to_owned(),
+                        kind: crate::agent::ArtifactKind::Output,
+                        body: "$ cargo run\nnew: ready\nextra: ready".to_owned(),
+                    }],
                     parts: vec![crate::agent::ChunkPart {
                         path: "src/app.rs".to_owned(),
                         start_line: Some(2),
@@ -3658,6 +3780,7 @@ diff --git a/tests/app.rs b/tests/app.rs
                     change_id: None,
                     explanation: None,
                     rationale: Some("mechanical rename in tests".to_owned()),
+                    artifacts: Vec::new(),
                     parts: vec![crate::agent::ChunkPart {
                         path: "tests/app.rs".to_owned(),
                         start_line: Some(1),
@@ -3670,6 +3793,7 @@ diff --git a/tests/app.rs b/tests/app.rs
                 summary: "Swaps the legacy old() startup call for new() and batches extra() \
                           alongside it, so both effects fire together."
                     .to_owned(),
+                artifacts: Vec::new(),
             }],
             ..Default::default()
         });
@@ -3717,6 +3841,23 @@ diff --git a/tests/app.rs b/tests/app.rs
     }
 
     #[test]
+    fn tui_snapshot_zen_artifact_viewer() {
+        let (session, mut zen) = zen_snapshot_session();
+        zen.phase = crate::tui::zen::ZenPhase::Artifact {
+            index: 0,
+            scroll: 0,
+        };
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            100,
+            24
+        ));
+    }
+
+    #[test]
     fn tui_snapshot_zen_reading_panel() {
         let (session, mut zen) = zen_snapshot_session();
         zen.phase = crate::tui::zen::ZenPhase::Reading;
@@ -3752,6 +3893,7 @@ diff --git a/tests/app.rs b/tests/app.rs
             change_id: None,
             rationale: None,
             explanation: None,
+            artifacts: Vec::new(),
             part: Some(crate::agent::ChunkPart {
                 path: "src/app.rs".to_owned(),
                 start_line: Some(3),
@@ -3782,6 +3924,7 @@ diff --git a/tests/app.rs b/tests/app.rs
             change_id: None,
             rationale: None,
             explanation: None,
+            artifacts: Vec::new(),
             part: Some(crate::agent::ChunkPart {
                 path: "big.txt".to_owned(),
                 start_line: Some(2),

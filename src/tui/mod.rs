@@ -1659,6 +1659,9 @@ fn handle_zen_key(
     if zen.phase == zen::ZenPhase::Glance {
         return handle_zen_glance_key(key, zen, session, keymap, review_loader, tui_state);
     }
+    if let zen::ZenPhase::Artifact { index, scroll } = zen.phase {
+        return handle_zen_artifact_key(key, zen, index, scroll);
+    }
     match key.code {
         KeyCode::Esc => {
             // Esc peels layers in order: an active range selection is more
@@ -1739,6 +1742,24 @@ fn handle_zen_key(
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "nothing on the glance board — every change is a stop".to_owned(),
+                });
+            }
+            return ZenKeyOutcome::Consumed;
+        }
+        KeyCode::Char('e') if zen.phase == zen::ZenPhase::Focus => {
+            let artifacts = zen
+                .current()
+                .map(|stop| zen::stop_artifacts(stop).len())
+                .unwrap_or(0);
+            if artifacts > 0 {
+                zen.phase = zen::ZenPhase::Artifact {
+                    index: 0,
+                    scroll: 0,
+                };
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no artifacts on this stop".to_owned(),
                 });
             }
             return ZenKeyOutcome::Consumed;
@@ -1856,6 +1877,57 @@ fn handle_zen_glance_key(
             ZenKeyOutcome::Consumed
         }
     }
+}
+
+/// Artifact viewer keys. A modal layer over the focus card: j/k (↑/↓)
+/// scroll the exhibit, h/l (←/→, tab) cycle between exhibits, and
+/// e/esc/enter/q close back to the card. Everything else is swallowed so
+/// normal-mode actions cannot fire invisibly underneath.
+fn handle_zen_artifact_key(
+    key: KeyEvent,
+    zen: &mut ZenState,
+    index: usize,
+    scroll: u16,
+) -> ZenKeyOutcome {
+    let count = zen
+        .current()
+        .map(|stop| zen::stop_artifacts(stop).len())
+        .unwrap_or(0);
+    if count == 0 {
+        zen.phase = zen::ZenPhase::Focus;
+        return ZenKeyOutcome::Consumed;
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('q') => {
+            zen.phase = zen::ZenPhase::Focus;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            zen.phase = zen::ZenPhase::Artifact {
+                index,
+                scroll: scroll.saturating_add(1),
+            };
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            zen.phase = zen::ZenPhase::Artifact {
+                index,
+                scroll: scroll.saturating_sub(1),
+            };
+        }
+        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+            zen.phase = zen::ZenPhase::Artifact {
+                index: (index + 1) % count,
+                scroll: 0,
+            };
+        }
+        KeyCode::Char('h') | KeyCode::Left => {
+            zen.phase = zen::ZenPhase::Artifact {
+                index: index.checked_sub(1).unwrap_or(count - 1),
+                scroll: 0,
+            };
+        }
+        _ => {}
+    }
+    ZenKeyOutcome::Consumed
 }
 
 /// Returns the next mode when the popup should change state.
@@ -3181,6 +3253,7 @@ diff --git a/b.rs b/b.rs
                 change_id: None,
                 explanation: None,
                 rationale: Some("read together".to_owned()),
+                artifacts: Vec::new(),
                 parts: vec![
                     crate::agent::ChunkPart {
                         path: "a.rs".to_owned(),
@@ -3378,6 +3451,7 @@ diff --git a/b.rs b/b.rs
                 change_id: None,
                 rationale: None,
                 explanation: Some("This is the heart of the change.".to_owned()),
+                artifacts: Vec::new(),
                 parts: vec![crate::agent::ChunkPart {
                     path: "a.rs".to_owned(),
                     start_line: Some(1),
@@ -3500,6 +3574,113 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn zen_e_opens_scrolls_and_closes_the_artifact_viewer() {
+        let mut session = zen_session_with_glance();
+        // Attach two exhibits to the spotlight chunk.
+        session.review_chunks[0].artifacts = vec![
+            crate::agent::Artifact {
+                title: "usage".to_owned(),
+                kind: crate::agent::ArtifactKind::Example,
+                body: "line one\nline two\nline three".to_owned(),
+            },
+            crate::agent::Artifact {
+                title: "test run".to_owned(),
+                kind: crate::agent::ArtifactKind::Output,
+                body: "3 passed".to_owned(),
+            },
+        ];
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.advance(); // chapter card -> the spotlight stop
+
+        // `e` on the chapter card would find no artifacts; on the stop it
+        // opens the viewer.
+        let mut press = |code: KeyCode, zen: &mut ZenState, session: &mut ReviewSession| {
+            assert!(matches!(
+                handle_zen_key(
+                    KeyEvent::from(code),
+                    zen,
+                    session,
+                    &keymap,
+                    &zen_loader(&zen_backend),
+                    &mut tui_state,
+                ),
+                ZenKeyOutcome::Consumed
+            ));
+        };
+        press(KeyCode::Char('e'), &mut zen, &mut session);
+        assert_eq!(
+            zen.phase,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 0
+            }
+        );
+
+        // j scrolls, l cycles to the next exhibit (resetting scroll), h
+        // wraps back, esc closes.
+        press(KeyCode::Char('j'), &mut zen, &mut session);
+        assert_eq!(
+            zen.phase,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 1
+            }
+        );
+        press(KeyCode::Char('l'), &mut zen, &mut session);
+        assert_eq!(
+            zen.phase,
+            zen::ZenPhase::Artifact {
+                index: 1,
+                scroll: 0
+            }
+        );
+        press(KeyCode::Char('h'), &mut zen, &mut session);
+        assert_eq!(
+            zen.phase,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 0
+            }
+        );
+        // The viewer is modal: normal keys are swallowed, not fallen through.
+        press(KeyCode::Char('c'), &mut zen, &mut session);
+        press(KeyCode::Esc, &mut zen, &mut session);
+        assert_eq!(zen.phase, zen::ZenPhase::Focus);
+    }
+
+    #[test]
+    fn zen_e_without_artifacts_notices_instead_of_opening() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('e')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert_eq!(zen.phase, zen::ZenPhase::Focus);
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("no artifacts on this stop")
+        );
+    }
+
+    #[test]
     fn glance_board_enter_jumps_to_the_entry_and_ends_zen() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
@@ -3559,6 +3740,7 @@ diff --git a/b.rs b/b.rs
                     change_id: None,
                     rationale: None,
                     explanation: None,
+                    artifacts: Vec::new(),
                     parts: vec![crate::agent::ChunkPart {
                         path: "a.rs".to_owned(),
                         start_line: Some(1),
@@ -3572,6 +3754,7 @@ diff --git a/b.rs b/b.rs
                     change_id: Some("bbb".to_owned()),
                     rationale: None,
                     explanation: Some("The second change of the stack.".to_owned()),
+                    artifacts: Vec::new(),
                     parts: vec![crate::agent::ChunkPart {
                         path: "b.rs".to_owned(),
                         start_line: Some(1),
