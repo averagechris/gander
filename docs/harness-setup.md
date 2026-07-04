@@ -25,7 +25,10 @@ to its per-instance socket. That means:
 
 Tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (file/line/hunk the human is looking at right now),
-`set_ordering`, `flag_section`, `set_chunks`, `draft_comment`,
+`stack_changes` (the `trunk()..@` stack, oldest first — treat it like
+stacked PRs), `change_diff` (one change against its parent),
+`set_ordering`, `flag_section`, `set_chunks` (anchor chunks to a stack
+change with `change_id`), `draft_comment`,
 `list_reviews`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
 via `S` and zen mode `T`/`Z`, drafts via `D`).

@@ -19,6 +19,12 @@ pub trait JjBackend {
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the current stack (`trunk()..@`), oldest first.
     fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+    /// A cheap fingerprint of the reviewed range: the commit ids of every
+    /// change in `base..rev`. Running it snapshots the working copy (like
+    /// any jj command), so it changes whenever a change is added, rewritten,
+    /// abandoned, or the working copy content moves — the poll primitive
+    /// behind live review refresh.
+    fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
     /// Recent operations from `jj op log`, newest first.
     fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>>;
     /// The diff for `target` as it looked at a prior operation.
@@ -194,6 +200,33 @@ impl JjCommand {
         Self::log_summaries(binary, repo, "trunk()..@", true)
     }
 
+    /// Commit ids of every change in the target range, one per line.
+    pub fn change_fingerprint(binary: &Path, repo: &Path, target: &ReviewTarget) -> Result<String> {
+        let output = Command::new(binary)
+            .arg("log")
+            .arg("-r")
+            .arg(format!("{}..{}", target.base, target.rev))
+            .arg("--no-graph")
+            .arg("--color=never")
+            .arg("--no-pager")
+            .arg("--template")
+            .arg("commit_id ++ \"\\n\"")
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        if !output.status.success() {
+            bail!(
+                "jj log failed fingerprinting {} with status {}:\n{}",
+                target,
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     fn log_summaries(
         binary: &Path,
         repo: &Path,
@@ -248,6 +281,10 @@ impl JjBackend for JjCliBackend {
 
     fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
         JjCommand::stack_changes(&self.binary, repo)
+    }
+
+    fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
+        JjCommand::change_fingerprint(&self.binary, repo, target)
     }
 
     fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>> {

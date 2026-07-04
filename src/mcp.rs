@@ -25,7 +25,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{acp::AcpHandler, app::ReviewSession, registry};
+use crate::{acp::AcpHandler, app::ReviewSession, jj::JjBackend, registry};
 
 /// MCP server state: registry routing plus an in-process snapshot fallback.
 ///
@@ -82,6 +82,13 @@ pub struct ChunkParams {
     /// hunks that should stay in the at-a-glance rail instead of interrupting
     /// the walkthrough.
     pub importance: Option<String>,
+    /// The jj change this chunk belongs to (a change_id from
+    /// `stack_changes`). The zen walkthrough retargets the review to that
+    /// change's own diff for this stop, so part line numbers must come from
+    /// `change_diff` for the same change. Anchor chunks this way whenever the
+    /// review target spans a stack of changes; omit for chunks over the
+    /// loaded target as a whole.
+    pub change_id: Option<String>,
     /// Why these parts belong together.
     pub rationale: Option<String>,
     /// For spotlight chunks: 2-5 sentences that teach the change (what the
@@ -106,15 +113,25 @@ pub struct DraftCommentParams {
     pub body: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChangeDiffParams {
+    /// A jj change id as listed by `stack_changes`.
+    pub change_id: String,
+}
+
 #[tool_router]
 impl GanderMcp {
     pub fn new(
         session_factory: impl FnOnce() -> ReviewSession + Send + 'static,
+        jj: Option<Box<dyn JjBackend + Send>>,
         overlay_path: PathBuf,
         registry_dir: PathBuf,
         workspace_root: PathBuf,
     ) -> Result<Self> {
         let mut handler = AcpHandler::new(overlay_path)?;
+        if let Some(jj) = jj {
+            handler.set_jj_backend(jj);
+        }
         let (sender, receiver) = mpsc::channel::<SnapshotRequest>();
         // ReviewSession itself is not Send (interior caches), so it is
         // constructed on the thread that owns it.
@@ -169,6 +186,26 @@ impl GanderMcp {
     }
 
     #[tool(
+        description = "The jj changes in the current stack (trunk()..@), oldest first, with the reviewed change marked — the human often treats these as stacked PRs or logical groupings that flow into each other, so prefer organizing the review change-by-change when several exist"
+    )]
+    fn stack_changes(&self) -> Result<CallToolResult, McpError> {
+        self.call("review/stack_changes", Value::Null)
+    }
+
+    #[tool(
+        description = "Git-style diff of one jj change against its parent (change_id- .. change_id). Line numbers in this diff are what chunk parts anchored to this change_id must reference"
+    )]
+    fn change_diff(
+        &self,
+        Parameters(params): Parameters<ChangeDiffParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call(
+            "review/change_diff",
+            json!({ "change_id": params.change_id }),
+        )
+    }
+
+    #[tool(
         description = "Suggest a review order (riskiest or most central files first); surfaced live in the reviewer's TUI"
     )]
     fn set_ordering(
@@ -197,7 +234,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Group the change into logical reviewable units that can span or subdivide files"
+        description = "Group the change into logical reviewable units that can span or subdivide files; anchor each unit to its jj change with change_id when reviewing a stack"
     )]
     fn set_chunks(
         &self,
@@ -323,13 +360,19 @@ impl ServerHandler for GanderMcp {
             .with_instructions(
                 "gander hosts a code review of a jj change for a human reviewer. \
                  Read the change with review_summary, review_files, and file_diff; \
-                 see what the human is looking at with current_focus; then help \
-                 organize the review with set_ordering, flag_section, set_chunks \
-                 (3-7 importance=spotlight chunks with a teaching `explanation` \
-                 each; importance=glance for the routine rest — the human tours \
-                 spotlights full-screen and skims glance items in bulk), and \
-                 draft_comment — suggestions appear live in the reviewer's \
-                 terminal, and drafted comments are triaged by the human. \
+                 call stack_changes early — the human often reviews a stack of jj \
+                 changes like stacked PRs, and change_diff reads one change \
+                 against its parent. See what the human is looking at with \
+                 current_focus; then help organize the review with set_ordering, \
+                 flag_section, set_chunks (3-7 importance=spotlight chunks with a \
+                 teaching `explanation` each; importance=glance for the routine \
+                 rest — the human tours spotlights full-screen and skims glance \
+                 items in bulk; on a stack, give each chunk the change_id it \
+                 belongs to with line numbers from that change_diff, in stack \
+                 order, so the walkthrough flows through the stack change by \
+                 change), and draft_comment — suggestions appear live in the \
+                 reviewer's terminal, and drafted comments are triaged by the \
+                 human. The review refreshes automatically as new changes land. \
                  list_reviews shows every running review instance. Do not modify \
                  the repository.",
             )
@@ -340,12 +383,14 @@ impl ServerHandler for GanderMcp {
 /// snapshot fallback session on its owning thread.
 pub fn run(
     session_factory: impl FnOnce() -> ReviewSession + Send + 'static,
+    jj: Option<Box<dyn JjBackend + Send>>,
     overlay_path: PathBuf,
     registry_dir: PathBuf,
     workspace_root: &Path,
 ) -> Result<()> {
     let server = GanderMcp::new(
         session_factory,
+        jj,
         overlay_path,
         registry_dir,
         workspace_root.to_path_buf(),
@@ -395,6 +440,7 @@ mod tests {
         let root = dir.to_path_buf();
         GanderMcp::new(
             move || session(&root),
+            None,
             dir.join("agent.json"),
             dir.join("registry"),
             dir.to_path_buf(),
@@ -455,6 +501,7 @@ mod tests {
                 chunks: vec![ChunkParams {
                     title: "core change".to_owned(),
                     importance: Some("spotlight".to_owned()),
+                    change_id: Some("abc".to_owned()),
                     rationale: None,
                     explanation: Some("Explains the core change.".to_owned()),
                     parts: vec![ChunkPartParams {
@@ -470,6 +517,7 @@ mod tests {
             crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
         assert_eq!(overlay.drafts.len(), 1);
         assert_eq!(overlay.chunks[0].title, "core change");
+        assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
         assert_eq!(
             overlay.chunks[0].explanation.as_deref(),
             Some("Explains the core change.")
@@ -550,6 +598,7 @@ mod tests {
         let root = workspace.clone();
         let server = GanderMcp::new(
             move || session(&root),
+            None,
             dir.path().join("agent.json"),
             registry_dir,
             workspace,

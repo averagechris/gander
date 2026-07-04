@@ -17,6 +17,9 @@ pub(super) struct ChunkListState {
 pub(super) struct ChunkRow {
     pub(super) title: String,
     pub(super) importance: ChunkImportance,
+    /// The jj change the chunk is anchored to, when the review spans a
+    /// stack; jumping to this row retargets the review to that change.
+    pub(super) change_id: Option<String>,
     pub(super) rationale: Option<String>,
     /// Teaching text for the zen focus card (spotlight chunks).
     pub(super) explanation: Option<String>,
@@ -52,6 +55,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         return vec![ChunkRow {
             title: chunk.title.clone(),
             importance: chunk.importance,
+            change_id: chunk.change_id.clone(),
             rationale: chunk.rationale.clone(),
             explanation: chunk.explanation.clone(),
             part: None,
@@ -66,6 +70,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         .map(|(index, part)| ChunkRow {
             title: chunk.title.clone(),
             importance: chunk.importance,
+            change_id: chunk.change_id.clone(),
             rationale: chunk.rationale.clone(),
             explanation: chunk.explanation.clone(),
             part: Some(part.clone()),
@@ -97,6 +102,7 @@ mod tests {
                     id: "c1".to_owned(),
                     title: "auth flow".to_owned(),
                     importance: ChunkImportance::Spotlight,
+                    change_id: None,
                     explanation: None,
                     rationale: Some("spans two files".to_owned()),
                     parts: vec![part("a.rs", 1, 10), part("b.rs", 5, 20)],
@@ -105,6 +111,7 @@ mod tests {
                     id: "c2".to_owned(),
                     title: "docs only".to_owned(),
                     importance: ChunkImportance::Glance,
+                    change_id: None,
                     explanation: None,
                     rationale: None,
                     parts: Vec::new(),
@@ -131,6 +138,7 @@ mod tests {
                 id: "c1".to_owned(),
                 title: "single".to_owned(),
                 importance: ChunkImportance::Spotlight,
+                change_id: None,
                 explanation: None,
                 rationale: None,
                 parts: vec![part("a.rs", 1, 2)],

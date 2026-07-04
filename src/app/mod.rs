@@ -348,6 +348,54 @@ impl ReviewSession {
         );
     }
 
+    /// Like [`Self::replace_diff`], but for background refreshes of the
+    /// *same* review: view state (pane visibility, focus, filters, folds,
+    /// per-file viewports, the selected file, and the zen focus frame)
+    /// carries over so the reload does not yank the reviewer around.
+    pub fn replace_diff_preserving_view(&mut self, target: ReviewTarget, diff: DiffSet) {
+        let file_pane_visible = self.file_pane_visible;
+        let focus = self.focus;
+        let hide_generated = self.hide_generated;
+        let viewed_filter = self.viewed_filter;
+        let fold_context = self.fold_context;
+        let use_agent_order = self.use_agent_order;
+        let collapsed_dirs = std::mem::take(&mut self.collapsed_dirs);
+        let force_rendered = std::mem::take(&mut self.force_rendered);
+        let viewports = std::mem::take(&mut self.viewport_by_path);
+        let zen_focus = self.zen_focus.take();
+        let selected_path = self.selected_file().map(|file| file.path.clone());
+
+        self.replace_diff(target, diff);
+
+        self.file_pane_visible = file_pane_visible;
+        self.hide_generated = hide_generated;
+        self.viewed_filter = viewed_filter;
+        self.fold_context = fold_context;
+        self.use_agent_order = use_agent_order;
+        self.collapsed_dirs = collapsed_dirs;
+        self.force_rendered = force_rendered;
+        self.viewport_by_path = viewports;
+        if let Some(index) = selected_path
+            .as_deref()
+            .and_then(|path| self.files.iter().position(|file| file.path == path))
+        {
+            self.select_file_index(index);
+            self.restore_current_viewport();
+        }
+        self.focus = focus;
+        if self.focus == Focus::Diff {
+            // Row counts may have shifted; keep the cursor on a real row.
+            let rows = self.diff_rows_for_selected_file().len();
+            if self.diff_cursor >= rows {
+                self.diff_cursor = rows.saturating_sub(1);
+            }
+            self.ensure_diff_cursor_commentable();
+        }
+        // The zen frame only survives when its file is still in the diff.
+        self.zen_focus =
+            zen_focus.filter(|focus| self.files.iter().any(|file| file.path == focus.path));
+    }
+
     /// Toggle rendering the selected file even though its diff exceeds the
     /// large-diff threshold.
     pub fn toggle_large_diff_render(&mut self) {
@@ -1623,6 +1671,99 @@ diff --git a/README.md b/README.md
         )
     }
 
+    #[test]
+    fn replace_diff_preserving_view_keeps_the_reviewers_place() {
+        let mut session = session();
+        session.toggle_file_pane(); // hidden pane, focus moves to the diff
+        session.hide_generated = true;
+        session.viewed_filter = ViewedFilter::Unviewed;
+        // Select the second file and mark the first viewed.
+        let index = session
+            .files
+            .iter()
+            .position(|file| file.path == "README.md")
+            .unwrap();
+        session.select_file_index(index);
+        session.zen_focus = Some(ZenFocus {
+            path: "README.md".to_owned(),
+            lines: Some((1, 1)),
+        });
+        session.files[0].viewed = true;
+
+        // The same review grew a third file (new work landed).
+        let refreshed = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/new.rs b/src/new.rs
+--- a/src/new.rs
++++ b/src/new.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert!(!session.file_pane_visible);
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(session.hide_generated);
+        assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "README.md");
+        // Viewed marks still carry over by fingerprint, and the new file
+        // arrived unviewed.
+        assert!(
+            session
+                .files
+                .iter()
+                .find(|file| file.path == "src/tui.rs")
+                .unwrap()
+                .viewed
+        );
+        assert!(
+            !session
+                .files
+                .iter()
+                .find(|file| file.path == "src/new.rs")
+                .unwrap()
+                .viewed
+        );
+    }
+
+    #[test]
+    fn replace_diff_preserving_view_drops_a_zen_frame_for_a_vanished_file() {
+        let mut session = session();
+        session.zen_focus = Some(ZenFocus {
+            path: "src/tui.rs".to_owned(),
+            lines: None,
+        });
+
+        let refreshed = DiffSet::parse(
+            r#"diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert!(session.zen_focus.is_none());
+    }
+
     fn three_file_session() -> ReviewSession {
         let diff = DiffSet::parse(
             r#"diff --git a/src/a.rs b/src/a.rs
@@ -1869,6 +2010,7 @@ diff --git a/src/c.rs b/src/c.rs
                 id: "c1".to_owned(),
                 title: "core".to_owned(),
                 importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
                 explanation: None,
                 rationale: None,
                 parts: vec![crate::agent::ChunkPart {
@@ -1919,6 +2061,7 @@ diff --git a/src/c.rs b/src/c.rs
                 id: "c1".to_owned(),
                 title: "core".to_owned(),
                 importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
                 explanation: None,
                 rationale: None,
                 parts: Vec::new(),

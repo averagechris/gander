@@ -125,6 +125,12 @@ struct TuiState {
     /// The zen walkthrough layer, when active. A layer, not a mode: normal
     /// review actions keep working underneath it (docs/focused-diff-ux.md §6).
     zen: Option<ZenState>,
+    /// Last repo poll for live refresh, throttled to [`REPO_POLL_INTERVAL`].
+    last_repo_poll: Option<std::time::Instant>,
+    /// `(target, fingerprint)` of the reviewed range at the last poll; a
+    /// fingerprint change for the same target means new work landed and the
+    /// review should refresh in place.
+    repo_fingerprint: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,12 +178,16 @@ pub struct TuiPaths {
     pub workspace_root: Option<PathBuf>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
+    // Owned backend handed to the live ACP endpoint so agents can query the
+    // stack (`review/stack_changes`, `review/change_diff`).
+    acp_jj: Option<Box<dyn JjBackend + Send>>,
     paths: TuiPaths,
     agent_config: AgentConfig,
 ) -> Result<()> {
@@ -210,8 +220,11 @@ pub fn run(
     let (mut acp_bridge, acp_notice, instance_registration) =
         match (acp_socket_path, &agent_overlay_path) {
             (Some(socket_path), Some(overlay_path)) => {
-                match crate::acp::socket::AcpBridge::bind(socket_path.clone(), overlay_path.clone())
-                {
+                match crate::acp::socket::AcpBridge::bind(
+                    socket_path.clone(),
+                    overlay_path.clone(),
+                    acp_jj,
+                ) {
                     Ok(bridge) => {
                         let registration = match (&registry_dir, &workspace_root) {
                             (Some(registry_dir), Some(workspace_root)) => {
@@ -242,7 +255,7 @@ pub fn run(
         };
     #[cfg(not(unix))]
     let acp_notice: Option<String> = {
-        let _ = (acp_socket_path, registry_dir, workspace_root);
+        let _ = (acp_socket_path, acp_jj, registry_dir, workspace_root);
         None
     };
 
@@ -377,6 +390,12 @@ fn run_loop(
                 maybe_reload_agent_overlay(session, overlay_path, tui_state, true);
             }
             notice_agent_exit(tui_state);
+            // Live refresh: pick up new/rewritten changes while nothing
+            // modal is open (a reload underneath a popup or comment editor
+            // could misanchor what the human is doing).
+            if matches!(mode, Mode::Normal) {
+                maybe_refresh_review(review_loader, session, tui_state);
+            }
             continue;
         }
 
@@ -521,6 +540,103 @@ fn maybe_reload_agent_overlay(
     }
 }
 
+/// How often the idle loop polls jj for new work in the reviewed range.
+const REPO_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Poll the repo (throttled) and refresh the review in place when the
+/// reviewed range changed underneath it — new changes landing, rewrites,
+/// or working-copy edits (the fingerprint query snapshots the working copy
+/// like any jj command). The first poll for a target only records the
+/// baseline; view state is preserved across refreshes and comments/viewed
+/// marks carry over by fingerprint, so the reload does not yank the
+/// reviewer around.
+fn maybe_refresh_review(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    let now = std::time::Instant::now();
+    if tui_state
+        .last_repo_poll
+        .is_some_and(|last| now.duration_since(last) < REPO_POLL_INTERVAL)
+    {
+        return;
+    }
+    tui_state.last_repo_poll = Some(now);
+    // Transient jj failures (locks, mid-operation states) must not spam the
+    // footer: skip this tick and try again on the next one.
+    let Ok(fingerprint) = review_loader
+        .jj
+        .change_fingerprint(&session.repo, &session.target)
+    else {
+        return;
+    };
+    let target_key = session.target.to_string();
+    let baseline = tui_state
+        .repo_fingerprint
+        .as_ref()
+        .filter(|(target, _)| *target == target_key)
+        .map(|(_, fingerprint)| fingerprint.clone());
+    tui_state.repo_fingerprint = Some((target_key, fingerprint.clone()));
+    match baseline {
+        None => {}
+        Some(previous) if previous == fingerprint => {}
+        Some(_) => refresh_current_target(review_loader, session, tui_state),
+    }
+}
+
+/// Reload the current target in place: view state survives, agent
+/// suggestions are reapplied, and an active zen walkthrough rebuilds its
+/// stops instead of going stale.
+fn refresh_current_target(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    if let Err(error) = review_loader.load_in_place(session, session.target.clone()) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Error,
+            message: format!("failed to refresh review: {error:?}"),
+        });
+        return;
+    }
+    reapply_agent_overlay(session, tui_state);
+    let mut message = format!("repository changed — refreshed {}", session.target);
+    if let Some(mut zen) = tui_state.zen.take() {
+        if zen.refresh(session) {
+            if zen.phase != zen::ZenPhase::Glance
+                && let Some(stop) = zen.current().cloned()
+            {
+                zen::jump_to_stop(session, &stop);
+            }
+            tui_state.zen = Some(zen);
+        } else {
+            zen::end(session, &zen);
+            message.push_str(" · zen ended (nothing left to walk through)");
+        }
+    }
+    tui_state.notice = Some(UiNotice {
+        level: UiNoticeLevel::Info,
+        message,
+    });
+}
+
+/// Re-apply the on-disk agent overlay to the session. Reloads (`replace_diff`)
+/// reset overlay-derived state (ordering, flags, chunks, drafts); refreshes
+/// and zen-driven retargets restore it so suggestions survive.
+fn reapply_agent_overlay(session: &mut ReviewSession, tui_state: &mut TuiState) {
+    let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
+        return;
+    };
+    if let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
+        session.apply_agent_overlay(&overlay);
+    }
+    // Our own read is not news; suppress the poll-based reload notice.
+    tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+}
+
 /// Cheap change-detection payload: only the persistable parts of the session
 /// (viewed marks and comments), excluding volatile metadata like `saved_at`.
 fn state_fingerprint(session: &ReviewSession) -> String {
@@ -562,12 +678,30 @@ fn handle_key_event(
             // everything else fall through to the normal vocabulary, so
             // commenting/flagging/view toggles keep working mid-walkthrough.
             if let Some(mut zen) = tui_state.zen.take() {
-                match handle_zen_key(key, &mut zen, session, keymap, tui_state) {
+                match handle_zen_key(key, &mut zen, session, keymap, review_loader, tui_state) {
                     ZenKeyOutcome::Consumed => {
                         tui_state.zen = Some(zen);
                         return Ok(false);
                     }
-                    ZenKeyOutcome::End => {
+                    ZenKeyOutcome::End { restore_target } => {
+                        // A change-anchored walkthrough may have wandered
+                        // through the stack; ending it returns to the target
+                        // it started from (unless the human jumped somewhere
+                        // on purpose).
+                        if restore_target && session.target != zen.home_target {
+                            match review_loader.load(session, zen.home_target.clone()) {
+                                Ok(()) => reapply_agent_overlay(session, tui_state),
+                                Err(error) => {
+                                    tui_state.notice = Some(UiNotice {
+                                        level: UiNoticeLevel::Error,
+                                        message: format!(
+                                            "zen ended but failed to restore {}: {error:?}",
+                                            zen.home_target
+                                        ),
+                                    });
+                                }
+                            }
+                        }
                         zen::end(session, &zen);
                         return Ok(false);
                     }
@@ -612,7 +746,7 @@ fn handle_key_event(
             }
         }
         Mode::ChunkList(list) => {
-            if handle_chunk_list_key(key, list, session, keymap) {
+            if handle_chunk_list_key(key, list, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -761,27 +895,30 @@ fn handle_normal_action(
             }
         }
         Action::Zen => match ZenState::new(session) {
-            Some(zen) => {
+            Some(mut zen) => {
                 session.file_pane_visible = false;
-                if let Some(stop) = zen.current().cloned() {
-                    zen::jump_to_stop(session, &stop);
+                let landed = match zen.current().cloned() {
+                    Some(stop) => zen_goto_row(review_loader, session, &mut zen, &stop, tui_state),
+                    None => true,
+                };
+                if landed {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: match zen.source {
+                            zen::ZenSource::Chunks => {
+                                format!(
+                                    "zen: {} focus stop(s), {} at a glance",
+                                    zen.len(),
+                                    zen.glance_rows.len()
+                                )
+                            }
+                            zen::ZenSource::Files => format!(
+                                "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
+                                zen.len()
+                            ),
+                        },
+                    });
                 }
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: match zen.source {
-                        zen::ZenSource::Chunks => {
-                            format!(
-                                "zen: {} focus stop(s), {} at a glance",
-                                zen.len(),
-                                zen.glance_rows.len()
-                            )
-                        }
-                        zen::ZenSource::Files => format!(
-                            "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
-                            zen.len()
-                        ),
-                    },
-                });
                 tui_state.zen = Some(zen);
             }
             None => {
@@ -1386,6 +1523,8 @@ fn handle_chunk_list_key(
     list: &mut ChunkListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
 ) -> bool {
     if let Some(action) = keymap.target_picker_action_for(&key) {
         match action {
@@ -1399,8 +1538,32 @@ fn handle_chunk_list_key(
     match key.code {
         KeyCode::Esc => true,
         KeyCode::Enter => {
-            if let Some(part) = list.selected_row().and_then(|row| row.part.clone()) {
-                session.jump_to_chunk_part(&part);
+            if let Some(row) = list.selected_row().cloned() {
+                // A change-anchored chunk lives in its own change's diff;
+                // load it before jumping so line anchors line up. This is a
+                // user retarget (an active zen walkthrough ends).
+                let desired = zen::row_target(&row, &session.target.clone());
+                if session.target != desired {
+                    match review_loader.load(session, desired.clone()) {
+                        Ok(()) => {
+                            reapply_agent_overlay(session, tui_state);
+                            tui_state.notice = Some(UiNotice {
+                                level: UiNoticeLevel::Info,
+                                message: format!("loaded {desired}"),
+                            });
+                        }
+                        Err(error) => {
+                            tui_state.notice = Some(UiNotice {
+                                level: UiNoticeLevel::Error,
+                                message: format!("failed to load {desired}: {error:?}"),
+                            });
+                            return true;
+                        }
+                    }
+                }
+                if let Some(part) = &row.part {
+                    session.jump_to_chunk_part(part);
+                }
             }
             true
         }
@@ -1421,9 +1584,43 @@ enum ZenKeyOutcome {
     /// The key was a zen navigation key and has been handled.
     Consumed,
     /// The walkthrough is over; the caller clears the layer.
-    End,
+    /// `restore_target` asks the caller to return to the walkthrough's home
+    /// target when change-anchored stops wandered through the stack; it is
+    /// `false` when the human deliberately jumped somewhere instead.
+    End { restore_target: bool },
     /// Not a zen key: let the normal-mode vocabulary handle it.
     Fallthrough,
+}
+
+/// Bring the session to a zen row, retargeting the review when the row is
+/// anchored to a different jj change than the one loaded (the stacked-PR
+/// walkthrough). Returns `false` when the retarget failed: a notice
+/// explains, and the caller should stay on its current stop.
+fn zen_goto_row(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    zen: &mut ZenState,
+    row: &chunks::ChunkRow,
+    tui_state: &mut TuiState,
+) -> bool {
+    let desired = zen::row_target(row, &zen.home_target);
+    if session.target != desired {
+        if let Err(error) = review_loader.load(session, desired.clone()) {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load {desired}: {error:?}"),
+            });
+            return false;
+        }
+        // A zen-driven load is not a user retarget: keep the walkthrough
+        // alive (staleness key), its chrome (hidden file pane), and the
+        // agent's suggestions (the loader reset all three).
+        zen.target_key = session.target.to_string();
+        session.file_pane_visible = false;
+        reapply_agent_overlay(session, tui_state);
+    }
+    zen::jump_to_stop(session, row);
+    true
 }
 
 /// Zen layer keys, phase-aware. On the focus card and reading view:
@@ -1440,10 +1637,11 @@ fn handle_zen_key(
     zen: &mut ZenState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> ZenKeyOutcome {
     if zen.phase == zen::ZenPhase::Glance {
-        return handle_zen_glance_key(key, zen, session, keymap, tui_state);
+        return handle_zen_glance_key(key, zen, session, keymap, review_loader, tui_state);
     }
     match key.code {
         KeyCode::Esc => {
@@ -1456,16 +1654,25 @@ fn handle_zen_key(
                 level: UiNoticeLevel::Info,
                 message: "zen ended".to_owned(),
             });
-            return ZenKeyOutcome::End;
+            return ZenKeyOutcome::End {
+                restore_target: true,
+            };
         }
         KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right => {
             let Some(stop) = zen.current().cloned() else {
-                return ZenKeyOutcome::End;
+                return ZenKeyOutcome::End {
+                    restore_target: true,
+                };
             };
             zen::mark_stop_viewed(session, &stop);
             if zen.advance() {
-                if let Some(next) = zen.current().cloned() {
-                    zen::jump_to_stop(session, &next);
+                if let Some(next) = zen.current().cloned()
+                    && !zen_goto_row(review_loader, session, zen, &next, tui_state)
+                {
+                    // The next stop's change failed to load: stay put
+                    // rather than showing a card over the wrong diff.
+                    zen.back();
+                    return ZenKeyOutcome::Consumed;
                 }
                 tui_state.notice = None;
                 return ZenKeyOutcome::Consumed;
@@ -1481,13 +1688,16 @@ fn handle_zen_key(
                 level: UiNoticeLevel::Info,
                 message: "zen complete — all stops visited".to_owned(),
             });
-            return ZenKeyOutcome::End;
+            return ZenKeyOutcome::End {
+                restore_target: true,
+            };
         }
         KeyCode::Char('p') | KeyCode::Left => {
             if zen.back()
                 && let Some(stop) = zen.current().cloned()
+                && !zen_goto_row(review_loader, session, zen, &stop, tui_state)
             {
-                zen::jump_to_stop(session, &stop);
+                zen.advance();
             }
             return ZenKeyOutcome::Consumed;
         }
@@ -1502,7 +1712,7 @@ fn handle_zen_key(
             // Refocus: snap the cursor/scroll back to the current stop after
             // wandering off it with line navigation.
             if let Some(stop) = zen.current().cloned() {
-                zen::jump_to_stop(session, &stop);
+                zen_goto_row(review_loader, session, zen, &stop, tui_state);
             }
             return ZenKeyOutcome::Consumed;
         }
@@ -1525,7 +1735,9 @@ fn handle_zen_key(
             level: UiNoticeLevel::Info,
             message: "zen ended".to_owned(),
         });
-        return ZenKeyOutcome::End;
+        return ZenKeyOutcome::End {
+            restore_target: true,
+        };
     }
     ZenKeyOutcome::Fallthrough
 }
@@ -1540,6 +1752,7 @@ fn handle_zen_glance_key(
     zen: &mut ZenState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> ZenKeyOutcome {
     match key.code {
@@ -1555,13 +1768,33 @@ fn handle_zen_glance_key(
             if let Some(row) = zen.selected_glance().cloned()
                 && let Some(part) = &row.part
             {
+                // The entry may live in another change of the stack: load
+                // its diff first so the jump lands on real rows. This is a
+                // deliberate jump, so the home target is not restored.
+                let desired = zen::row_target(&row, &zen.home_target);
+                if session.target != desired {
+                    match review_loader.load(session, desired.clone()) {
+                        Ok(()) => reapply_agent_overlay(session, tui_state),
+                        Err(error) => {
+                            tui_state.notice = Some(UiNotice {
+                                level: UiNoticeLevel::Error,
+                                message: format!("failed to load {desired}: {error:?}"),
+                            });
+                            return ZenKeyOutcome::End {
+                                restore_target: false,
+                            };
+                        }
+                    }
+                }
                 session.jump_to_chunk_part(part);
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: format!("zen ended — jumped to {}", part.path),
                 });
             }
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End {
+                restore_target: false,
+            }
         }
         KeyCode::Char('a') => {
             zen::mark_glance_viewed(session, zen);
@@ -1572,12 +1805,14 @@ fn handle_zen_glance_key(
                     zen.glance_rows.len()
                 ),
             });
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End {
+                restore_target: true,
+            }
         }
         KeyCode::Char('p') | KeyCode::Left => {
             zen.phase = zen::ZenPhase::Focus;
             if let Some(stop) = zen.current().cloned() {
-                zen::jump_to_stop(session, &stop);
+                zen_goto_row(review_loader, session, zen, &stop, tui_state);
             }
             ZenKeyOutcome::Consumed
         }
@@ -1586,7 +1821,9 @@ fn handle_zen_glance_key(
                 level: UiNoticeLevel::Info,
                 message: "zen ended".to_owned(),
             });
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End {
+                restore_target: true,
+            }
         }
         _ => {
             if keymap.action_for(&key) == Some(Action::Zen) {
@@ -1594,7 +1831,9 @@ fn handle_zen_glance_key(
                     level: UiNoticeLevel::Info,
                     message: "zen ended".to_owned(),
                 });
-                return ZenKeyOutcome::End;
+                return ZenKeyOutcome::End {
+                    restore_target: true,
+                };
             }
             // The board is modal: swallow everything else so invisible
             // normal-mode actions cannot fire underneath it.
@@ -1868,6 +2107,21 @@ impl ReviewLoader<'_> {
     }
 
     fn load(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
+        self.load_with(session, target, false)
+    }
+
+    /// Reload for a background refresh of the same review: the session's
+    /// view state is preserved (see `replace_diff_preserving_view`).
+    fn load_in_place(&self, session: &mut ReviewSession, target: ReviewTarget) -> Result<()> {
+        self.load_with(session, target, true)
+    }
+
+    fn load_with(
+        &self,
+        session: &mut ReviewSession,
+        target: ReviewTarget,
+        preserve_view: bool,
+    ) -> Result<()> {
         let diff_text = self
             .jj
             .diff(&session.repo, &target)
@@ -1875,7 +2129,11 @@ impl ReviewLoader<'_> {
         let mut diff = DiffSet::parse(&diff_text)
             .with_context(|| format!("failed to parse jj diff for {target}"))?;
         diff.apply_ignores(&self.ignore_globs)?;
-        session.replace_diff(target, diff);
+        if preserve_view {
+            session.replace_diff_preserving_view(target, diff);
+        } else {
+            session.replace_diff(target, diff);
+        }
         session.annotate_generated_where(|file| {
             self.generated_matcher.is_match(&file.path)
                 || crate::generated::diff_content_looks_generated(&file.diff)
@@ -2104,6 +2362,7 @@ mod tests {
         file_contents: Option<String>,
         commands: RefCell<Vec<Vec<String>>>,
         command_result: Result<String, String>,
+        fingerprint: RefCell<Result<String, String>>,
     }
 
     impl MockJjBackend {
@@ -2118,6 +2377,7 @@ mod tests {
                 file_contents: None,
                 commands: RefCell::new(Vec::new()),
                 command_result: Ok(String::new()),
+                fingerprint: RefCell::new(Ok(String::new())),
             }
         }
     }
@@ -2137,6 +2397,13 @@ mod tests {
 
         fn stack_changes(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
             Ok(self.stack.clone())
+        }
+
+        fn change_fingerprint(&self, _repo: &Path, _target: &ReviewTarget) -> Result<String> {
+            match &*self.fingerprint.borrow() {
+                Ok(fingerprint) => Ok(fingerprint.clone()),
+                Err(error) => bail!(error.clone()),
+            }
         }
 
         fn operations(&self, _repo: &Path) -> Result<Vec<crate::jj::JjOperationSummary>> {
@@ -2895,6 +3162,7 @@ diff --git a/b.rs b/b.rs
                 id: "c1".to_owned(),
                 title: "core flow".to_owned(),
                 importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
                 explanation: None,
                 rationale: Some("read together".to_owned()),
                 parts: vec![
@@ -2915,10 +3183,21 @@ diff --git a/b.rs b/b.rs
         session
     }
 
+    /// Loader over a mock backend for zen navigation tests (retargeting
+    /// change-anchored stops goes through the loader).
+    fn zen_loader(backend: &MockJjBackend) -> ReviewLoader<'_> {
+        ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: backend,
+        }
+    }
+
     #[test]
     fn zen_advances_through_stops_marking_files_viewed() {
         let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
 
@@ -2929,6 +3208,7 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Consumed
@@ -2951,9 +3231,10 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End { .. }
         ));
         assert!(session.files.iter().all(|file| file.viewed));
         assert!(tui_state.notice.unwrap().message.contains("zen complete"));
@@ -2963,6 +3244,7 @@ diff --git a/b.rs b/b.rs
     fn zen_esc_ends_the_walkthrough_without_marking_viewed() {
         let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
 
@@ -2972,9 +3254,10 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End { .. }
         ));
         assert!(session.files.iter().all(|file| !file.viewed));
     }
@@ -2983,6 +3266,7 @@ diff --git a/b.rs b/b.rs
     fn zen_esc_cancels_an_active_range_selection_first() {
         let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         zen::jump_to_stop(&mut session, &zen.stops[0].clone());
@@ -2997,6 +3281,7 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Fallthrough
@@ -3007,6 +3292,7 @@ diff --git a/b.rs b/b.rs
     fn zen_lets_review_keys_fall_through() {
         let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
 
@@ -3018,6 +3304,7 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Fallthrough
@@ -3028,6 +3315,7 @@ diff --git a/b.rs b/b.rs
     fn zen_key_ends_the_walkthrough() {
         let mut session = zen_session();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
 
@@ -3037,9 +3325,10 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End { .. }
         ));
         assert!(tui_state.notice.unwrap().message.contains("zen ended"));
     }
@@ -3053,6 +3342,7 @@ diff --git a/b.rs b/b.rs
                 id: "c1".to_owned(),
                 title: "the important bit".to_owned(),
                 importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
                 rationale: None,
                 explanation: Some("This is the heart of the change.".to_owned()),
                 parts: vec![crate::agent::ChunkPart {
@@ -3070,6 +3360,7 @@ diff --git a/b.rs b/b.rs
     fn zen_opens_the_glance_board_after_the_last_stop() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         assert_eq!(zen.len(), 1);
@@ -3083,6 +3374,7 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Consumed
@@ -3096,9 +3388,10 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End { .. }
         ));
         assert!(session.files.iter().all(|file| file.viewed));
         assert!(tui_state.notice.unwrap().message.contains("zen complete"));
@@ -3108,6 +3401,7 @@ diff --git a/b.rs b/b.rs
     fn zen_dot_refocuses_the_current_stop_after_wandering() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         zen::jump_to_stop(&mut session, &zen.stops[0].clone());
@@ -3123,6 +3417,7 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Consumed
@@ -3135,6 +3430,7 @@ diff --git a/b.rs b/b.rs
     fn zen_tab_toggles_between_focus_card_and_reading_view() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         assert_eq!(zen.phase, zen::ZenPhase::Focus);
@@ -3146,6 +3442,7 @@ diff --git a/b.rs b/b.rs
                     &mut zen,
                     &mut session,
                     &keymap,
+                    &zen_loader(&zen_backend),
                     &mut tui_state,
                 ),
                 ZenKeyOutcome::Consumed
@@ -3158,6 +3455,7 @@ diff --git a/b.rs b/b.rs
     fn glance_board_enter_jumps_to_the_entry_and_ends_zen() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         zen.phase = zen::ZenPhase::Glance;
@@ -3168,9 +3466,10 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
-            ZenKeyOutcome::End
+            ZenKeyOutcome::End { .. }
         ));
         assert_eq!(session.selected_file().unwrap().path, "b.rs");
         assert!(tui_state.notice.unwrap().message.contains("jumped to b.rs"));
@@ -3180,6 +3479,7 @@ diff --git a/b.rs b/b.rs
     fn glance_board_swallows_normal_mode_keys() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
         let mut zen = ZenState::new(&session).unwrap();
         zen.phase = zen::ZenPhase::Glance;
@@ -3192,10 +3492,280 @@ diff --git a/b.rs b/b.rs
                 &mut zen,
                 &mut session,
                 &keymap,
+                &zen_loader(&zen_backend),
                 &mut tui_state,
             ),
             ZenKeyOutcome::Consumed
         ));
+    }
+
+    /// A session where chunk two is anchored to a stack change `bbb`.
+    fn stacked_zen_session() -> ReviewSession {
+        let mut session = zen_session();
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![
+                crate::agent::ReviewChunk {
+                    id: "c1".to_owned(),
+                    title: "home stop".to_owned(),
+                    importance: crate::agent::ChunkImportance::Spotlight,
+                    change_id: None,
+                    rationale: None,
+                    explanation: None,
+                    parts: vec![crate::agent::ChunkPart {
+                        path: "a.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    }],
+                },
+                crate::agent::ReviewChunk {
+                    id: "c2".to_owned(),
+                    title: "stacked stop".to_owned(),
+                    importance: crate::agent::ChunkImportance::Spotlight,
+                    change_id: Some("bbb".to_owned()),
+                    rationale: None,
+                    explanation: Some("The second change of the stack.".to_owned()),
+                    parts: vec![crate::agent::ChunkPart {
+                        path: "b.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    }],
+                },
+            ],
+            ..Default::default()
+        });
+        session
+    }
+
+    #[test]
+    fn zen_retargets_to_a_change_anchored_stop_without_going_stale() {
+        let mut session = stacked_zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(r#"diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-old
++new
+"#
+        .to_owned()));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+        session.file_pane_visible = false;
+
+        // Advancing to the bbb-anchored stop retargets the review to that
+        // change's own diff (stacked-PR style) without ending zen.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
+        assert!(!zen.is_stale(&session));
+        assert!(!session.file_pane_visible);
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
+        assert_eq!(
+            zen_backend.calls.borrow().as_slice(),
+            [ReviewTarget::new("bbb-", "bbb")]
+        );
+
+        // Ending the walkthrough returns to the home target.
+        tui_state.zen = Some(zen);
+        let mut mode = Mode::Normal;
+        handle_key_event(
+            KeyEvent::from(KeyCode::Esc),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &zen_loader(&zen_backend),
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.zen.is_none());
+        assert_eq!(session.target, ReviewTarget::trunk_to_current());
+        assert_eq!(
+            zen_backend.calls.borrow().as_slice(),
+            [
+                ReviewTarget::new("bbb-", "bbb"),
+                ReviewTarget::trunk_to_current(),
+            ]
+        );
+    }
+
+    #[test]
+    fn zen_stays_put_when_a_change_anchored_stop_fails_to_load() {
+        let mut session = stacked_zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Err("boom".to_owned()));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session).unwrap();
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+
+        // The load failed: still on the first stop, target unchanged, and
+        // the notice explains what happened.
+        assert_eq!(zen.index, 0);
+        assert_eq!(session.target, ReviewTarget::trunk_to_current());
+        let notice = tui_state.notice.unwrap();
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("bbb"));
+    }
+
+    #[test]
+    fn chunk_list_enter_retargets_to_a_change_anchored_chunk() {
+        let mut session = stacked_zen_session();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+        let mut list = ChunkListState::new(&session);
+        list.move_selection(1); // the bbb-anchored row
+
+        assert!(handle_chunk_list_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut list,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+
+        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("loaded bbb-..bbb")
+        );
+    }
+
+    const REFRESHED_DIFF: &str = r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/c.rs b/c.rs
+--- a/c.rs
++++ b/c.rs
+@@ -1 +1 @@
+-old
++new
+"#;
+
+    #[test]
+    fn repo_polling_baselines_then_refreshes_in_place_on_change() {
+        let mut session = zen_session();
+        session.file_pane_visible = false;
+        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        // First poll only records the baseline: no reload, no notice.
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+        assert!(tui_state.notice.is_none());
+
+        // Unchanged fingerprint: still nothing.
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+
+        // New work landed: the review reloads in place, preserving view
+        // state (hidden file pane) and picking up the new file.
+        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert_eq!(backend.calls.borrow().len(), 1);
+        assert!(!session.file_pane_visible);
+        assert!(session.files.iter().any(|file| file.path == "c.rs"));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("repository changed")
+        );
+    }
+
+    #[test]
+    fn repo_polling_is_throttled_and_ignores_fingerprint_errors() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
+
+        // Within the poll interval: the change is not even inspected.
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+
+        // Transient jj failures skip the tick without noise or baseline
+        // loss.
+        *backend.fingerprint.borrow_mut() = Err("locked".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+        assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn refresh_keeps_an_active_zen_walkthrough_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        let mut session = zen_session();
+        let overlay = crate::agent::AgentOverlay {
+            chunks: session.review_chunks.clone(),
+            ..Default::default()
+        };
+        overlay.save(&overlay_path).unwrap();
+        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..TuiState::default()
+        };
+        let mut zen = ZenState::new(&session).unwrap();
+        zen.advance();
+        tui_state.zen = Some(zen);
+
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+
+        // The walkthrough survived the reload: stops rebuilt from the
+        // reapplied overlay chunks, position kept, staleness key updated.
+        let zen = tui_state.zen.as_ref().unwrap();
+        assert_eq!(zen.source, zen::ZenSource::Chunks);
+        assert_eq!(zen.index, 1);
+        assert!(!zen.is_stale(&session));
+        assert!(!session.review_chunks.is_empty());
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
     }
 
     const CONTEXT_EXPANSION_DIFF: &str = r#"diff --git a/a.txt b/a.txt

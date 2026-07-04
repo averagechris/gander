@@ -471,8 +471,11 @@ gander mcp
 ```
 
 Tools: `review_summary`, `review_files`, `file_diff`, `comments`,
-`current_focus` (what the human is looking at right now), `set_ordering`,
-`flag_section`, `set_chunks`, `draft_comment`, and `list_reviews` (every
+`current_focus` (what the human is looking at right now), `stack_changes`
+and `change_diff` (the jj stack and one change's own diff, for
+stacked-PR-style reviews), `set_ordering`, `flag_section`, `set_chunks`
+(chunks can anchor to a stack change via `change_id`), `draft_comment`,
+and `list_reviews` (every
 running review instance). Spawned in a workspace, each tool call routes to
 that workspace's live gander TUI through the instance registry — with
 several instances, the most recently touched one wins — so the harness

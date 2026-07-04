@@ -70,6 +70,13 @@ pub struct ReviewChunk {
     /// so routine hunks can be acknowledged without being toured one-by-one.
     #[serde(default)]
     pub importance: ChunkImportance,
+    /// The jj change this chunk belongs to, when the review spans a stack.
+    /// Part line numbers then refer to that change's own diff
+    /// (`<change_id>-..<change_id>`), and the zen walkthrough retargets the
+    /// review to that change before visiting the chunk — stacked-PR review,
+    /// change by change. `None` anchors the chunk to the loaded target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
     /// The teaching text for a spotlight stop: a few sentences that explain
@@ -246,12 +253,18 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              (a running TUI is served live through it automatically).\n\
              1. Call initialize, then review/files, then review/file_diff \
              (params: {{\"path\": ...}}) for each file that matters.\n\
-             2. Suggest a review order with review/set_ordering \
+             2. Call review/stack_changes: when the target spans several jj \
+             changes the human treats them like stacked PRs (or logical \
+             groupings that flow into each other), so review the stack \
+             change-by-change with review/change_diff \
+             (params: {{\"change_id\": ...}}) instead of only reading the \
+             squashed diff.\n\
+             3. Suggest a review order with review/set_ordering \
              (params: {{\"paths\": [...]}}), riskiest or most central files first.\n\
-             3. Flag sections needing extra scrutiny with review/flag_section \
+             4. Flag sections needing extra scrutiny with review/flag_section \
              (params: {{\"path\", \"line\", \"reason\", \"priority\": \
              critical|high|medium|low}}).\n\
-             4. Curate a focused walkthrough with review/set_chunks. The human \
+             5. Curate a focused walkthrough with review/set_chunks. The human \
              sees spotlight chunks as full-screen stops (a code excerpt plus \
              your explanation) and skims everything else on a glance board, \
              so budget their attention: pick at most 3-7 chunks with \
@@ -261,11 +274,16 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              precise start_line/end_line parts covering only the critical \
              lines (not whole files), and an `explanation` of 2-5 sentences \
              that teaches the change: what the code does, why it changed, and \
-             what could break. Group ALL remaining hunks into a few \
+             what could break. When the target is a stack, anchor each chunk \
+             to its jj change with `change_id` (from review/stack_changes), \
+             take part line numbers from that change's own diff \
+             (review/change_diff), and order chunks in stack order — the \
+             walkthrough then flows through the stack change by change. \
+             Group ALL remaining hunks into a few \
              importance=glance chunks (mechanical renames, boilerplate, \
              config churn, test scaffolding) with a one-line rationale each; \
              the human acknowledges those in bulk without visiting them.\n\
-             5. For concrete issues, add review/draft_comment \
+             6. For concrete issues, add review/draft_comment \
              (params: {{\"path\", \"line\", \"body\"}}); the human accepts or \
              discards these in the TUI.\n\
              Your suggestions appear live in the reviewer's terminal. \
@@ -301,6 +319,7 @@ mod tests {
                 id: "chunk-1".to_owned(),
                 title: "auth flow".to_owned(),
                 importance: ChunkImportance::Spotlight,
+                change_id: Some("xyzkwqrs".to_owned()),
                 rationale: Some("spans handler and middleware".to_owned()),
                 explanation: Some("The middleware now refuses tokens without an audience claim; the handler assumes that invariant.".to_owned()),
                 parts: vec![ChunkPart {
@@ -407,6 +426,10 @@ mod tests {
         assert!(prompt.contains("trunk()..@"));
         assert!(prompt.contains("gander acp"));
         assert!(prompt.contains("review/set_ordering"));
+        assert!(prompt.contains("review/stack_changes"));
+        assert!(prompt.contains("review/change_diff"));
+        assert!(prompt.contains("change_id"));
+        assert!(prompt.contains("stacked PRs"));
         assert!(prompt.contains("review/set_chunks"));
         assert!(prompt.contains("importance=spotlight"));
         assert!(prompt.contains("importance=glance"));

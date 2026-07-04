@@ -18,6 +18,7 @@
 
 use crate::agent::{ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
+use crate::jj::ReviewTarget;
 
 use super::chunks::{ChunkRow, chunk_rows};
 
@@ -34,9 +35,13 @@ pub(super) struct ZenState {
     pub(super) glance_selected: usize,
     /// File-pane visibility to restore when zen ends.
     pub(super) restore_file_pane: bool,
-    /// Rendered target at zen start; a mismatch means the review was
-    /// retargeted underneath the walkthrough and zen must end.
+    /// Rendered target the session currently shows; zen updates this when it
+    /// retargets itself (change-anchored stops), so a mismatch means the
+    /// review was retargeted underneath the walkthrough and zen must end.
     pub(super) target_key: String,
+    /// The target the walkthrough started from. Stops without a change
+    /// anchor jump within it, and ending zen returns to it.
+    pub(super) home_target: ReviewTarget,
     /// Whether the stops came from agent chunks or the file-order fallback.
     pub(super) source: ZenSource,
 }
@@ -88,8 +93,27 @@ impl ZenState {
             glance_selected: 0,
             restore_file_pane: session.file_pane_visible,
             target_key: session.target.to_string(),
+            home_target: session.target.clone(),
             source,
         })
+    }
+
+    /// Rebuild the stops and glance rows from the (freshly reloaded)
+    /// session, keeping position, phase, and the home target. Returns
+    /// `false` when nothing is left to walk through and zen should end.
+    pub(super) fn refresh(&mut self, session: &ReviewSession) -> bool {
+        let Some(rebuilt) = Self::new(session) else {
+            return false;
+        };
+        self.stops = rebuilt.stops;
+        self.glance_rows = rebuilt.glance_rows;
+        self.source = rebuilt.source;
+        self.index = self.index.min(self.stops.len() - 1);
+        self.glance_selected = self
+            .glance_selected
+            .min(self.glance_rows.len().saturating_sub(1));
+        self.target_key = session.target.to_string();
+        true
     }
 
     pub(super) fn current(&self) -> Option<&ChunkRow> {
@@ -174,6 +198,7 @@ fn whole_file_row(path: String) -> ChunkRow {
     ChunkRow {
         title: path.clone(),
         importance: ChunkImportance::Glance,
+        change_id: None,
         rationale: None,
         explanation: None,
         part: Some(ChunkPart {
@@ -182,6 +207,16 @@ fn whole_file_row(path: String) -> ChunkRow {
             end_line: None,
         }),
         part_position: None,
+    }
+}
+
+/// The review target a zen row wants loaded: a change-anchored row reviews
+/// that change against its parent (stacked-PR style); anything else reads
+/// within the walkthrough's home target.
+pub(super) fn row_target(row: &ChunkRow, home: &ReviewTarget) -> ReviewTarget {
+    match &row.change_id {
+        Some(change_id) => ReviewTarget::new(format!("{change_id}-"), change_id.clone()),
+        None => home.clone(),
     }
 }
 
@@ -272,6 +307,7 @@ diff --git a/b.rs b/b.rs
                 id: "c1".to_owned(),
                 title: "core flow".to_owned(),
                 importance: ChunkImportance::Spotlight,
+                change_id: None,
                 rationale: Some("read these together".to_owned()),
                 explanation: Some("The rename changes the contract.".to_owned()),
                 parts: vec![
@@ -331,6 +367,7 @@ diff --git a/b.rs b/b.rs
                     id: "spotlight".to_owned(),
                     title: "risky behavior".to_owned(),
                     importance: ChunkImportance::Spotlight,
+                    change_id: None,
                     rationale: None,
                     explanation: Some("This changes the retry loop.".to_owned()),
                     parts: vec![ChunkPart {
@@ -343,6 +380,7 @@ diff --git a/b.rs b/b.rs
                     id: "glance".to_owned(),
                     title: "mechanical follow-up".to_owned(),
                     importance: ChunkImportance::Glance,
+                    change_id: None,
                     rationale: None,
                     explanation: None,
                     parts: vec![ChunkPart {
@@ -371,6 +409,7 @@ diff --git a/b.rs b/b.rs
                 id: "spotlight".to_owned(),
                 title: "the important bit".to_owned(),
                 importance: ChunkImportance::Spotlight,
+                change_id: None,
                 rationale: None,
                 explanation: None,
                 parts: vec![ChunkPart {
@@ -400,6 +439,7 @@ diff --git a/b.rs b/b.rs
                 id: "spotlight".to_owned(),
                 title: "the important bit".to_owned(),
                 importance: ChunkImportance::Spotlight,
+                change_id: None,
                 rationale: None,
                 explanation: None,
                 parts: vec![ChunkPart {
@@ -515,5 +555,75 @@ diff --git a/b.rs b/b.rs
 
         zen.target_key = "elsewhere".to_owned();
         assert!(zen.is_stale(&session));
+    }
+
+    #[test]
+    fn zen_remembers_its_home_target() {
+        let session = session_with_chunks();
+        let zen = ZenState::new(&session).unwrap();
+
+        assert_eq!(zen.home_target, session.target);
+        assert_eq!(zen.target_key, session.target.to_string());
+    }
+
+    #[test]
+    fn row_target_prefers_the_change_anchor() {
+        let home = crate::jj::ReviewTarget::trunk_to_current();
+        let mut row = whole_file_row("a.rs".to_owned());
+        assert_eq!(row_target(&row, &home), home);
+
+        row.change_id = Some("xyz".to_owned());
+        assert_eq!(
+            row_target(&row, &home),
+            crate::jj::ReviewTarget::new("xyz-", "xyz")
+        );
+    }
+
+    #[test]
+    fn refresh_rebuilds_stops_and_clamps_the_index() {
+        let mut session = session_with_chunks();
+        let mut zen = ZenState::new(&session).unwrap();
+        zen.index = 1;
+        zen.phase = ZenPhase::Reading;
+
+        // The agent trimmed its chunks down to a single one-part spotlight:
+        // the stop list shrinks and the index snaps back into range.
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![ReviewChunk {
+                id: "c2".to_owned(),
+                title: "tightened".to_owned(),
+                importance: ChunkImportance::Spotlight,
+                change_id: None,
+                rationale: None,
+                explanation: None,
+                parts: vec![ChunkPart {
+                    path: "a.rs".to_owned(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                }],
+            }],
+            ..Default::default()
+        });
+
+        assert!(zen.refresh(&session));
+        assert_eq!(zen.len(), 1);
+        assert_eq!(zen.index, 0);
+        assert_eq!(zen.phase, ZenPhase::Reading);
+        assert_eq!(zen.stops[0].title, "tightened");
+        // b.rs is no longer covered: it joins the glance board.
+        assert!(
+            zen.glance_rows
+                .iter()
+                .any(|row| row.part.as_ref().is_some_and(|part| part.path == "b.rs"))
+        );
+    }
+
+    #[test]
+    fn refresh_reports_when_nothing_is_left_to_review() {
+        let session = session_with_chunks();
+        let mut zen = ZenState::new(&session).unwrap();
+
+        let empty = snapshot_session("");
+        assert!(!zen.refresh(&empty));
     }
 }

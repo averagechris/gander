@@ -20,6 +20,24 @@
   change) or `importance=glance` for the mechanical rest. Without an
   agent, zen falls back to one stop per file. Retargeting the review
   ends the briefing safely.
+- Change-aware walkthroughs for stacked reviews: chunks can carry a
+  `change_id` anchoring them to one jj change of the stack, and zen
+  retargets the review to that change's own diff (`change-..change`) as
+  the tour flows through the stack — stacked-PR review, change by
+  change. Ending zen returns to the target it started from. The chunk
+  list (`S`) retargets the same way, and chunk/zen locations show the
+  anchored change id. Agents get `stack_changes` (the `trunk()..@` stack
+  with the reviewed change marked) and `change_diff` (one change against
+  its parent) over both MCP and ACP (`review/stack_changes`,
+  `review/change_diff`), and the summon prompt and MCP instructions
+  teach the stacked-PR workflow.
+- Live review refresh: the TUI polls jj on idle (throttled, ~2s) and,
+  when the reviewed range changes — new changes landing, rewrites,
+  working-copy edits — reloads the diff in place with a footer notice.
+  View state (pane visibility, filters, folds, selection, viewports) is
+  preserved, viewed marks and comments carry over by fingerprint, agent
+  suggestions are reapplied, and an active zen walkthrough rebuilds its
+  stops instead of going stale.
 
 ### Changed
 

@@ -31,6 +31,7 @@ use crate::{
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
+    jj::{JjBackend, ReviewTarget},
 };
 
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
@@ -40,6 +41,10 @@ pub const ACP_PROTOCOL_VERSION: u32 = 1;
 pub struct AcpHandler {
     overlay: AgentOverlay,
     overlay_path: PathBuf,
+    /// Backend for stack/change queries (`review/stack_changes`,
+    /// `review/change_diff`). Optional so tests and callers without jj
+    /// access degrade to a clear per-method error.
+    jj: Option<Box<dyn JjBackend + Send>>,
 }
 
 /// Standalone stdio server owning a session snapshot.
@@ -54,6 +59,13 @@ impl AcpServer {
             session,
             handler: AcpHandler::new(overlay_path)?,
         })
+    }
+
+    /// Enable the jj-backed stack methods (`review/stack_changes`,
+    /// `review/change_diff`).
+    pub fn with_jj(mut self, jj: Box<dyn JjBackend + Send>) -> Self {
+        self.handler.set_jj_backend(jj);
+        self
     }
 
     /// Serve requests until EOF. One JSON-RPC message per line.
@@ -84,7 +96,14 @@ impl AcpHandler {
         Ok(Self {
             overlay,
             overlay_path,
+            jj: None,
         })
+    }
+
+    /// Attach a jj backend so agents can inspect the stack and per-change
+    /// diffs. Without one those methods return a descriptive error.
+    pub fn set_jj_backend(&mut self, jj: Box<dyn JjBackend + Send>) {
+        self.jj = Some(jj);
     }
 
     /// Re-read the overlay from disk so reads reflect dispositions another
@@ -145,6 +164,8 @@ impl AcpHandler {
                     "review/comments",
                     "review/current_focus",
                     "review/overlay",
+                    "review/stack_changes",
+                    "review/change_diff",
                     "review/set_ordering",
                     "review/flag_section",
                     "review/set_chunks",
@@ -202,6 +223,70 @@ impl AcpHandler {
             )),
             "review/overlay" => {
                 serde_json::to_value(&self.overlay).map_err(|error| error.to_string())
+            }
+            // The jj stack the review lives in (`trunk()..@`, oldest first).
+            // The human often treats these as stacked PRs, so agents should
+            // organize chunks change-by-change when several changes exist.
+            "review/stack_changes" => {
+                let jj = self.require_jj()?;
+                let stack = jj
+                    .stack_changes(&session.repo)
+                    .map_err(|error| format!("failed to load jj stack: {error}"))?;
+                let current = stack
+                    .iter()
+                    .position(|change| change.matches_rev(&session.target.rev))
+                    .or_else(|| {
+                        (session.target.rev == "@" && !stack.is_empty()).then(|| stack.len() - 1)
+                    });
+                Ok(json!({
+                    "base": session.target.base,
+                    "revision": session.target.rev,
+                    "changes": stack
+                        .iter()
+                        .enumerate()
+                        .map(|(index, change)| json!({
+                            "change_id": change.change_id,
+                            "bookmarks": change.bookmarks,
+                            "description": change.description,
+                            "current": current == Some(index),
+                        }))
+                        .collect::<Vec<_>>(),
+                }))
+            }
+            // One change's own diff against its parent. Line numbers here
+            // are what chunk parts carrying this change_id must reference.
+            "review/change_diff" => {
+                let change_id = require_str(params, "change_id")?;
+                if change_id.trim().is_empty() {
+                    return Err("change_id must not be empty".to_owned());
+                }
+                let jj = self.require_jj()?;
+                let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+                let raw = jj
+                    .diff(&session.repo, &target)
+                    .map_err(|error| format!("failed to read diff for {change_id}: {error}"))?;
+                let files = crate::diff::DiffSet::parse(&raw)
+                    .map(|diff| {
+                        diff.files
+                            .iter()
+                            .map(|file| {
+                                json!({
+                                    "path": file.path,
+                                    "status": file.status.to_string(),
+                                    "additions": file.additions,
+                                    "deletions": file.deletions,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Ok(json!({
+                    "change_id": change_id,
+                    "base": target.base,
+                    "revision": target.rev,
+                    "files": files,
+                    "raw": raw,
+                }))
             }
             // What the human is looking at right now: selected file, focused
             // pane, and (when the diff cursor sits on an anchorable row) the
@@ -315,6 +400,12 @@ impl AcpHandler {
         }
     }
 
+    fn require_jj(&self) -> Result<&(dyn JjBackend + Send), String> {
+        self.jj
+            .as_deref()
+            .ok_or_else(|| "jj backend unavailable in this server".to_owned())
+    }
+
     fn save_overlay(&mut self) -> Result<(), String> {
         // Merge dispositions the TUI may have written since our last write:
         // draft states/accepted ids flow TUI -> agent, everything else
@@ -368,6 +459,12 @@ fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         title,
         importance: parse_chunk_importance(value.get("importance").and_then(Value::as_str))?,
+        change_id: value
+            .get("change_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|change_id| !change_id.is_empty())
+            .map(str::to_owned),
         rationale: value
             .get("rationale")
             .and_then(Value::as_str)
@@ -423,7 +520,7 @@ pub mod socket {
     use color_eyre::eyre::{Context, Result, bail};
 
     use super::AcpHandler;
-    use crate::app::ReviewSession;
+    use crate::{app::ReviewSession, jj::JjBackend};
 
     /// One JSON-RPC line from a connected agent, plus where to send the
     /// response. `None` responses (notifications) send nothing.
@@ -444,8 +541,13 @@ pub mod socket {
     impl AcpBridge {
         /// Bind the socket and spawn the accept loop. Fails if another live
         /// server is already bound; silently replaces a stale socket file
-        /// left behind by a crashed process.
-        pub fn bind(socket_path: PathBuf, overlay_path: PathBuf) -> Result<Self> {
+        /// left behind by a crashed process. `jj` enables the stack-aware
+        /// methods (`review/stack_changes`, `review/change_diff`).
+        pub fn bind(
+            socket_path: PathBuf,
+            overlay_path: PathBuf,
+            jj: Option<Box<dyn JjBackend + Send>>,
+        ) -> Result<Self> {
             if let Some(parent) = socket_path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -484,7 +586,13 @@ pub mod socket {
             });
 
             Ok(Self {
-                handler: AcpHandler::new(overlay_path)?,
+                handler: {
+                    let mut handler = AcpHandler::new(overlay_path)?;
+                    if let Some(jj) = jj {
+                        handler.set_jj_backend(jj);
+                    }
+                    handler
+                },
                 receiver,
                 socket_path,
             })
@@ -621,6 +729,85 @@ diff --git a/README.md b/README.md
         (AcpServer::new(session, overlay_path).unwrap(), dir)
     }
 
+    /// A jj backend canned for stack-aware tests.
+    struct MockJj;
+
+    impl crate::jj::JjBackend for MockJj {
+        fn diff(&self, _repo: &std::path::Path, target: &ReviewTarget) -> Result<String> {
+            assert_eq!(target, &ReviewTarget::new("abc-", "abc"));
+            Ok(r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#
+            .to_owned())
+        }
+
+        fn change_summaries(
+            &self,
+            _repo: &std::path::Path,
+        ) -> Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn stack_changes(
+            &self,
+            _repo: &std::path::Path,
+        ) -> Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(vec![
+                crate::jj::JjChangeSummary {
+                    change_id: "abc".to_owned(),
+                    bookmarks: "feature".to_owned(),
+                    description: "feat: first".to_owned(),
+                },
+                crate::jj::JjChangeSummary {
+                    change_id: "def".to_owned(),
+                    bookmarks: String::new(),
+                    description: "feat: second".to_owned(),
+                },
+            ])
+        }
+
+        fn change_fingerprint(
+            &self,
+            _repo: &std::path::Path,
+            _target: &ReviewTarget,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn operations(
+            &self,
+            _repo: &std::path::Path,
+        ) -> Result<Vec<crate::jj::JjOperationSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn diff_at_operation(
+            &self,
+            _repo: &std::path::Path,
+            _target: &ReviewTarget,
+            _operation_id: &str,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn file_contents(
+            &self,
+            _repo: &std::path::Path,
+            _rev: &str,
+            _path: &str,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn run_command(&self, _repo: &std::path::Path, _args: &[String]) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
     fn call(server: &mut AcpServer, method: &str, params: Value) -> Value {
         let request =
             json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string();
@@ -726,6 +913,88 @@ diff --git a/README.md b/README.md
         assert_eq!(overlay.drafts.len(), 1);
         assert_eq!(overlay.drafts[0].id, draft["id"].as_str().unwrap());
         assert_eq!(overlay.drafts[0].state, DraftState::Pending);
+    }
+
+    #[test]
+    fn stack_methods_error_without_a_jj_backend() {
+        let (mut server, _dir) = server();
+
+        for method in ["review/stack_changes", "review/change_diff"] {
+            let request = json!({
+                "jsonrpc": "2.0", "id": 5,
+                "method": method,
+                "params": { "change_id": "abc" },
+            })
+            .to_string();
+            let response = server.handle_line(&request).unwrap();
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("jj backend unavailable"),
+                "{method} should fail without a backend"
+            );
+        }
+    }
+
+    #[test]
+    fn stack_changes_lists_the_stack_and_marks_the_current_change() {
+        let (server, _dir) = server();
+        let mut server = server.with_jj(Box::new(MockJj));
+
+        let result = call(&mut server, "review/stack_changes", Value::Null);
+
+        assert_eq!(result["base"], "trunk()");
+        assert_eq!(result["revision"], "@");
+        let changes = result["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0]["change_id"], "abc");
+        assert_eq!(changes[0]["description"], "feat: first");
+        assert_eq!(changes[0]["current"], false);
+        // Reviewing `@`: the working-copy change is the current one.
+        assert_eq!(changes[1]["current"], true);
+    }
+
+    #[test]
+    fn change_diff_serves_one_change_against_its_parent() {
+        let (server, _dir) = server();
+        let mut server = server.with_jj(Box::new(MockJj));
+
+        let result = call(
+            &mut server,
+            "review/change_diff",
+            json!({ "change_id": "abc" }),
+        );
+
+        assert_eq!(result["change_id"], "abc");
+        assert_eq!(result["base"], "abc-");
+        assert_eq!(result["revision"], "abc");
+        assert!(result["raw"].as_str().unwrap().contains("+new"));
+        assert_eq!(result["files"][0]["path"], "src/app.rs");
+        assert_eq!(result["files"][0]["additions"], 1);
+    }
+
+    #[test]
+    fn set_chunks_records_change_anchors() {
+        let (mut server, dir) = server();
+
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [
+                {
+                    "title": "stacked change",
+                    "change_id": "abc",
+                    "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }],
+                },
+                { "title": "unanchored", "change_id": "  ", "parts": [] },
+            ] }),
+        );
+
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
+        // Blank anchors normalize to None instead of a whitespace revset.
+        assert_eq!(overlay.chunks[1].change_id, None);
     }
 
     #[test]
@@ -886,7 +1155,8 @@ diff --git a/README.md b/README.md
             let mut session = session(dir.path());
             let socket_path = dir.path().join("acp.sock");
             let overlay_path = dir.path().join("agent.json");
-            let mut bridge = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
+            let mut bridge =
+                AcpBridge::bind(socket_path.clone(), overlay_path.clone(), None).unwrap();
             assert!(socket::is_live(&socket_path));
 
             let mut client = BufReader::new(UnixStream::connect(&socket_path).unwrap());
@@ -937,8 +1207,9 @@ diff --git a/README.md b/README.md
             let socket_path = dir.path().join("acp.sock");
             let overlay_path = dir.path().join("agent.json");
 
-            let live = AcpBridge::bind(socket_path.clone(), overlay_path.clone()).unwrap();
-            let Err(error) = AcpBridge::bind(socket_path.clone(), overlay_path.clone()) else {
+            let live = AcpBridge::bind(socket_path.clone(), overlay_path.clone(), None).unwrap();
+            let Err(error) = AcpBridge::bind(socket_path.clone(), overlay_path.clone(), None)
+            else {
                 panic!("second bind must fail while the first is live");
             };
             assert!(error.to_string().contains("already listening"));
@@ -960,7 +1231,7 @@ diff --git a/README.md b/README.md
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
             assert!(!socket::is_live(&socket_path));
-            AcpBridge::bind(socket_path, overlay_path).unwrap();
+            AcpBridge::bind(socket_path, overlay_path, None).unwrap();
         }
     }
 }

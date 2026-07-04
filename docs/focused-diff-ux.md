@@ -290,9 +290,16 @@ then everything mechanical acknowledged in bulk. Design decisions:
 - **Framing.** The file pane hides on entry (visibility restored on
   exit). In the reading view, rows outside the stop's range dim; the
   cursor row never dims. Whole-file stops dim nothing.
-- **Safety.** Retargeting (t/p/b/R, stack step, operation picker)
+- **Stacked walkthroughs.** Chunks anchored to a jj change (`change_id`)
+  make zen retarget the review to that change's own diff
+  (`change-..change`) for the stop — the tour flows through the stack
+  like stacked PRs, and ending zen returns to the home target. Zen-driven
+  retargets update the staleness key, so they never end the walkthrough.
+- **Safety.** *User* retargeting (t/p/b/R, stack step, operation picker)
   invalidates the stops; the walkthrough ends with a notice rather than
-  touring a stale map. Runtime state is session-only, consistent with §3.
+  touring a stale map. A live refresh of the same target (new changes
+  landing) instead rebuilds the stops in place. Runtime state is
+  session-only, consistent with §3.
 
 Config: the `tour` keybinding is renamed `zen` (serde alias keeps old
 configs working); defaults are `T` and `Z`.

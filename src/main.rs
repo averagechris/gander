@@ -249,6 +249,7 @@ fn main() -> color_eyre::Result<()> {
                 ignore_globs,
                 generated_matcher,
                 &jj,
+                Some(Box::new(jj.clone())),
                 tui::TuiPaths {
                     state_file: Some(state_path.clone()),
                     agent_overlay: Some(workspace_paths.overlay_file()),
@@ -345,7 +346,8 @@ fn main() -> color_eyre::Result<()> {
                 return crate::acp::socket::bridge_stdio(&instance.socket_path);
             }
             let overlay_path = workspace_paths.overlay_file();
-            let mut server = crate::acp::AcpServer::new(session, overlay_path)?;
+            let mut server =
+                crate::acp::AcpServer::new(session, overlay_path)?.with_jj(Box::new(jj.clone()));
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;
@@ -364,6 +366,7 @@ fn main() -> color_eyre::Result<()> {
                     });
                     session
                 },
+                Some(Box::new(jj.clone())),
                 workspace_paths.overlay_file(),
                 workspace_paths.registry_dir.clone(),
                 &workspace_paths.workspace_root,

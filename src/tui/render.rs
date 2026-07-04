@@ -1804,13 +1804,18 @@ fn draw_zen_panel(
 }
 
 fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
-    match &row.part {
+    let location = match &row.part {
         Some(part) => match (part.start_line, part.end_line) {
             (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
             (Some(start), None) => format!("{}:{start}", part.path),
             _ => part.path.clone(),
         },
         None => "(no location)".to_owned(),
+    };
+    // Change-anchored chunks tour their own change's diff: say which one.
+    match &row.change_id {
+        Some(change_id) => format!("[{change_id}] {location}"),
+        None => location,
     }
 }
 
@@ -3353,6 +3358,7 @@ diff --git a/README.md b/README.md
                 id: "c1".to_owned(),
                 title: "core change".to_owned(),
                 importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
                 explanation: None,
                 rationale: Some("start here".to_owned()),
                 parts: vec![
@@ -3400,6 +3406,7 @@ diff --git a/tests/app.rs b/tests/app.rs
                     id: "c1".to_owned(),
                     title: "core change".to_owned(),
                     importance: crate::agent::ChunkImportance::Spotlight,
+                    change_id: None,
                     explanation: Some(
                         "main() now calls new() and adds extra() — the old single-call \
                          contract is gone, so every caller that relied on old() firing \
@@ -3417,6 +3424,7 @@ diff --git a/tests/app.rs b/tests/app.rs
                     id: "c2".to_owned(),
                     title: "test churn".to_owned(),
                     importance: crate::agent::ChunkImportance::Glance,
+                    change_id: None,
                     explanation: None,
                     rationale: Some("mechanical rename in tests".to_owned()),
                     parts: vec![crate::agent::ChunkPart {
@@ -3476,6 +3484,27 @@ diff --git a/tests/app.rs b/tests/app.rs
     }
 
     #[test]
+    fn chunk_row_location_names_the_anchored_change() {
+        let mut row = crate::tui::chunks::ChunkRow {
+            title: "stop".to_owned(),
+            importance: crate::agent::ChunkImportance::Spotlight,
+            change_id: None,
+            rationale: None,
+            explanation: None,
+            part: Some(crate::agent::ChunkPart {
+                path: "src/app.rs".to_owned(),
+                start_line: Some(3),
+                end_line: Some(9),
+            }),
+            part_position: None,
+        };
+        assert_eq!(chunk_row_location(&row), "src/app.rs:3-9");
+
+        row.change_id = Some("xyzkwqrs".to_owned());
+        assert_eq!(chunk_row_location(&row), "[xyzkwqrs] src/app.rs:3-9");
+    }
+
+    #[test]
     fn zen_excerpt_follows_a_wandering_cursor_and_reports_it() {
         let mut body = String::from(
             "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,30 +1,30 @@\n",
@@ -3489,6 +3518,7 @@ diff --git a/tests/app.rs b/tests/app.rs
         let stop = crate::tui::chunks::ChunkRow {
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
+            change_id: None,
             rationale: None,
             explanation: None,
             part: Some(crate::agent::ChunkPart {
