@@ -45,6 +45,7 @@ pub(super) enum Action {
     ToggleLargeDiff,
     ToggleAgentOrder,
     FlagList,
+    TaskList,
     ChunkList,
     Zen,
     DraftList,
@@ -126,6 +127,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &config.toggle_agent_order,
         )?;
         add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
+        add_bindings(&mut bindings, Action::TaskList, &config.task_list)?;
         add_bindings(&mut bindings, Action::ChunkList, &config.chunk_list)?;
         add_bindings(&mut bindings, Action::Zen, &config.zen)?;
         add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
@@ -440,6 +442,10 @@ mod tests {
             Some(Action::FlagList)
         );
         assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('X'))),
+            Some(Action::TaskList)
+        );
+        assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('S'))),
             Some(Action::ChunkList)
         );
@@ -472,6 +478,7 @@ mod tests {
             Some(Action::Help)
         );
         assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
+        assert_eq!(keymap.hint(Action::TaskList), "X");
         assert_eq!(keymap.hint(Action::Help), "?");
     }
 

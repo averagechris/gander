@@ -1419,6 +1419,32 @@ impl ReviewSession {
         Some(comment.state)
     }
 
+    /// Advance a comment's action intent (none -> fix -> explain -> test -> follow-up -> none).
+    pub fn cycle_comment_action(&mut self, id: &str) -> Option<Option<crate::state::ActionIntent>> {
+        let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
+        comment.action = match comment.action.unwrap_or(crate::state::ActionIntent::None) {
+            crate::state::ActionIntent::None => Some(crate::state::ActionIntent::Fix),
+            crate::state::ActionIntent::Fix => Some(crate::state::ActionIntent::Explain),
+            crate::state::ActionIntent::Explain => Some(crate::state::ActionIntent::Test),
+            crate::state::ActionIntent::Test => Some(crate::state::ActionIntent::FollowUp),
+            crate::state::ActionIntent::FollowUp => None,
+        };
+        Some(comment.action)
+    }
+
+    /// Advance a comment's kind (none -> note -> issue -> question -> praise -> none).
+    pub fn cycle_comment_kind(&mut self, id: &str) -> Option<Option<crate::state::CommentKind>> {
+        let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
+        comment.kind = match comment.kind {
+            None => Some(crate::state::CommentKind::Note),
+            Some(crate::state::CommentKind::Note) => Some(crate::state::CommentKind::Issue),
+            Some(crate::state::CommentKind::Issue) => Some(crate::state::CommentKind::Question),
+            Some(crate::state::CommentKind::Question) => Some(crate::state::CommentKind::Praise),
+            Some(crate::state::CommentKind::Praise) => None,
+        };
+        Some(comment.kind)
+    }
+
     /// Select a comment by id, moving the file/diff cursors to its anchor.
     pub fn select_comment_by_id(&mut self, id: &str) {
         if let Some(index) = self.comments.iter().position(|comment| comment.id == id) {

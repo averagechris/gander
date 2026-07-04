@@ -21,6 +21,7 @@ mod outline;
 mod render;
 mod revset;
 mod search;
+mod tasks;
 mod view_options;
 mod zen;
 
@@ -66,6 +67,7 @@ use render::{
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
+use tasks::TaskListState;
 use view_options::ViewOptionsState;
 use zen::ZenState;
 
@@ -77,6 +79,7 @@ enum Mode {
     OperationPicker(OperationPickerState),
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
+    TaskList(TaskListState),
     ChunkList(ChunkListState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
@@ -749,6 +752,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::TaskList(list) => {
+            if handle_task_list_key(key, list, session, keymap, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::ChunkList(list) => {
             if handle_chunk_list_key(key, list, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
@@ -886,6 +894,17 @@ fn handle_normal_action(
                 });
             } else {
                 *mode = Mode::FlagList(FlagListState::new(session));
+            }
+        }
+        Action::TaskList => {
+            let tasks = TaskListState::new(session);
+            if tasks.comment_ids.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no review tasks".to_owned(),
+                });
+            } else {
+                *mode = Mode::TaskList(tasks);
             }
         }
         Action::ChunkList => {
@@ -2185,12 +2204,104 @@ fn handle_comment_list_key(
             }
             false
         }
+        KeyCode::Char('a') => {
+            if let Some(id) = list.selected_comment_id(session)
+                && let Some(action) = session.cycle_comment_action(&id)
+            {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!(
+                        "comment action {}",
+                        action.map_or("none", action_intent_label)
+                    ),
+                });
+            }
+            false
+        }
+        KeyCode::Char('K') => {
+            if let Some(id) = list.selected_comment_id(session)
+                && let Some(kind) = session.cycle_comment_kind(&id)
+            {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("comment kind {}", kind.map_or("none", comment_kind_label)),
+                });
+            }
+            false
+        }
         KeyCode::Char('x') => {
             if let Some(id) = list.selected_comment_id(session) {
                 session.delete_comment(&id);
                 list.clamp(session);
             }
             session.comments.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn action_intent_label(action: crate::state::ActionIntent) -> &'static str {
+    match action {
+        crate::state::ActionIntent::None => "none",
+        crate::state::ActionIntent::Fix => "fix",
+        crate::state::ActionIntent::Explain => "explain",
+        crate::state::ActionIntent::Test => "test",
+        crate::state::ActionIntent::FollowUp => "follow-up",
+    }
+}
+
+fn comment_kind_label(kind: crate::state::CommentKind) -> &'static str {
+    match kind {
+        crate::state::CommentKind::Note => "note",
+        crate::state::CommentKind::Issue => "issue",
+        crate::state::CommentKind::Question => "question",
+        crate::state::CommentKind::Praise => "praise",
+    }
+}
+
+fn handle_task_list_key(
+    key: KeyEvent,
+    list: &mut TaskListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1),
+            Action::TargetPickerMoveUp => list.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(id) = list.selected_comment_id() {
+                session.select_comment_by_id(id);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1);
+            false
+        }
+        KeyCode::Char('d') => {
+            if let Some(id) = list.selected_comment_id().map(str::to_owned)
+                && let Some(state) = session.cycle_comment_state(&id)
+            {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("comment marked {}", state.label()),
+                });
+                list.refresh(session);
+            }
+            list.comment_ids.is_empty()
         }
         _ => false,
     }
@@ -2326,6 +2437,7 @@ fn handle_mouse_event(
             | Mode::OperationPicker(_)
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
+            | Mode::TaskList(_)
             | Mode::ChunkList(_)
             | Mode::DraftList(_)
             | Mode::FileSearch(_)

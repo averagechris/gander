@@ -200,6 +200,7 @@ pub struct KeybindingsConfig {
     pub toggle_large_diff: Vec<String>,
     pub toggle_agent_order: Vec<String>,
     pub flag_list: Vec<String>,
+    pub task_list: Vec<String>,
     pub chunk_list: Vec<String>,
     pub zen: Vec<String>,
     pub draft_list: Vec<String>,
@@ -373,6 +374,7 @@ struct KeybindingsConfigPatch {
     toggle_large_diff: Option<Vec<String>>,
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
+    task_list: Option<Vec<String>>,
     chunk_list: Option<Vec<String>>,
     /// Accepts the pre-0.4 name `tour` so existing configs keep working.
     #[serde(alias = "tour")]
@@ -470,6 +472,7 @@ impl Default for KeybindingsConfig {
             toggle_large_diff: keys(["L"]),
             toggle_agent_order: keys(["A"]),
             flag_list: keys(["F"]),
+            task_list: keys(["X"]),
             chunk_list: keys(["S"]),
             zen: keys(["T", "Z"]),
             draft_list: keys(["D"]),
@@ -701,6 +704,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_large_diff, patch.toggle_large_diff);
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
         apply_optional(&mut self.flag_list, patch.flag_list);
+        apply_optional(&mut self.task_list, patch.task_list);
         apply_optional(&mut self.chunk_list, patch.chunk_list);
         apply_optional(&mut self.zen, patch.zen);
         apply_optional(&mut self.draft_list, patch.draft_list);

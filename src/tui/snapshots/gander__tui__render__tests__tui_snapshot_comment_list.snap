@@ -6,13 +6,13 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
 │  • mod     app.rs                        ││@@ -1 +1 @@                                           │
 │                                          ││1   1 - old                                           │
-│                                          ││      ↳ line-not [todo] Line note that needs fixing   │
+│                                          ││      ↳ line-not [todo] [fix] [question] Line note    │
 │         ┌comments──────────────────────────────────────────────────────────────────────┐         │
 │         │  [ draft  ] src/app.rs File-level note                                       │         │
-│         │› [  todo  ] src/app.rs:1 Line note that needs fixing                         │         │
+│         │› [  todo  ] [fix] [question] src/app.rs:1 Line note that needs fixing        │         │
 │         │                                                                              │         │
-│         │↑/↓ or j/k move · enter jump · s cycle state · x delete · esc close           │         │
-│         │                                                                              │         │
+│         │↑/↓ or j/k move · enter jump · s state · a action · K kind · x delete · esc   │         │
+│         │close                                                                         │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
@@ -25,4 +25,4 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 2 comments
-comments · j/k move · enter jump · s cycle state · x delete · esc close
+comments · j/k move · enter jump · s state · a action · K kind · x delete · esc close

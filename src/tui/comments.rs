@@ -33,7 +33,10 @@ impl CommentListState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{state::CommentState, tui::test_support::snapshot_session};
+    use crate::{
+        state::{ActionIntent, CommentKind, CommentState},
+        tui::test_support::snapshot_session,
+    };
 
     fn commented_session() -> ReviewSession {
         let mut session = snapshot_session(
@@ -88,5 +91,55 @@ mod tests {
             Some(CommentState::Resolved)
         );
         assert_eq!(session.cycle_comment_state(&id), Some(CommentState::Draft));
+    }
+
+    #[test]
+    fn cycling_action_walks_all_intents_and_back_to_none() {
+        let mut session = commented_session();
+        let list = CommentListState::default();
+        let id = list.selected_comment_id(&session).unwrap();
+
+        assert_eq!(
+            session.cycle_comment_action(&id),
+            Some(Some(ActionIntent::Fix))
+        );
+        assert_eq!(
+            session.cycle_comment_action(&id),
+            Some(Some(ActionIntent::Explain))
+        );
+        assert_eq!(
+            session.cycle_comment_action(&id),
+            Some(Some(ActionIntent::Test))
+        );
+        assert_eq!(
+            session.cycle_comment_action(&id),
+            Some(Some(ActionIntent::FollowUp))
+        );
+        assert_eq!(session.cycle_comment_action(&id), Some(None));
+    }
+
+    #[test]
+    fn cycling_kind_walks_all_kinds_and_back_to_none() {
+        let mut session = commented_session();
+        let list = CommentListState::default();
+        let id = list.selected_comment_id(&session).unwrap();
+
+        assert_eq!(
+            session.cycle_comment_kind(&id),
+            Some(Some(CommentKind::Note))
+        );
+        assert_eq!(
+            session.cycle_comment_kind(&id),
+            Some(Some(CommentKind::Issue))
+        );
+        assert_eq!(
+            session.cycle_comment_kind(&id),
+            Some(Some(CommentKind::Question))
+        );
+        assert_eq!(
+            session.cycle_comment_kind(&id),
+            Some(Some(CommentKind::Praise))
+        );
+        assert_eq!(session.cycle_comment_kind(&id), Some(None));
     }
 }

@@ -33,6 +33,7 @@ use super::{
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
+    tasks::TaskListState,
     view_options::{ViewOption, ViewOptionsState},
     zen::{ZenState, ZenStop},
 };
@@ -106,6 +107,7 @@ pub(super) fn draw(
         Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
+        Mode::TaskList(list) => draw_task_list_popup(frame, frame.area(), session, list),
         Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
         Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
@@ -718,15 +720,58 @@ fn comment_summary_line(comment: &Comment) -> Line<'static> {
         .trim();
     // Comment ids are UUIDs; show a short prefix so the gutter stays readable.
     let short_id: String = comment.id.chars().take(8).collect();
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled("      ↳ ", Style::default().fg(Color::Yellow)),
         Span::styled(format!("{short_id} "), Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("[{}] ", comment.state.label()),
             comment_state_style(comment.state),
         ),
-        Span::styled(summary.to_owned(), Style::default().fg(Color::Yellow)),
-    ])
+    ];
+    spans.extend(comment_badge_spans(comment));
+    spans.push(Span::styled(
+        summary.to_owned(),
+        Style::default().fg(Color::Yellow),
+    ));
+    Line::from(spans)
+}
+
+fn comment_badge_spans(comment: &Comment) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some(action) = comment.action
+        && action != crate::state::ActionIntent::None
+    {
+        spans.push(Span::styled(
+            format!("[{}] ", action_intent_label(action)),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    if let Some(kind) = comment.kind {
+        spans.push(Span::styled(
+            format!("[{}] ", comment_kind_label(kind)),
+            Style::default().fg(Color::Blue),
+        ));
+    }
+    spans
+}
+
+fn action_intent_label(action: crate::state::ActionIntent) -> &'static str {
+    match action {
+        crate::state::ActionIntent::None => "none",
+        crate::state::ActionIntent::Fix => "fix",
+        crate::state::ActionIntent::Explain => "explain",
+        crate::state::ActionIntent::Test => "test",
+        crate::state::ActionIntent::FollowUp => "follow-up",
+    }
+}
+
+fn comment_kind_label(kind: crate::state::CommentKind) -> &'static str {
+    match kind {
+        crate::state::CommentKind::Note => "note",
+        crate::state::CommentKind::Issue => "issue",
+        crate::state::CommentKind::Question => "question",
+        crate::state::CommentKind::Praise => "praise",
+    }
 }
 
 fn comment_state_style(state: crate::state::CommentState) -> Style {
@@ -1170,6 +1215,9 @@ fn draw_footer(
             }
         }
         Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
+        Mode::TaskList(_) => {
+            "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
+        }
         Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
         Mode::DraftList(_) => {
             "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
@@ -1183,7 +1231,8 @@ fn draw_footer(
         }
         Mode::SymbolOutline(_) => "changed symbols · j/k move · enter jump · esc cancel".to_owned(),
         Mode::CommentList(_) => {
-            "comments · j/k move · enter jump · s cycle state · x delete · esc close".to_owned()
+            "comments · j/k move · enter jump · s state · a action · K kind · x delete · esc close"
+                .to_owned()
         }
         Mode::ViewOptions(_) => {
             "view options · j/k move · space/enter toggle · esc close".to_owned()
@@ -1373,6 +1422,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::EditComment], "edit comment"),
         entry(&[Action::DeleteComment], "delete comment"),
         entry(&[Action::CommentList], "comment list"),
+        entry(&[Action::TaskList], "review tasks"),
         entry(
             &[Action::NextComment, Action::PreviousComment],
             "next/previous comment",
@@ -2994,15 +3044,19 @@ fn draw_comment_list_popup(
                         .unwrap_or("(empty comment)")
                         .trim()
                         .to_owned();
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(format!("{marker} "), style),
                         Span::styled(
                             format!("[{:^8}] ", comment.state.label()),
                             comment_state_style(comment.state),
                         ),
+                    ];
+                    spans.extend(comment_badge_spans(comment));
+                    spans.extend([
                         Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
                         Span::styled(summary, style),
-                    ])
+                    ]);
+                    Line::from(spans)
                 }),
         );
         if visible_window.hidden_below > 0 {
@@ -3014,7 +3068,7 @@ fn draw_comment_list_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · s cycle state · x delete · esc close",
+        "↑/↓ or j/k move · enter jump · s state · a action · K kind · x delete · esc close",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3024,6 +3078,102 @@ fn draw_comment_list_popup(
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn draw_task_list_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    list: &TaskListState,
+) {
+    let popup = centered_rect(82, 60, area);
+    frame.render_widget(Clear, popup);
+
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed_lines = 2usize;
+    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
+    let visible_window = picker_visible_window(list.selected, list.comment_ids.len(), list_height);
+
+    let mut lines = Vec::new();
+    if list.comment_ids.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no review tasks",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        if visible_window.hidden_above > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↑ {} more", visible_window.hidden_above),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        for (index, id) in list
+            .comment_ids
+            .iter()
+            .enumerate()
+            .skip(visible_window.start)
+            .take(visible_window.end.saturating_sub(visible_window.start))
+        {
+            let Some(comment) = session.comments.iter().find(|comment| &comment.id == id) else {
+                continue;
+            };
+            let selected = index == list.selected;
+            let marker = if selected { "›" } else { " " };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let location = match (comment.line, comment.end_line) {
+                (Some(line), Some(end_line)) => format!("{}:{line}-{end_line}", comment.path),
+                (Some(line), None) => format!("{}:{line}", comment.path),
+                _ => comment.path.clone(),
+            };
+            let summary = comment
+                .body
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("(empty comment)")
+                .trim()
+                .to_owned();
+            let mut spans = vec![
+                Span::styled(format!("{marker} "), style),
+                Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+            ];
+            spans.extend(comment_badge_spans(comment));
+            spans.extend([
+                Span::styled(
+                    format!("[{}] ", comment.state.label()),
+                    comment_state_style(comment.state),
+                ),
+                Span::styled(summary, style),
+            ]);
+            lines.push(Line::from(spans));
+        }
+        if visible_window.hidden_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  ↓ {} more", visible_window.hidden_below),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or j/k move · enter jump · d cycle state · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Review tasks ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, popup);
 }
 
 fn draw_target_chooser_popup(
@@ -3544,9 +3694,33 @@ diff --git a/README.md b/README.md
         // UUID ids would leak into the diff gutter; pin them for the snapshot.
         session.comments[0].id = "file-note".to_owned();
         session.comments[1].id = "line-note".to_owned();
+        session.comments[1].action = Some(crate::state::ActionIntent::Fix);
+        session.comments[1].kind = Some(crate::state::CommentKind::Question);
         let todo_id = session.comments[1].id.clone();
         session.cycle_comment_state(&todo_id);
         let mode = Mode::CommentList(CommentListState { selected: 1 });
+
+        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_task_list() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session.add_comment("Draft only".into());
+        session.toggle_focus();
+        session.add_comment("Please add a regression test".into());
+        session.comments[1].id = "test-task".to_owned();
+        session.comments[1].action = Some(crate::state::ActionIntent::Test);
+        session.comments[1].kind = Some(crate::state::CommentKind::Issue);
+        let mode = Mode::TaskList(TaskListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
