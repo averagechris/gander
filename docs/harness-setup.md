@@ -58,9 +58,17 @@ Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`
 stacked PRs), `change_diff` (one change against its parent),
 `set_ordering`, `flag_section`, `set_chunks` (anchor chunks to a stack
 change with `change_id`), `draft_comment`,
-`list_reviews`. Suggestions written through the mutating tools surface
+`list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
+`comment_*`, `task_*`/`tasks_list`, and `walkthrough_*`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
 via `S` and zen mode `T`/`Z`, drafts via `D`).
+
+The CLI-parity state-file tools load and save the persisted review state
+directly, matching the corresponding `gander reviews`, `comments`, `tasks`,
+and `walkthrough` commands. They are best used when no TUI is actively
+autosaving: the TUI holds review state in memory and writes it back on save or
+quit, so concurrent state-file edits can be overwritten by an older in-memory
+snapshot.
 
 `gander paths` prints every resolved location (state dir, overlay, socket
 pattern, registry) when you need to debug a connection.

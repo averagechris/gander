@@ -9,10 +9,7 @@
 //! loaded at startup. Harnesses discover the typed tools natively — no wire
 //! protocol explained in a prompt.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::mpsc,
-};
+use std::{path::PathBuf, sync::mpsc};
 
 use color_eyre::eyre::{Context as _, Result};
 use rmcp::{
@@ -25,7 +22,16 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{acp::AcpHandler, app::ReviewSession, jj::JjBackend, registry};
+use crate::{
+    acp::AcpHandler,
+    app::ReviewSession,
+    jj::{JjBackend, ReviewTarget as JjReviewTarget},
+    registry, review,
+    state::{
+        ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
+        WalkthroughStep,
+    },
+};
 
 /// MCP server state: registry routing plus an in-process snapshot fallback.
 ///
@@ -35,8 +41,20 @@ use crate::{acp::AcpHandler, app::ReviewSession, jj::JjBackend, registry};
 pub struct GanderMcp {
     registry_dir: PathBuf,
     workspace_root: PathBuf,
+    state_path: PathBuf,
+    target: review::SessionTargetSpec,
+    diff_files: Vec<String>,
     snapshot: mpsc::Sender<SnapshotRequest>,
     tool_router: ToolRouter<Self>,
+}
+
+pub struct GanderMcpParams {
+    pub overlay_path: PathBuf,
+    pub state_path: PathBuf,
+    pub registry_dir: PathBuf,
+    pub workspace_root: PathBuf,
+    pub target: JjReviewTarget,
+    pub diff_files: Vec<String>,
 }
 
 struct SnapshotRequest {
@@ -154,16 +172,91 @@ pub struct ChangeDiffParams {
     pub change_id: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReviewsCreateParams {
+    /// Optional title. Equivalent to `gander reviews create --title <title>`.
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct IdParams {
+    /// Full id or unambiguous id prefix.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentAddParams {
+    /// Diff file path. Equivalent to `gander comments add <path>`.
+    pub path: String,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub body: String,
+    pub kind: Option<CommentKind>,
+    pub action: Option<ActionIntent>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentSetStateParams {
+    /// Full id or unambiguous id prefix. Equivalent to `gander comments set-state <id> <state>`.
+    pub id: String,
+    pub state: CommentState,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskAddParams {
+    /// Task title. Equivalent to `gander tasks add <title>`.
+    pub title: String,
+    pub body: Option<String>,
+    pub action: Option<ActionIntent>,
+    pub comment_id: Option<String>,
+    pub path: Option<String>,
+    pub line: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskCompleteParams {
+    /// Full id or unambiguous id prefix. Equivalent to `gander tasks complete <id>`.
+    pub id: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughAddStepParams {
+    /// Step title. Equivalent to `gander walkthrough add-step <title>`.
+    pub title: String,
+    pub file: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub symbol: Option<String>,
+    pub why: Option<String>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughMoveStepParams {
+    /// Full id or unambiguous id prefix. Equivalent to `gander walkthrough move-step <id> <to>`.
+    pub id: String,
+    pub to: usize,
+}
+
 #[tool_router]
 impl GanderMcp {
     pub fn new(
         session_factory: impl FnOnce() -> ReviewSession + Send + 'static,
         jj: Option<Box<dyn JjBackend + Send>>,
-        overlay_path: PathBuf,
-        registry_dir: PathBuf,
-        workspace_root: PathBuf,
+        params: GanderMcpParams,
     ) -> Result<Self> {
-        let mut handler = AcpHandler::new(overlay_path)?;
+        let workspace_root = params
+            .workspace_root
+            .canonicalize()
+            .unwrap_or(params.workspace_root);
+        let target_spec = review::SessionTargetSpec {
+            repo: Some(workspace_root.display().to_string()),
+            base: Some(params.target.base.clone()),
+            revision: Some(params.target.rev.clone()),
+            revset: Some(params.target.to_string()),
+        };
+        let mut handler = AcpHandler::new(params.overlay_path)?;
         if let Some(jj) = jj {
             handler.set_jj_backend(jj);
         }
@@ -181,8 +274,11 @@ impl GanderMcp {
             }
         });
         Ok(Self {
-            registry_dir,
+            registry_dir: params.registry_dir,
             workspace_root,
+            state_path: params.state_path,
+            target: target_spec,
+            diff_files: params.diff_files,
             snapshot: sender,
             tool_router: Self::tool_router(),
         })
@@ -320,6 +416,223 @@ impl GanderMcp {
         )
     }
 
+    #[tool(
+        description = "List durable review sessions from the state file. Equivalent to `gander reviews list`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn reviews_list(&self) -> Result<CallToolResult, McpError> {
+        let state = self.load_state()?;
+        json_result(json!({ "sessions": review::list_sessions(&state) }))
+    }
+
+    #[tool(
+        description = "Show one durable review session from the state file. Equivalent to `gander reviews show <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn reviews_show(
+        &self,
+        Parameters(params): Parameters<IdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let state = self.load_state()?;
+        let session = review::find_session(&state, &params.id)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        json_result(to_value(session)?)
+    }
+
+    #[tool(
+        description = "Create or reuse the durable review session for this MCP target. Equivalent to `gander reviews create`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn reviews_create(
+        &self,
+        Parameters(params): Parameters<ReviewsCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            Ok(review::ensure_session(state, &this.target, params.title.as_deref()).clone())
+        })
+    }
+
+    #[tool(
+        description = "Add a durable review comment. Equivalent to `gander comments add`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn comment_add(
+        &self,
+        Parameters(params): Parameters<CommentAddParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_diff_file(&params.path)?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            Ok(review::add_comment(
+                &mut state.sessions[idx],
+                &mut state.comments,
+                review::NewComment {
+                    path: params.path,
+                    line: params.line,
+                    end_line: params.end_line,
+                    body: params.body,
+                    kind: params.kind,
+                    action: params.action,
+                },
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Resolve a durable review comment. Equivalent to `gander comments resolve <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn comment_resolve(
+        &self,
+        Parameters(params): Parameters<IdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &params.id)
+        })
+    }
+
+    #[tool(
+        description = "Set a durable review comment state. Equivalent to `gander comments set-state <id> <state>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn comment_set_state(
+        &self,
+        Parameters(params): Parameters<CommentSetStateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::set_comment_state(
+                &mut state.sessions[idx],
+                &mut state.comments,
+                &params.id,
+                params.state,
+            )
+        })
+    }
+
+    #[tool(
+        description = "Add a durable review task. Equivalent to `gander tasks add`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn task_add(
+        &self,
+        Parameters(params): Parameters<TaskAddParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(path) = params.path.as_deref() {
+            self.ensure_diff_file(path)?;
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            Ok(review::add_task(
+                &mut state.sessions[idx],
+                params.title,
+                params.body,
+                params.action.unwrap_or_default(),
+                params.comment_id,
+                params.path.map(|file| StateReviewTarget {
+                    file: Some(file),
+                    line: params.line,
+                    ..StateReviewTarget::default()
+                }),
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Complete a durable review task. Equivalent to `gander tasks complete <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn task_complete(
+        &self,
+        Parameters(params): Parameters<TaskCompleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::complete_task(&mut state.sessions[idx], &params.id, params.summary)
+        })
+    }
+
+    #[tool(
+        description = "Reopen a durable review task. Equivalent to `gander tasks reopen <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn task_reopen(
+        &self,
+        Parameters(params): Parameters<IdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::reopen_task(&mut state.sessions[idx], &params.id)
+        })
+    }
+
+    #[tool(
+        description = "List durable review tasks. Equivalent to `gander tasks list`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn tasks_list(&self) -> Result<CallToolResult, McpError> {
+        let mut state = self.load_state()?;
+        let session = review::ensure_session(&mut state, &self.target, None).clone();
+        json_result(json!({ "tasks": review::list_tasks(&session, &state.comments) }))
+    }
+
+    #[tool(
+        description = "Add a durable walkthrough step. Equivalent to `gander walkthrough add-step`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn walkthrough_add_step(
+        &self,
+        Parameters(params): Parameters<WalkthroughAddStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(file) = params.file.as_deref() {
+            self.ensure_diff_file(file)?;
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            Ok(review::add_walkthrough_step(
+                &mut state.sessions[idx],
+                WalkthroughStep {
+                    id: String::new(),
+                    title: Some(params.title),
+                    body: params.body,
+                    why: params.why,
+                    target: StateReviewTarget {
+                        file: params.file,
+                        line: params.line,
+                        end_line: params.end_line,
+                        symbol: params.symbol,
+                        ..StateReviewTarget::default()
+                    },
+                },
+            ))
+        })
+    }
+
+    #[tool(
+        description = "Remove a durable walkthrough step. Equivalent to `gander walkthrough remove-step <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn walkthrough_remove_step(
+        &self,
+        Parameters(params): Parameters<IdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::remove_walkthrough_step(&mut state.sessions[idx], &params.id)
+        })
+    }
+
+    #[tool(
+        description = "Move a durable walkthrough step. Equivalent to `gander walkthrough move-step <id> <to>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn walkthrough_move_step(
+        &self,
+        Parameters(params): Parameters<WalkthroughMoveStepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::move_walkthrough_step(&mut state.sessions[idx], &params.id, params.to)
+        })
+    }
+
+    #[tool(
+        description = "Show durable walkthroughs. Equivalent to `gander walkthrough show`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn walkthrough_show(&self) -> Result<CallToolResult, McpError> {
+        let mut state = self.load_state()?;
+        let session = review::ensure_session(&mut state, &self.target, None).clone();
+        json_result(json!({ "walkthroughs": session.walkthroughs }))
+    }
+
     /// Dispatch one ACP request: through the live instance socket when this
     /// workspace has a running TUI, else against the snapshot session.
     fn call(&self, method: &str, params: Value) -> Result<CallToolResult, McpError> {
@@ -391,6 +704,48 @@ impl GanderMcp {
             .map_err(|_| McpError::internal_error("snapshot session thread exited", None))?
             .ok_or_else(|| McpError::internal_error("no response from review session", None))
     }
+
+    fn load_state(&self) -> Result<ReviewState, McpError> {
+        ReviewState::load_or_default(&self.state_path)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))
+    }
+
+    fn with_state_mut<T: Serialize>(
+        &self,
+        f: impl FnOnce(&mut ReviewState, &Self) -> Result<T>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut state = self.load_state()?;
+        let value = f(&mut state, self)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        state
+            .save(&self.state_path)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        json_result(to_value(value)?)
+    }
+
+    fn ensure_session_index(&self, state: &mut ReviewState) -> usize {
+        let id = review::ensure_session(state, &self.target, None).id.clone();
+        state
+            .sessions
+            .iter()
+            .position(|session| session.id == id)
+            .unwrap()
+    }
+
+    fn ensure_diff_file(&self, path: &str) -> Result<(), McpError> {
+        if self.diff_files.iter().any(|file| file == path) {
+            Ok(())
+        } else {
+            Err(McpError::invalid_params(
+                format!("`{path}` is not a file in the current diff"),
+                None,
+            ))
+        }
+    }
+}
+
+fn to_value(value: impl Serialize) -> Result<Value, McpError> {
+    serde_json::to_value(value).map_err(|error| McpError::internal_error(error.to_string(), None))
 }
 
 fn json_result(value: Value) -> Result<CallToolResult, McpError> {
@@ -436,17 +791,9 @@ impl ServerHandler for GanderMcp {
 pub fn run(
     session_factory: impl FnOnce() -> ReviewSession + Send + 'static,
     jj: Option<Box<dyn JjBackend + Send>>,
-    overlay_path: PathBuf,
-    registry_dir: PathBuf,
-    workspace_root: &Path,
+    params: GanderMcpParams,
 ) -> Result<()> {
-    let server = GanderMcp::new(
-        session_factory,
-        jj,
-        overlay_path,
-        registry_dir,
-        workspace_root.to_path_buf(),
-    )?;
+    let server = GanderMcp::new(session_factory, jj, params)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -467,6 +814,8 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
     use crate::{diff::DiffSet, jj::ReviewTarget, state::ReviewState};
 
     fn session(dir: &Path) -> ReviewSession {
@@ -493,9 +842,14 @@ mod tests {
         GanderMcp::new(
             move || session(&root),
             None,
-            dir.join("agent.json"),
-            dir.join("registry"),
-            dir.to_path_buf(),
+            GanderMcpParams {
+                overlay_path: dir.join("agent.json"),
+                state_path: dir.join("state.json"),
+                registry_dir: dir.join("registry"),
+                workspace_root: dir.to_path_buf(),
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".to_owned()],
+            },
         )
         .unwrap()
     }
@@ -612,6 +966,102 @@ mod tests {
         assert_eq!(result, json!([]));
     }
 
+    #[test]
+    fn reviews_create_then_reviews_list_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+
+        let created = result_json(
+            &server
+                .reviews_create(Parameters(ReviewsCreateParams {
+                    title: Some("MCP pass".to_owned()),
+                }))
+                .unwrap(),
+        );
+        let listed = result_json(&server.reviews_list().unwrap());
+
+        assert_eq!(created["title"], "MCP pass");
+        assert_eq!(listed["sessions"][0]["id"], created["id"]);
+    }
+
+    #[test]
+    fn comment_add_persists_to_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+
+        let comment = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: "src/app.rs".to_owned(),
+                    line: Some(1),
+                    end_line: None,
+                    body: "persist me".to_owned(),
+                    kind: Some(CommentKind::Issue),
+                    action: Some(ActionIntent::Fix),
+                }))
+                .unwrap(),
+        );
+
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.comments[0].id, comment["id"]);
+        assert_eq!(state.comments[0].body, "persist me");
+    }
+
+    #[test]
+    fn task_complete_sets_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let task = result_json(
+            &server
+                .task_add(Parameters(TaskAddParams {
+                    title: "Fix it".to_owned(),
+                    body: None,
+                    action: Some(ActionIntent::Fix),
+                    comment_id: None,
+                    path: None,
+                    line: None,
+                }))
+                .unwrap(),
+        );
+
+        let done = result_json(
+            &server
+                .task_complete(Parameters(TaskCompleteParams {
+                    id: task["id"].as_str().unwrap().to_owned(),
+                    summary: Some("done".to_owned()),
+                }))
+                .unwrap(),
+        );
+
+        assert_eq!(done["status"], "done");
+        assert_eq!(done["resolution"], "done");
+    }
+
+    #[test]
+    fn walkthrough_add_step_then_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+
+        let step = result_json(
+            &server
+                .walkthrough_add_step(Parameters(WalkthroughAddStepParams {
+                    title: "Read app".to_owned(),
+                    file: Some("src/app.rs".to_owned()),
+                    line: Some(1),
+                    end_line: None,
+                    symbol: None,
+                    why: Some("entry point".to_owned()),
+                    body: None,
+                }))
+                .unwrap(),
+        );
+        let shown = result_json(&server.walkthrough_show().unwrap());
+
+        assert_eq!(shown["walkthroughs"][0]["steps"][0]["id"], step["id"]);
+        assert_eq!(shown["walkthroughs"][0]["steps"][0]["title"], "Read app");
+    }
+
     #[cfg(unix)]
     #[test]
     fn tools_route_to_a_live_instance_when_one_serves_the_workspace() {
@@ -664,9 +1114,14 @@ mod tests {
         let server = GanderMcp::new(
             move || session(&root),
             None,
-            dir.path().join("agent.json"),
-            registry_dir,
-            workspace,
+            GanderMcpParams {
+                overlay_path: dir.path().join("agent.json"),
+                state_path: dir.path().join("state.json"),
+                registry_dir,
+                workspace_root: workspace,
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".to_owned()],
+            },
         )
         .unwrap();
 

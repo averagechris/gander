@@ -130,7 +130,7 @@ pub enum ReviewTaskStatus {
     Dismissed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CommentKind {
     Note,
@@ -139,7 +139,9 @@ pub enum CommentKind {
     Praise,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ActionIntent {
     #[default]
@@ -151,7 +153,9 @@ pub enum ActionIntent {
 }
 
 /// Review lifecycle state of a comment.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum CommentState {
     #[default]

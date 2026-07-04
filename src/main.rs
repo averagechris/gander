@@ -565,9 +565,14 @@ fn main() -> color_eyre::Result<()> {
                     session
                 },
                 Some(Box::new(jj.clone())),
-                workspace_paths.overlay_file(),
-                workspace_paths.registry_dir.clone(),
-                &workspace_paths.workspace_root,
+                crate::mcp::GanderMcpParams {
+                    overlay_path: workspace_paths.overlay_file(),
+                    state_path: state_path.clone(),
+                    registry_dir: workspace_paths.registry_dir.clone(),
+                    workspace_root: workspace_paths.workspace_root.clone(),
+                    target: session.target.clone(),
+                    diff_files: session.files.iter().map(|file| file.path.clone()).collect(),
+                },
             )?;
         }
         Command::Paths => unreachable!("handled before loading the diff"),
