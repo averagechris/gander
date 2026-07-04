@@ -3,6 +3,13 @@
 ## Unreleased
 
 
+
+## v0.4.1 - 2026-07-04
+
+### Fixed
+
+- Support mouse wheel in zen tour.
+
 ## v0.4.0 - 2026-07-04
 
 ### Added
