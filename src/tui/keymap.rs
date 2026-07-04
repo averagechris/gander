@@ -46,6 +46,7 @@ pub(super) enum Action {
     ToggleAgentOrder,
     FlagList,
     TaskList,
+    WalkthroughList,
     ChunkList,
     Zen,
     DraftList,
@@ -80,6 +81,7 @@ pub(super) enum Action {
     ToggleFilePane,
     ToggleDiffView,
     RangeComment,
+    MarkWalkthrough,
     CancelRangeComment,
     Comment,
     EditComment,
@@ -217,6 +219,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         )?;
         add_bindings(
             &mut bindings,
+            Action::WalkthroughList,
+            &config.walkthrough_list,
+        )?;
+        add_bindings(
+            &mut bindings,
             Action::ToggleFilePane,
             &config.toggle_file_pane,
         )?;
@@ -226,6 +233,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &config.toggle_diff_view,
         )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
+        add_bindings(
+            &mut bindings,
+            Action::MarkWalkthrough,
+            &config.mark_walkthrough,
+        )?;
         add_bindings(
             &mut bindings,
             Action::CancelRangeComment,

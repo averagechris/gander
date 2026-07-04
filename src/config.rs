@@ -201,6 +201,7 @@ pub struct KeybindingsConfig {
     pub toggle_agent_order: Vec<String>,
     pub flag_list: Vec<String>,
     pub task_list: Vec<String>,
+    pub walkthrough_list: Vec<String>,
     pub chunk_list: Vec<String>,
     pub zen: Vec<String>,
     pub draft_list: Vec<String>,
@@ -235,6 +236,7 @@ pub struct KeybindingsConfig {
     pub toggle_file_pane: Vec<String>,
     pub toggle_diff_view: Vec<String>,
     pub range_comment: Vec<String>,
+    pub mark_walkthrough: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
     pub edit_comment: Vec<String>,
@@ -375,6 +377,7 @@ struct KeybindingsConfigPatch {
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
     task_list: Option<Vec<String>>,
+    walkthrough_list: Option<Vec<String>>,
     chunk_list: Option<Vec<String>>,
     /// Accepts the pre-0.4 name `tour` so existing configs keep working.
     #[serde(alias = "tour")]
@@ -411,6 +414,7 @@ struct KeybindingsConfigPatch {
     toggle_file_pane: Option<Vec<String>>,
     toggle_diff_view: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
+    mark_walkthrough: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
     edit_comment: Option<Vec<String>>,
@@ -473,6 +477,7 @@ impl Default for KeybindingsConfig {
             toggle_agent_order: keys(["A"]),
             flag_list: keys(["F"]),
             task_list: keys(["X"]),
+            walkthrough_list: keys(["W"]),
             chunk_list: keys(["S"]),
             zen: keys(["T", "Z"]),
             draft_list: keys(["D"]),
@@ -509,6 +514,7 @@ impl Default for KeybindingsConfig {
             toggle_file_pane: keys(["w"]),
             toggle_diff_view: keys(["|"]),
             range_comment: keys(["r"]),
+            mark_walkthrough: keys(["Y"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
             edit_comment: keys(["e"]),
@@ -705,6 +711,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
         apply_optional(&mut self.flag_list, patch.flag_list);
         apply_optional(&mut self.task_list, patch.task_list);
+        apply_optional(&mut self.walkthrough_list, patch.walkthrough_list);
         apply_optional(&mut self.chunk_list, patch.chunk_list);
         apply_optional(&mut self.zen, patch.zen);
         apply_optional(&mut self.draft_list, patch.draft_list);
@@ -742,6 +749,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
         apply_optional(&mut self.toggle_diff_view, patch.toggle_diff_view);
         apply_optional(&mut self.range_comment, patch.range_comment);
+        apply_optional(&mut self.mark_walkthrough, patch.mark_walkthrough);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
         apply_optional(&mut self.edit_comment, patch.edit_comment);

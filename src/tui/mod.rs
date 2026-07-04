@@ -23,6 +23,7 @@ mod revset;
 mod search;
 mod tasks;
 mod view_options;
+mod walkthroughs;
 mod zen;
 
 use std::{
@@ -49,6 +50,8 @@ use crate::{
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, ReviewTarget},
+    review,
+    state::{ReviewState, WalkthroughStep},
 };
 
 use chooser::TargetChooserState;
@@ -69,6 +72,7 @@ use revset::RevsetInputState;
 use search::FileSearchState;
 use tasks::TaskListState;
 use view_options::ViewOptionsState;
+use walkthroughs::WalkthroughListState;
 use zen::ZenState;
 
 enum Mode {
@@ -86,6 +90,7 @@ enum Mode {
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
     ViewOptions(ViewOptionsState),
+    WalkthroughList(WalkthroughListState),
     CommentInput {
         editor: CommentEditor,
         target: CommentInputTarget,
@@ -757,6 +762,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::WalkthroughList(list) => {
+            if handle_walkthrough_list_key(key, list, session, keymap, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::ChunkList(list) => {
             if handle_chunk_list_key(key, list, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
@@ -905,6 +915,17 @@ fn handle_normal_action(
                 });
             } else {
                 *mode = Mode::TaskList(tasks);
+            }
+        }
+        Action::WalkthroughList => {
+            let walkthroughs = WalkthroughListState::new(session);
+            if walkthroughs.step_ids.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no walkthrough steps".to_owned(),
+                });
+            } else {
+                *mode = Mode::WalkthroughList(walkthroughs);
             }
         }
         Action::ChunkList => {
@@ -1065,6 +1086,24 @@ fn handle_normal_action(
                 session.toggle_diff_range_selection();
             }
         }
+        Action::MarkWalkthrough => {
+            if session.focus == Focus::Diff {
+                match add_walkthrough_step_from_selection(session) {
+                    Some((index, label)) => {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: format!("added walkthrough step {index}: {label}"),
+                        });
+                    }
+                    None => {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: "no diff line selected for walkthrough".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
         Action::CancelRangeComment => {
             // Esc-style dismissal: clear the transient layers (range selection
             // and footer notice) instead of quitting.
@@ -1117,6 +1156,70 @@ fn handle_normal_action(
         | Action::TargetPickerMoveUp => {}
     }
     Ok(false)
+}
+
+fn ensure_tui_review_session(session: &mut ReviewSession) -> &mut crate::state::ReviewSession {
+    let mut state = ReviewState {
+        sessions: std::mem::take(&mut session.sessions),
+        ..ReviewState::default()
+    };
+    let spec = review::SessionTargetSpec {
+        repo: Some(session.repo.display().to_string()),
+        base: Some(session.target.base.clone()),
+        revision: Some(session.target.rev.clone()),
+        revset: None,
+    };
+    let id = review::ensure_session(&mut state, &spec, None).id.clone();
+    session.sessions = state.sessions;
+    session.sessions.iter_mut().find(|s| s.id == id).unwrap()
+}
+
+fn walkthrough_target_from_selection(
+    session: &ReviewSession,
+) -> Option<crate::state::ReviewTarget> {
+    let anchor = session
+        .selected_range_anchor()
+        .or_else(|| session.selected_line_anchor())?;
+    let line = anchor.line()?;
+    Some(crate::state::ReviewTarget {
+        repo: Some(session.repo.display().to_string()),
+        base: Some(session.target.base.clone()),
+        revision: Some(session.target.rev.clone()),
+        file: Some(anchor.path().to_owned()),
+        line: Some(line),
+        end_line: anchor.end_line().filter(|end| *end != line),
+        ..Default::default()
+    })
+}
+
+fn walkthrough_step_title(_session: &ReviewSession, target: &crate::state::ReviewTarget) -> String {
+    let file = target.file.as_deref().unwrap_or("<unknown>");
+    match (target.line, target.end_line) {
+        (Some(line), Some(end)) => format!("{file}:{line}-{end}"),
+        (Some(line), None) => format!("{file}:{line}"),
+        _ => file.to_owned(),
+    }
+}
+
+fn add_walkthrough_step_from_selection(session: &mut ReviewSession) -> Option<(usize, String)> {
+    let target = walkthrough_target_from_selection(session)?;
+    let title = walkthrough_step_title(session, &target);
+    let durable = ensure_tui_review_session(session);
+    let step = review::add_walkthrough_step(
+        durable,
+        WalkthroughStep {
+            target,
+            title: Some(title.clone()),
+            ..Default::default()
+        },
+    );
+    let index = durable
+        .walkthroughs
+        .first()
+        .and_then(|w| w.steps.iter().position(|s| s.id == step.id))
+        .map(|i| i + 1)
+        .unwrap_or(1);
+    Some((index, title))
 }
 
 /// Expand hidden hunk context near the diff cursor (docs/focused-diff-ux.md
@@ -2307,6 +2410,119 @@ fn handle_task_list_key(
     }
 }
 
+fn handle_walkthrough_list_key(
+    key: KeyEvent,
+    list: &mut WalkthroughListState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1),
+            Action::TargetPickerMoveUp => list.move_selection(-1),
+            _ => {}
+        }
+        return false;
+    }
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(step) = selected_walkthrough_step(session, list).cloned() {
+                jump_to_walkthrough_step(session, &step);
+            }
+            true
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            list.move_selection(1);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            list.move_selection(-1);
+            false
+        }
+        KeyCode::Char('d') => {
+            if let Some(id) = list.selected_step_id().map(str::to_owned) {
+                if let Some(durable) = session.sessions.iter_mut().find(|s| {
+                    s.walkthroughs
+                        .iter()
+                        .any(|w| w.steps.iter().any(|step| step.id == id))
+                }) {
+                    let _ = review::remove_walkthrough_step(durable, &id);
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: "deleted walkthrough step".to_owned(),
+                    });
+                }
+                list.refresh(session);
+            }
+            list.step_ids.is_empty()
+        }
+        KeyCode::Char('J') => {
+            move_selected_walkthrough_step(session, list, 1);
+            false
+        }
+        KeyCode::Char('K') => {
+            move_selected_walkthrough_step(session, list, -1);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn selected_walkthrough_step<'a>(
+    session: &'a ReviewSession,
+    list: &WalkthroughListState,
+) -> Option<&'a WalkthroughStep> {
+    let id = list.selected_step_id()?;
+    session
+        .sessions
+        .iter()
+        .flat_map(|s| &s.walkthroughs)
+        .flat_map(|w| &w.steps)
+        .find(|step| step.id == id)
+}
+
+fn move_selected_walkthrough_step(
+    session: &mut ReviewSession,
+    list: &mut WalkthroughListState,
+    delta: isize,
+) {
+    let Some(id) = list.selected_step_id().map(str::to_owned) else {
+        return;
+    };
+    for durable in &mut session.sessions {
+        for walkthrough in &durable.walkthroughs {
+            if let Some(index) = walkthrough.steps.iter().position(|step| step.id == id) {
+                let to = (index as isize + delta).clamp(0, walkthrough.steps.len() as isize - 1)
+                    as usize;
+                let _ = review::move_walkthrough_step(durable, &id, to);
+                list.refresh(session);
+                return;
+            }
+        }
+    }
+}
+
+fn jump_to_walkthrough_step(session: &mut ReviewSession, step: &WalkthroughStep) {
+    let Some(path) = &step.target.file else {
+        return;
+    };
+    let Some(file_index) = session.files.iter().position(|file| &file.path == path) else {
+        return;
+    };
+    session.select_file_index(file_index);
+    session.focus = Focus::Diff;
+    if let Some(line) = step.target.line
+        && let Some(row_index) = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(line) || row.old_lineno == Some(line))
+    {
+        session.jump_to_diff_row(row_index);
+    }
+}
+
 impl ReviewLoader<'_> {
     fn base_candidates(&self, session: &ReviewSession) -> Result<Vec<crate::jj::JjChangeSummary>> {
         self.jj.change_summaries(&session.repo)
@@ -2438,6 +2654,7 @@ fn handle_mouse_event(
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
             | Mode::TaskList(_)
+            | Mode::WalkthroughList(_)
             | Mode::ChunkList(_)
             | Mode::DraftList(_)
             | Mode::FileSearch(_)

@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 3090
 expression: "render_tui_style_runs(&session, &Mode::Normal, 130, 12)"
 ---
 y=01 x=01..17 fg=Some(Yellow) bg=Some(Reset) add=BOLD sub=NONE text="src/app.rs  +2 -1"
@@ -35,4 +34,4 @@ y=06 x=65..65 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=06 x=66..69 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   4"
 y=06 x=71..73 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"
 y=10 x=00..129 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments                                                                        "
-y=11 x=00..129 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="trunk()..@ · focus diff · j/k line · d/u scroll · r range · c comment · n/N unviewed · tab files · ? help · q quit                "
+y=11 x=00..129 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="trunk()..@ · focus diff · j/k line · d/u scroll · r range · Y walkthrough · c comment · n/N unviewed · tab files · ? help · q quit"

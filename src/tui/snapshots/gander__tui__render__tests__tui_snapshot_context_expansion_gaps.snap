@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 2392
 expression: "render_tui_text(&session, &Mode::Normal, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -26,4 +25,4 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +2/-2, 0 comments
-trunk()..@ · focus diff · j/k line · d/u scroll · r range · c comment · n/N unviewed · tab files · ?
+trunk()..@ · focus diff · j/k line · d/u scroll · r range · Y walkthrough · c comment · n/N unviewed

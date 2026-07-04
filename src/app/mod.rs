@@ -569,7 +569,7 @@ impl ReviewSession {
         None
     }
 
-    fn select_file_index(&mut self, index: usize) {
+    pub(crate) fn select_file_index(&mut self, index: usize) {
         if index >= self.files.len() {
             return;
         }

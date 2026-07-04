@@ -35,6 +35,7 @@ use super::{
     search::FileSearchState,
     tasks::TaskListState,
     view_options::{ViewOption, ViewOptionsState},
+    walkthroughs::WalkthroughListState,
     zen::{ZenState, ZenStop},
 };
 
@@ -108,6 +109,9 @@ pub(super) fn draw(
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
         Mode::TaskList(list) => draw_task_list_popup(frame, frame.area(), session, list),
+        Mode::WalkthroughList(list) => {
+            draw_walkthrough_list_popup(frame, frame.area(), session, list)
+        }
         Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
         Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
@@ -1218,6 +1222,9 @@ fn draw_footer(
         Mode::TaskList(_) => {
             "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
         }
+        Mode::WalkthroughList(_) => {
+            "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
+        }
         Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
         Mode::DraftList(_) => {
             "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
@@ -1321,6 +1328,7 @@ fn diff_footer_segments(
         FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
         FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
         FooterHint::new([Action::RangeComment], "range"),
+        FooterHint::new([Action::MarkWalkthrough], "walkthrough"),
         FooterHint::new([Action::Comment], "comment"),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::ToggleFocus], "files"),
@@ -1423,6 +1431,8 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::DeleteComment], "delete comment"),
         entry(&[Action::CommentList], "comment list"),
         entry(&[Action::TaskList], "review tasks"),
+        entry(&[Action::WalkthroughList], "walkthrough panel"),
+        entry(&[Action::MarkWalkthrough], "mark for walkthrough"),
         entry(
             &[Action::NextComment, Action::PreviousComment],
             "next/previous comment",
@@ -3169,6 +3179,78 @@ fn draw_task_list_popup(
         .block(
             Block::default()
                 .title(" Review tasks ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(paragraph, popup);
+}
+
+fn draw_walkthrough_list_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    list: &WalkthroughListState,
+) {
+    let popup = centered_rect(84, 60, area);
+    frame.render_widget(Clear, popup);
+    let mut lines = Vec::new();
+    for (index, id) in list.step_ids.iter().enumerate() {
+        let Some(step) = session
+            .sessions
+            .iter()
+            .flat_map(|s| &s.walkthroughs)
+            .flat_map(|w| &w.steps)
+            .find(|step| &step.id == id)
+        else {
+            continue;
+        };
+        let selected = index == list.selected;
+        let style = if selected {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let marker = if selected { "›" } else { " " };
+        let file = step.target.file.as_deref().unwrap_or("<target>");
+        let location = match (step.target.line, step.target.end_line) {
+            (Some(line), Some(end)) => format!("{file}:{line}-{end}"),
+            (Some(line), None) => format!("{file}:{line}"),
+            _ => file.to_owned(),
+        };
+        let title = step.title.as_deref().unwrap_or("(untitled)");
+        let why = step
+            .why
+            .as_deref()
+            .unwrap_or("")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim();
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker} {}. ", index + 1), style),
+            Span::styled(format!("{title} "), style),
+            Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+            Span::styled(why.to_owned(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  no walkthrough steps",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "j/k move · enter jump · J/K reorder · d delete · esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title(" Walkthrough ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded),
         )
