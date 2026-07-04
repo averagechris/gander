@@ -1,10 +1,15 @@
-# VHS tape for the gander demo GIF. Re-render docs/demo.gif with vhs before the next release.
+# VHS tape for the gander demo GIF.
 #
-# Record with:
-#   nix develop -c cargo build --release
-#   PATH="$PWD/target/release:$PATH" nix run nixpkgs#vhs -- docs/demo.tape
+# Render with:
+#   nix run .#render-demo
 #
-# Requires `jj` on PATH (dev shell provides it).
+# This builds the flake's gander package, puts it (and jj) on PATH, runs vhs
+# against this tape, and refreshes docs/demo.gif.inputs-sha256 so CI knows the
+# gif is current. CI (.builds/demo.yml) re-renders and commits the gif
+# automatically whenever this tape or scripts/demo-fixture.sh changes.
+#
+# The shell vhs spawns inherits PATH from the wrapper, so the tape itself
+# stays machine-independent: it only needs `gander` and `jj` resolvable.
 
 Output docs/demo.gif
 
@@ -17,7 +22,7 @@ Set TypingSpeed 60ms
 Set Shell bash
 
 Hide
-Type "export PATH='/Users/chris/projects/gander/target/release':$PATH; bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '"
+Type "bash scripts/demo-fixture.sh /tmp/gander-demo >/dev/null 2>&1; cd /tmp/gander-demo; PS1='$ '"
 Enter
 Sleep 6s
 Type "clear"

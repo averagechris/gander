@@ -22,6 +22,9 @@
   `comment_add/resolve/set_state`, `task_add/complete/reopen/tasks_list`, and
   `walkthrough_add_step/remove_step/move_step/show`, each matching a CLI
   equivalent.
+- `nix run .#render-demo` renders docs/demo.gif from docs/demo.tape with the
+  flake-built binary, and a new CI manifest (`.builds/demo.yml`) re-renders
+  and commits the GIF automatically when the tape or demo fixture change.
 
 ## v0.4.1 - 2026-07-04
 

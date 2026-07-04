@@ -340,8 +340,11 @@ session can start here without re-deriving them:
    still go through `app::ReviewSession::add_comment`; unify with
    `review::add_comment` so kind/action can be set at creation time in the
    TUI.
-6. **Re-render docs/demo.gif** with vhs (see the note at the top of
-   docs/demo.tape) so the README/tour GIF shows the new `X`/`Y`/`W` beats.
+6. ~~**Re-render docs/demo.gif**~~ Done: `nix run .#render-demo` renders the
+   tape with the flake-built binary, and CI (`.builds/demo.yml`) re-renders
+   and commits the GIF whenever the tape or fixture change (guarded by
+   docs/demo.gif.inputs-sha256 to avoid render loops). Note: vhs comes from a
+   dedicated `nixpkgs-vhs` flake input until the main pin's ttyd is fixed.
 7. **Sample review size** (M15 polish). docs/pages/sample-review.html is
    ~1.6 MB because it embeds the full diff; consider regenerating from a
    smaller change or trimming hunks for the tour link.

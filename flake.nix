@@ -3,16 +3,22 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Dedicated newer pin for vhs only: the main pin's ttyd build fails on
+    # darwin ("failed to load evlib_uv" -> vhs cannot reach its terminal).
+    # Drop this input once the main nixpkgs pin ships a working ttyd.
+    nixpkgs-vhs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
   outputs = {
     self,
     nixpkgs,
+    nixpkgs-vhs,
     flake-utils,
   }:
     flake-utils.lib.eachDefaultSystem (system: let
       pkgs = import nixpkgs {inherit system;};
+      vhsPkgs = import nixpkgs-vhs {inherit system;};
       inherit (pkgs) lib;
       cargoToml = lib.importTOML ./Cargo.toml;
       nativeBuildInputs = with pkgs; [pkg-config];
@@ -752,6 +758,53 @@
         PY
       '';
 
+      # Re-render docs/demo.gif from docs/demo.tape with vhs, using the
+      # flake-built gander binary. A sidecar hash of the render inputs
+      # (docs/demo.gif.inputs-sha256) lets CI (.builds/demo.yml) skip renders
+      # when the tape and fixture are unchanged, and re-render + commit the
+      # gif when they change.
+      renderDemoScript = ''
+        repo_root="$(git rev-parse --show-toplevel)"
+        cd "$repo_root"
+
+        check_only=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --check) check_only=1; shift ;;
+            -h|--help)
+              printf 'usage: render-demo [--check]\n'
+              printf '  --check  exit 0 if docs/demo.gif is current for the tape inputs, 1 otherwise\n'
+              exit 0
+              ;;
+            *) printf 'unknown argument: %s\n' "$1" >&2; exit 1 ;;
+          esac
+        done
+
+        sidecar="docs/demo.gif.inputs-sha256"
+        inputs_hash="$(cat docs/demo.tape scripts/demo-fixture.sh | sha256sum | cut -d' ' -f1)"
+
+        if [[ $check_only -eq 1 ]]; then
+          if [[ -f docs/demo.gif && -f "$sidecar" ]] && [[ "$(cat "$sidecar")" == "$inputs_hash" ]]; then
+            printf 'demo gif is current (inputs %s)\n' "$inputs_hash"
+            exit 0
+          fi
+          printf 'demo gif is stale: inputs %s do not match %s\n' "$inputs_hash" "$sidecar" >&2
+          exit 1
+        fi
+
+        printf 'building gander...\n'
+        nix build --accept-flake-config .# --out-link result-render-demo
+        export PATH="$repo_root/result-render-demo/bin:$PATH"
+        command -v gander >/dev/null || { printf 'gander not on PATH after build\n' >&2; exit 1; }
+        command -v jj >/dev/null || { printf 'jj not on PATH\n' >&2; exit 1; }
+
+        printf 'rendering docs/demo.tape with vhs...\n'
+        vhs docs/demo.tape
+
+        printf '%s\n' "$inputs_hash" > "$sidecar"
+        printf 'rendered docs/demo.gif (inputs %s)\n' "$inputs_hash"
+      '';
+
       publishPagesScript = ''
         repo_root="$(git rev-parse --show-toplevel)"
         cd "$repo_root"
@@ -993,6 +1046,18 @@
           hut
         ];
       };
+      render-demo = mkRepoScript {
+        name = "render-demo";
+        text = renderDemoScript;
+        runtimeInputs = with pkgs; [
+          coreutils
+          git
+          jujutsu
+          nix
+          # vhs comes from the dedicated newer nixpkgs pin; see inputs.
+          vhsPkgs.vhs
+        ];
+      };
       release = mkRepoScript {
         name = "release";
         text = releaseScript;
@@ -1009,7 +1074,7 @@
       packages =
         {
           default = gander;
-          inherit build-pages ci-clippy ci-fmt ci-test prepare-release publish-pages release release-tag;
+          inherit build-pages ci-clippy ci-fmt ci-test prepare-release publish-pages release release-tag render-demo;
         }
         // lib.optionalAttrs (releaseArtifact != null) {
           release-artifact = releaseArtifact;
@@ -1028,6 +1093,7 @@
         release-tag = flake-utils.lib.mkApp {drv = release-tag;};
         build-pages = flake-utils.lib.mkApp {drv = build-pages;};
         publish-pages = flake-utils.lib.mkApp {drv = publish-pages;};
+        render-demo = flake-utils.lib.mkApp {drv = render-demo;};
         release = flake-utils.lib.mkApp {drv = release;};
       };
 

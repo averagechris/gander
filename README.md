@@ -12,10 +12,11 @@ automation, and optional MCP access over the same core logic.
 
 ![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
 
-The tour is recorded from [`docs/demo.tape`](docs/demo.tape). When adding a
-visual feature that would make the first impression clearer, consider refreshing
-this GIF in the same change so the README keeps showing gander's current review
-flow.
+The tour is recorded from [`docs/demo.tape`](docs/demo.tape) and rendered with
+`nix run .#render-demo`. CI re-renders and commits the GIF automatically when
+the tape or its fixture change (`.builds/demo.yml`), so updating the tape in
+the same change as a visual feature keeps the README showing gander's current
+review flow.
 
 This repo is intentionally early, but the first vertical slice is in place:
 

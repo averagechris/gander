@@ -1,0 +1,47 @@
+# Re-render docs/demo.gif whenever docs/demo.tape or scripts/demo-fixture.sh
+# change, and commit the refreshed gif back to main.
+#
+# Loop safety: render-demo writes docs/demo.gif.inputs-sha256 alongside the
+# gif. The cheap `check` task below compares that sidecar against the current
+# tape+fixture hash and completes the build early when the gif is already
+# current — so the commit this build pushes does not trigger another render.
+#
+# Push safety: the gif commit is only pushed when the triggering commit is
+# still the tip of main, so branch pushes and races never rewrite main.
+image: nixos/unstable
+arch: x86_64
+oauth: git.sr.ht/OBJECTS:RW git.sr.ht/PROFILE:RO
+environment:
+  NIX_CONFIG: "experimental-features = nix-command flakes"
+sources:
+  - https://git.sr.ht/~averagechris/gander
+tasks:
+  - check: |
+      cd gander
+      expected="$(cat docs/demo.gif.inputs-sha256 2>/dev/null || true)"
+      actual="$(cat docs/demo.tape scripts/demo-fixture.sh | sha256sum | cut -d' ' -f1)"
+      if [ -f docs/demo.gif ] && [ "$expected" = "$actual" ]; then
+        echo "demo gif already current; nothing to do"
+        complete-build
+      fi
+      echo "demo gif stale (inputs $actual); rendering"
+  - render: |
+      cd gander
+      nix run --accept-flake-config .#render-demo
+  - push: |
+      cd gander
+      git config user.name "gander demo bot"
+      git config user.email "builds@sr.ht"
+      git add docs/demo.gif docs/demo.gif.inputs-sha256
+      git commit -m "chore(demo): re-render demo gif from tape"
+      git fetch origin main
+      if [ "$(git rev-parse HEAD~1)" != "$(git rev-parse FETCH_HEAD)" ]; then
+        echo "triggering commit is not the tip of main; skipping push"
+        exit 0
+      fi
+      token="$(sed -n 's/.*access-token[[:space:]]*"\([^"]*\)".*/\1/p' ~/.config/hut/config | head -n1)"
+      if [ -z "$token" ]; then
+        echo "no hut access token available; cannot push" >&2
+        exit 1
+      fi
+      git push "https://oauth2:${token}@git.sr.ht/~averagechris/gander" HEAD:main

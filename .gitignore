@@ -6,3 +6,4 @@
 *.swo
 /result-release-artifact
 /dist/
+/result-render-demo
