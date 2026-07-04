@@ -34,7 +34,7 @@ use super::{
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
     view_options::{ViewOption, ViewOptionsState},
-    zen::ZenState,
+    zen::{ZenState, ZenStop},
 };
 
 use super::zen::ZenPhase;
@@ -1026,16 +1026,24 @@ fn draw_footer(
         Mode::Normal if zen.is_some() => {
             let zen = zen.expect("checked above");
             match zen.phase {
-                ZenPhase::Focus => format!(
-                    "zen {}/{} · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comment · esc end",
-                    zen.index + 1,
-                    zen.len(),
-                ),
-                ZenPhase::Reading => format!(
-                    "zen read {}/{} · n next · p back · . refocus · tab focus card · esc end · other keys as normal",
-                    zen.index + 1,
-                    zen.len(),
-                ),
+                ZenPhase::Focus => match zen.current() {
+                    Some(ZenStop::Chapter(chapter)) => format!(
+                        "zen chapter {}/{} · n tours its {} stop(s) · p back · tab full diff · g glance · esc end",
+                        chapter.position.0, chapter.position.1, chapter.stop_count,
+                    ),
+                    _ => {
+                        let (current, total) = zen.chunk_position();
+                        format!(
+                            "zen {current}/{total} · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comment · esc end",
+                        )
+                    }
+                },
+                ZenPhase::Reading => {
+                    let (current, total) = zen.chunk_position();
+                    format!(
+                        "zen read {current}/{total} · n next · p back · . refocus · tab focus card · esc end · other keys as normal",
+                    )
+                }
                 ZenPhase::Glance => format!(
                     "zen glance · {} item(s) · j/k move · enter jump · a mark all viewed & finish · p back · esc end",
                     zen.glance_rows.len(),
@@ -1729,38 +1737,69 @@ fn draw_zen_panel(
 
     let mut lines = Vec::new();
     let mut flagged = 0usize;
-    if let Some(stop) = zen.current() {
-        let position = stop
-            .part_position
-            .map(|(part, total)| format!(" (part {part}/{total})"))
-            .unwrap_or_default();
-        let location = chunk_row_location(stop);
-        flagged = stop
-            .part
-            .as_ref()
-            .map(|part| {
-                session
-                    .agent_flags
-                    .iter()
-                    .filter(|flag| flag.path == part.path)
-                    .count()
-            })
-            .unwrap_or(0);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}{position}  ", stop.title),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(location, Style::default().fg(Color::Cyan)),
-        ]));
-        lines.push(Line::from(Span::styled(
-            stop.rationale
-                .clone()
-                .unwrap_or_else(|| "(no rationale given)".to_owned()),
-            Style::default().fg(Color::Gray),
-        )));
+    match zen.current() {
+        Some(ZenStop::Chapter(chapter)) => {
+            let (number, total) = chapter.position;
+            let headline = if chapter.description.is_empty() {
+                session.target.to_string()
+            } else {
+                chapter.description.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("chapter {number}/{total}  "),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    headline,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                chapter.summary.clone().unwrap_or_else(|| {
+                    "(no change brief from the agent — @ summons one)".to_owned()
+                }),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        Some(ZenStop::Chunk(stop)) => {
+            let position = stop
+                .part_position
+                .map(|(part, total)| format!(" (part {part}/{total})"))
+                .unwrap_or_default();
+            let location = chunk_row_location(stop);
+            flagged = stop
+                .part
+                .as_ref()
+                .map(|part| {
+                    session
+                        .agent_flags
+                        .iter()
+                        .filter(|flag| flag.path == part.path)
+                        .count()
+                })
+                .unwrap_or(0);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{}{position}  ", stop.title),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(location, Style::default().fg(Color::Cyan)),
+            ]));
+            lines.push(Line::from(Span::styled(
+                stop.rationale
+                    .clone()
+                    .unwrap_or_else(|| "(no rationale given)".to_owned()),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        None => {}
     }
     if !zen.glance_rows.is_empty() {
         let shown = zen.glance_rows.iter().take(3).map(|row| {
@@ -1788,7 +1827,15 @@ fn draw_zen_panel(
         Style::default().fg(Color::DarkGray),
     )));
 
-    let mut title = format!("zen spotlight {}/{}", zen.index + 1, zen.len());
+    let mut title = match zen.current() {
+        Some(ZenStop::Chapter(chapter)) => {
+            format!("zen chapter {}/{}", chapter.position.0, chapter.position.1)
+        }
+        _ => {
+            let (current, total) = zen.chunk_position();
+            format!("zen spotlight {current}/{total}")
+        }
+    };
     if !zen.glance_rows.is_empty() {
         title.push_str(&format!(" · {} glance", zen.glance_rows.len()));
     }
@@ -1819,22 +1866,195 @@ fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
     }
 }
 
-/// The zen focus card: a full-screen stop showing only the critical lines
-/// (extracted and vertically centered) with the agent's explanation as the
-/// co-star. One object of attention per stop — pop in, understand, move on.
-/// `tab` drops into the full dimmed diff when surrounding context is needed.
+/// The zen focus surface: a chapter intro card between changes, or a
+/// spotlight stop card inside one (docs/focused-diff-ux.md §6).
 fn draw_zen_focus(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     session: &ReviewSession,
     zen: &ZenState,
 ) {
+    match zen.current() {
+        Some(ZenStop::Chapter(chapter)) => draw_zen_chapter(frame, area, session, zen, chapter),
+        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop),
+        None => {}
+    }
+}
+
+/// The chapter card: a full-screen intro for one jj change before its
+/// stops — description, bookmarks, live diff stats, and the agent's
+/// high-level brief. Kills the "dropped into a random change id" feeling
+/// of stacked walkthroughs: every change opens with its story.
+fn draw_zen_chapter(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    zen: &ZenState,
+    chapter: &super::zen::ChapterCard,
+) {
     frame.render_widget(Clear, area);
-    let Some(stop) = zen.current() else {
+    let (number, total) = chapter.position;
+    let mut title = format!(" zen · chapter {number}/{total} ");
+    if zen.has_glance() {
+        title.push_str(&format!("· then {} at a glance ", zen.glance_rows.len()));
+    }
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(title),
+        area,
+    );
+    let inner = inner_bordered(area);
+
+    // Where this chapter lives: its own change, or the walkthrough's target.
+    let mut location = match &chapter.change_id {
+        Some(change_id) => format!("change {change_id}"),
+        None => session.target.to_string(),
+    };
+    if !chapter.bookmarks.is_empty() {
+        location.push_str(&format!(" · {}", chapter.bookmarks));
+    }
+
+    let headline = if chapter.description.is_empty() {
+        "(no description)".to_owned()
+    } else {
+        chapter.description.clone()
+    };
+    let additions: usize = session.files.iter().map(|file| file.additions).sum();
+    let deletions: usize = session.files.iter().map(|file| file.deletions).sum();
+    let stats = format!(
+        "{} file(s) · +{additions} −{deletions}",
+        session.files.len()
+    );
+    let stops_hint = format!("n tours the {} stop(s) in this chapter", chapter.stop_count);
+
+    let mut body: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            headline,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(stats, Style::default().fg(Color::Cyan))),
+        Line::from(Span::styled(
+            stops_hint,
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    if inner.height < 8 {
+        // Too small for the card layout: header only.
+        body.insert(0, Line::from(location));
+        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
         return;
+    }
+
+    // Progress dots stay on the backdrop, like the stop cards.
+    frame.render_widget(
+        Paragraph::new(zen_progress_line(zen)),
+        Rect { height: 1, ..inner },
+    );
+
+    let summary = chapter.summary.clone().unwrap_or_else(|| {
+        "(no change brief from the agent — @ summons one to tell this change's story)".to_owned()
+    });
+
+    let max_card_width = inner.width.saturating_sub(4).max(20);
+    let card_width = 72.min(max_card_width).max(50.min(max_card_width));
+    let text_width = card_width.saturating_sub(4).max(20) as usize;
+    let estimated: usize = summary
+        .lines()
+        .map(|line| line.chars().count().div_ceil(text_width).max(1))
+        .sum();
+    let summary_height = (estimated as u16 + 1).clamp(2, (inner.height / 2).max(3));
+    let card_height = (body.len() as u16 + summary_height + 2).min(inner.height.saturating_sub(2));
+
+    let card = Rect {
+        x: inner.x + inner.width.saturating_sub(card_width) / 2,
+        y: inner.y + 1 + inner.height.saturating_sub(1).saturating_sub(card_height) / 2,
+        width: card_width,
+        height: card_height,
     };
 
-    let mut title = format!(" zen · stop {}/{} ", zen.index + 1, zen.len());
+    // The same one-cell drop shadow as the stop cards.
+    let shadow = Rect {
+        x: (card.x + 2).min(area.right().saturating_sub(1)),
+        y: (card.y + 1).min(area.bottom().saturating_sub(1)),
+        width: card.width.min(area.right().saturating_sub(card.x + 2)),
+        height: card.height.min(area.bottom().saturating_sub(card.y + 1)),
+    };
+    if shadow.width > 0 && shadow.height > 0 {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Black)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, card);
+    let card_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(vec![
+            Span::styled(
+                format!(" chapter {number}/{total} "),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("· {location} "), Style::default().fg(Color::Cyan)),
+        ]));
+    let card_inner = card_block.inner(card);
+    frame.render_widget(card_block, card);
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(summary_height)])
+        .split(card_inner);
+
+    frame.render_widget(
+        Paragraph::new(body)
+            .block(Block::default().padding(Padding::horizontal(1)))
+            .wrap(Wrap { trim: false }),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(summary)
+            .style(Style::default().fg(Color::Gray))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .padding(Padding::horizontal(1))
+                    .title(Span::styled(
+                        " what this change does ",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+            )
+            .wrap(Wrap { trim: false }),
+        sections[1],
+    );
+}
+
+/// The zen focus card: a full-screen stop showing only the critical lines
+/// (extracted and vertically centered) with the agent's explanation as the
+/// co-star. One object of attention per stop — pop in, understand, move on.
+/// `tab` drops into the full dimmed diff when surrounding context is needed.
+fn draw_zen_stop(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    zen: &ZenState,
+    stop: &super::chunks::ChunkRow,
+) {
+    frame.render_widget(Clear, area);
+
+    let (stop_number, stop_total) = zen.chunk_position();
+    let mut title = format!(" zen · stop {stop_number}/{stop_total} ");
     if zen.has_glance() {
         title.push_str(&format!("· then {} at a glance ", zen.glance_rows.len()));
     }
@@ -1998,25 +2218,12 @@ fn draw_zen_focus(
 
 /// Header lines for the focus card backdrop: the progress dots.
 fn zen_focus_header_lines(zen: &ZenState, stop: &super::chunks::ChunkRow) -> Vec<Line<'static>> {
-    let mut dots: Vec<Span<'static>> = Vec::new();
-    for index in 0..zen.len().min(30) {
-        dots.push(match index.cmp(&zen.index) {
-            std::cmp::Ordering::Less => Span::styled("● ", Style::default().fg(Color::DarkGray)),
-            std::cmp::Ordering::Equal => Span::styled(
-                "● ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            std::cmp::Ordering::Greater => Span::styled("○ ", Style::default().fg(Color::DarkGray)),
-        });
-    }
     let position = stop
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
         .unwrap_or_default();
     vec![
-        Line::from(dots),
+        zen_progress_line(zen),
         Line::from(vec![
             Span::styled(
                 format!("{}{position}", stop.title),
@@ -2029,6 +2236,30 @@ fn zen_focus_header_lines(zen: &ZenState, stop: &super::chunks::ChunkRow) -> Vec
         ]),
         Line::from(""),
     ]
+}
+
+/// The walkthrough progress strip: a dot per spotlight stop, grouped by
+/// chapter (`▎` bars introduce each chapter), the current station bold.
+fn zen_progress_line(zen: &ZenState) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, stop) in zen.stops.iter().take(40).enumerate() {
+        let glyph = match stop {
+            super::zen::ZenStop::Chapter(_) => "▎",
+            super::zen::ZenStop::Chunk(_) if index <= zen.index => "● ",
+            super::zen::ZenStop::Chunk(_) => "○ ",
+        };
+        spans.push(if index == zen.index {
+            Span::styled(
+                glyph,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(glyph, Style::default().fg(Color::DarkGray))
+        });
+    }
+    Line::from(spans)
 }
 
 /// Rows worth excerpting for a stop: diff lines whose line number falls in
@@ -2127,7 +2358,7 @@ fn draw_zen_glance(
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
-                format!("{} spotlight stop(s) toured. ", zen.len()),
+                format!("{} spotlight stop(s) toured. ", zen.chunk_stop_count()),
                 Style::default().fg(Color::Gray),
             ),
             Span::styled(
@@ -3434,12 +3665,42 @@ diff --git a/tests/app.rs b/tests/app.rs
                     }],
                 },
             ],
+            briefs: vec![crate::agent::ChangeBrief {
+                change_id: "zzzzyyyy".to_owned(),
+                summary: "Swaps the legacy old() startup call for new() and batches extra() \
+                          alongside it, so both effects fire together."
+                    .to_owned(),
+            }],
             ..Default::default()
         });
-        let zen = ZenState::new(&session).unwrap();
+        // A single-change stack: the opening chapter card carries the
+        // change's description and the agent's brief.
+        let stack = vec![crate::jj::JjChangeSummary {
+            change_id: "zzzzyyyy".to_owned(),
+            bookmarks: "startup-fix".to_owned(),
+            description: "feat: swap old() for new()".to_owned(),
+        }];
+        let mut zen = ZenState::new(&session, &stack).unwrap();
         session.file_pane_visible = false;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+        // Land on the first spotlight stop (stops[0] is the chapter card).
+        zen.index = 1;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
         (session, zen)
+    }
+
+    #[test]
+    fn tui_snapshot_zen_chapter_card() {
+        let (mut session, mut zen) = zen_snapshot_session();
+        zen.index = 0;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            100,
+            24
+        ));
     }
 
     #[test]

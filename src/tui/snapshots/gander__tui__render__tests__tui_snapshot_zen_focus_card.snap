@@ -3,7 +3,7 @@ source: src/tui/render.rs
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 ┌ zen · stop 1/1 · then 1 at a glance ─────────────────────────────────────────────────────────────┐
-│●                                                                                                 │
+│▎●                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │

@@ -105,6 +105,23 @@ pub struct SetChunksParams {
     pub chunks: Vec<ChunkParams>,
 }
 
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ChangeBriefParams {
+    /// The jj change this brief describes (a change_id from `stack_changes`).
+    pub change_id: String,
+    /// 2-4 sentences of prose that teach the change at a high level: what it
+    /// accomplishes, why it exists, and how it builds on the changes before
+    /// it. Shown on the chapter intro card before that change's walkthrough
+    /// stops.
+    pub summary: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetChangeBriefsParams {
+    /// One brief per change in the reviewed range; replaces the previous set.
+    pub briefs: Vec<ChangeBriefParams>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DraftCommentParams {
     pub path: String,
@@ -246,6 +263,18 @@ impl GanderMcp {
     }
 
     #[tool(
+        description = "Brief the human on each jj change in the reviewed range: a short high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). The zen walkthrough shows each brief as a chapter intro card before that change's stops"
+    )]
+    fn set_change_briefs(
+        &self,
+        Parameters(params): Parameters<SetChangeBriefsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let briefs = serde_json::to_value(&params.briefs)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        self.call("review/set_change_briefs", json!({ "briefs": briefs }))
+    }
+
+    #[tool(
         description = "Draft a review comment for the human to accept, edit, or discard in the TUI"
     )]
     fn draft_comment(
@@ -364,7 +393,10 @@ impl ServerHandler for GanderMcp {
                  changes like stacked PRs, and change_diff reads one change \
                  against its parent. See what the human is looking at with \
                  current_focus; then help organize the review with set_ordering, \
-                 flag_section, set_chunks (3-7 importance=spotlight chunks with a \
+                 flag_section, set_change_briefs (one short high-level brief \
+                 per change in the stack — shown as a chapter intro before that \
+                 change's walkthrough stops), set_chunks (3-7 \
+                 importance=spotlight chunks with a \
                  teaching `explanation` each; importance=glance for the routine \
                  rest — the human tours spotlights full-screen and skims glance \
                  items in bulk; on a stack, give each chunk the change_id it \
@@ -513,6 +545,15 @@ mod tests {
             }))
             .unwrap();
 
+        server
+            .set_change_briefs(Parameters(SetChangeBriefsParams {
+                briefs: vec![ChangeBriefParams {
+                    change_id: "abc".to_owned(),
+                    summary: "Reworks the core loop before the follow-ups build on it.".to_owned(),
+                }],
+            }))
+            .unwrap();
+
         let overlay =
             crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
         assert_eq!(overlay.drafts.len(), 1);
@@ -522,6 +563,8 @@ mod tests {
             overlay.chunks[0].explanation.as_deref(),
             Some("Explains the core change.")
         );
+        assert_eq!(overlay.briefs.len(), 1);
+        assert_eq!(overlay.briefs[0].change_id, "abc");
     }
 
     #[test]

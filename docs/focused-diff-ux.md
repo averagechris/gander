@@ -295,6 +295,20 @@ then everything mechanical acknowledged in bulk. Design decisions:
   (`change-..change`) for the stop — the tour flows through the stack
   like stacked PRs, and ending zen returns to the home target. Zen-driven
   retargets update the staleness key, so they never end the walkthrough.
+- **Chapters** (2026-07 follow-up). A bare retarget taught nothing: the
+  human landed on a change id they knew nothing about. The stop list is
+  now organized into chapters — every run of stops anchored to the same
+  change opens with a full-screen *chapter card* carrying that change's
+  jj metadata (description, bookmarks, live diff stats) plus the agent's
+  high-level *change brief* (`review/set_change_briefs`: one `{change_id,
+  summary}` per change — what it accomplishes, why it exists, how it
+  builds on the previous changes). Every walkthrough gets an opening
+  chapter for its home target (single-change targets resolve their
+  description; multi-change ranges stay generic rather than showing the
+  tip's description), so even the chunkless fallback starts with the big
+  picture. Chapter cards mark nothing viewed; the progress strip renders
+  chapters as `▎` bars grouping the stop dots; human-facing stop numbers
+  count spotlight stops only.
 - **Safety.** *User* retargeting (t/p/b/R, stack step, operation picker)
   invalidates the stops; the walkthrough ends with a notice rather than
   touring a stale map. A live refresh of the same target (new changes

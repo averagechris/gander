@@ -27,7 +27,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentDraft, AgentFlag, AgentOverlay, ChunkPart, DraftState, ReviewChunk},
+    agent::{AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, DraftState, ReviewChunk},
     anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
@@ -99,6 +99,8 @@ pub struct ReviewSession {
     pub agent_flags: Vec<AgentFlag>,
     /// Agent-defined reviewable units that can span or subdivide files.
     pub review_chunks: Vec<ReviewChunk>,
+    /// Agent-written per-change briefings for stacked walkthroughs.
+    pub change_briefs: Vec<ChangeBrief>,
     /// Agent-drafted comments with their dispositions.
     pub agent_drafts: Vec<AgentDraft>,
     selected_comment_id: Option<String>,
@@ -301,6 +303,7 @@ impl ReviewSession {
             use_agent_order: true,
             agent_flags: Vec::new(),
             review_chunks: Vec::new(),
+            change_briefs: Vec::new(),
             agent_drafts: Vec::new(),
             selected_comment_id: None,
             context_expansion: BTreeMap::new(),
@@ -659,6 +662,7 @@ impl ReviewSession {
         self.agent_ordering = overlay.ordering.clone();
         self.agent_flags = overlay.flags.clone();
         self.review_chunks = overlay.chunks.clone();
+        self.change_briefs = overlay.briefs.clone();
         self.agent_drafts = overlay.drafts.clone();
     }
 

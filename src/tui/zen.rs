@@ -3,7 +3,10 @@
 //!
 //! - **Focus card** (default): a full-screen stop per spotlight chunk that
 //!   shows only the critical lines plus the agent's explanation — pop in,
-//!   understand, move on.
+//!   understand, move on. The walkthrough is organized into *chapters*:
+//!   each jj change opens with a chapter card (description, bookmarks,
+//!   diff stats, and the agent's high-level brief) before its stops, so a
+//!   stacked review reads like a guided tour rather than a bare change id.
 //! - **Reading view** (`tab`): the normal review UI with out-of-range rows
 //!   dimmed, for surrounding context and precise commenting. The full
 //!   normal-mode vocabulary works here.
@@ -18,13 +21,13 @@
 
 use crate::agent::{ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
-use crate::jj::ReviewTarget;
+use crate::jj::{JjChangeSummary, ReviewTarget};
 
 use super::chunks::{ChunkRow, chunk_rows};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ZenState {
-    pub(super) stops: Vec<ChunkRow>,
+    pub(super) stops: Vec<ZenStop>,
     /// Rows intentionally left out of the stop-by-stop tour: glance chunks
     /// plus files no chunk covers. Skimmed in bulk on the glance board.
     pub(super) glance_rows: Vec<ChunkRow>,
@@ -46,6 +49,34 @@ pub(super) struct ZenState {
     pub(super) source: ZenSource,
 }
 
+/// One station of the walkthrough: a chapter intro card for a jj change,
+/// or a spotlight stop inside the current chapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ZenStop {
+    Chapter(ChapterCard),
+    Chunk(ChunkRow),
+}
+
+/// The intro card that opens a chapter: what the human should know about a
+/// jj change *before* touring its stops. jj metadata comes from the stack
+/// (description, bookmarks); the narrative comes from the agent's change
+/// brief; diff stats render live from the (retargeted) session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ChapterCard {
+    /// The jj change this chapter introduces. `None` means the walkthrough's
+    /// home target as a whole (unanchored stops, or the chunkless fallback).
+    pub(super) change_id: Option<String>,
+    /// 1-indexed `(chapter, total chapters)`.
+    pub(super) position: (usize, usize),
+    /// Spotlight stops that follow this card.
+    pub(super) stop_count: usize,
+    /// jj description (first line); empty when unknown.
+    pub(super) description: String,
+    pub(super) bookmarks: String,
+    /// The agent's high-level narrative for this change, when briefed.
+    pub(super) summary: Option<String>,
+}
+
 /// The zen surfaces. Focus is the default landing surface for each stop;
 /// Reading drops into the (dimmed) normal UI; Glance is the bulk-skim board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,10 +95,12 @@ pub(super) enum ZenSource {
 impl ZenState {
     /// Build a walkthrough: spotlight chunks become full-screen stops and
     /// everything else (glance chunks + uncovered files) lands on the
-    /// glance board. Without chunks, every file becomes a stop.
-    /// `None` when there is nothing at all to walk through.
-    pub(super) fn new(session: &ReviewSession) -> Option<Self> {
-        let (stops, glance_rows, source) = if session.review_chunks.is_empty() {
+    /// glance board; a chapter card introduces each jj change the stops
+    /// flow through (metadata from `stack`, narrative from the agent's
+    /// change briefs). Without chunks, every file becomes a stop under a
+    /// single opening chapter. `None` when there is nothing to walk through.
+    pub(super) fn new(session: &ReviewSession, stack: &[JjChangeSummary]) -> Option<Self> {
+        let (chunk_stops, glance_rows, source) = if session.review_chunks.is_empty() {
             (file_stops(session), Vec::new(), ZenSource::Files)
         } else {
             let rows: Vec<ChunkRow> = session.review_chunks.iter().flat_map(chunk_rows).collect();
@@ -85,8 +118,8 @@ impl ZenState {
             glance_rows.extend(uncovered_file_rows(session));
             (stops, glance_rows, ZenSource::Chunks)
         };
-        (!stops.is_empty()).then_some(Self {
-            stops,
+        (!chunk_stops.is_empty()).then(|| Self {
+            stops: chaptered_stops(chunk_stops, session, stack),
             glance_rows,
             index: 0,
             phase: ZenPhase::Focus,
@@ -101,8 +134,8 @@ impl ZenState {
     /// Rebuild the stops and glance rows from the (freshly reloaded)
     /// session, keeping position, phase, and the home target. Returns
     /// `false` when nothing is left to walk through and zen should end.
-    pub(super) fn refresh(&mut self, session: &ReviewSession) -> bool {
-        let Some(rebuilt) = Self::new(session) else {
+    pub(super) fn refresh(&mut self, session: &ReviewSession, stack: &[JjChangeSummary]) -> bool {
+        let Some(rebuilt) = Self::new(session, stack) else {
             return false;
         };
         self.stops = rebuilt.stops;
@@ -116,7 +149,7 @@ impl ZenState {
         true
     }
 
-    pub(super) fn current(&self) -> Option<&ChunkRow> {
+    pub(super) fn current(&self) -> Option<&ZenStop> {
         self.stops.get(self.index)
     }
 
@@ -140,8 +173,35 @@ impl ZenState {
         }
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.stops.len()
+    /// Spotlight stops only, chapters excluded — what "N focus stops" means
+    /// to the human.
+    pub(super) fn chunk_stop_count(&self) -> usize {
+        self.stops
+            .iter()
+            .filter(|stop| matches!(stop, ZenStop::Chunk(_)))
+            .count()
+    }
+
+    pub(super) fn chapter_count(&self) -> usize {
+        self.stops
+            .iter()
+            .filter(|stop| matches!(stop, ZenStop::Chapter(_)))
+            .count()
+    }
+
+    /// 1-indexed `(current, total)` counting spotlight stops only, so the
+    /// human-facing numbering ignores chapter cards. On a chapter card the
+    /// current count is the number of stops already toured.
+    pub(super) fn chunk_position(&self) -> (usize, usize) {
+        if self.stops.is_empty() {
+            return (0, 0);
+        }
+        let upto = self.index.min(self.stops.len() - 1);
+        let current = self.stops[..=upto]
+            .iter()
+            .filter(|stop| matches!(stop, ZenStop::Chunk(_)))
+            .count();
+        (current, self.chunk_stop_count())
     }
 
     pub(super) fn has_glance(&self) -> bool {
@@ -166,6 +226,99 @@ impl ZenState {
     pub(super) fn is_stale(&self, session: &ReviewSession) -> bool {
         self.target_key != session.target.to_string()
     }
+}
+
+/// Weave chapter cards into the stop list: every run of stops anchored to
+/// the same jj change opens with a card introducing that change. Unanchored
+/// runs (and the chunkless fallback) open with a card for the home target,
+/// so every walkthrough starts with the big picture.
+fn chaptered_stops(
+    chunk_stops: Vec<ChunkRow>,
+    session: &ReviewSession,
+    stack: &[JjChangeSummary],
+) -> Vec<ZenStop> {
+    let mut groups: Vec<(Option<String>, Vec<ChunkRow>)> = Vec::new();
+    for row in chunk_stops {
+        match groups.last_mut() {
+            Some((anchor, rows)) if *anchor == row.change_id => rows.push(row),
+            _ => groups.push((row.change_id.clone(), vec![row])),
+        }
+    }
+    let total = groups.len();
+    let mut stops = Vec::new();
+    for (index, (anchor, rows)) in groups.into_iter().enumerate() {
+        stops.push(ZenStop::Chapter(chapter_card(
+            anchor,
+            (index + 1, total),
+            rows.len(),
+            session,
+            stack,
+        )));
+        stops.extend(rows.into_iter().map(ZenStop::Chunk));
+    }
+    stops
+}
+
+/// Resolve one chapter's metadata: the jj summary for its change (or for
+/// the home target when it cleanly names a single change) plus the agent's
+/// brief for that change id.
+fn chapter_card(
+    anchor: Option<String>,
+    position: (usize, usize),
+    stop_count: usize,
+    session: &ReviewSession,
+    stack: &[JjChangeSummary],
+) -> ChapterCard {
+    let summary = match &anchor {
+        Some(change_id) => stack
+            .iter()
+            .find(|change| change_ids_match(&change.change_id, change_id)),
+        None => home_change(session, stack),
+    };
+    let brief = anchor
+        .clone()
+        .or_else(|| summary.map(|change| change.change_id.clone()))
+        .and_then(|change_id| {
+            session
+                .change_briefs
+                .iter()
+                .find(|brief| change_ids_match(&brief.change_id, &change_id))
+                .map(|brief| brief.summary.clone())
+        });
+    ChapterCard {
+        change_id: anchor,
+        position,
+        stop_count,
+        description: summary
+            .map(|change| change.description.clone())
+            .unwrap_or_default(),
+        bookmarks: summary
+            .map(|change| change.bookmarks.clone())
+            .unwrap_or_default(),
+        summary: brief,
+    }
+}
+
+/// Agents copy change ids from `review/stack_changes`, but tolerate one
+/// side being a longer prefix of the other (jj ids abbreviate freely).
+fn change_ids_match(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+}
+
+/// The stack change the home target reviews, when it names exactly one:
+/// either the target rev resolves to a stack entry reviewed against its own
+/// parent, or the whole stack is a single change. `None` for multi-change
+/// ranges — describing those with the tip's description would mislead.
+fn home_change<'a>(
+    session: &ReviewSession,
+    stack: &'a [JjChangeSummary],
+) -> Option<&'a JjChangeSummary> {
+    let change = stack
+        .iter()
+        .find(|change| change.matches_rev(&session.target.rev))
+        .or_else(|| (session.target.rev == "@").then(|| stack.last()).flatten())?;
+    let single_change = stack.len() == 1 || session.target.base == format!("{}-", change.change_id);
+    single_change.then_some(change)
 }
 
 /// Chunkless fallback: one stop per visible file, in the same order the
@@ -220,10 +373,42 @@ pub(super) fn row_target(row: &ChunkRow, home: &ReviewTarget) -> ReviewTarget {
     }
 }
 
+/// The review target a stop wants loaded; chapter cards load their change's
+/// own diff so stats and the reading view describe that change.
+pub(super) fn stop_target(stop: &ZenStop, home: &ReviewTarget) -> ReviewTarget {
+    match stop {
+        ZenStop::Chapter(chapter) => match &chapter.change_id {
+            Some(change_id) => ReviewTarget::new(format!("{change_id}-"), change_id.clone()),
+            None => home.clone(),
+        },
+        ZenStop::Chunk(row) => row_target(row, home),
+    }
+}
+
 /// Jump the session to a stop's location and frame it: the diff pane takes
 /// focus and `zen_focus` records the file/range so out-of-range rows dim.
-pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ChunkRow) {
-    let Some(part) = &stop.part else {
+/// Chapter cards frame nothing — they park at the top of the change with
+/// the whole diff undimmed for the reading view.
+pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ZenStop) {
+    let part = match stop {
+        ZenStop::Chapter(_) => {
+            session.zen_focus = None;
+            // Park at the top of the change (first file, no line frame) so
+            // the reading view starts at the beginning of the chapter.
+            if let Some(path) = session.ordered_visible_file_paths().into_iter().next() {
+                session.jump_to_chunk_part(&ChunkPart {
+                    path,
+                    start_line: None,
+                    end_line: None,
+                });
+            }
+            session.focus = Focus::Diff;
+            session.diff_scroll = 0;
+            return;
+        }
+        ZenStop::Chunk(row) => &row.part,
+    };
+    let Some(part) = part else {
         session.zen_focus = None;
         return;
     };
@@ -243,8 +428,11 @@ pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ChunkRow) {
 }
 
 /// Mark the file a stop belongs to as viewed (used when advancing past it).
-pub(super) fn mark_stop_viewed(session: &mut ReviewSession, stop: &ChunkRow) {
-    if let Some(part) = &stop.part {
+/// Chapter cards mark nothing — reading an intro is not reading the code.
+pub(super) fn mark_stop_viewed(session: &mut ReviewSession, stop: &ZenStop) {
+    if let ZenStop::Chunk(row) = stop
+        && let Some(part) = &row.part
+    {
         let path = part.path.clone();
         session.mark_files_viewed_where(|file| file.path == path);
     }
@@ -281,7 +469,7 @@ pub(super) fn end(session: &mut ReviewSession, zen: &ZenState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentOverlay, ChunkPart, ReviewChunk};
+    use crate::agent::{AgentOverlay, ChangeBrief, ChunkPart, ReviewChunk};
     use crate::tui::test_support::snapshot_session;
 
     fn two_file_diff() -> &'static str {
@@ -328,34 +516,167 @@ diff --git a/b.rs b/b.rs
         session
     }
 
-    #[test]
-    fn zen_requires_something_to_review() {
-        let session = snapshot_session("");
-        assert!(ZenState::new(&session).is_none());
+    fn spotlight(id: &str, title: &str, change_id: Option<&str>, path: &str) -> ReviewChunk {
+        ReviewChunk {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            importance: ChunkImportance::Spotlight,
+            change_id: change_id.map(str::to_owned),
+            rationale: None,
+            explanation: None,
+            parts: vec![ChunkPart {
+                path: path.to_owned(),
+                start_line: Some(1),
+                end_line: Some(1),
+            }],
+        }
+    }
+
+    fn stack() -> Vec<JjChangeSummary> {
+        vec![
+            JjChangeSummary {
+                change_id: "aaabbbcc".to_owned(),
+                bookmarks: "feature".to_owned(),
+                description: "feat: first".to_owned(),
+            },
+            JjChangeSummary {
+                change_id: "dddeeeff".to_owned(),
+                bookmarks: String::new(),
+                description: "feat: second".to_owned(),
+            },
+        ]
+    }
+
+    fn chunk_stop(zen: &ZenState, index: usize) -> &ChunkRow {
+        match &zen.stops[index] {
+            ZenStop::Chunk(row) => row,
+            ZenStop::Chapter(chapter) => panic!("stop {index} is a chapter: {chapter:?}"),
+        }
+    }
+
+    fn chapter(zen: &ZenState, index: usize) -> &ChapterCard {
+        match &zen.stops[index] {
+            ZenStop::Chapter(chapter) => chapter,
+            ZenStop::Chunk(row) => panic!("stop {index} is a chunk: {row:?}"),
+        }
     }
 
     #[test]
-    fn zen_without_chunks_falls_back_to_file_stops() {
+    fn zen_requires_something_to_review() {
+        let session = snapshot_session("");
+        assert!(ZenState::new(&session, &[]).is_none());
+    }
+
+    #[test]
+    fn zen_without_chunks_falls_back_to_file_stops_under_one_chapter() {
         let session = snapshot_session(two_file_diff());
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
         assert_eq!(zen.source, ZenSource::Files);
         assert_eq!(zen.phase, ZenPhase::Focus);
-        assert_eq!(zen.len(), 2);
-        assert_eq!(zen.stops[0].title, "a.rs");
-        assert_eq!(zen.stops[0].part.as_ref().unwrap().start_line, None);
-        assert_eq!(zen.stops[1].title, "b.rs");
+        // An opening chapter for the home target, then one stop per file.
+        assert_eq!(zen.stops.len(), 3);
+        assert_eq!(zen.chunk_stop_count(), 2);
+        assert_eq!(zen.chapter_count(), 1);
+        assert_eq!(chapter(&zen, 0).position, (1, 1));
+        assert_eq!(chapter(&zen, 0).stop_count, 2);
+        assert_eq!(chunk_stop(&zen, 1).title, "a.rs");
+        assert_eq!(chunk_stop(&zen, 1).part.as_ref().unwrap().start_line, None);
+        assert_eq!(chunk_stop(&zen, 2).title, "b.rs");
         assert!(!zen.has_glance());
     }
 
     #[test]
     fn zen_prefers_agent_chunks_when_present() {
         let session = session_with_chunks();
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
         assert_eq!(zen.source, ZenSource::Chunks);
-        assert_eq!(zen.len(), 2);
-        assert_eq!(zen.current().unwrap().part.as_ref().unwrap().path, "a.rs");
+        assert_eq!(zen.stops.len(), 3);
+        assert_eq!(zen.chunk_stop_count(), 2);
+        assert!(matches!(zen.current(), Some(ZenStop::Chapter(_))));
+        assert_eq!(chunk_stop(&zen, 1).part.as_ref().unwrap().path, "a.rs");
+    }
+
+    #[test]
+    fn stacked_stops_get_one_chapter_per_change_in_stop_order() {
+        let mut session = snapshot_session(two_file_diff());
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![
+                spotlight("s1", "first stop", Some("aaabbbcc"), "a.rs"),
+                spotlight("s2", "second stop", Some("aaabbbcc"), "a.rs"),
+                spotlight("s3", "third stop", Some("dddeeeff"), "b.rs"),
+            ],
+            briefs: vec![ChangeBrief {
+                // A shorter prefix of the stack id still matches.
+                change_id: "dddee".to_owned(),
+                summary: "Builds the follow-up on the first change.".to_owned(),
+            }],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        assert_eq!(zen.stops.len(), 5);
+        assert_eq!(zen.chapter_count(), 2);
+        assert_eq!(zen.chunk_stop_count(), 3);
+
+        let first = chapter(&zen, 0);
+        assert_eq!(first.change_id.as_deref(), Some("aaabbbcc"));
+        assert_eq!(first.position, (1, 2));
+        assert_eq!(first.stop_count, 2);
+        assert_eq!(first.description, "feat: first");
+        assert_eq!(first.bookmarks, "feature");
+        assert_eq!(first.summary, None);
+
+        assert_eq!(chunk_stop(&zen, 1).title, "first stop");
+        assert_eq!(chunk_stop(&zen, 2).title, "second stop");
+
+        let second = chapter(&zen, 3);
+        assert_eq!(second.change_id.as_deref(), Some("dddeeeff"));
+        assert_eq!(second.position, (2, 2));
+        assert_eq!(second.stop_count, 1);
+        assert_eq!(second.description, "feat: second");
+        assert_eq!(
+            second.summary.as_deref(),
+            Some("Builds the follow-up on the first change.")
+        );
+        assert_eq!(chunk_stop(&zen, 4).title, "third stop");
+    }
+
+    #[test]
+    fn home_chapter_describes_a_single_change_target() {
+        // Reviewing one change against its parent: the opening chapter
+        // carries that change's description and brief.
+        let mut session = snapshot_session(two_file_diff());
+        session.target = ReviewTarget::new("dddeeeff-", "dddeeeff");
+        session.apply_agent_overlay(&AgentOverlay {
+            briefs: vec![ChangeBrief {
+                change_id: "dddeeeff".to_owned(),
+                summary: "Reworks the retry loop.".to_owned(),
+            }],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        let opener = chapter(&zen, 0);
+        assert_eq!(opener.change_id, None);
+        assert_eq!(opener.description, "feat: second");
+        assert_eq!(opener.summary.as_deref(), Some("Reworks the retry loop."));
+    }
+
+    #[test]
+    fn home_chapter_stays_generic_for_multi_change_ranges() {
+        // trunk()..@ over a two-change stack: the tip's description would
+        // mislead, so the opener carries no single change's metadata.
+        let session = snapshot_session(two_file_diff());
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        let opener = chapter(&zen, 0);
+        assert_eq!(opener.change_id, None);
+        assert_eq!(opener.description, "");
+        assert_eq!(opener.summary, None);
     }
 
     #[test]
@@ -393,10 +714,10 @@ diff --git a/b.rs b/b.rs
             ..Default::default()
         });
 
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
-        assert_eq!(zen.len(), 1);
-        assert_eq!(zen.current().unwrap().title, "risky behavior");
+        assert_eq!(zen.chunk_stop_count(), 1);
+        assert_eq!(chunk_stop(&zen, 1).title, "risky behavior");
         assert_eq!(zen.glance_rows.len(), 1);
         assert_eq!(zen.glance_rows[0].title, "mechanical follow-up");
     }
@@ -405,27 +726,15 @@ diff --git a/b.rs b/b.rs
     fn files_uncovered_by_chunks_join_the_glance_board() {
         let mut session = snapshot_session(two_file_diff());
         session.apply_agent_overlay(&AgentOverlay {
-            chunks: vec![ReviewChunk {
-                id: "spotlight".to_owned(),
-                title: "the important bit".to_owned(),
-                importance: ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: None,
-                parts: vec![ChunkPart {
-                    path: "a.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
+            chunks: vec![spotlight("spotlight", "the important bit", None, "a.rs")],
             ..Default::default()
         });
 
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
         // b.rs is untouched by any chunk: it must still be reachable via
         // the glance board so the briefing covers the whole change.
-        assert_eq!(zen.len(), 1);
+        assert_eq!(zen.chunk_stop_count(), 1);
         assert_eq!(zen.glance_rows.len(), 1);
         assert_eq!(zen.glance_rows[0].title, "b.rs");
         assert_eq!(zen.glance_rows[0].part.as_ref().unwrap().path, "b.rs");
@@ -435,22 +744,10 @@ diff --git a/b.rs b/b.rs
     fn glance_board_selection_moves_and_bulk_marks_viewed() {
         let mut session = snapshot_session(two_file_diff());
         session.apply_agent_overlay(&AgentOverlay {
-            chunks: vec![ReviewChunk {
-                id: "spotlight".to_owned(),
-                title: "the important bit".to_owned(),
-                importance: ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: None,
-                parts: vec![ChunkPart {
-                    path: "a.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
+            chunks: vec![spotlight("spotlight", "the important bit", None, "a.rs")],
             ..Default::default()
         });
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         zen.move_glance_selection(5);
         assert_eq!(zen.glance_selected, 0); // clamped: one row
@@ -472,22 +769,29 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn zen_steps_through_stops_and_stops_at_ends() {
         let session = session_with_chunks();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         assert!(!zen.back());
         assert!(zen.advance());
-        assert_eq!(zen.current().unwrap().part.as_ref().unwrap().path, "b.rs");
+        assert!(zen.advance());
+        match zen.current().unwrap() {
+            ZenStop::Chunk(row) => assert_eq!(row.part.as_ref().unwrap().path, "b.rs"),
+            other => panic!("expected a chunk stop, got {other:?}"),
+        }
         assert!(!zen.advance());
         assert!(zen.back());
-        assert_eq!(zen.index, 0);
+        assert_eq!(zen.index, 1);
     }
 
     #[test]
-    fn advancing_marks_the_stop_file_viewed() {
+    fn advancing_marks_the_stop_file_viewed_but_chapters_mark_nothing() {
         let mut session = session_with_chunks();
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
-        mark_stop_viewed(&mut session, &zen.stops[0]);
+        mark_stop_viewed(&mut session, &zen.stops[0]); // the chapter card
+        assert!(session.files.iter().all(|file| !file.viewed));
+
+        mark_stop_viewed(&mut session, &zen.stops[1]);
 
         assert!(
             session
@@ -510,9 +814,9 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn jump_to_stop_selects_the_file_and_sets_the_focus_frame() {
         let mut session = session_with_chunks();
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
-        jump_to_stop(&mut session, &zen.stops[1]);
+        jump_to_stop(&mut session, &zen.stops[2]);
 
         assert_eq!(session.selected_file().unwrap().path, "b.rs");
         assert_eq!(session.focus, Focus::Diff);
@@ -522,11 +826,25 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn file_fallback_stops_frame_the_whole_file() {
-        let mut session = snapshot_session(two_file_diff());
-        let zen = ZenState::new(&session).unwrap();
+    fn jump_to_a_chapter_parks_at_the_top_with_nothing_framed() {
+        let mut session = session_with_chunks();
+        let zen = ZenState::new(&session, &[]).unwrap();
+        jump_to_stop(&mut session, &zen.stops[2]); // frame something first
 
         jump_to_stop(&mut session, &zen.stops[0]);
+
+        assert!(session.zen_focus.is_none());
+        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(session.diff_scroll, 0);
+        assert_eq!(session.selected_file().unwrap().path, "a.rs");
+    }
+
+    #[test]
+    fn file_fallback_stops_frame_the_whole_file() {
+        let mut session = snapshot_session(two_file_diff());
+        let zen = ZenState::new(&session, &[]).unwrap();
+
+        jump_to_stop(&mut session, &zen.stops[1]);
 
         assert_eq!(session.focus, Focus::Diff);
         let focus = session.zen_focus.as_ref().unwrap();
@@ -537,9 +855,9 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn ending_zen_restores_the_file_pane_and_clears_the_frame() {
         let mut session = session_with_chunks();
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
         session.file_pane_visible = false;
-        jump_to_stop(&mut session, &zen.stops[0]);
+        jump_to_stop(&mut session, &zen.stops[1]);
 
         end(&mut session, &zen);
 
@@ -550,7 +868,7 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn zen_goes_stale_when_the_target_changes() {
         let session = session_with_chunks();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
         assert!(!zen.is_stale(&session));
 
         zen.target_key = "elsewhere".to_owned();
@@ -560,21 +878,32 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn zen_remembers_its_home_target() {
         let session = session_with_chunks();
-        let zen = ZenState::new(&session).unwrap();
+        let zen = ZenState::new(&session, &[]).unwrap();
 
         assert_eq!(zen.home_target, session.target);
         assert_eq!(zen.target_key, session.target.to_string());
     }
 
     #[test]
-    fn row_target_prefers_the_change_anchor() {
+    fn stop_targets_prefer_the_change_anchor() {
         let home = crate::jj::ReviewTarget::trunk_to_current();
         let mut row = whole_file_row("a.rs".to_owned());
         assert_eq!(row_target(&row, &home), home);
+        assert_eq!(stop_target(&ZenStop::Chunk(row.clone()), &home), home);
 
         row.change_id = Some("xyz".to_owned());
+        let anchored = crate::jj::ReviewTarget::new("xyz-", "xyz");
+        assert_eq!(row_target(&row, &home), anchored);
+        assert_eq!(stop_target(&ZenStop::Chunk(row), &home), anchored);
+
+        let session = session_with_chunks();
+        let mut zen = ZenState::new(&session, &stack()).unwrap();
+        assert_eq!(stop_target(&zen.stops[0], &home), home);
+        if let ZenStop::Chapter(chapter) = &mut zen.stops[0] {
+            chapter.change_id = Some("xyz".to_owned());
+        }
         assert_eq!(
-            row_target(&row, &home),
+            stop_target(&zen.stops[0], &home),
             crate::jj::ReviewTarget::new("xyz-", "xyz")
         );
     }
@@ -582,34 +911,22 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn refresh_rebuilds_stops_and_clamps_the_index() {
         let mut session = session_with_chunks();
-        let mut zen = ZenState::new(&session).unwrap();
-        zen.index = 1;
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.index = 2;
         zen.phase = ZenPhase::Reading;
 
         // The agent trimmed its chunks down to a single one-part spotlight:
         // the stop list shrinks and the index snaps back into range.
         session.apply_agent_overlay(&AgentOverlay {
-            chunks: vec![ReviewChunk {
-                id: "c2".to_owned(),
-                title: "tightened".to_owned(),
-                importance: ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: None,
-                parts: vec![ChunkPart {
-                    path: "a.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
+            chunks: vec![spotlight("c2", "tightened", None, "a.rs")],
             ..Default::default()
         });
 
-        assert!(zen.refresh(&session));
-        assert_eq!(zen.len(), 1);
-        assert_eq!(zen.index, 0);
+        assert!(zen.refresh(&session, &[]));
+        assert_eq!(zen.stops.len(), 2);
+        assert_eq!(zen.index, 1);
         assert_eq!(zen.phase, ZenPhase::Reading);
-        assert_eq!(zen.stops[0].title, "tightened");
+        assert_eq!(chunk_stop(&zen, 1).title, "tightened");
         // b.rs is no longer covered: it joins the glance board.
         assert!(
             zen.glance_rows
@@ -621,9 +938,9 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn refresh_reports_when_nothing_is_left_to_review() {
         let session = session_with_chunks();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         let empty = snapshot_session("");
-        assert!(!zen.refresh(&empty));
+        assert!(!zen.refresh(&empty, &[]));
     }
 }

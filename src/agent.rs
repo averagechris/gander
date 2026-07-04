@@ -25,8 +25,24 @@ pub struct AgentOverlay {
     pub flags: Vec<AgentFlag>,
     /// Reviewable units that can span or subdivide files.
     pub chunks: Vec<ReviewChunk>,
+    /// Per-change briefings for stacked reviews: the high-level narrative
+    /// of each jj change, shown as a chapter intro in the zen walkthrough.
+    pub briefs: Vec<ChangeBrief>,
     /// Agent-drafted comments awaiting human review.
     pub drafts: Vec<AgentDraft>,
+}
+
+/// The agent's high-level briefing for one jj change: what it accomplishes,
+/// why it exists, and how it builds on the changes before it. The zen
+/// walkthrough renders it on the chapter card that introduces that change's
+/// stops, alongside jj metadata (description, bookmarks, diff stats).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeBrief {
+    /// The jj change this brief describes (a change id from
+    /// `review/stack_changes`).
+    pub change_id: String,
+    /// A few sentences of narrative, prose not bullet points.
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,12 +275,20 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              change-by-change with review/change_diff \
              (params: {{\"change_id\": ...}}) instead of only reading the \
              squashed diff.\n\
-             3. Suggest a review order with review/set_ordering \
+             3. Brief the human on each change with review/set_change_briefs \
+             (params: {{\"briefs\": [{{\"change_id\", \"summary\"}}]}}): one \
+             brief per change in the reviewed range (change ids from \
+             review/stack_changes), 2-4 sentences of prose that teach the \
+             change at a high level — what it accomplishes, why it exists, \
+             and how it builds on the changes before it. The walkthrough \
+             shows each brief as a chapter intro card before that change's \
+             stops, so the human is never dropped into a bare change id.\n\
+             4. Suggest a review order with review/set_ordering \
              (params: {{\"paths\": [...]}}), riskiest or most central files first.\n\
-             4. Flag sections needing extra scrutiny with review/flag_section \
+             5. Flag sections needing extra scrutiny with review/flag_section \
              (params: {{\"path\", \"line\", \"reason\", \"priority\": \
              critical|high|medium|low}}).\n\
-             5. Curate a focused walkthrough with review/set_chunks. The human \
+             6. Curate a focused walkthrough with review/set_chunks. The human \
              sees spotlight chunks as full-screen stops (a code excerpt plus \
              your explanation) and skims everything else on a glance board, \
              so budget their attention: pick at most 3-7 chunks with \
@@ -283,7 +307,7 @@ pub fn review_prompt(template: Option<&str>, repo: &Path, base: &str, rev: &str)
              importance=glance chunks (mechanical renames, boilerplate, \
              config churn, test scaffolding) with a one-line rationale each; \
              the human acknowledges those in bulk without visiting them.\n\
-             6. For concrete issues, add review/draft_comment \
+             7. For concrete issues, add review/draft_comment \
              (params: {{\"path\", \"line\", \"body\"}}); the human accepts or \
              discards these in the TUI.\n\
              Your suggestions appear live in the reviewer's terminal. \
@@ -327,6 +351,10 @@ mod tests {
                     start_line: Some(10),
                     end_line: Some(60),
                 }],
+            }],
+            briefs: vec![ChangeBrief {
+                change_id: "xyzkwqrs".to_owned(),
+                summary: "Tightens the auth middleware so downstream handlers can assume an audience claim.".to_owned(),
             }],
             drafts: vec![AgentDraft {
                 id: "draft-1".to_owned(),
@@ -430,6 +458,8 @@ mod tests {
         assert!(prompt.contains("review/change_diff"));
         assert!(prompt.contains("change_id"));
         assert!(prompt.contains("stacked PRs"));
+        assert!(prompt.contains("review/set_change_briefs"));
+        assert!(prompt.contains("chapter intro"));
         assert!(prompt.contains("review/set_chunks"));
         assert!(prompt.contains("importance=spotlight"));
         assert!(prompt.contains("importance=glance"));

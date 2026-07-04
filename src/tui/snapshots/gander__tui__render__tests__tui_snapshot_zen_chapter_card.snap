@@ -1,0 +1,28 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
+---
+┌ zen · chapter 1/1 · then 1 at a glance ──────────────────────────────────────────────────────────┐
+│▎○                                                                                                │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│             ╭ chapter 1/1 · trunk()..@ · startup-fix ──────────────────────────────╮             │
+│             │ feat: swap old() for new()                                           │             │
+│             │                                                                      │             │
+│             │ 2 file(s) · +3 −2                                                    │             │
+│             │ n tours the 1 stop(s) in this chapter                                │             │
+│             │ what this change does ───────────────────────────────────────────────│             │
+│             │ Swaps the legacy old() startup call for new() and batches extra()    │             │
+│             │ alongside it, so both effects fire together.                         │             │
+│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
+zen chapter 1/1 · n tours its 1 stop(s) · p back · tab full diff · g glance · esc end

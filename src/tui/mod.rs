@@ -603,7 +603,11 @@ fn refresh_current_target(
     reapply_agent_overlay(session, tui_state);
     let mut message = format!("repository changed — refreshed {}", session.target);
     if let Some(mut zen) = tui_state.zen.take() {
-        if zen.refresh(session) {
+        let stack = review_loader
+            .jj
+            .stack_changes(&session.repo)
+            .unwrap_or_default();
+        if zen.refresh(session, &stack) {
             if zen.phase != zen::ZenPhase::Glance
                 && let Some(stop) = zen.current().cloned()
             {
@@ -894,40 +898,52 @@ fn handle_normal_action(
                 *mode = Mode::ChunkList(ChunkListState::new(session));
             }
         }
-        Action::Zen => match ZenState::new(session) {
-            Some(mut zen) => {
-                session.file_pane_visible = false;
-                let landed = match zen.current().cloned() {
-                    Some(stop) => zen_goto_row(review_loader, session, &mut zen, &stop, tui_state),
-                    None => true,
-                };
-                if landed {
+        Action::Zen => {
+            // Chapter cards want the stack's metadata (descriptions,
+            // bookmarks); zen still works with an empty stack when jj is
+            // unavailable, the cards just carry less context.
+            let stack = review_loader
+                .jj
+                .stack_changes(&session.repo)
+                .unwrap_or_default();
+            match ZenState::new(session, &stack) {
+                Some(mut zen) => {
+                    session.file_pane_visible = false;
+                    let landed = match zen.current().cloned() {
+                        Some(stop) => {
+                            zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+                        }
+                        None => true,
+                    };
+                    if landed {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: match zen.source {
+                                zen::ZenSource::Chunks => {
+                                    format!(
+                                        "zen: {} chapter(s), {} focus stop(s), {} at a glance",
+                                        zen.chapter_count(),
+                                        zen.chunk_stop_count(),
+                                        zen.glance_rows.len()
+                                    )
+                                }
+                                zen::ZenSource::Files => format!(
+                                    "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
+                                    zen.chunk_stop_count()
+                                ),
+                            },
+                        });
+                    }
+                    tui_state.zen = Some(zen);
+                }
+                None => {
                     tui_state.notice = Some(UiNotice {
                         level: UiNoticeLevel::Info,
-                        message: match zen.source {
-                            zen::ZenSource::Chunks => {
-                                format!(
-                                    "zen: {} focus stop(s), {} at a glance",
-                                    zen.len(),
-                                    zen.glance_rows.len()
-                                )
-                            }
-                            zen::ZenSource::Files => format!(
-                                "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
-                                zen.len()
-                            ),
-                        },
+                        message: "nothing to review — no changed files in this target".to_owned(),
                     });
                 }
-                tui_state.zen = Some(zen);
             }
-            None => {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "nothing to review — no changed files in this target".to_owned(),
-                });
-            }
-        },
+        }
         Action::DraftList => {
             let drafts = DraftListState::new(session);
             if drafts.drafts.is_empty() {
@@ -1592,18 +1608,18 @@ enum ZenKeyOutcome {
     Fallthrough,
 }
 
-/// Bring the session to a zen row, retargeting the review when the row is
+/// Bring the session to a zen stop, retargeting the review when the stop is
 /// anchored to a different jj change than the one loaded (the stacked-PR
 /// walkthrough). Returns `false` when the retarget failed: a notice
 /// explains, and the caller should stay on its current stop.
-fn zen_goto_row(
+fn zen_goto_stop(
     review_loader: &ReviewLoader<'_>,
     session: &mut ReviewSession,
     zen: &mut ZenState,
-    row: &chunks::ChunkRow,
+    stop: &zen::ZenStop,
     tui_state: &mut TuiState,
 ) -> bool {
-    let desired = zen::row_target(row, &zen.home_target);
+    let desired = zen::stop_target(stop, &zen.home_target);
     if session.target != desired {
         if let Err(error) = review_loader.load(session, desired.clone()) {
             tui_state.notice = Some(UiNotice {
@@ -1619,7 +1635,7 @@ fn zen_goto_row(
         session.file_pane_visible = false;
         reapply_agent_overlay(session, tui_state);
     }
-    zen::jump_to_stop(session, row);
+    zen::jump_to_stop(session, stop);
     true
 }
 
@@ -1667,7 +1683,7 @@ fn handle_zen_key(
             zen::mark_stop_viewed(session, &stop);
             if zen.advance() {
                 if let Some(next) = zen.current().cloned()
-                    && !zen_goto_row(review_loader, session, zen, &next, tui_state)
+                    && !zen_goto_stop(review_loader, session, zen, &next, tui_state)
                 {
                     // The next stop's change failed to load: stay put
                     // rather than showing a card over the wrong diff.
@@ -1695,7 +1711,7 @@ fn handle_zen_key(
         KeyCode::Char('p') | KeyCode::Left => {
             if zen.back()
                 && let Some(stop) = zen.current().cloned()
-                && !zen_goto_row(review_loader, session, zen, &stop, tui_state)
+                && !zen_goto_stop(review_loader, session, zen, &stop, tui_state)
             {
                 zen.advance();
             }
@@ -1712,7 +1728,7 @@ fn handle_zen_key(
             // Refocus: snap the cursor/scroll back to the current stop after
             // wandering off it with line navigation.
             if let Some(stop) = zen.current().cloned() {
-                zen_goto_row(review_loader, session, zen, &stop, tui_state);
+                zen_goto_stop(review_loader, session, zen, &stop, tui_state);
             }
             return ZenKeyOutcome::Consumed;
         }
@@ -1812,7 +1828,7 @@ fn handle_zen_glance_key(
         KeyCode::Char('p') | KeyCode::Left => {
             zen.phase = zen::ZenPhase::Focus;
             if let Some(stop) = zen.current().cloned() {
-                zen_goto_row(review_loader, session, zen, &stop, tui_state);
+                zen_goto_stop(review_loader, session, zen, &stop, tui_state);
             }
             ZenKeyOutcome::Consumed
         }
@@ -3199,7 +3215,23 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+
+        // Advancing past the opening chapter card marks nothing viewed and
+        // lands on the first stop.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert!(session.files.iter().all(|file| !file.viewed));
+        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
 
         // Advancing past the first stop marks a.rs viewed and moves on.
         assert!(matches!(
@@ -3246,7 +3278,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         assert!(matches!(
             handle_zen_key(
@@ -3268,8 +3300,9 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
-        zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.advance(); // past the chapter card onto the first stop
+        zen::jump_to_stop(&mut session, &zen.stops[1].clone());
         session.toggle_diff_range_selection();
         assert!(session.has_active_diff_range());
 
@@ -3294,7 +3327,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         // A comment key is not a zen navigation key: the caller routes it
         // to the normal-mode vocabulary.
@@ -3317,7 +3350,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
         assert!(matches!(
             handle_zen_key(
@@ -3362,9 +3395,23 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
-        assert_eq!(zen.len(), 1);
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        assert_eq!(zen.stops.len(), 2); // chapter card + one spotlight
         assert!(zen.has_glance());
+
+        // Step off the chapter card onto the only stop.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert_eq!(zen.phase, zen::ZenPhase::Focus);
 
         // Advancing past the only stop lands on the glance board instead of
         // ending, so the boilerplate is skimmed rather than skipped.
@@ -3403,8 +3450,9 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
-        zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.advance(); // past the chapter card onto the stop
+        zen::jump_to_stop(&mut session, &zen.stops[1].clone());
         let home = session.diff_cursor;
 
         // Wander off the stop with normal line navigation.
@@ -3432,7 +3480,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
         assert_eq!(zen.phase, zen::ZenPhase::Focus);
 
         for expected in [zen::ZenPhase::Reading, zen::ZenPhase::Focus] {
@@ -3457,7 +3505,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
         zen.phase = zen::ZenPhase::Glance;
 
         assert!(matches!(
@@ -3481,7 +3529,7 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
         zen.phase = zen::ZenPhase::Glance;
 
         // 'c' would open a comment editor in normal mode; the board is a
@@ -3549,22 +3597,27 @@ diff --git a/b.rs b/b.rs
 "#
         .to_owned()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
         session.file_pane_visible = false;
+        // [home chapter, home stop, bbb chapter, bbb stop]: the chapter
+        // card for bbb already retargets the review to that change.
+        assert_eq!(zen.stops.len(), 4);
 
         // Advancing to the bbb-anchored stop retargets the review to that
         // change's own diff (stacked-PR style) without ending zen.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                handle_zen_key(
+                    KeyEvent::from(KeyCode::Enter),
+                    &mut zen,
+                    &mut session,
+                    &keymap,
+                    &zen_loader(&zen_backend),
+                    &mut tui_state,
+                ),
+                ZenKeyOutcome::Consumed
+            ));
+        }
         assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
         assert!(!zen.is_stale(&session));
         assert!(!session.file_pane_visible);
@@ -3603,23 +3656,27 @@ diff --git a/b.rs b/b.rs
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Err("boom".to_owned()));
         let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session).unwrap();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
 
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
+        // Step off the home chapter onto the home stop, then try to enter
+        // the bbb chapter (which needs its change's diff).
+        for _ in 0..2 {
+            assert!(matches!(
+                handle_zen_key(
+                    KeyEvent::from(KeyCode::Enter),
+                    &mut zen,
+                    &mut session,
+                    &keymap,
+                    &zen_loader(&zen_backend),
+                    &mut tui_state,
+                ),
+                ZenKeyOutcome::Consumed
+            ));
+        }
 
-        // The load failed: still on the first stop, target unchanged, and
+        // The load failed: still on the home stop, target unchanged, and
         // the notice explains what happened.
-        assert_eq!(zen.index, 0);
+        assert_eq!(zen.index, 1);
         assert_eq!(session.target, ReviewTarget::trunk_to_current());
         let notice = tui_state.notice.unwrap();
         assert_eq!(notice.level, UiNoticeLevel::Error);
@@ -3749,8 +3806,9 @@ diff --git a/c.rs b/c.rs
             agent_overlay_path: Some(overlay_path),
             ..TuiState::default()
         };
-        let mut zen = ZenState::new(&session).unwrap();
-        zen.advance();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.advance(); // chapter card -> first stop
+        zen.advance(); // -> second stop (b.rs)
         tui_state.zen = Some(zen);
 
         maybe_refresh_review(&loader, &mut session, &mut tui_state);
@@ -3762,7 +3820,7 @@ diff --git a/c.rs b/c.rs
         // reapplied overlay chunks, position kept, staleness key updated.
         let zen = tui_state.zen.as_ref().unwrap();
         assert_eq!(zen.source, zen::ZenSource::Chunks);
-        assert_eq!(zen.index, 1);
+        assert_eq!(zen.index, 2);
         assert!(!zen.is_stale(&session));
         assert!(!session.review_chunks.is_empty());
         assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
@@ -3945,10 +4003,13 @@ diff --git a/c.rs b/c.rs
 
         assert!(matches!(mode, Mode::Normal));
         let zen = tui_state.zen.as_ref().unwrap();
-        assert_eq!(zen.len(), 2);
+        assert_eq!(zen.stops.len(), 3); // opening chapter + one stop per file
         assert!(zen.restore_file_pane);
         assert!(!session.file_pane_visible);
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
+        // Zen lands on the opening chapter card: nothing framed yet, parked
+        // at the top of the change.
+        assert!(session.zen_focus.is_none());
+        assert_eq!(session.selected_file().unwrap().path, "a.rs");
         assert!(
             tui_state
                 .notice

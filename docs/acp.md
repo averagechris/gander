@@ -85,7 +85,7 @@ prompt and run a subprocess works.
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
 | `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
 | `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what chunk parts anchored to this change must reference |
-| `review/overlay` | – | the full agent overlay (ordering, flags, chunks, drafts with dispositions) |
+| `review/overlay` | – | the full agent overlay (ordering, flags, chunks, change briefs, drafts with dispositions) |
 
 ## Write methods
 
@@ -97,6 +97,7 @@ within one poll tick.
 | `review/set_ordering` | `{paths: [string]}` | suggested review order, highest priority first; unknown paths are rejected |
 | `review/flag_section` | `{path, line?, reason, priority?}` | flag a critical section (`priority`: `critical`/`high`/`medium`/`low`, default `high`) |
 | `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change |
+| `review/set_change_briefs` | `{briefs: [{change_id, summary}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's stops |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; returns `{id}` |
 
 ## Two-way draft flow

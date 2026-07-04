@@ -31,6 +31,17 @@
   its parent) over both MCP and ACP (`review/stack_changes`,
   `review/change_diff`), and the summon prompt and MCP instructions
   teach the stacked-PR workflow.
+- Zen chapters: the walkthrough is organized change by change instead of
+  dropping the reviewer onto bare change ids. Every run of stops
+  anchored to the same jj change opens with a full-screen *chapter card*
+  showing the change's description, bookmarks, and live diff stats plus
+  the agent's high-level *change brief* — a few sentences on what the
+  change accomplishes, why it exists, and how it builds on the previous
+  changes (`review/set_change_briefs` over ACP, `set_change_briefs` over
+  MCP; briefs live in the shared overlay like every other suggestion).
+  Every walkthrough starts with an opening chapter for its target, the
+  progress strip groups stop dots by chapter (`▎` bars), and chapter
+  cards mark nothing viewed.
 - Live review refresh: the TUI polls jj on idle (throttled, ~2s) and,
   when the reviewed range changes — new changes landing, rewrites,
   working-copy edits — reloads the diff in place with a footer notice.

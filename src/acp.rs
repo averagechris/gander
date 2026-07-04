@@ -26,8 +26,8 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{
-        AgentDraft, AgentFlag, AgentOverlay, ChunkImportance, ChunkPart, DraftState, FlagPriority,
-        ReviewChunk,
+        AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkImportance, ChunkPart, DraftState,
+        FlagPriority, ReviewChunk,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -169,6 +169,7 @@ impl AcpHandler {
                     "review/set_ordering",
                     "review/flag_section",
                     "review/set_chunks",
+                    "review/set_change_briefs",
                     "review/draft_comment",
                 ],
             })),
@@ -378,6 +379,21 @@ impl AcpHandler {
                 self.save_overlay()?;
                 Ok(json!({ "chunks": self.overlay.chunks.len() }))
             }
+            // Per-change briefings, one per change in the stack. The zen
+            // walkthrough shows each as a chapter intro card before that
+            // change's stops. Replaces the previous set.
+            "review/set_change_briefs" => {
+                let briefs = params
+                    .get("briefs")
+                    .and_then(Value::as_array)
+                    .ok_or("missing array param: briefs")?
+                    .iter()
+                    .map(parse_change_brief)
+                    .collect::<Result<Vec<_>, String>>()?;
+                self.overlay.briefs = briefs;
+                self.save_overlay()?;
+                Ok(json!({ "briefs": self.overlay.briefs.len() }))
+            }
             "review/draft_comment" => {
                 let path = require_str(params, "path")?;
                 let body = require_str(params, "body")?;
@@ -474,6 +490,22 @@ fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         parts,
+    })
+}
+
+fn parse_change_brief(value: &Value) -> Result<ChangeBrief, String> {
+    let change_id = require_str(value, "change_id")?;
+    let change_id = change_id.trim();
+    if change_id.is_empty() {
+        return Err("change_id must not be empty".to_owned());
+    }
+    let summary = require_str(value, "summary")?;
+    if summary.trim().is_empty() {
+        return Err("summary must not be empty".to_owned());
+    }
+    Ok(ChangeBrief {
+        change_id: change_id.to_owned(),
+        summary,
     })
 }
 
@@ -995,6 +1027,50 @@ diff --git a/README.md b/README.md
         assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
         // Blank anchors normalize to None instead of a whitespace revset.
         assert_eq!(overlay.chunks[1].change_id, None);
+    }
+
+    #[test]
+    fn set_change_briefs_replaces_and_validates() {
+        let (mut server, dir) = server();
+
+        call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [
+                { "change_id": " abc ", "summary": "Lays the groundwork for the retry loop." },
+            ] }),
+        );
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.briefs.len(), 1);
+        // Whitespace around the change id normalizes away.
+        assert_eq!(overlay.briefs[0].change_id, "abc");
+
+        // A later call replaces the previous set wholesale.
+        call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [
+                { "change_id": "def", "summary": "Builds the retry loop on the groundwork." },
+            ] }),
+        );
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.briefs.len(), 1);
+        assert_eq!(overlay.briefs[0].change_id, "def");
+
+        for bad in [
+            json!({}),
+            json!({ "briefs": [{ "change_id": "  ", "summary": "x" }] }),
+            json!({ "briefs": [{ "change_id": "abc", "summary": "   " }] }),
+        ] {
+            let request = json!({
+                "jsonrpc": "2.0", "id": 9,
+                "method": "review/set_change_briefs",
+                "params": bad,
+            })
+            .to_string();
+            let response = server.handle_line(&request).unwrap();
+            assert!(response.get("error").is_some(), "expected error for {bad}");
+        }
     }
 
     #[test]
