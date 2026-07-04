@@ -1,0 +1,162 @@
+# Gander CLI reference
+
+Gander is CLI-first: every durable review operation writes only Gander review
+state (the `--state` file or the XDG state path shown by `gander paths`). These
+commands inspect jj-visible code, but mutation commands do **not** edit the code
+workspace, fetch from forges, or post reviews remotely.
+
+Global options accepted by all commands include `--repo <path>`, `--rev <revset>`
+(default `@`), `--base <revset>` (default `trunk()`), repeated `--ignore`,
+generated-file filters, `--state <path>`, and `--config <path>`.
+
+## Reviews
+
+```sh
+gander reviews create [--title <title>]
+gander reviews list
+gander reviews show <id>
+```
+
+`create` opens a durable review session for the current target. Example output:
+
+```json
+{
+  "id": "b777f59e-c91c-4610-a272-c4154c2e350e",
+  "title": "Demo",
+  "target": { "revset": "trunk()..@", "base": "trunk()", "revision": "@", "repo": "/repo", "file": null, "line": null, "end_line": null, "symbol": null },
+  "status": "open",
+  "walkthroughs": [],
+  "tasks": [],
+  "created_at": "2026-07-04T22:19:05.917185Z",
+  "updated_at": "2026-07-04T22:19:05.917185Z"
+}
+```
+
+`list` returns `{ "sessions": [...] }` with `task_count` and
+`walkthrough_count`; `show` returns the full session object.
+
+## Files and hunks
+
+```sh
+gander files list
+gander hunks list [--file <path>]
+gander hunks show <path:index>
+```
+
+These are read-only JSON queries over the current jj diff. `hunks list` returns
+hunk ids suitable for `hunks show`.
+
+## Comments
+
+```sh
+gander comments list
+gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
+  [--kind note|issue|question|praise] [--action fix|explain|test|follow-up]
+gander comments resolve <id>
+gander comments set-state <id> --state draft|todo|resolved
+```
+
+`add` creates a persisted comment. Example:
+
+```json
+{
+  "id": "d9e9e6de-f819-4022-823d-b1ed573d6091",
+  "path": "README.md",
+  "line": 1,
+  "body": "Clarify intro",
+  "kind": "issue",
+  "action": "fix",
+  "state": "draft",
+  "created_at": "2026-07-04T22:19:06.819614Z"
+}
+```
+
+`comments list` returns `{ "comments": [...] }`. `resolve` is a convenience for
+`set-state --state resolved`.
+
+## Tasks
+
+```sh
+gander tasks add --title <title> [--body <text>] [--action fix|explain|test|follow-up] \
+  [--comment <comment-id>] [--path <path>] [--line <n>]
+gander tasks list
+gander tasks complete <id> [--summary <resolution>]
+gander tasks reopen <id>
+```
+
+Tasks are review-state todos for humans or agents. Example `tasks list`:
+
+```json
+{
+  "tasks": [
+    {
+      "id": "57e87a50-e83a-4778-9cd6-b154d1a2caa5",
+      "title": "Update intro",
+      "body": null,
+      "target": { "file": "README.md", "line": 1, "end_line": null, "symbol": null, "revset": null, "base": null, "revision": null, "repo": null },
+      "action": "fix",
+      "status": "open",
+      "source_comment_id": null,
+      "resolution": null,
+      "source": "session"
+    }
+  ]
+}
+```
+
+## Walkthroughs
+
+```sh
+gander walkthrough add-step --title <title> [--file <path>] [--line <n>] \
+  [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]
+gander walkthrough remove-step <id>
+gander walkthrough move-step <id> --to <zero-based-index>
+gander walkthrough show
+gander walkthrough export
+```
+
+Walkthrough steps have a title, optional why/body, and an optional stable target.
+`show` emits JSON; `export` emits Markdown.
+
+## Export/import and state utilities
+
+```sh
+gander export [json|markdown|html] [--profile human|agent] [--output <path>]
+gander import <json-artifact>
+gander mark-viewed
+gander mark-generated-viewed
+gander paths
+gander summary
+```
+
+`export html` writes a self-contained static review page. JSON and Markdown are
+the existing artifact formats; `--profile agent` adds raw excerpts for tools.
+
+## MCP and ACP
+
+```sh
+gander mcp
+gander acp
+```
+
+`mcp` exposes typed tools for harnesses, including CLI-parity state tools.
+`acp` is the line-delimited JSON-RPC bridge used by older live-session flows.
+
+## Automation without MCP
+
+For low-context agent loops, use the CLI and `jq` directly:
+
+```sh
+state="$TMPDIR/gander-review.json"
+rm -f "$state"
+review_id=$(gander --state "$state" reviews create --title "Agent pass" | jq -r .id)
+comment_id=$(gander --state "$state" comments add --path README.md --line 1 \
+  --kind issue --action fix --body "Clarify the introduction." | jq -r .id)
+task_id=$(gander --state "$state" tasks add --title "Fix intro" \
+  --action fix --comment "$comment_id" --path README.md --line 1 | jq -r .id)
+gander --state "$state" tasks list | jq -r '.tasks[] | select(.status == "open") | .id' |
+  while read -r id; do
+    gander --state "$state" tasks complete "$id" --summary "Handled by agent"
+  done
+gander --state "$state" reviews show "$review_id" | jq '{id, title, tasks}'
+```

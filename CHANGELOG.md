@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Added
 
+- Durable review sessions now carry review tasks, walkthrough steps
+  (`title`/`why`/`body` plus file/line/symbol targets), comment kinds
+  (`note`/`issue`/`question`/`praise`), and action intents
+  (`fix`/`explain`/`test`/`follow-up`) in the persisted review state.
+- Session, comment, task, and walkthrough CLI commands: `reviews
+  create/list/show`, `comments add/resolve/set-state`, `tasks
+  add/complete/reopen/list`, and `walkthrough
+  add-step/remove-step/move-step/show/export`, plus machine-readable
+  `files list` and `hunks list/show` queries.
+- Self-contained static HTML review export via `gander export html`, alongside
+  the existing JSON and Markdown artifact formats.
+- TUI action tags and kind badges in the comment list (`C`, then `a`/`K`), a
+  review-tasks popup (`X`), and maintainer walkthrough authoring (`Y` to mark a
+  step, `W` to jump/reorder/delete steps).
+- MCP parity tools for durable review state: `reviews_list/show/create`,
+  `comment_add/resolve/set_state`, `task_add/complete/reopen/tasks_list`, and
+  `walkthrough_add_step/remove_step/move_step/show`, each matching a CLI
+  equivalent.
 
 ## v0.4.1 - 2026-07-04
 

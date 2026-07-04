@@ -254,45 +254,55 @@ task, walkthrough, comment kind, and action-intent fields are now part of
 
 ## Milestone 12: complete CLI automation surface
 
-Status: in progress. First JSON query slice landed for files, hunks, comments,
-comment-backed tasks, and Markdown walkthrough export.
+Status: mostly complete. Mutating session/comment/task/walkthrough commands,
+file and hunk queries, JSON/Markdown/HTML exports, and the CLI/MCP parity table
+have landed. Remaining work is a stable `--json` contract audit.
 
-- [ ] add scriptable commands for sessions, files, hunks, comments, tasks,
+- [x] add scriptable commands for sessions, files, hunks, comments, tasks,
   walkthroughs, and exports
 - [x] provide initial stable JSON output suitable for harnesses and agents
-- [ ] ensure every MCP capability has a documented CLI equivalent backed by the
+- [x] ensure every MCP capability has a documented CLI equivalent backed by the
   same core service
 - [x] make CLI automation usable without MCP, for users who avoid MCP context
   pollution
+- [ ] audit and freeze a stable `--json` contract across all commands
 
 ## Milestone 13: TUI over the shared session core
 
-Status: planned.
+Status: in progress. Action tags, task popup, and walkthrough authoring have
+landed; zen/focused modes still need to become views over the durable
+walkthrough/session state.
 
 - [ ] make TUI state mutations call the same services as the CLI/MCP adapters
-- [ ] add first-class key hunk and walkthrough editing affordances
-- [ ] support action-tagged comments/tasks (`explain`, `research`, `fix`,
-  `write-tests`, `document`, `export`) for agent handoff
+- [x] add first-class key hunk and walkthrough editing affordances
+- [x] support action-tagged comments/tasks (`fix`, `explain`, `test`,
+  `follow-up`) for agent handoff
 - [ ] keep zen/focused review modes as views over walkthrough/session state
 
 ## Milestone 14: MCP parity adapter
 
-Status: planned.
+Status: complete for the parity adapter. Caveat: state-file tools load/save the
+persisted state directly, so avoid concurrent use with an active TUI that may
+later autosave an older in-memory snapshot.
 
-- [ ] make `gander mcp` a thin adapter over the same core API used by the CLI
-- [ ] retain live-instance routing and `current_focus` where useful
-- [ ] document the CLI equivalent for each tool
-- [ ] avoid making MCP the only or most capable automation path
+- [x] make `gander mcp` a thin adapter over the same core API used by the CLI
+- [x] retain live-instance routing and `current_focus` where useful
+- [x] document the CLI equivalent for each tool
+- [x] avoid making MCP the only or most capable automation path
+- [ ] route parity tools through the live TUI session (or add a state-reload
+  handshake) so state-file writes cannot race an active TUI autosave; until
+  then the documented guidance is to use them when no TUI is open
 
 ## Milestone 15: static web walkthrough export
 
-Status: planned.
+Status: partially complete. `gander export html` now writes a self-contained
+static review page; a pages-style hosted tour remains separate future work.
 
-- [ ] export a self-contained local HTML artifact with walkthrough navigation,
+- [x] export a self-contained local HTML artifact with walkthrough navigation,
   key hunks, comments, and task state
 - [ ] keep export local/static first, with no hosted sync or direct forge
   integration
-- [ ] use the same session data as JSON/Markdown exports
+- [x] use the same session data as JSON/Markdown exports
 
 ## Milestone 16: optional local web UI
 
@@ -301,6 +311,40 @@ Status: future.
 - [ ] add an interactive local browser UI only after the session core is stable
 - [ ] expose the same capabilities as the TUI/CLI where appropriate
 - [ ] preserve the no-code-mutation and forge-agnostic boundaries
+
+## Follow-up backlog (next session pick-up)
+
+Open items from the 2026-07 review-sessions push, consolidated so a future
+session can start here without re-deriving them:
+
+1. **Stable `--json` contract audit** (M12). The v1 JSON shapes shipped by
+   `reviews`/`comments`/`tasks`/`walkthrough`/`files`/`hunks` are captured in
+   docs/cli.md; audit them for consistency (naming, envelope objects,
+   id-prefix semantics), fix inconsistencies once, then declare the contract
+   stable and note versioning rules in docs/cli.md.
+2. **Reviewer/author metadata** (M11). Comments/sessions/tasks have no author
+   field yet. Add optional `author` (human name/handle or agent identifier)
+   with serde defaults, thread it through `review.rs`, the CLI (`--author` or
+   config default), MCP params, and exports.
+3. **MCP/CLI mutations vs live TUI autosave** (M14 unchecked box). Parity
+   tools and mutation CLI commands write the state file directly; an open TUI
+   holds state in memory and can autosave over those writes. Options: route
+   mutations through the live instance socket (registry already exists), or
+   make the TUI reload/merge state on external change (mtime watch). Caveat
+   is documented in docs/harness-setup.md until fixed.
+4. **Zen/focused modes over durable walkthroughs** (M13). Zen currently tours
+   agent-overlay chunks; teach it to also tour persisted
+   `state.sessions[].walkthroughs` so authored walkthroughs (`Y`/`W`) get the
+   same guided presentation.
+5. **TUI comment creation through the service layer** (M13). TUI comment adds
+   still go through `app::ReviewSession::add_comment`; unify with
+   `review::add_comment` so kind/action can be set at creation time in the
+   TUI.
+6. **Re-render docs/demo.gif** with vhs (see the note at the top of
+   docs/demo.tape) so the README/tour GIF shows the new `X`/`Y`/`W` beats.
+7. **Sample review size** (M15 polish). docs/pages/sample-review.html is
+   ~1.6 MB because it embeds the full diff; consider regenerating from a
+   smaller change or trimming hunks for the tour link.
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 

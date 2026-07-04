@@ -23,16 +23,16 @@ Prefer the CLI when you want explicit, low-context interactions or when MCP
 tool definitions would pollute an agent prompt. Commands should expose the same
 capabilities as MCP tools over the same core business logic.
 
-Representative future shape (see docs/vision.md milestones 11-14):
+Current shape (see [docs/cli.md](cli.md) for the complete reference):
 
 ```sh
-gander reviews list --json
-gander reviews show <id> --json
-gander hunks show --review <id> --hunk <hunk-id> --json
-gander comments list --review <id> --status open --json
-gander tasks list --review <id> --status open --json
+gander reviews list
+gander reviews show <id>
+gander hunks show <hunk-id>
+gander comments list
+gander tasks list
 gander tasks complete <task-id> --summary "Handled by agent workspace changes"
-gander walkthrough export --review <id> --format markdown
+gander walkthrough export
 ```
 
 Use MCP when your harness benefits from typed tools and live `current_focus`.
@@ -69,6 +69,29 @@ and `walkthrough` commands. They are best used when no TUI is actively
 autosaving: the TUI holds review state in memory and writes it back on save or
 quit, so concurrent state-file edits can be overwritten by an older in-memory
 snapshot.
+
+### MCP ⇄ CLI parity table
+
+Each parity tool documents its CLI equivalent and is backed by the same core
+review service. The MCP adapter is optional; the CLI remains the canonical
+scriptable surface.
+
+| MCP tool | CLI equivalent |
+| --- | --- |
+| `reviews_list` | `gander reviews list` |
+| `reviews_show` | `gander reviews show <id>` |
+| `reviews_create` | `gander reviews create [--title <title>]` |
+| `comment_add` | `gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> [--kind ...] [--action ...]` |
+| `comment_resolve` | `gander comments resolve <id>` |
+| `comment_set_state` | `gander comments set-state <id> --state draft|todo|resolved` |
+| `task_add` | `gander tasks add --title <title> [--body <text>] [--action ...] [--comment <id>] [--path <path>] [--line <n>]` |
+| `task_complete` | `gander tasks complete <id> [--summary <text>]` |
+| `task_reopen` | `gander tasks reopen <id>` |
+| `tasks_list` | `gander tasks list` |
+| `walkthrough_add_step` | `gander walkthrough add-step --title <title> [--file <path>] [--line <n>] [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]` |
+| `walkthrough_remove_step` | `gander walkthrough remove-step <id>` |
+| `walkthrough_move_step` | `gander walkthrough move-step <id> --to <zero-based-index>` |
+| `walkthrough_show` | `gander walkthrough show` |
 
 `gander paths` prints every resolved location (state dir, overlay, socket
 pattern, registry) when you need to debug a connection.

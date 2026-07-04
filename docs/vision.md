@@ -80,11 +80,11 @@ The next-generation review session should include:
 - subject: jj revset/change stack/base+tip already visible in the workspace;
 - files, hunks, stable anchors, fingerprints, viewed state, and symbols;
 - comments with kind, status, action intent, author, timestamps, and target;
-- tasks derived from comments or created directly, such as `explain`,
-  `research`, `fix`, `write-tests`, `document`, or `export`;
+- tasks derived from comments or created directly, with action intents such as
+  `fix`, `explain`, `test`, or `follow-up`;
 - walkthroughs: ordered steps pointing at files/hunks/ranges/symbols with
   explanations and rationale;
-- exports in JSON, Markdown, and eventually static HTML.
+- exports in JSON, Markdown, and static HTML.
 
 This model is the shared substrate for self-review, reviewing agent-generated
 changes, onboarding new contributors, and collaborative teammate review.
@@ -110,13 +110,13 @@ changes, onboarding new contributors, and collaborative teammate review.
 Example shape:
 
 ```sh
-gander reviews list --json
-gander reviews show <id> --json
-gander hunks list --review <id> --file src/lib.rs --json
-gander comments add --review <id> --hunk <hunk-id> --kind issue --action fix
-gander tasks list --review <id> --status open --json
-gander walkthrough add-hunk --review <id> --hunk <hunk-id> --why "Entry point"
-gander walkthrough export --review <id> --format markdown
+gander reviews list
+gander reviews show <id>
+gander hunks list --file src/lib.rs
+gander comments add --path src/lib.rs --line 42 --kind issue --action fix --body "..."
+gander tasks list
+gander walkthrough add-step --file src/lib.rs --line 42 --why "Entry point" --title "Start here"
+gander walkthrough export
 ```
 
 ### M13: TUI over the session core

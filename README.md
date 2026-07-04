@@ -33,8 +33,14 @@ This repo is intentionally early, but the first vertical slice is in place:
 - changed-symbol outline (`o`) with `]`/`[` jumps between changed functions
 - symbol-aware folding of long unchanged context runs (`z`)
 - records lightweight file-level and line-level comments from the TUI
-- tracks comment states (draft/todo/resolved) with a comment list pane (`C`)
-- exports review artifacts as JSON or Markdown, including an agent profile
+- tracks comment states (draft/todo/resolved), kinds (note/issue/question/
+  praise), and action tags (fix/explain/test/follow-up) with a comment list
+  pane (`C`, then `s`/`a`/`K`)
+- persists durable review sessions with review tasks and maintainer-authored
+  walkthrough steps over the shared CLI/MCP/TUI review core
+- exposes scriptable CLI groups for `reviews`, `files`, `hunks`, `comments`,
+  `tasks`, and `walkthrough`; see [docs/cli.md](docs/cli.md)
+- exports review artifacts as JSON, Markdown, or self-contained HTML, including an agent profile
   with raw hunks and comment excerpts (`--profile agent`)
 - reviews arbitrary revsets (`R`), steps through stacks change-by-change
   (`>`/`<`), and re-reviews incrementally against a prior jj operation (`I`)
@@ -44,6 +50,9 @@ This repo is intentionally early, but the first vertical slice is in place:
 - hosts agent-collaborative review over ACP (`gander acp`): agents read the
   session and suggest ordering (`A`), flag critical sections (`F`), define
   review chunks (`S`), and draft comments the human triages (`D`)
+- offers optional MCP (`gander mcp`) with live-session tools plus CLI-parity
+  tools for reviews, comments, tasks, and walkthroughs; see
+  [docs/harness-setup.md](docs/harness-setup.md)
 - syntax-highlights common languages with a built-in tree-sitter registry
 - makes changes obvious at a glance: word-level change highlights, added/
   removed line background tints, and an optional gutter change bar, all
@@ -211,6 +220,8 @@ jj-helpers = ["!"]
 toggle-large-diff = ["L"]
 toggle-agent-order = ["A"]
 flag-list = ["F"]
+task-list = ["X"]
+walkthrough-list = ["W"]
 chunk-list = ["S"]
 zen = ["T", "Z"]
 draft-list = ["D"]
@@ -230,6 +241,7 @@ symbol-outline = ["o"]
 next-symbol = ["]"]
 previous-symbol = ["["]
 comment = ["c"]
+mark-walkthrough = ["Y"]
 edit-comment = ["e"]
 delete-comment = ["x"]
 comment-list = ["C"]
@@ -412,6 +424,8 @@ full grouped keymap; the footer only shows the everyday hints.
 | `L` | render/hide a diff that exceeds the large-diff threshold |
 | `A` | toggle agent-suggested review ordering |
 | `F` | agent-flagged sections popup |
+| `X` | review tasks popup (jump to task-backed comments, cycle state) |
+| `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
 | `S` | agent review chunks popup |
 | `T` / `Z` | zen mode: focused walkthrough of agent chunks (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
@@ -430,8 +444,9 @@ full grouped keymap; the footer only shows the everyday hints.
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
 | `c` | add a file comment in file focus, or line/range comment in diff focus |
+| `Y` | mark the current hunk/range as a walkthrough step |
 | `e` / `x` | edit / delete the selected comment |
-| `C` | comment list popup (jump, cycle draft/todo/resolved, delete) |
+| `C` | comment list popup (jump, `s` cycle state, `a` cycle action, `K` cycle kind, `x` delete) |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
 | `q` | quit and save state |
