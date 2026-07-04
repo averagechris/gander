@@ -308,7 +308,9 @@ then everything mechanical acknowledged in bulk. Design decisions:
   tip's description), so even the chunkless fallback starts with the big
   picture. Chapter cards mark nothing viewed; the progress strip renders
   chapters as `▎` bars grouping the stop dots; human-facing stop numbers
-  count spotlight stops only.
+  count spotlight stops only. Cards show the change's *full* description
+  (headline bold, body beneath, `d` collapses to the headline) — the
+  change's own words come first, the agent's brief second.
 - **Artifacts** (2026-07 follow-up). Agents can *show* instead of only
   telling: spotlight chunks and change briefs may carry `artifacts`
   (`{title, kind: example|output|diagram|note, body}`) — a usage example

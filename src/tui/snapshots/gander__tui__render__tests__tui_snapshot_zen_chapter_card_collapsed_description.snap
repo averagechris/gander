@@ -7,11 +7,10 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
 │             ╭ chapter 1/1 · trunk()..@ · startup-fix ──────────────────────────────╮             │
 │             │ feat: swap old() for new()                                           │             │
-│             │                                                                      │             │
-│             │ old() fired a single effect; new() batches extra() alongside it      │             │
-│             │ so startup converges in one pass.                                    │             │
+│             │ … d expands the description (2 more line(s))                         │             │
 │             │                                                                      │             │
 │             │ 2 file(s) · +3 −2                                                    │             │
 │             │ n tours the 1 stop(s) in this chapter                                │             │
@@ -23,6 +22,7 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
+│                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
-zen chapter 1/1 · n tours its 1 stop(s) · d collapse · p back · tab full diff · g glance · esc end
+zen chapter 1/1 · n tours its 1 stop(s) · d description · p back · tab full diff · g glance · esc en

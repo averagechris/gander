@@ -25,4 +25,4 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
-zen 1/1 · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comm
+zen 1/1 · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · e 1 ar

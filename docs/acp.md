@@ -83,7 +83,7 @@ prompt and run a subprocess works.
 | `review/file_diff` | `{path}` | `{path, fingerprint, raw}` (raw git-style diff) |
 | `review/comments` | – | array of `{id, path, line, end_line, body, state}` |
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
-| `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
+| `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
 | `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what chunk parts anchored to this change must reference |
 | `review/overlay` | – | the full agent overlay (ordering, flags, chunks, change briefs, drafts with dispositions) |
 

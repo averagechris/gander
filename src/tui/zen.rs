@@ -47,6 +47,9 @@ pub(super) struct ZenState {
     pub(super) home_target: ReviewTarget,
     /// Whether the stops came from agent chunks or the file-order fallback.
     pub(super) source: ZenSource,
+    /// Chapter cards show the change's full description body by default;
+    /// `d` collapses it to the headline (sticky for the walkthrough).
+    pub(super) chapter_description_collapsed: bool,
 }
 
 /// One station of the walkthrough: a chapter intro card for a jj change,
@@ -70,13 +73,33 @@ pub(super) struct ChapterCard {
     pub(super) position: (usize, usize),
     /// Spotlight stops that follow this card.
     pub(super) stop_count: usize,
-    /// jj description (first line); empty when unknown.
+    /// jj description (full, multiline); empty when unknown.
     pub(super) description: String,
     pub(super) bookmarks: String,
     /// The agent's high-level narrative for this change, when briefed.
     pub(super) summary: Option<String>,
     /// Exhibits attached to the change brief, opened with `e`.
     pub(super) artifacts: Vec<Artifact>,
+}
+
+impl ChapterCard {
+    /// The description's first line — the card's headline.
+    pub(super) fn title(&self) -> &str {
+        self.description.lines().next().unwrap_or_default()
+    }
+
+    /// Description lines after the headline, outer blank lines trimmed.
+    /// What the collapsible body of the chapter card shows.
+    pub(super) fn description_body(&self) -> Vec<&str> {
+        let mut lines: Vec<&str> = self.description.lines().skip(1).collect();
+        while lines.first().is_some_and(|line| line.trim().is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+        lines
+    }
 }
 
 /// The zen surfaces. Focus is the default landing surface for each stop;
@@ -133,6 +156,7 @@ impl ZenState {
             target_key: session.target.to_string(),
             home_target: session.target.clone(),
             source,
+            chapter_description_collapsed: false,
         })
     }
 
@@ -556,7 +580,7 @@ diff --git a/b.rs b/b.rs
             JjChangeSummary {
                 change_id: "aaabbbcc".to_owned(),
                 bookmarks: "feature".to_owned(),
-                description: "feat: first".to_owned(),
+                description: "feat: first\n\nLays the groundwork.\nTwo lines of body.".to_owned(),
             },
             JjChangeSummary {
                 change_id: "dddeeeff".to_owned(),
@@ -645,7 +669,12 @@ diff --git a/b.rs b/b.rs
         assert_eq!(first.change_id.as_deref(), Some("aaabbbcc"));
         assert_eq!(first.position, (1, 2));
         assert_eq!(first.stop_count, 2);
-        assert_eq!(first.description, "feat: first");
+        // The card carries the full description: headline + body.
+        assert_eq!(first.title(), "feat: first");
+        assert_eq!(
+            first.description_body(),
+            vec!["Lays the groundwork.", "Two lines of body."]
+        );
         assert_eq!(first.bookmarks, "feature");
         assert_eq!(first.summary, None);
 
@@ -695,6 +724,29 @@ diff --git a/b.rs b/b.rs
         assert_eq!(stop_artifacts(&zen.stops[0])[0].title, "flow");
         assert_eq!(stop_artifacts(&zen.stops[1]).len(), 1);
         assert_eq!(stop_artifacts(&zen.stops[1])[0].title, "usage");
+    }
+
+    #[test]
+    fn chapter_description_splits_into_headline_and_trimmed_body() {
+        let mut chapter = ChapterCard {
+            change_id: None,
+            position: (1, 1),
+            stop_count: 0,
+            description: "feat: headline\n\n\nbody one\nbody two\n\n".to_owned(),
+            bookmarks: String::new(),
+            summary: None,
+            artifacts: Vec::new(),
+        };
+
+        assert_eq!(chapter.title(), "feat: headline");
+        assert_eq!(chapter.description_body(), vec!["body one", "body two"]);
+
+        chapter.description = "just a headline".to_owned();
+        assert!(chapter.description_body().is_empty());
+
+        chapter.description = String::new();
+        assert_eq!(chapter.title(), "");
+        assert!(chapter.description_body().is_empty());
     }
 
     #[test]

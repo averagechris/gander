@@ -1205,7 +1205,7 @@ fn step_stack(
             let description = if change.description.is_empty() {
                 "(no description)"
             } else {
-                &change.description
+                change.title()
             };
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
@@ -1762,6 +1762,13 @@ fn handle_zen_key(
                     message: "no artifacts on this stop".to_owned(),
                 });
             }
+            return ZenKeyOutcome::Consumed;
+        }
+        KeyCode::Char('d')
+            if zen.phase == zen::ZenPhase::Focus
+                && matches!(zen.current(), Some(zen::ZenStop::Chapter(_))) =>
+        {
+            zen.chapter_description_collapsed = !zen.chapter_description_collapsed;
             return ZenKeyOutcome::Consumed;
         }
         _ => {}
@@ -3571,6 +3578,46 @@ diff --git a/b.rs b/b.rs
             ));
             assert_eq!(zen.phase, expected);
         }
+    }
+
+    #[test]
+    fn zen_d_collapses_the_chapter_description_but_only_on_chapter_cards() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        assert!(!zen.chapter_description_collapsed);
+
+        // On the chapter card `d` toggles the description body.
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('d')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+        assert!(zen.chapter_description_collapsed);
+
+        // On a spotlight stop `d` is not a zen key: the normal vocabulary
+        // keeps it.
+        zen.advance();
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Char('d')),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Fallthrough
+        ));
+        assert!(zen.chapter_description_collapsed);
     }
 
     #[test]

@@ -53,7 +53,15 @@ pub struct JjOperationSummary {
 pub struct JjChangeSummary {
     pub change_id: String,
     pub bookmarks: String,
+    /// Full multiline description; use [`Self::title`] for one-line surfaces.
     pub description: String,
+}
+
+impl JjChangeSummary {
+    /// The description's first line — what pickers and notices show.
+    pub fn title(&self) -> &str {
+        self.description.lines().next().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -242,9 +250,9 @@ impl JjCommand {
             .arg("--color=never")
             .arg("--no-pager")
             .arg("--template")
-            .arg(
-                "change_id.short() ++ \"\\t\" ++ bookmarks ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
-            );
+            // NUL-terminated records so multiline descriptions survive
+            // parsing; tabs separate the single-line fields before it.
+            .arg("change_id.short() ++ \"\\t\" ++ bookmarks ++ \"\\t\" ++ description ++ \"\\0\"");
         if reversed {
             command.arg("--reversed");
         }
@@ -354,15 +362,17 @@ fn parse_operation_summaries(output: &str) -> Result<Vec<JjOperationSummary>> {
 
 fn parse_change_summaries(output: &str) -> Result<Vec<JjChangeSummary>> {
     output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let mut parts = line.splitn(3, '\t');
+        .split('\0')
+        .filter(|record| !record.trim().is_empty())
+        .map(|record| {
+            let mut parts = record.splitn(3, '\t');
             let change_id = parts.next().unwrap_or_default().trim().to_owned();
             let bookmarks = parts.next().unwrap_or_default().trim().to_owned();
+            // The description keeps its full multiline body (chapter cards
+            // show it); only surrounding whitespace is trimmed.
             let description = parts.next().unwrap_or_default().trim().to_owned();
             if change_id.is_empty() {
-                bail!("jj log emitted a row without a change id: {line:?}");
+                bail!("jj log emitted a record without a change id: {record:?}");
             }
             Ok(JjChangeSummary {
                 change_id,
@@ -524,9 +534,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_change_summary_rows() {
-        let rows =
-            parse_change_summaries("abc123\tmain* feature\tfeat: hello\ndef456\t\t\n").unwrap();
+    fn parses_change_summary_records_with_multiline_descriptions() {
+        let rows = parse_change_summaries(
+            "abc123\tmain* feature\tfeat: hello\n\nbody line one\nbody line two\0def456\t\t\0",
+        )
+        .unwrap();
 
         assert_eq!(
             rows,
@@ -534,7 +546,7 @@ mod tests {
                 JjChangeSummary {
                     change_id: "abc123".to_owned(),
                     bookmarks: "main* feature".to_owned(),
-                    description: "feat: hello".to_owned(),
+                    description: "feat: hello\n\nbody line one\nbody line two".to_owned(),
                 },
                 JjChangeSummary {
                     change_id: "def456".to_owned(),
@@ -543,6 +555,8 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(rows[0].title(), "feat: hello");
+        assert_eq!(rows[1].title(), "");
     }
 
     #[test]

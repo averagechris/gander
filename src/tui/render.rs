@@ -1042,14 +1042,36 @@ fn draw_footer(
             let zen = zen.expect("checked above");
             match zen.phase {
                 ZenPhase::Focus => match zen.current() {
-                    Some(ZenStop::Chapter(chapter)) => format!(
-                        "zen chapter {}/{} · n tours its {} stop(s) · p back · tab full diff · g glance · esc end",
-                        chapter.position.0, chapter.position.1, chapter.stop_count,
-                    ),
-                    _ => {
-                        let (current, total) = zen.chunk_position();
+                    Some(ZenStop::Chapter(chapter)) => {
+                        let mut text = format!(
+                            "zen chapter {}/{} · n tours its {} stop(s)",
+                            chapter.position.0, chapter.position.1, chapter.stop_count,
+                        );
+                        if !chapter.description_body().is_empty() {
+                            text.push_str(if zen.chapter_description_collapsed {
+                                " · d description"
+                            } else {
+                                " · d collapse"
+                            });
+                        }
+                        if !chapter.artifacts.is_empty() {
+                            text.push_str(&format!(" · e {} artifact(s)", chapter.artifacts.len()));
+                        }
+                        text.push_str(" · p back · tab full diff · g glance · esc end");
+                        text
+                    }
+                    current => {
+                        let (current_stop, total) = zen.chunk_position();
+                        let artifacts = current
+                            .map(|stop| super::zen::stop_artifacts(stop).len())
+                            .unwrap_or(0);
+                        let artifact_hint = if artifacts > 0 {
+                            format!(" · e {artifacts} artifact(s)")
+                        } else {
+                            String::new()
+                        };
                         format!(
-                            "zen {current}/{total} · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comment · esc end",
+                            "zen {current_stop}/{total} · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance{artifact_hint} · c comment · esc end",
                         )
                     }
                 },
@@ -1768,7 +1790,7 @@ fn draw_zen_panel(
             let headline = if chapter.description.is_empty() {
                 session.target.to_string()
             } else {
-                chapter.description.clone()
+                chapter.title().to_owned()
             };
             lines.push(Line::from(vec![
                 Span::styled(
@@ -1944,8 +1966,9 @@ fn draw_zen_chapter(
     let headline = if chapter.description.is_empty() {
         "(no description)".to_owned()
     } else {
-        chapter.description.clone()
+        chapter.title().to_owned()
     };
+    let description_body = chapter.description_body();
     let additions: usize = session.files.iter().map(|file| file.additions).sum();
     let deletions: usize = session.files.iter().map(|file| file.deletions).sum();
     let stats = format!(
@@ -1960,20 +1983,42 @@ fn draw_zen_chapter(
         ));
     }
 
-    let mut body: Vec<Line<'static>> = vec![
-        Line::from(Span::styled(
-            headline,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(stats, Style::default().fg(Color::Cyan))),
-        Line::from(Span::styled(
-            stops_hint,
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let mut body: Vec<Line<'static>> = vec![Line::from(Span::styled(
+        headline,
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    // The change's own words come right after the headline: the full
+    // description body, collapsible with `d` when it gets in the way.
+    if !description_body.is_empty() {
+        if zen.chapter_description_collapsed {
+            body.push(Line::from(Span::styled(
+                format!(
+                    "… d expands the description ({} more line(s))",
+                    description_body.len()
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            body.push(Line::from(""));
+            for line in &description_body {
+                body.push(Line::from(Span::styled(
+                    (*line).to_owned(),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+        }
+    }
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        stats,
+        Style::default().fg(Color::Cyan),
+    )));
+    body.push(Line::from(Span::styled(
+        stops_hint,
+        Style::default().fg(Color::DarkGray),
+    )));
     if inner.height < 8 {
         // Too small for the card layout: header only.
         body.insert(0, Line::from(location));
@@ -1999,7 +2044,14 @@ fn draw_zen_chapter(
         .map(|line| line.chars().count().div_ceil(text_width).max(1))
         .sum();
     let summary_height = (estimated as u16 + 1).clamp(2, (inner.height / 2).max(3));
-    let card_height = (body.len() as u16 + summary_height + 2).min(inner.height.saturating_sub(2));
+    // Wrap-aware height for the top section so a long description body
+    // gets the room it asked for (bounded by the screen).
+    let estimated_body: usize = body
+        .iter()
+        .map(|line| line.width().div_ceil(text_width).max(1))
+        .sum();
+    let card_height =
+        (estimated_body as u16 + summary_height + 2).min(inner.height.saturating_sub(2));
 
     let card = Rect {
         x: inner.x + inner.width.saturating_sub(card_width) / 2,
@@ -3162,7 +3214,7 @@ fn base_picker_row(
     let description = if row.description.is_empty() {
         "(no description)"
     } else {
-        &row.description
+        row.title()
     };
     Line::from(vec![
         Span::styled(
@@ -3798,11 +3850,13 @@ diff --git a/tests/app.rs b/tests/app.rs
             ..Default::default()
         });
         // A single-change stack: the opening chapter card carries the
-        // change's description and the agent's brief.
+        // change's full description and the agent's brief.
         let stack = vec![crate::jj::JjChangeSummary {
             change_id: "zzzzyyyy".to_owned(),
             bookmarks: "startup-fix".to_owned(),
-            description: "feat: swap old() for new()".to_owned(),
+            description: "feat: swap old() for new()\n\nold() fired a single effect; new() \
+                          batches extra() alongside it\nso startup converges in one pass."
+                .to_owned(),
         }];
         let mut zen = ZenState::new(&session, &stack).unwrap();
         session.file_pane_visible = false;
@@ -3830,6 +3884,22 @@ diff --git a/tests/app.rs b/tests/app.rs
     #[test]
     fn tui_snapshot_zen_focus_card() {
         let (session, zen) = zen_snapshot_session();
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            100,
+            24
+        ));
+    }
+
+    #[test]
+    fn tui_snapshot_zen_chapter_card_collapsed_description() {
+        let (mut session, mut zen) = zen_snapshot_session();
+        zen.index = 0;
+        zen.chapter_description_collapsed = true;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
 
         insta::assert_snapshot!(render_tui_text_with_zen(
             &session,
