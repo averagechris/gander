@@ -656,6 +656,8 @@
           .filename { margin: 0 0 0.75rem; overflow-wrap: anywhere; font-size: 0.9rem; }
           .download-links { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.75rem 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.9rem; }
           .primary-link { font-weight: 700; }
+          .tour-link { display: inline-block; background: var(--pine); border-radius: 999px; color: var(--base); font-family: ui-monospace, Menlo, monospace; font-weight: 700; padding: 0.45rem 0.85rem; text-decoration: none; }
+          .tour-link:hover { background: var(--rose); color: var(--base); }
           details summary { cursor: pointer; color: var(--subtle); }
           details pre { margin-bottom: 0; }
           .previous-heading { margin-top: 2rem; }
@@ -706,6 +708,7 @@
             <button class="theme-toggle" id="theme-toggle" aria-label="toggle color theme">dawn &frasl; moon</button>
           </div>
           <p>Take a gander at your jj changes: a fast terminal UI for reviewing changes.</p>
+          <p><a class="tour-link" href="tour.html">Take the tour</a></p>
           <p><a href="https://git.sr.ht/~averagechris/gander">Source repository</a></p>
 
           <h2>What's new in {html.escape(tag)}</h2>
@@ -731,6 +734,15 @@
         </body>
         </html>
         """)
+
+        for source_name, target_name in [
+            ("docs/pages/tour.html", "tour.html"),
+            ("docs/pages/sample-review.html", "sample-review.html"),
+            ("docs/demo.gif", "demo.gif"),
+        ]:
+            source_path = repo / source_name
+            if source_path.exists():
+                shutil.copy2(source_path, site_dir / target_name)
 
         subprocess.run([
             "tar", "--sort=name", "--format=ustar", "--mtime=@1", "--owner=0", "--group=0", "--numeric-owner",

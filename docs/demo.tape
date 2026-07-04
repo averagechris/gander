@@ -1,4 +1,4 @@
-# VHS tape for the gander demo GIF.
+# VHS tape for the gander demo GIF. Re-render docs/demo.gif with vhs before the next release.
 #
 # Record with:
 #   nix develop -c cargo build --release
@@ -74,6 +74,22 @@ Type "lowercasing is a behavior change; keep the README note and tests in sync"
 Sleep 1.6s
 Ctrl+S
 Sleep 2s
+
+# Cycle the comment action, then open the tasks popup for actionable follow-up.
+Type "a"
+Sleep 900ms
+Type "X"
+Sleep 2s
+Escape
+Sleep 900ms
+
+# Mark this hunk as a walkthrough step and inspect the walkthrough panel.
+Type "Y"
+Sleep 1.2s
+Type "W"
+Sleep 2s
+Escape
+Sleep 900ms
 
 # Back to the tree; mark files viewed as we go.
 Tab
