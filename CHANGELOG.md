@@ -4,6 +4,18 @@
 
 ### Added
 
+- Zen tours without agent curation now derive useful content from the
+  diff itself: chapter cards show files-by-role, churn, tests-touched,
+  and top changed symbols; fallback stops anchor on each file's largest
+  hunk with touched-symbol summaries; manifests, tests, docs, and
+  exports-only files route to the glance board with a rationale label.
+- Agent review chunks are validated at ingestion: ACP/MCP `set_chunks`
+  rejects parts that reference files outside the anchored change's diff,
+  out-of-range lines, or unknown change ids; invalid parts in an overlay
+  file written directly to disk are excluded with a TUI notice.
+- `gander acp`/`gander mcp` warn on stderr when bridging to a live TUI
+  whose review target differs from the requested flags, and
+  `review/summary` now reports `active_target` and `live_session`.
 - `gander handoff`: one-shot, prompt-style agent handoff of the current
   review — action items (open tasks + unresolved issue/fix comments with
   excerpts) first, walkthrough order, then full hunks as reference.

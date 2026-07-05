@@ -20,21 +20,22 @@ The loop:
 
 Scores are 1–5 per rubric dimension (see `eval/rubric.md`).
 
-| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | Target |
-| ----------------------------- | ------------------- | ------------------ | ------ |
-| CLI discoverability           | 3                   | 4                  | 4      |
-| TUI review ergonomics         | 4                   | —                  | 4.5    |
-| CLI output quality for agents | 3                   | 5                  | 4      |
-| Handoff readiness             | **2**               | **4**              | 4      |
-| Zen usefulness, uncurated     | **2**               | —                  | 3.5    |
-| Zen usefulness, curated       | 4                   | —                  | 4.5    |
-| Curation protocol ergonomics  | **2**               | —                  | 4      |
-| Watch: freshness / follows @  | 4                   | —                  | 4.5    |
-| Watch: change awareness       | **2**               | —                  | 4      |
-| Pane-worthiness overall       | 3                   | —                  | 4.5    |
+| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | Target |
+| ----------------------------- | ------------------- | ------------------ | --------------------- | ------ |
+| CLI discoverability           | 3                   | 4                  | —                     | 4      |
+| TUI review ergonomics         | 4                   | —                  | 4                     | 4.5    |
+| CLI output quality for agents | 3                   | 5                  | —                     | 4      |
+| Handoff readiness             | **2**               | **4**              | —                     | 4      |
+| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3.5    |
+| Zen usefulness, curated       | 4                   | —                  | 4                     | 4.5    |
+| Curation protocol ergonomics  | **2**               | —                  | 3                     | 4      |
+| Watch: freshness / follows @  | 4                   | —                  | —                     | 4.5    |
+| Watch: change awareness       | **2**               | —                  | —                     | 4      |
+| Pane-worthiness overall       | 3                   | —                  | —                     | 4.5    |
 
 Baseline reports: `eval/reports/2026-07-05-baseline/`. Post-W1 recheck of
-scenario 1: `eval/reports/2026-07-05-w1-recheck/`.
+scenario 1: `eval/reports/2026-07-05-w1-recheck/`. Post-W2/W3 recheck of
+scenario 2: `eval/reports/2026-07-05-w2w3-recheck/`.
 
 ## Baseline findings (2026-07-05)
 
@@ -109,28 +110,43 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
 
 ### W2 — Zen presents useful information without an agent
 
-- [ ] Every fallback stop answers "why this matters": derived signals
-      (new/changed public API, symbols touched, error/retry/unsafe-pattern
-      heuristics, test coverage relation, file role) instead of a bare file
-      card.
-- [ ] Chapter cards narrate the stack: per-change description, dependency
-      between changes, tests added/missing, open review tasks.
-- [ ] Glance board groups by concept with expandable locations; uncovered
-      files carry a rationale so bulk mark-viewed is a confident act.
+- [x] Every fallback stop answers "why this matters" with derived facts:
+      file role, largest-hunk anchoring (no more top-of-file cards),
+      churn, and tree-sitter symbols touched. *(2026-07-05)*
+- [x] Chapter cards narrate the stack with derived lines: files by role,
+      churn, tests-touched, top changed symbols; uncurated tours say so
+      and point at the summon flow. *(2026-07-05)*
+- [x] Glance board entries carry a rationale (role / "exports only") so
+      bulk mark-viewed is a confident act; manifests/tests/docs route to
+      glance instead of full-screen stops. *(2026-07-05)*
 - [ ] Multi-part spotlight chunks render as "part 1/2 / part 2/2" with
-      cross-references, not disconnected stops.
-- [ ] Empty/uncurated tours say so explicitly and point at the summon flow.
+      cross-references, not disconnected stops; glance board groups
+      multi-part conceptual chunks instead of duplicating bullets.
+- [ ] Chapter-level dependency narration between stack changes (which
+      change builds on which).
+- [ ] Recheck gap: fallback rationale is still mostly metadata — explore
+      derived risk labels (e.g. "touches error handling path",
+      "public API change") that stay factual.
+- [ ] Recheck gap: zen card headers wrap poorly for long titles/paths.
+- [ ] Recheck gap (TUI-wide): help overlay needs a task-oriented "first
+      review loop" section.
 
 ### W3 — Curation protocol ergonomics
 
-- [ ] Validate agent chunks: reject or visibly flag parts not present in
-      the anchored change's diff, out-of-range lines, unknown files.
+- [x] Validate agent chunks at ingestion: ACP/MCP `set_chunks` rejects
+      requests with parts outside the anchored change's diff,
+      out-of-range lines, or unknown change ids (full reject, per-part
+      reasons); overlay files loaded from disk get invalid parts excluded
+      with a TUI footer notice. *(2026-07-05)*
 - [ ] Incremental chunk updates (add/update/remove) alongside full replace.
 - [ ] Friendlier authoring path than hand-written JSON-RPC (e.g. spec file
       / stdin document the CLI translates).
-- [ ] Live-bridge transparency: when `gander acp`/`mcp` bridges to a live
-      TUI whose target differs from the invoked flags, say so in the
-      response and on stderr.
+- [x] Live-bridge transparency: `gander acp`/`mcp` warn on stderr when
+      bridging to a live TUI whose target differs from the invoked flags;
+      `review/summary` gains additive `active_target`/`live_session`
+      fields. *(2026-07-05)*
+- [ ] Badge invalid chunks in the TUI chunk list popup (`S`) — exclusion
+      + notice landed; the badge was deferred.
 - [ ] MCP `comment_add` still stores `anchor: None` (it never loads full
       diff context), so MCP-created comments lack excerpts in agent
       exports. Derive anchors once MCP loads diff context (M14 parity;
@@ -166,3 +182,9 @@ export should inherit W2's tour content. Revisit after W4.
 - **2026-07-05** — Scenario 1 re-run post-W1: handoff readiness 2→4
   (target met), agent output quality 3→5, discoverability 3→4, no
   regressions. Remaining polish captured as W1 follow-ups.
+- **2026-07-05** — W2 fallback zen content + W3 chunk validation and
+  live-bridge transparency landed.
+- **2026-07-05** — Scenario 2 re-run post-W2/W3: zen uncurated 2→3
+  (target 3.5), curation ergonomics 2→3 (target 4), curated 4, TUI 4.
+  Remaining friction is authoring ergonomics (spec-file/incremental
+  updates) and glance grouping — both still open above.
