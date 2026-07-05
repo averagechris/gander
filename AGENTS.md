@@ -52,17 +52,21 @@ pushing. SourceHut CI (`.builds/ci.yml`) runs flake check + the same
 See [docs/release.md](docs/release.md) for the full flow. Short version:
 
 ```bash
-nix run .#release -- --version X.Y.Z [--publish-pages] [--submit-linux-build]
+nix run .#release -- --version X.Y.Z [--submit-linux-build] [--skip-*]
 ```
 
-The orchestrator runs `prepare-release`, `cargo check --locked`,
-`jj lint`, tags and pushes `vX.Y.Z`, builds the local `release-artifact`
-tarball, and builds (optionally publishes) the SourceHut Pages downloads
-site. Each stage is also its own flake app (`prepare-release`,
-`release-tag`, `build-pages`, `publish-pages`).
+The release apps come from the shared fleet preset
+(`lib.fleet.presets.rust` in the averagechris.srht.site flake, via the
+`fleet` input). The orchestrator runs `prepare-release` (version bump +
+changelog + `cargo check --locked`), the `ci-*` validation apps, tags and
+pushes `vX.Y.Z`, builds the local `release-artifact` tarball, uploads it
+to the tag with `hut git artifact upload`, and submits the site
+`refresh-pages` trigger. Pages are published by the
+averagechris.srht.site repo, not from here; the legacy `build-pages` /
+`publish-pages` apps remain only for manual/migration use.
 
 Note: the Linux release manifest intentionally lives in
 `builds/release-linux-x86_64.yml` — *outside* `.builds/` — so
-builds.sr.ht does not auto-submit it on push. Release artifacts and pages
-are only built/published on an explicit submit (`--submit-linux-build` or
+builds.sr.ht does not auto-submit it on push. Release artifacts are only
+built/uploaded on an explicit submit (`--submit-linux-build` or
 `hut builds submit`). Do not move it into `.builds/`.
