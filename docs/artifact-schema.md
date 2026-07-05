@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `4`.
+Current schema version: `5`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -30,13 +30,17 @@ config.
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
   "revision": "@",
   "profile": "agent",
   "summary": "3 files (1/3 viewed), +10/-2, 1 comments",
+  "session": {
+    "id": "review-session-id",
+    "title": "Review handoff"
+  },
   "files": [
     {
       "path": "src/main.rs",
@@ -96,6 +100,31 @@ config.
         { "kind": "context", "old_line": 42, "new_line": 43, "text": "    after();" }
       ]
     }
+  ],
+  "tasks": [
+    {
+      "id": "task-id",
+      "title": "Fix the unchecked parse path",
+      "status": "open",
+      "action": "fix",
+      "linked_comment_ids": ["stable-ish-id"],
+      "target": { "file": "src/main.rs", "line": 42 }
+    }
+  ],
+  "walkthroughs": [
+    {
+      "id": "walkthrough-id",
+      "title": "Suggested review order",
+      "steps": [
+        {
+          "id": "step-id",
+          "title": "Start with the renderer",
+          "why": "This establishes the new data shape.",
+          "body": "Confirm the serialized fields before reading callers.",
+          "target": { "file": "src/main.rs", "line": 42, "symbol": "render" }
+        }
+      ]
+    }
   ]
 }
 ```
@@ -104,11 +133,17 @@ Notes:
 
 - `profile`, `files[].hunks`, and `comments[].excerpt` are omitted entirely
   in the `human` profile.
+- `session` is present when the exported change matches an open durable review
+  session; it includes the session `id` and optional `title`.
+- `tasks` and `walkthroughs` are exported from the active durable session when
+  one is present. They are empty arrays otherwise. Task targets and walkthrough
+  step targets include local file/line/symbol coordinates when recorded.
 - `comments[].state` is one of `draft`, `todo`, `resolved`; missing values
   deserialize as `draft` for artifacts written before version 4.
 
 ## Version history
 
+- `5`: active durable session metadata plus session `tasks` and `walkthroughs`.
 - `4`: comment `state`, optional `profile` marker, agent-profile `hunks` and
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
@@ -116,9 +151,6 @@ Notes:
 ## Planned schema additions
 
 - explicit artifact `source` block with jj operation/change IDs
-- first-class review session id/subject metadata
-- walkthrough steps anchored to files/hunks/ranges/symbols
-- action-tagged review tasks derived from comments or created directly
 - per-file ignored/collapsed metadata
 - reviewer identity/profile metadata
 - review disposition/intent (`comment`, `approve`, `needs-work`, etc.) as

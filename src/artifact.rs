@@ -8,7 +8,7 @@ use crate::{
     anchor::CommentAnchor,
     app::{ReviewFile, ReviewSession},
     diff::{DiffLineKind, Hunk},
-    state::{Comment, ReviewState},
+    state::{ActionIntent, Comment, ReviewState, ReviewTarget, ReviewTaskStatus},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -40,8 +40,19 @@ pub struct ReviewArtifact<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<&'static str>,
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionArtifact<'a>>,
     pub files: Vec<FileArtifact<'a>>,
     pub comments: Vec<CommentArtifact<'a>>,
+    pub tasks: Vec<TaskArtifact<'a>>,
+    pub walkthroughs: Vec<WalkthroughArtifact<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionArtifact<'a> {
+    pub id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +99,49 @@ pub struct CommentArtifact<'a> {
     pub excerpt: Option<Vec<ExcerptLine<'a>>>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TaskArtifact<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub status: ReviewTaskStatus,
+    pub action: ActionIntent,
+    pub linked_comment_ids: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<TargetArtifact<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalkthroughArtifact<'a> {
+    pub id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<&'a str>,
+    pub steps: Vec<WalkthroughStepArtifact<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalkthroughStepArtifact<'a> {
+    pub id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<&'a str>,
+    pub target: TargetArtifact<'a>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TargetArtifact<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<&'a str>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct OwnedReviewArtifact {
@@ -116,7 +170,7 @@ pub struct ImportSummary {
 impl Default for OwnedReviewArtifact {
     fn default() -> Self {
         Self {
-            version: 4,
+            version: 5,
             base: String::new(),
             revision: String::new(),
             files: Vec::new(),
@@ -135,13 +189,17 @@ impl<'a> ReviewArtifact<'a> {
     pub fn build(session: &'a ReviewSession, profile: ArtifactProfile) -> Self {
         let agent = profile == ArtifactProfile::Agent;
         Self {
-            version: 4,
+            version: 5,
             generated_at: Utc::now(),
             repo: &session.repo,
             base: &session.target.base,
             revision: &session.target.rev,
             profile: agent.then_some("agent"),
             summary: session.summary_line(),
+            session: active_durable_session(session).map(|durable| SessionArtifact {
+                id: &durable.id,
+                title: durable.title.as_deref(),
+            }),
             files: session
                 .files
                 .iter()
@@ -165,7 +223,55 @@ impl<'a> ReviewArtifact<'a> {
                     excerpt: agent.then(|| comment_excerpt(session, comment)).flatten(),
                 })
                 .collect(),
+            tasks: active_durable_session(session)
+                .into_iter()
+                .flat_map(|durable| durable.tasks.iter())
+                .map(|task| TaskArtifact {
+                    id: &task.id,
+                    title: &task.title,
+                    status: task.status,
+                    action: task.action,
+                    linked_comment_ids: task.source_comment_id.iter().map(String::as_str).collect(),
+                    target: task.target.as_ref().map(target_artifact),
+                })
+                .collect(),
+            walkthroughs: active_durable_session(session)
+                .into_iter()
+                .flat_map(|durable| durable.walkthroughs.iter())
+                .map(|walkthrough| WalkthroughArtifact {
+                    id: &walkthrough.id,
+                    title: walkthrough.title.as_deref(),
+                    steps: walkthrough
+                        .steps
+                        .iter()
+                        .map(|step| WalkthroughStepArtifact {
+                            id: &step.id,
+                            title: step.title.as_deref(),
+                            why: step.why.as_deref(),
+                            body: step.body.as_deref(),
+                            target: target_artifact(&step.target),
+                        })
+                        .collect(),
+                })
+                .collect(),
         }
+    }
+}
+
+fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::ReviewSession> {
+    session.sessions.iter().find(|durable| {
+        durable.status == crate::state::ReviewSessionStatus::Open
+            && durable.target.base.as_deref() == Some(session.target.base.as_str())
+            && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
+    })
+}
+
+fn target_artifact(target: &ReviewTarget) -> TargetArtifact<'_> {
+    TargetArtifact {
+        file: target.file.as_deref(),
+        line: target.line,
+        end_line: target.end_line,
+        symbol: target.symbol.as_deref(),
     }
 }
 
@@ -359,7 +465,73 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
         }
     }
 
+    out.push_str("\n## Tasks\n\n");
+    if artifact.tasks.is_empty() {
+        out.push_str("No tasks recorded.\n");
+    } else {
+        for task in &artifact.tasks {
+            out.push_str(&format!(
+                "- [{}] `{}` — {:?} ({:?})",
+                match task.status {
+                    ReviewTaskStatus::Done => "x",
+                    _ => " ",
+                },
+                task.id,
+                task.title,
+                task.action
+            ));
+            if let Some(target) = &task.target {
+                write_target_suffix(&mut out, target);
+            }
+            if !task.linked_comment_ids.is_empty() {
+                out.push_str(&format!(
+                    "; comments: {}",
+                    task.linked_comment_ids.join(", ")
+                ));
+            }
+            out.push('\n');
+        }
+    }
+
+    out.push_str("\n## Walkthrough\n\n");
+    if artifact.walkthroughs.is_empty() {
+        out.push_str("No walkthrough steps recorded.\n");
+    } else {
+        for walkthrough in &artifact.walkthroughs {
+            if let Some(title) = walkthrough.title {
+                out.push_str(&format!("### {}\n\n", title));
+            }
+            for (index, step) in walkthrough.steps.iter().enumerate() {
+                out.push_str(&format!("{}. {}", index + 1, step.title.unwrap_or(step.id)));
+                write_target_suffix(&mut out, &step.target);
+                out.push_str("\n\n");
+                if let Some(why) = step.why {
+                    out.push_str(&format!("Why: {}\n\n", why.trim()));
+                }
+                if let Some(body) = step.body {
+                    out.push_str(body.trim());
+                    out.push_str("\n\n");
+                }
+            }
+        }
+    }
+
     out
+}
+
+fn write_target_suffix(out: &mut String, target: &TargetArtifact<'_>) {
+    if let Some(file) = target.file {
+        out.push_str(&format!(" — `{file}`"));
+        if let Some(line) = target.line {
+            out.push_str(&format!(":{line}"));
+            if let Some(end_line) = target.end_line.filter(|end| *end != line) {
+                out.push_str(&format!("-{end_line}"));
+            }
+        }
+    }
+    if let Some(symbol) = target.symbol {
+        out.push_str(&format!(" `{symbol}`"));
+    }
 }
 
 fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
@@ -638,8 +810,142 @@ mod tests {
 
         let artifact = ReviewArtifact::from(&session);
 
-        assert_eq!(artifact.version, 4);
+        assert_eq!(artifact.version, 5);
         assert_eq!(artifact.profile, None);
+    }
+
+    #[test]
+    fn artifact_json_includes_session_tasks_and_walkthroughs() {
+        let diff = DiffSet::parse(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            title: Some("Review handoff".to_owned()),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            tasks: vec![crate::state::ReviewTask {
+                id: "task-1".to_owned(),
+                title: "Fix parser".to_owned(),
+                action: crate::state::ActionIntent::Fix,
+                source_comment_id: Some("comment-1".to_owned()),
+                target: Some(crate::state::ReviewTarget {
+                    file: Some("a.txt".to_owned()),
+                    line: Some(1),
+                    ..crate::state::ReviewTarget::default()
+                }),
+                ..crate::state::ReviewTask::default()
+            }],
+            walkthroughs: vec![crate::state::Walkthrough {
+                id: "walk-1".to_owned(),
+                title: Some("Start here".to_owned()),
+                steps: vec![crate::state::WalkthroughStep {
+                    id: "step-1".to_owned(),
+                    title: Some("Read parser".to_owned()),
+                    why: Some("It changed".to_owned()),
+                    body: Some("Check the replacement.".to_owned()),
+                    target: crate::state::ReviewTarget {
+                        file: Some("a.txt".to_owned()),
+                        line: Some(1),
+                        symbol: Some("parse".to_owned()),
+                        ..crate::state::ReviewTarget::default()
+                    },
+                }],
+            }],
+            ..crate::state::ReviewSession::default()
+        });
+        let session = ReviewSession::new(".".into(), ReviewTarget::trunk_to_current(), diff, state);
+
+        let json = render_artifact(&session, ArtifactFormat::Json).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["session"]["id"], "session-1");
+        assert_eq!(value["tasks"][0]["linked_comment_ids"][0], "comment-1");
+        assert_eq!(value["tasks"][0]["target"]["file"], "a.txt");
+        assert_eq!(value["walkthroughs"][0]["steps"][0]["why"], "It changed");
+        assert_eq!(
+            value["walkthroughs"][0]["steps"][0]["target"]["symbol"],
+            "parse"
+        );
+    }
+
+    #[test]
+    fn markdown_contains_tasks_and_walkthrough_sections() {
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let artifact = ReviewArtifact::from(&session);
+
+        let markdown = to_markdown(&artifact);
+
+        assert!(markdown.contains("## Tasks"));
+        assert!(markdown.contains("No tasks recorded."));
+        assert!(markdown.contains("## Walkthrough"));
+    }
+
+    #[test]
+    fn import_accepts_minimal_v4_artifact() {
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "src/lib.rs".to_owned(),
+            FileState {
+                fingerprint: "abc".to_owned(),
+                viewed: false,
+            },
+        );
+        let artifact: OwnedReviewArtifact = serde_json::from_str(
+            r#"{
+  "version": 4,
+  "base": "trunk()",
+  "revision": "@",
+  "files": [
+    { "path": "src/lib.rs", "viewed": true, "fingerprint": "abc" }
+  ],
+  "comments": []
+}"#,
+        )
+        .unwrap();
+
+        let summary = import_json_artifact_into_state(&mut state, &artifact);
+
+        assert_eq!(artifact.version, 4);
+        assert_eq!(summary.viewed_files_imported, 1);
+        assert!(state.files["src/lib.rs"].viewed);
+    }
+
+    #[test]
+    fn empty_state_exports_cleanly_with_empty_tasks_and_walkthroughs() {
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse("").unwrap(),
+            ReviewState::default(),
+        );
+
+        let json = render_artifact(&session, ArtifactFormat::Json).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert!(value["files"].as_array().unwrap().is_empty());
+        assert!(value["tasks"].as_array().unwrap().is_empty());
+        assert!(value["walkthroughs"].as_array().unwrap().is_empty());
+        assert!(value.get("session").is_none());
     }
 
     #[test]
