@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.5.0 - 2026-07-04
+
 ### Added
 
 - Durable review sessions now carry review tasks, walkthrough steps
