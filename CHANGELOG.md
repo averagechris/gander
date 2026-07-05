@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- Dogfood evaluation loop: `eval/` harness (fixture generator, scripted
+  evaluator scenarios, scoring rubric, archived baseline reports) and a
+  living findings/action-item tracker in `docs/dogfood.md`.
+
+### Fixed
+
+- CLI commands exit quietly on broken pipes (e.g. `gander hunks list |
+  head`) instead of printing an error and backtrace.
+- Comments added via `gander comments add` now carry stable line/range
+  anchors, so agent-profile exports include the documented
+  `comments[].anchor` and `excerpt` context. Anchor derivation is shared
+  core logic between the CLI and the TUI.
+- File-anchor flags are consistent across command groups: `--path` and
+  `--file` are both accepted everywhere a file anchor is taken; `--path`
+  is canonical.
 
 ## v0.5.0 - 2026-07-04
 
