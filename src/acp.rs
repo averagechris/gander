@@ -26,8 +26,9 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{
-        AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief, ChunkImportance,
-        ChunkPart, DraftState, FlagPriority, ReviewChunk,
+        AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief,
+        ChangeDiffContext, ChunkImportance, ChunkPart, ChunkValidationContext, DraftState,
+        FlagPriority, ReviewChunk, validate_review_chunks,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -45,6 +46,7 @@ pub struct AcpHandler {
     /// `review/change_diff`). Optional so tests and callers without jj
     /// access degrade to a clear per-method error.
     jj: Option<Box<dyn JjBackend + Send>>,
+    live_session: bool,
 }
 
 /// Standalone stdio server owning a session snapshot.
@@ -97,7 +99,12 @@ impl AcpHandler {
             overlay,
             overlay_path,
             jj: None,
+            live_session: false,
         })
+    }
+
+    pub fn mark_live_session(&mut self) {
+        self.live_session = true;
     }
 
     /// Attach a jj backend so agents can inspect the stack and per-change
@@ -177,6 +184,8 @@ impl AcpHandler {
                 "repo": session.repo.display().to_string(),
                 "base": session.target.base,
                 "revision": session.target.rev,
+                "active_target": session.target.to_string(),
+                "live_session": self.live_session,
                 "summary": session.summary_line(),
             })),
             "review/files" => Ok(json!(
@@ -375,6 +384,20 @@ impl AcpHandler {
                     .iter()
                     .map(parse_chunk)
                     .collect::<Result<Vec<_>, String>>()?;
+                let invalid = self.validate_chunks_for_session(session, &chunks)?;
+                if !invalid.is_empty() {
+                    let details = invalid
+                        .iter()
+                        .map(|part| {
+                            format!(
+                                "chunk '{}' part {} ({}): {}",
+                                part.chunk_title, part.part_index, part.path, part.reason
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!("invalid chunk part(s): {details}"));
+                }
                 self.overlay.chunks = chunks;
                 self.save_overlay()?;
                 Ok(json!({ "chunks": self.overlay.chunks.len() }))
@@ -439,6 +462,50 @@ impl AcpHandler {
         self.overlay
             .save(&self.overlay_path)
             .map_err(|error| error.to_string())
+    }
+
+    fn validate_chunks_for_session(
+        &self,
+        session: &ReviewSession,
+        chunks: &[ReviewChunk],
+    ) -> Result<Vec<crate::agent::InvalidChunkPart>, String> {
+        let session_files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let mut parsed_changes = Vec::new();
+        if chunks.iter().any(|chunk| chunk.change_id.is_some()) {
+            let jj = self.require_jj()?;
+            for change_id in chunks.iter().filter_map(|chunk| chunk.change_id.as_ref()) {
+                if parsed_changes
+                    .iter()
+                    .any(|(existing, _): &(String, crate::diff::DiffSet)| existing == change_id)
+                {
+                    continue;
+                }
+                let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+                if let Ok(raw) = jj.diff(&session.repo, &target)
+                    && let Ok(diff) = crate::diff::DiffSet::parse(&raw)
+                {
+                    parsed_changes.push((change_id.clone(), diff));
+                }
+            }
+        }
+        let change_diffs = parsed_changes
+            .iter()
+            .map(|(change_id, diff)| ChangeDiffContext {
+                change_id: change_id.clone(),
+                files: &diff.files,
+            })
+            .collect::<Vec<_>>();
+        Ok(validate_review_chunks(
+            chunks,
+            &ChunkValidationContext {
+                session_files: &session_files,
+                change_diffs,
+            },
+        ))
     }
 }
 
@@ -662,6 +729,7 @@ pub mod socket {
             Ok(Self {
                 handler: {
                     let mut handler = AcpHandler::new(overlay_path)?;
+                    handler.mark_live_session();
                     if let Some(jj) = jj {
                         handler.set_jj_backend(jj);
                     }
@@ -1050,7 +1118,8 @@ diff --git a/README.md b/README.md
 
     #[test]
     fn set_chunks_records_change_anchors() {
-        let (mut server, dir) = server();
+        let (server, dir) = server();
+        let mut server = server.with_jj(Box::new(MockJj));
 
         call(
             &mut server,
@@ -1069,6 +1138,36 @@ diff --git a/README.md b/README.md
         assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
         // Blank anchors normalize to None instead of a whitespace revset.
         assert_eq!(overlay.chunks[1].change_id, None);
+    }
+
+    #[test]
+    fn set_chunks_rejects_invalid_part_and_applies_nothing() {
+        let (mut server, dir) = server();
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [
+                { "title": "valid", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] }
+            ] }),
+        );
+        let request = json!({
+            "jsonrpc": "2.0", "id": 9,
+            "method": "review/set_chunks",
+            "params": { "chunks": [
+                { "title": "bad", "parts": [{ "path": "missing.rs", "start_line": 1, "end_line": 1 }] }
+            ] }
+        })
+        .to_string();
+        let response = server.handle_line(&request).unwrap();
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid chunk part")
+        );
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.chunks.len(), 1);
+        assert_eq!(overlay.chunks[0].title, "valid");
     }
 
     #[test]

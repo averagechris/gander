@@ -106,6 +106,15 @@ one of `example` (default), `output`, `diagram`, or `note`: exhibits that
 running the code, a small ASCII diagram. The human opens them from the zen
 focus or chapter card with `e` (scrollable, `h`/`l` cycles).
 
+### Chunk validation
+
+`review/set_chunks` validates every chunk part before replacing the overlay.
+Parts must reference a file in the anchored change diff (or the current session
+diff when `change_id` is omitted), and any supplied line range must intersect
+that file's diff line space. Unknown or unresolvable `change_id`s are invalid.
+If any part is invalid the entire request is rejected with a JSON-RPC error
+listing the invalid parts; no valid subset is applied.
+
 ## Two-way draft flow
 
 Draft comments start `pending`. The human accepts, edits, or discards them in

@@ -12,6 +12,8 @@ use std::{fs, path::Path};
 use color_eyre::eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::diff::{DiffLineKind, FileDiff};
+
 pub const AGENT_OVERLAY_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +177,243 @@ pub struct ChunkPart {
     pub start_line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkValidationContext<'a> {
+    pub session_files: &'a [FileDiff],
+    pub change_diffs: Vec<ChangeDiffContext<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChangeDiffContext<'a> {
+    pub change_id: String,
+    pub files: &'a [FileDiff],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidChunkPart {
+    pub chunk_id: String,
+    pub chunk_title: String,
+    pub part_index: usize,
+    pub path: String,
+    pub reason: String,
+}
+
+pub fn validate_review_chunks(
+    chunks: &[ReviewChunk],
+    context: &ChunkValidationContext<'_>,
+) -> Vec<InvalidChunkPart> {
+    let mut invalid = Vec::new();
+    for chunk in chunks {
+        let files = match &chunk.change_id {
+            Some(change_id) => match context
+                .change_diffs
+                .iter()
+                .find(|diff| diff.change_id == *change_id)
+            {
+                Some(diff) => diff.files,
+                None => {
+                    for (index, part) in chunk.parts.iter().enumerate() {
+                        invalid.push(invalid_part(
+                            chunk,
+                            index,
+                            part,
+                            format!("unknown or unresolvable change id: {change_id}"),
+                        ));
+                    }
+                    continue;
+                }
+            },
+            None => context.session_files,
+        };
+        for (index, part) in chunk.parts.iter().enumerate() {
+            let Some(file) = files.iter().find(|file| file.path == part.path) else {
+                let scope = chunk
+                    .change_id
+                    .as_ref()
+                    .map(|id| format!("change {id}'s diff"))
+                    .unwrap_or_else(|| "session diff".to_owned());
+                invalid.push(invalid_part(
+                    chunk,
+                    index,
+                    part,
+                    format!("file not present in {scope}: {}", part.path),
+                ));
+                continue;
+            };
+            if !part_range_intersects_file_diff(part, file) {
+                invalid.push(invalid_part(
+                    chunk,
+                    index,
+                    part,
+                    format!("line range outside diff line space for {}", part.path),
+                ));
+            }
+        }
+    }
+    invalid
+}
+
+pub fn remove_invalid_chunk_parts(
+    chunks: &[ReviewChunk],
+    invalid: &[InvalidChunkPart],
+) -> Vec<ReviewChunk> {
+    chunks
+        .iter()
+        .map(|chunk| {
+            let mut chunk = chunk.clone();
+            let chunk_id = chunk.id.clone();
+            chunk.parts = chunk
+                .parts
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    !invalid
+                        .iter()
+                        .any(|part| part.chunk_id == chunk_id && part.part_index == *index + 1)
+                })
+                .map(|(_, part)| part)
+                .collect();
+            chunk
+        })
+        .filter(|chunk| !chunk.parts.is_empty())
+        .collect()
+}
+
+fn invalid_part(
+    chunk: &ReviewChunk,
+    index: usize,
+    part: &ChunkPart,
+    reason: String,
+) -> InvalidChunkPart {
+    InvalidChunkPart {
+        chunk_id: chunk.id.clone(),
+        chunk_title: chunk.title.clone(),
+        part_index: index + 1,
+        path: part.path.clone(),
+        reason,
+    }
+}
+
+fn part_range_intersects_file_diff(part: &ChunkPart, file: &FileDiff) -> bool {
+    let start = part.start_line.unwrap_or(1);
+    let end = part.end_line.unwrap_or(start);
+    if start > end {
+        return false;
+    }
+    file.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| {
+        if line.kind == DiffLineKind::Meta {
+            return false;
+        }
+        [line.new_lineno, line.old_lineno]
+            .into_iter()
+            .flatten()
+            .any(|line_no| (start..=end).contains(&line_no))
+    })
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use crate::diff::DiffSet;
+
+    fn diff_files(raw: &str) -> Vec<FileDiff> {
+        DiffSet::parse(raw).unwrap().files
+    }
+
+    fn chunk(id: &str, change_id: Option<&str>, parts: Vec<ChunkPart>) -> ReviewChunk {
+        ReviewChunk {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            importance: ChunkImportance::Spotlight,
+            change_id: change_id.map(str::to_owned),
+            rationale: None,
+            explanation: None,
+            artifacts: Vec::new(),
+            parts,
+        }
+    }
+
+    fn part(path: &str, start: usize, end: usize) -> ChunkPart {
+        ChunkPart {
+            path: path.to_owned(),
+            start_line: Some(start),
+            end_line: Some(end),
+        }
+    }
+
+    #[test]
+    fn validates_valid_multi_part_chunk() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -10 +10 @@\n-old\n+new\n",
+        );
+        let chunks = vec![chunk(
+            "c",
+            None,
+            vec![part("a.rs", 1, 1), part("b.rs", 10, 10)],
+        )];
+        let invalid = validate_review_chunks(
+            &chunks,
+            &ChunkValidationContext {
+                session_files: &files,
+                change_diffs: Vec::new(),
+            },
+        );
+        assert!(invalid.is_empty());
+    }
+
+    #[test]
+    fn rejects_file_not_present() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let chunks = vec![chunk("c", None, vec![part("missing.rs", 1, 1)])];
+        let invalid = validate_review_chunks(
+            &chunks,
+            &ChunkValidationContext {
+                session_files: &files,
+                change_diffs: Vec::new(),
+            },
+        );
+        assert!(invalid[0].reason.contains("file not present"));
+    }
+
+    #[test]
+    fn rejects_line_range_outside_diff_line_space() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let chunks = vec![chunk("c", None, vec![part("a.rs", 50, 60)])];
+        let invalid = validate_review_chunks(
+            &chunks,
+            &ChunkValidationContext {
+                session_files: &files,
+                change_diffs: Vec::new(),
+            },
+        );
+        assert!(invalid[0].reason.contains("outside diff line space"));
+    }
+
+    #[test]
+    fn rejects_unknown_change_id() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let chunks = vec![chunk("c", Some("bad"), vec![part("a.rs", 1, 1)])];
+        let invalid = validate_review_chunks(
+            &chunks,
+            &ChunkValidationContext {
+                session_files: &files,
+                change_diffs: Vec::new(),
+            },
+        );
+        assert!(
+            invalid[0]
+                .reason
+                .contains("unknown or unresolvable change id")
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

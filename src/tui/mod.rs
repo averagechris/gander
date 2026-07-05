@@ -337,7 +337,7 @@ fn run_loop(
     #[cfg(unix)] mut acp_bridge: Option<&mut crate::acp::socket::AcpBridge>,
 ) -> Result<()> {
     if let Some(overlay_path) = agent_overlay_path {
-        maybe_reload_agent_overlay(session, overlay_path, tui_state, false);
+        maybe_reload_agent_overlay(session, overlay_path, tui_state, review_loader, false);
     }
     // Large-change nudge: on a big review with no agent structure yet,
     // point at the collaboration affordances instead of leaving the human
@@ -400,7 +400,7 @@ fn run_loop(
             // Idle ticks are the natural moment to pick up agent overlay
             // writes without competing with user input handling.
             if let Some(overlay_path) = agent_overlay_path {
-                maybe_reload_agent_overlay(session, overlay_path, tui_state, true);
+                maybe_reload_agent_overlay(session, overlay_path, tui_state, review_loader, true);
             }
             notice_agent_exit(tui_state);
             // Live refresh: pick up new/rewritten changes while nothing
@@ -560,6 +560,7 @@ fn maybe_reload_agent_overlay(
     session: &mut ReviewSession,
     overlay_path: &Path,
     tui_state: &mut TuiState,
+    review_loader: &ReviewLoader<'_>,
     notify: bool,
 ) {
     let mtime = std::fs::metadata(overlay_path)
@@ -571,11 +572,21 @@ fn maybe_reload_agent_overlay(
     tui_state.overlay_mtime = mtime;
     match crate::agent::AgentOverlay::load_or_default(overlay_path) {
         Ok(overlay) => {
+            let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
             session.apply_agent_overlay(&overlay);
             if notify {
+                let message = if let Some(first) = invalid.first() {
+                    format!(
+                        "agent overlay: {} invalid chunk part(s) ignored — {}",
+                        invalid.len(),
+                        first.reason
+                    )
+                } else {
+                    "agent suggestions updated".to_owned()
+                };
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: "agent suggestions updated".to_owned(),
+                    message,
                 });
             }
         }
@@ -586,6 +597,58 @@ fn maybe_reload_agent_overlay(
             });
         }
     }
+}
+
+fn validated_overlay_for_tui(
+    session: &ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    mut overlay: crate::agent::AgentOverlay,
+) -> (
+    crate::agent::AgentOverlay,
+    Vec<crate::agent::InvalidChunkPart>,
+) {
+    let session_files = session
+        .files
+        .iter()
+        .map(|file| file.diff.clone())
+        .collect::<Vec<_>>();
+    let mut parsed_changes = Vec::new();
+    for change_id in overlay
+        .chunks
+        .iter()
+        .filter_map(|chunk| chunk.change_id.as_ref())
+    {
+        if parsed_changes
+            .iter()
+            .any(|(existing, _): &(String, crate::diff::DiffSet)| existing == change_id)
+        {
+            continue;
+        }
+        let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+        if let Ok(raw) = review_loader.jj.diff(&session.repo, &target)
+            && let Ok(diff) = DiffSet::parse(&raw)
+        {
+            parsed_changes.push((change_id.clone(), diff));
+        }
+    }
+    let change_diffs = parsed_changes
+        .iter()
+        .map(|(change_id, diff)| crate::agent::ChangeDiffContext {
+            change_id: change_id.clone(),
+            files: &diff.files,
+        })
+        .collect::<Vec<_>>();
+    let invalid = crate::agent::validate_review_chunks(
+        &overlay.chunks,
+        &crate::agent::ChunkValidationContext {
+            session_files: &session_files,
+            change_diffs,
+        },
+    );
+    if !invalid.is_empty() {
+        overlay.chunks = crate::agent::remove_invalid_chunk_parts(&overlay.chunks, &invalid);
+    }
+    (overlay, invalid)
 }
 
 /// How often the idle loop polls jj for new work in the reviewed range.
@@ -2950,7 +3013,6 @@ mod tests {
             });
         let copied = RefCell::new(String::new());
         let mut tui_state = TuiState::default();
-
         yank_handoff_with(&session, &mut tui_state, |body| {
             copied.replace(body.to_owned());
             Ok(ClipboardMethod::Osc52)
@@ -3550,9 +3612,15 @@ diff --git a/b.rs b/b.rs
 "#,
         );
         let mut tui_state = TuiState::default();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
 
         // No overlay on disk yet: nothing happens.
-        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
         assert!(session.agent_ordering.is_empty());
         assert!(tui_state.notice.is_none());
 
@@ -3563,7 +3631,7 @@ diff --git a/b.rs b/b.rs
         .save(&overlay_path)
         .unwrap();
 
-        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
         assert_eq!(session.agent_ordering, ["b.rs"]);
         assert_eq!(
             tui_state.notice.as_ref().unwrap().message,
@@ -3572,8 +3640,69 @@ diff --git a/b.rs b/b.rs
 
         // Unchanged mtime: no re-notification.
         tui_state.notice = None;
-        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, true);
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
         assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn overlay_polling_ignores_invalid_chunk_parts_with_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        let mut session = snapshot_session(
+            r#"diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "mixed".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
+                rationale: None,
+                explanation: None,
+                artifacts: Vec::new(),
+                parts: vec![
+                    crate::agent::ChunkPart {
+                        path: "a.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    },
+                    crate::agent::ChunkPart {
+                        path: "missing.rs".to_owned(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    },
+                ],
+            }],
+            ..Default::default()
+        }
+        .save(&overlay_path)
+        .unwrap();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+
+        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
+
+        assert_eq!(session.review_chunks.len(), 1);
+        assert_eq!(session.review_chunks[0].parts.len(), 1);
+        assert_eq!(session.review_chunks[0].parts[0].path, "a.rs");
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("1 invalid chunk part")
+        );
     }
 
     fn draft_session_with_overlay(dir: &std::path::Path) -> (ReviewSession, PathBuf) {

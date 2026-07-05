@@ -611,6 +611,12 @@ fn run() -> color_eyre::Result<()> {
                 &workspace_paths.registry_dir,
                 &workspace_paths.workspace_root,
             ) {
+                if instance.base != session.target.base || instance.rev != session.target.rev {
+                    eprintln!(
+                        "warning: bridging to live TUI session reviewing {}..{}; requested {} ignored",
+                        instance.base, instance.rev, session.target
+                    );
+                }
                 return crate::acp::socket::bridge_stdio(&instance.socket_path);
             }
             let overlay_path = workspace_paths.overlay_file();

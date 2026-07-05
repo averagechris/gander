@@ -668,6 +668,16 @@ impl GanderMcp {
         use std::io::{BufRead, BufReader, Write};
 
         let instance = registry::find_live_for_workspace(&self.registry_dir, &self.workspace_root)?;
+        if instance.base != self.target.base.as_deref().unwrap_or_default()
+            || instance.rev != self.target.revision.as_deref().unwrap_or_default()
+        {
+            eprintln!(
+                "warning: bridging to live TUI session reviewing {}..{}; requested {} ignored",
+                instance.base,
+                instance.rev,
+                self.target.revset.as_deref().unwrap_or("requested target")
+            );
+        }
         let call = || -> std::io::Result<Value> {
             let mut stream = std::os::unix::net::UnixStream::connect(&instance.socket_path)?;
             stream.write_all(request.as_bytes())?;
@@ -909,7 +919,7 @@ mod tests {
                 chunks: vec![ChunkParams {
                     title: "core change".to_owned(),
                     importance: Some("spotlight".to_owned()),
-                    change_id: Some("abc".to_owned()),
+                    change_id: None,
                     rationale: None,
                     explanation: Some("Explains the core change.".to_owned()),
                     artifacts: None,
@@ -936,7 +946,7 @@ mod tests {
             crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
         assert_eq!(overlay.drafts.len(), 1);
         assert_eq!(overlay.chunks[0].title, "core change");
-        assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
+        assert_eq!(overlay.chunks[0].change_id, None);
         assert_eq!(
             overlay.chunks[0].explanation.as_deref(),
             Some("Explains the core change.")
