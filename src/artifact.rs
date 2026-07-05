@@ -8,7 +8,10 @@ use crate::{
     anchor::CommentAnchor,
     app::{ReviewFile, ReviewSession},
     diff::{DiffLineKind, Hunk},
-    state::{ActionIntent, Comment, ReviewState, ReviewTarget, ReviewTaskStatus},
+    state::{
+        ActionIntent, Comment, CommentKind, CommentState, ReviewState, ReviewTarget,
+        ReviewTaskStatus,
+    },
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -25,6 +28,11 @@ pub enum ArtifactProfile {
     #[default]
     Human,
     Agent,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArtifactBuildOptions {
+    pub only_open: bool,
 }
 
 /// Diff context lines included on each side of a comment excerpt.
@@ -187,6 +195,14 @@ impl<'a> From<&'a ReviewSession> for ReviewArtifact<'a> {
 
 impl<'a> ReviewArtifact<'a> {
     pub fn build(session: &'a ReviewSession, profile: ArtifactProfile) -> Self {
+        Self::build_with_options(session, profile, ArtifactBuildOptions::default())
+    }
+
+    pub fn build_with_options(
+        session: &'a ReviewSession,
+        profile: ArtifactProfile,
+        options: ArtifactBuildOptions,
+    ) -> Self {
         let agent = profile == ArtifactProfile::Agent;
         Self {
             version: 5,
@@ -218,6 +234,7 @@ impl<'a> ReviewArtifact<'a> {
             comments: session
                 .comments
                 .iter()
+                .filter(|comment| !options.only_open || comment.state != CommentState::Resolved)
                 .map(|comment| CommentArtifact {
                     comment,
                     excerpt: agent.then(|| comment_excerpt(session, comment)).flatten(),
@@ -226,6 +243,7 @@ impl<'a> ReviewArtifact<'a> {
             tasks: active_durable_session(session)
                 .into_iter()
                 .flat_map(|durable| durable.tasks.iter())
+                .filter(|task| !options.only_open || task.status == ReviewTaskStatus::Open)
                 .map(|task| TaskArtifact {
                     id: &task.id,
                     title: &task.title,
@@ -406,7 +424,16 @@ pub fn render_artifact_with_profile(
     format: ArtifactFormat,
     profile: ArtifactProfile,
 ) -> Result<String> {
-    let artifact = ReviewArtifact::build(session, profile);
+    render_artifact_with_options(session, format, profile, ArtifactBuildOptions::default())
+}
+
+pub fn render_artifact_with_options(
+    session: &ReviewSession,
+    format: ArtifactFormat,
+    profile: ArtifactProfile,
+    options: ArtifactBuildOptions,
+) -> Result<String> {
+    let artifact = ReviewArtifact::build_with_options(session, profile, options);
     match format {
         ArtifactFormat::Json => Ok(serde_json::to_string_pretty(&artifact)?),
         ArtifactFormat::Markdown => Ok(to_markdown(&artifact)),
@@ -428,6 +455,13 @@ pub fn write_artifact_to(
 }
 
 fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
+    if artifact.profile == Some("agent") {
+        return to_agent_markdown(artifact);
+    }
+    to_human_markdown(artifact)
+}
+
+fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
     out.push_str("# jj change review\n\n");
     out.push_str(&format!("- Revision: `{}`\n", artifact.revision));
@@ -517,6 +551,202 @@ fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
     }
 
     out
+}
+
+fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
+    let mut out = String::new();
+    let open_tasks = artifact
+        .tasks
+        .iter()
+        .filter(|task| task.status == ReviewTaskStatus::Open)
+        .count();
+    let unresolved_comments = artifact
+        .comments
+        .iter()
+        .filter(|comment| comment.comment.state != CommentState::Resolved)
+        .count();
+    out.push_str("# Human review handoff for a coding agent\n\n");
+    out.push_str("You are a coding agent consuming a human Gander review. Prioritize the action items before using full hunks as reference.\n\n");
+    out.push_str(&format!("- Repository: `{}`\n", artifact.repo.display()));
+    out.push_str(&format!(
+        "- Target: `{}` → `{}`\n",
+        artifact.base, artifact.revision
+    ));
+    if let Some(session) = &artifact.session
+        && let Some(title) = session.title
+    {
+        out.push_str(&format!("- Session: {}\n", title));
+    }
+    out.push_str(&format!(
+        "- Action counts: {open_tasks} open task(s), {unresolved_comments} unresolved comment(s)\n\n"
+    ));
+
+    out.push_str("## Action items\n\n");
+    let mut wrote = false;
+    for task in artifact
+        .tasks
+        .iter()
+        .filter(|task| task.status == ReviewTaskStatus::Open)
+    {
+        wrote = true;
+        out.push_str(&format!(
+            "- [task][{}] {}",
+            action_label(task.action),
+            task.title
+        ));
+        if let Some(target) = &task.target {
+            write_target_suffix(&mut out, target);
+        }
+        if !task.linked_comment_ids.is_empty() {
+            out.push_str(&format!(
+                "; linked comments: {}",
+                task.linked_comment_ids.join(", ")
+            ));
+        }
+        out.push('\n');
+    }
+    for comment in artifact
+        .comments
+        .iter()
+        .filter(|comment| comment.comment.state != CommentState::Resolved)
+        .filter(|comment| {
+            comment.comment.kind == Some(CommentKind::Issue)
+                || comment.comment.action == Some(ActionIntent::Fix)
+        })
+    {
+        wrote = true;
+        out.push_str(&format!(
+            "- [comment][{}][{}] ",
+            kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
+            action_label(comment.comment.action.unwrap_or(ActionIntent::None))
+        ));
+        write_comment_location_inline(&mut out, comment.comment);
+        out.push_str(" — ");
+        out.push_str(comment.comment.body.trim());
+        out.push('\n');
+        write_excerpt(&mut out, comment.excerpt.as_deref());
+    }
+    if !wrote {
+        out.push_str("No open tasks or unresolved issue/fix comments.\n");
+    }
+
+    out.push_str("\n## Walkthrough\n\n");
+    write_walkthroughs(&mut out, artifact);
+
+    out.push_str("\n## Other comments\n\n");
+    let mut other = false;
+    for comment in &artifact.comments {
+        if comment.comment.state != CommentState::Resolved
+            && (comment.comment.kind == Some(CommentKind::Issue)
+                || comment.comment.action == Some(ActionIntent::Fix))
+        {
+            continue;
+        }
+        other = true;
+        write_comment_heading(&mut out, comment.comment);
+        out.push_str(&format!(
+            "Status: {}; kind: {}; action: {}\n\n",
+            comment.comment.state.label(),
+            kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
+            action_label(comment.comment.action.unwrap_or(ActionIntent::None))
+        ));
+        out.push_str(comment.comment.body.trim());
+        out.push_str("\n\n");
+        write_excerpt(&mut out, comment.excerpt.as_deref());
+    }
+    if !other {
+        out.push_str("No other comments recorded.\n");
+    }
+
+    out.push_str("\n## Reference: full hunks\n\n");
+    for file in &artifact.files {
+        if let Some(hunks) = &file.hunks {
+            out.push_str(&format!("### `{}`\n\n", file.path));
+            for hunk in hunks {
+                out.push_str(&format!("#### {}\n\n```diff\n", hunk.header));
+                for line in &hunk.lines {
+                    out.push_str(match line.kind {
+                        "added" => "+",
+                        "removed" => "-",
+                        _ => " ",
+                    });
+                    out.push_str(line.text);
+                    out.push('\n');
+                }
+                out.push_str("```\n\n");
+            }
+        }
+    }
+    out
+}
+
+fn write_walkthroughs(out: &mut String, artifact: &ReviewArtifact<'_>) {
+    if artifact.walkthroughs.is_empty() {
+        out.push_str("No walkthrough steps recorded.\n");
+        return;
+    }
+    for walkthrough in &artifact.walkthroughs {
+        if let Some(title) = walkthrough.title {
+            out.push_str(&format!("### {}\n\n", title));
+        }
+        for (index, step) in walkthrough.steps.iter().enumerate() {
+            out.push_str(&format!("{}. {}", index + 1, step.title.unwrap_or(step.id)));
+            write_target_suffix(out, &step.target);
+            out.push_str("\n\n");
+            if let Some(why) = step.why {
+                out.push_str(&format!("Why: {}\n\n", why.trim()));
+            }
+            if let Some(body) = step.body {
+                out.push_str(body.trim());
+                out.push_str("\n\n");
+            }
+        }
+    }
+}
+
+fn write_excerpt(out: &mut String, excerpt: Option<&[ExcerptLine<'_>]>) {
+    let Some(lines) = excerpt.filter(|lines| !lines.is_empty()) else {
+        return;
+    };
+    out.push_str("\n```diff\n");
+    for line in lines {
+        out.push_str(match line.kind {
+            "added" => "+",
+            "removed" => "-",
+            _ => " ",
+        });
+        if let Some(line_no) = line.new_line.or(line.old_line) {
+            out.push_str(&format!("{:>4} ", line_no));
+        }
+        out.push_str(line.text);
+        out.push('\n');
+    }
+    out.push_str("```\n");
+}
+
+fn write_comment_location_inline(out: &mut String, comment: &crate::state::Comment) {
+    match comment.line {
+        Some(line) => out.push_str(&format!("`{}`:{line}", comment.path)),
+        None => out.push_str(&format!("`{}`", comment.path)),
+    }
+}
+
+fn kind_label(kind: CommentKind) -> &'static str {
+    match kind {
+        CommentKind::Note => "note",
+        CommentKind::Issue => "issue",
+        CommentKind::Question => "question",
+        CommentKind::Praise => "praise",
+    }
+}
+fn action_label(action: ActionIntent) -> &'static str {
+    match action {
+        ActionIntent::None => "none",
+        ActionIntent::Fix => "fix",
+        ActionIntent::Explain => "explain",
+        ActionIntent::Test => "test",
+        ActionIntent::FollowUp => "follow-up",
+    }
 }
 
 fn write_target_suffix(out: &mut String, target: &TargetArtifact<'_>) {
@@ -790,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_version_is_4() {
+    fn artifact_version_is_5() {
         let diff = DiffSet::parse(
             r#"diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -812,6 +1042,90 @@ mod tests {
 
         assert_eq!(artifact.version, 5);
         assert_eq!(artifact.profile, None);
+    }
+
+    #[test]
+    fn agent_markdown_orders_action_items_before_reference_hunks_and_mentions_target() {
+        let mut session = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::new("main", "@"),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.add_comment("Please fix this".into());
+        session.comments[0].kind = Some(CommentKind::Issue);
+        session.comments[0].action = Some(ActionIntent::Fix);
+
+        let markdown = render_artifact_with_profile(
+            &session,
+            ArtifactFormat::Markdown,
+            ArtifactProfile::Agent,
+        )
+        .unwrap();
+
+        assert!(markdown.contains("`main` → `@`"));
+        assert!(markdown.contains("## Action items"));
+        assert!(markdown.contains("[comment][issue][fix]"));
+        assert!(
+            markdown.find("## Action items").unwrap()
+                < markdown.find("## Reference: full hunks").unwrap()
+        );
+    }
+
+    #[test]
+    fn only_open_excludes_resolved_comments_and_done_tasks() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            tasks: vec![
+                crate::state::ReviewTask {
+                    id: "open-task".to_owned(),
+                    title: "Keep me".to_owned(),
+                    status: ReviewTaskStatus::Open,
+                    ..crate::state::ReviewTask::default()
+                },
+                crate::state::ReviewTask {
+                    id: "done-task".to_owned(),
+                    title: "Drop me".to_owned(),
+                    status: ReviewTaskStatus::Done,
+                    ..crate::state::ReviewTask::default()
+                },
+            ],
+            ..crate::state::ReviewSession::default()
+        });
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+        session.add_comment("Keep comment".into());
+        session.add_comment("Drop comment".into());
+        session.comments[1].state = CommentState::Resolved;
+
+        let json = render_artifact_with_options(
+            &session,
+            ArtifactFormat::Json,
+            ArtifactProfile::Agent,
+            ArtifactBuildOptions { only_open: true },
+        )
+        .unwrap();
+
+        assert!(json.contains("Keep comment"));
+        assert!(!json.contains("Drop comment"));
+        assert!(json.contains("open-task"));
+        assert!(!json.contains("done-task"));
     }
 
     #[test]

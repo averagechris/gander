@@ -3,6 +3,7 @@ mod agent;
 mod anchor;
 mod app;
 mod artifact;
+mod clipboard;
 mod config;
 mod diff;
 mod file_tree;
@@ -29,9 +30,11 @@ use crate::{
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
-        ArtifactFormat, ArtifactProfile, OwnedReviewArtifact, import_json_artifact_into_state,
-        write_artifact, write_artifact_to,
+        ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, OwnedReviewArtifact,
+        import_json_artifact_into_state, render_artifact_with_options, write_artifact,
+        write_artifact_to,
     },
+    clipboard::copy_to_clipboard,
     config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
@@ -113,6 +116,19 @@ enum Command {
         /// Artifact profile; agent adds raw hunks and comment excerpts.
         #[arg(short, long, value_enum)]
         profile: Option<OutputProfile>,
+    },
+    /// Print or copy a prompt-style handoff for a coding agent.
+    Handoff {
+        #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
+        format: HandoffFormat,
+        /// Include only unresolved comments and open tasks.
+        #[arg(long)]
+        only_open: bool,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Copy the rendered handoff to the clipboard instead of printing it.
+        #[arg(long)]
+        copy: bool,
     },
     /// Import comments/viewed state from a JSON review artifact.
     Import {
@@ -313,6 +329,12 @@ enum OutputFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum HandoffFormat {
+    Json,
+    Markdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum OutputProfile {
     Human,
     Agent,
@@ -507,6 +529,43 @@ fn run() -> color_eyre::Result<()> {
                         let stdout = std::io::stdout();
                         write_artifact_to(&session, format, profile, stdout.lock())?;
                     }
+                }
+            }
+        }
+        Command::Handoff {
+            format,
+            only_open,
+            output,
+            copy,
+        } => {
+            let format = match format {
+                HandoffFormat::Json => ArtifactFormat::Json,
+                HandoffFormat::Markdown => ArtifactFormat::Markdown,
+            };
+            let body = render_artifact_with_options(
+                &session,
+                format,
+                ArtifactProfile::Agent,
+                ArtifactBuildOptions { only_open },
+            )?;
+            if let Some(path) = output {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, &body)
+                    .with_context(|| format!("failed to write handoff {}", path.display()))?;
+                eprintln!("Wrote handoff to {}", path.display());
+                if copy {
+                    let method = copy_to_clipboard(&body)?;
+                    eprintln!("Copied handoff to clipboard via {method}");
+                }
+            } else if copy {
+                let method = copy_to_clipboard(&body)?;
+                eprintln!("Copied handoff to clipboard via {method}");
+            } else {
+                print!("{body}");
+                if !body.ends_with('\n') {
+                    println!();
                 }
             }
         }
@@ -1368,6 +1427,36 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn handoff_command_parses_format_only_open_output_and_copy() {
+        let cli = Cli::try_parse_from([
+            "gander",
+            "handoff",
+            "--format",
+            "json",
+            "--only-open",
+            "--output",
+            "/tmp/handoff.json",
+            "--copy",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            Command::Handoff {
+                format,
+                only_open,
+                output,
+                copy,
+            } => {
+                assert_eq!(format, HandoffFormat::Json);
+                assert!(only_open);
+                assert_eq!(output, Some(PathBuf::from("/tmp/handoff.json")));
+                assert!(copy);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

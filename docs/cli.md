@@ -124,6 +124,7 @@ canonical form in docs and JSON remains `--path`.
 ## Export/import and state utilities
 
 ```sh
+gander handoff [--format markdown|json] [--only-open] [--output <path>] [--copy]
 gander export [json|markdown|html] [--profile human|agent] [--output <path>]
 gander import <json-artifact>
 gander mark-viewed
@@ -131,6 +132,13 @@ gander mark-generated-viewed
 gander paths
 gander summary
 ```
+
+`handoff` is the one-shot agent handoff. It always uses the agent artifact
+profile and defaults to prompt-style Markdown on stdout: action items first,
+walkthrough next, other comments, then full hunks as reference. `--only-open`
+filters the core artifact to unresolved comments and open tasks; `--output`
+writes the rendered handoff without stdout body output; `--copy` copies it to
+the clipboard (pbcopy, wl-copy, xclip, or OSC52 via `/dev/tty`).
 
 `export html` writes a self-contained static review page. JSON and Markdown are
 the existing artifact formats; `--profile agent` adds raw excerpts for tools.

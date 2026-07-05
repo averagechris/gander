@@ -473,6 +473,10 @@ review chunks, and draft comments. A running TUI polls the overlay and
 surfaces suggestions live; draft dispositions (accept/edit/discard) are
 written back so agents observe the outcome.
 
+For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
+It prints the agent profile with action items first, then walkthrough context,
+comments, and full hunks as reference.
+
 While the TUI is running it also serves the same protocol on a Unix socket
 (in the workspace runtime dir; see `gander paths`) backed by the **live**
 session — and `gander acp`
