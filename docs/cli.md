@@ -107,7 +107,7 @@ Tasks are review-state todos for humans or agents. Example `tasks list`:
 ## Walkthroughs
 
 ```sh
-gander walkthrough add-step --title <title> [--file <path>] [--line <n>] \
+gander walkthrough add-step --title <title> [--path <path>] [--line <n>] \
   [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]
 gander walkthrough remove-step <id>
 gander walkthrough move-step <id> --to <zero-based-index>
@@ -117,6 +117,9 @@ gander walkthrough export
 
 Walkthrough steps have a title, optional why/body, and an optional stable target.
 `show` emits JSON; `export` emits Markdown.
+
+File-anchor commands accept both `--path` and `--file` for compatibility. The
+canonical form in docs and JSON remains `--path`.
 
 ## Export/import and state utilities
 

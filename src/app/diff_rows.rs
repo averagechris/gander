@@ -4,7 +4,7 @@
 use std::{collections::BTreeMap, ops::Range, rc::Rc};
 
 use crate::{
-    anchor::{CommentAnchor, DiffSide, fingerprint_line},
+    anchor::{CommentAnchor, line_anchor_for_diff_row},
     diff::{DiffLineKind, Hunk},
     syntax::{SymbolSpan, SyntaxSpan},
 };
@@ -349,45 +349,7 @@ impl ReviewSession {
         hunk_index: usize,
         line_index: usize,
     ) -> Option<CommentAnchor> {
-        let hunk = file.diff.hunks.get(hunk_index)?;
-        let line = hunk.lines.get(line_index)?;
-        let (side, line_number) = match line.kind {
-            DiffLineKind::Added => (DiffSide::New, line.new_lineno?),
-            DiffLineKind::Removed => (DiffSide::Old, line.old_lineno?),
-            DiffLineKind::Context => (DiffSide::New, line.new_lineno?),
-            DiffLineKind::Meta => return None,
-        };
-        Some(CommentAnchor::Line {
-            path: file.path.clone(),
-            old_path: file.old_path.clone(),
-            side,
-            line: line_number,
-            old_line: line.old_lineno,
-            new_line: line.new_lineno,
-            hunk_header: hunk.header.clone(),
-            hunk_old_start: hunk.old_start,
-            hunk_old_len: hunk.old_len,
-            hunk_new_start: hunk.new_start,
-            hunk_new_len: hunk.new_len,
-            hunk_index,
-            line_index,
-            line_kind: match line.kind {
-                DiffLineKind::Context => "context",
-                DiffLineKind::Added => "added",
-                DiffLineKind::Removed => "removed",
-                DiffLineKind::Meta => "meta",
-            }
-            .to_owned(),
-            line_text: line.text.clone(),
-            line_fingerprint: fingerprint_line(
-                &file.path,
-                side,
-                line_number,
-                &line.text,
-                &file.fingerprint,
-            ),
-            diff_fingerprint: file.fingerprint.clone(),
-        })
+        line_anchor_for_diff_row(file, hunk_index, line_index)
     }
 }
 

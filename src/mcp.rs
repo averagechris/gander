@@ -466,6 +466,8 @@ impl GanderMcp {
                     path: params.path,
                     line: params.line,
                     end_line: params.end_line,
+                    // TODO(M14): derive anchors once MCP loads full diff context; see docs/dogfood.md W3.
+                    anchor: None,
                     body: params.body,
                     kind: params.kind,
                     action: params.action,

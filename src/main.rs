@@ -19,13 +19,14 @@ mod tui;
 mod walkthrough;
 mod web_export;
 
-use std::path::PathBuf;
+use std::{io::Write as _, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{Context, eyre};
 use serde::Serialize;
 
 use crate::{
+    anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
         ArtifactFormat, ArtifactProfile, OwnedReviewArtifact, import_json_artifact_into_state,
@@ -189,7 +190,7 @@ enum CommentsCommand {
     /// List comments as JSON.
     List,
     Add {
-        #[arg(long)]
+        #[arg(long, alias = "file")]
         path: String,
         #[arg(long)]
         line: Option<usize>,
@@ -237,7 +238,7 @@ enum TasksCommand {
         action: Option<ActionIntentArg>,
         #[arg(long = "comment")]
         comment: Option<String>,
-        #[arg(long)]
+        #[arg(long, alias = "file")]
         path: Option<String>,
         #[arg(long)]
         line: Option<usize>,
@@ -259,7 +260,7 @@ enum WalkthroughCommand {
     AddStep {
         #[arg(long)]
         title: String,
-        #[arg(long = "file")]
+        #[arg(long = "path", alias = "file")]
         file: Option<String>,
         #[arg(long)]
         line: Option<usize>,
@@ -346,6 +347,16 @@ enum TuiArtifactDestination {
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+    if let Err(error) = run() {
+        if is_broken_pipe_report(&error) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn run() -> color_eyre::Result<()> {
     let cli = Cli::parse();
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
@@ -615,6 +626,11 @@ fn main() -> color_eyre::Result<()> {
                 action,
             } => {
                 ensure_diff_file(&session, &path)?;
+                let anchor = session
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .and_then(|file| comment_anchor_for_file_lines(file, line, end_line));
                 let spec = session_target_spec(&repo, &session.target);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
@@ -625,6 +641,7 @@ fn main() -> color_eyre::Result<()> {
                         path,
                         line,
                         end_line,
+                        anchor,
                         body,
                         kind: kind.map(Into::into),
                         action: action.map(Into::into),
@@ -788,9 +805,22 @@ fn main() -> color_eyre::Result<()> {
 
 fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {
     let stdout = std::io::stdout();
-    serde_json::to_writer_pretty(stdout.lock(), value)?;
-    println!();
+    let mut stdout = stdout.lock();
+    serde_json::to_writer_pretty(&mut stdout, value)?;
+    stdout.write_all(b"\n")?;
     Ok(())
+}
+
+fn is_broken_pipe_report(error: &color_eyre::Report) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+            || cause
+                .downcast_ref::<serde_json::Error>()
+                .and_then(serde_json::Error::io_error_kind)
+                .is_some_and(|kind| kind == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn session_target_spec(repo: &std::path::Path, target: &ReviewTarget) -> SessionTargetSpec {
@@ -1298,6 +1328,177 @@ mod tests {
         assert_eq!(request.format, OutputFormat::Json);
         assert_eq!(request.profile, OutputProfile::Agent);
         assert_eq!(request.destination, TuiArtifactDestination::Stdout);
+    }
+
+    #[test]
+    fn file_anchor_flags_accept_path_and_file_aliases() {
+        assert!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "add",
+                "--file",
+                "src/lib.rs",
+                "--body",
+                "note"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gander",
+                "tasks",
+                "add",
+                "--title",
+                "fix",
+                "--file",
+                "src/lib.rs"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gander",
+                "walkthrough",
+                "add-step",
+                "--title",
+                "read",
+                "--path",
+                "src/lib.rs",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn broken_pipe_reports_are_quiet_success() {
+        let error = std::io::Error::from(std::io::ErrorKind::BrokenPipe).into();
+
+        assert!(is_broken_pipe_report(&error));
+    }
+
+    #[test]
+    fn cli_comment_anchor_exports_agent_excerpt() {
+        let mut session = sample_session();
+        let file = session
+            .files
+            .iter()
+            .find(|file| file.path == "src/lib.rs")
+            .unwrap();
+        let anchor = comment_anchor_for_file_lines(file, Some(3), None);
+        let spec = session_target_spec(&session.repo, &session.target);
+        let mut state = ReviewState::default();
+        let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+        let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+        review::add_comment(
+            &mut state.sessions[idx],
+            &mut state.comments,
+            review::NewComment {
+                path: "src/lib.rs".to_owned(),
+                line: Some(3),
+                end_line: None,
+                anchor,
+                body: "explain this".to_owned(),
+                kind: None,
+                action: None,
+            },
+        );
+        session.comments = state.comments;
+
+        let json = crate::artifact::render_artifact_with_profile(
+            &session,
+            crate::artifact::ArtifactFormat::Json,
+            crate::artifact::ArtifactProfile::Agent,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["comments"][0]["anchor"]["type"], "line");
+        assert!(
+            !value["comments"][0]["excerpt"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cli_comment_anchor_derivation_falls_back_to_removed_line() {
+        let session = ReviewSession::new(
+            PathBuf::from("/repo"),
+            ReviewTarget::new("main".to_owned(), "@".to_owned()),
+            DiffSet::parse(
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1 @@\n keep\n-remove",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let file = session
+            .files
+            .iter()
+            .find(|file| file.path == "src/lib.rs")
+            .unwrap();
+
+        let anchor = comment_anchor_for_file_lines(file, Some(2), None).unwrap();
+
+        assert_eq!(anchor.line(), Some(2));
+        assert!(matches!(
+            anchor,
+            crate::anchor::CommentAnchor::Line {
+                side: crate::anchor::DiffSide::Old,
+                line_kind,
+                ..
+            } if line_kind == "removed"
+        ));
+    }
+
+    #[test]
+    fn cli_range_comment_anchor_exports_agent_excerpt() {
+        let mut session = sample_session();
+        let file = session
+            .files
+            .iter()
+            .find(|file| file.path == "src/lib.rs")
+            .unwrap();
+        let anchor = comment_anchor_for_file_lines(file, Some(3), Some(4));
+        assert!(matches!(
+            anchor,
+            Some(crate::anchor::CommentAnchor::Range { .. })
+        ));
+        let spec = session_target_spec(&session.repo, &session.target);
+        let mut state = ReviewState::default();
+        let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+        let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+        review::add_comment(
+            &mut state.sessions[idx],
+            &mut state.comments,
+            review::NewComment {
+                path: "src/lib.rs".to_owned(),
+                line: Some(3),
+                end_line: Some(4),
+                anchor,
+                body: "explain this range".to_owned(),
+                kind: None,
+                action: None,
+            },
+        );
+        session.comments = state.comments;
+
+        let json = crate::artifact::render_artifact_with_profile(
+            &session,
+            crate::artifact::ArtifactFormat::Json,
+            crate::artifact::ArtifactProfile::Agent,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["comments"][0]["anchor"]["type"], "range");
+        assert!(
+            !value["comments"][0]["excerpt"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn sample_session() -> ReviewSession {
