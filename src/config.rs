@@ -184,6 +184,7 @@ pub struct KeybindingsConfig {
     pub quit: Vec<String>,
     pub help: Vec<String>,
     pub summon_agent: Vec<String>,
+    pub yank_handoff: Vec<String>,
     pub move_down: Vec<String>,
     pub move_up: Vec<String>,
     pub toggle_focus: Vec<String>,
@@ -360,6 +361,7 @@ struct KeybindingsConfigPatch {
     quit: Option<Vec<String>>,
     help: Option<Vec<String>>,
     summon_agent: Option<Vec<String>>,
+    yank_handoff: Option<Vec<String>>,
     move_down: Option<Vec<String>>,
     move_up: Option<Vec<String>>,
     toggle_focus: Option<Vec<String>>,
@@ -460,6 +462,7 @@ impl Default for KeybindingsConfig {
             quit: keys(["q"]),
             help: keys(["?"]),
             summon_agent: keys(["@"]),
+            yank_handoff: keys(["ctrl-y"]),
             move_down: keys(["j", "down"]),
             move_up: keys(["k", "up"]),
             toggle_focus: keys(["tab"]),
@@ -694,6 +697,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.quit, patch.quit);
         apply_optional(&mut self.help, patch.help);
         apply_optional(&mut self.summon_agent, patch.summon_agent);
+        apply_optional(&mut self.yank_handoff, patch.yank_handoff);
         apply_optional(&mut self.move_down, patch.move_down);
         apply_optional(&mut self.move_up, patch.move_up);
         apply_optional(&mut self.toggle_focus, patch.toggle_focus);

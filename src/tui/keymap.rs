@@ -29,6 +29,7 @@ pub(super) enum Action {
     Quit,
     Help,
     SummonAgent,
+    YankHandoff,
     MoveDown,
     MoveUp,
     ToggleFocus,
@@ -101,6 +102,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::Quit, &config.quit)?;
         add_bindings(&mut bindings, Action::Help, &config.help)?;
         add_bindings(&mut bindings, Action::SummonAgent, &config.summon_agent)?;
+        add_bindings(&mut bindings, Action::YankHandoff, &config.yank_handoff)?;
         add_bindings(&mut bindings, Action::MoveDown, &config.move_down)?;
         add_bindings(&mut bindings, Action::MoveUp, &config.move_up)?;
         add_bindings(&mut bindings, Action::ToggleFocus, &config.toggle_focus)?;
@@ -489,9 +491,14 @@ mod tests {
             keymap.action_for(&KeyEvent::from(KeyCode::Char('?'))),
             Some(Action::Help)
         );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+            Some(Action::YankHandoff)
+        );
         assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
         assert_eq!(keymap.hint(Action::TaskList), "X");
         assert_eq!(keymap.hint(Action::Help), "?");
+        assert_eq!(keymap.hint(Action::YankHandoff), "ctrl-y");
     }
 
     #[test]

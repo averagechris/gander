@@ -26,10 +26,10 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │diff                                                        !  jj helpers (squash, rebase, ...)  │    │
 │     │         j/k  move cursor                        agent                                           │    │
 │     │         d/u  scroll                                        @  summon configured review agent    │    │
-│     │         g/G  jump top/bottom                               A  toggle agent-suggested order      │    │
-│     │         ]/[  next/previous changed symbol                  F  agent-flagged sections            │    │
-│     │           o  changed symbol outline                        S  agent review chunks               │    │
-│     │           z  fold/unfold context lines                     T  zen briefing (focus stops +       │    │
+│     │         g/G  jump top/bottom                          ctrl-y  copy agent handoff markdown       │    │
+│     │         ]/[  next/previous changed symbol                  A  toggle agent-suggested order      │    │
+│     │           o  changed symbol outline                        F  agent-flagged sections            │    │
+│     │           z  fold/unfold context lines                     S  agent review chunks               │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments

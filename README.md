@@ -408,6 +408,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | --- | --- |
 | `?` | help overlay with the full keymap |
 | `@` | summon the configured review agent (`[agent] command`) |
+| Ctrl-y | copy an agent-profile handoff to the clipboard |
 | `j` / Down | next file |
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |

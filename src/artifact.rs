@@ -440,6 +440,23 @@ pub fn render_artifact_with_options(
     }
 }
 
+pub fn action_item_count(artifact: &ReviewArtifact<'_>) -> usize {
+    artifact
+        .tasks
+        .iter()
+        .filter(|task| task.status == ReviewTaskStatus::Open)
+        .count()
+        + artifact
+            .comments
+            .iter()
+            .filter(|comment| comment.comment.state != CommentState::Resolved)
+            .filter(|comment| {
+                comment.comment.kind == Some(CommentKind::Issue)
+                    || comment.comment.action == Some(ActionIntent::Fix)
+            })
+            .count()
+}
+
 pub fn write_artifact_to(
     session: &ReviewSession,
     format: ArtifactFormat,
@@ -686,7 +703,10 @@ fn write_walkthroughs(out: &mut String, artifact: &ReviewArtifact<'_>) {
         return;
     }
     for walkthrough in &artifact.walkthroughs {
-        if let Some(title) = walkthrough.title {
+        if let Some(title) = walkthrough
+            .title
+            .filter(|title| !title.eq_ignore_ascii_case("walkthrough"))
+        {
             out.push_str(&format!("### {}\n\n", title));
         }
         for (index, step) in walkthrough.steps.iter().enumerate() {
@@ -1212,6 +1232,53 @@ mod tests {
         assert!(markdown.contains("## Tasks"));
         assert!(markdown.contains("No tasks recorded."));
         assert!(markdown.contains("## Walkthrough"));
+    }
+
+    #[test]
+    fn agent_markdown_deduplicates_default_walkthrough_heading() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            walkthroughs: vec![crate::state::Walkthrough {
+                id: "walk-1".to_owned(),
+                title: Some("Walkthrough".to_owned()),
+                steps: vec![crate::state::WalkthroughStep {
+                    id: "step-1".to_owned(),
+                    title: Some("Read parser".to_owned()),
+                    target: crate::state::ReviewTarget {
+                        file: Some("a.txt".to_owned()),
+                        line: Some(1),
+                        ..crate::state::ReviewTarget::default()
+                    },
+                    ..crate::state::WalkthroughStep::default()
+                }],
+            }],
+            ..crate::state::ReviewSession::default()
+        });
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+
+        let markdown = render_artifact_with_profile(
+            &session,
+            ArtifactFormat::Markdown,
+            ArtifactProfile::Agent,
+        )
+        .unwrap();
+
+        assert!(markdown.contains("## Walkthrough\n\n1. Read parser"));
+        assert!(!markdown.contains("### Walkthrough"));
     }
 
     #[test]

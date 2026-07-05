@@ -46,6 +46,11 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use crate::{
     agent::AgentProcess,
     app::{Focus, ReviewSession},
+    artifact::{
+        ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, ReviewArtifact, action_item_count,
+        render_artifact_with_options,
+    },
+    clipboard::{ClipboardMethod, copy_to_clipboard},
     config::{AgentConfig, KeybindingsConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
@@ -492,6 +497,41 @@ fn summon_agent(session: &ReviewSession, tui_state: &mut TuiState) {
     }
 }
 
+fn yank_handoff(session: &ReviewSession, tui_state: &mut TuiState) {
+    yank_handoff_with(session, tui_state, copy_to_clipboard);
+}
+
+fn yank_handoff_with(
+    session: &ReviewSession,
+    tui_state: &mut TuiState,
+    mut copy: impl FnMut(&str) -> Result<ClipboardMethod>,
+) {
+    let options = ArtifactBuildOptions { only_open: false };
+    let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
+    let count = action_item_count(&artifact);
+    match render_artifact_with_options(
+        session,
+        ArtifactFormat::Markdown,
+        ArtifactProfile::Agent,
+        options,
+    )
+    .and_then(|body| copy(&body))
+    {
+        Ok(method) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!("handoff copied via {method} ({count} action items)"),
+            });
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to copy handoff: {error}"),
+            });
+        }
+    }
+}
+
 /// Announce a summoned agent's exit exactly once and release the handle so
 /// it can be summoned again.
 fn notice_agent_exit(tui_state: &mut TuiState) {
@@ -824,6 +864,7 @@ fn handle_normal_action(
         Action::Quit => return Ok(true),
         Action::Help => *mode = Mode::Help,
         Action::SummonAgent => summon_agent(session, tui_state),
+        Action::YankHandoff => yank_handoff(session, tui_state),
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => session.move_diff_cursor(1),
@@ -2852,6 +2893,7 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use crate::jj::{JjBackend, JjChangeSummary, ReviewTarget};
+    use crate::state::{ActionIntent, Comment, CommentKind, CommentState, ReviewTask};
 
     struct MockJjBackend {
         calls: RefCell<Vec<ReviewTarget>>,
@@ -2881,6 +2923,48 @@ mod tests {
                 fingerprint: RefCell::new(Ok(String::new())),
             }
         }
+    }
+
+    #[test]
+    fn yank_handoff_copies_agent_markdown_and_sets_notice() {
+        let mut session = snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n");
+        session.comments.push(Comment {
+            id: "c1".to_owned(),
+            path: "src/lib.rs".to_owned(),
+            line: Some(1),
+            end_line: None,
+            anchor: None,
+            body: "fix this".to_owned(),
+            kind: Some(CommentKind::Issue),
+            action: Some(ActionIntent::Fix),
+            state: CommentState::Todo,
+            created_at: chrono::Utc::now(),
+        });
+        ensure_tui_review_session(&mut session)
+            .tasks
+            .push(ReviewTask {
+                id: "t1".to_owned(),
+                title: "do the thing".to_owned(),
+                action: ActionIntent::Fix,
+                ..ReviewTask::default()
+            });
+        let copied = RefCell::new(String::new());
+        let mut tui_state = TuiState::default();
+
+        yank_handoff_with(&session, &mut tui_state, |body| {
+            copied.replace(body.to_owned());
+            Ok(ClipboardMethod::Osc52)
+        });
+
+        assert!(copied.borrow().starts_with("# Human review handoff"));
+        assert!(copied.borrow().contains("fix this"));
+        assert_eq!(
+            tui_state.notice,
+            Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "handoff copied via OSC52 (/dev/tty) (2 action items)".to_owned(),
+            })
+        );
     }
 
     impl JjBackend for MockJjBackend {

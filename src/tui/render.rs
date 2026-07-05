@@ -1453,6 +1453,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::JjHelpers], "jj helpers (squash, rebase, ...)"),
         section("agent"),
         entry(&[Action::SummonAgent], "summon configured review agent"),
+        entry(&[Action::YankHandoff], "copy agent handoff markdown"),
         entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
         entry(&[Action::FlagList], "agent-flagged sections"),
         entry(&[Action::ChunkList], "agent review chunks"),
