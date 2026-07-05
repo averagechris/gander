@@ -281,7 +281,7 @@
           esac
         done
 
-        repo_root="$(git rev-parse --show-toplevel)"
+        repo_root="$(git rev-parse --show-toplevel 2>/dev/null || jj workspace root)"
 
         version="$(python3 -c '
         import pathlib, sys, tomllib
@@ -337,7 +337,7 @@
       '';
 
       buildPagesScript = ''
-        repo_root="$(git rev-parse --show-toplevel)"
+        repo_root="$(git rev-parse --show-toplevel 2>/dev/null || jj workspace root)"
         cd "$repo_root"
 
         domain="averagechris.srht.site"
@@ -656,8 +656,9 @@
           .filename { margin: 0 0 0.75rem; overflow-wrap: anywhere; font-size: 0.9rem; }
           .download-links { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.75rem 0; font-family: ui-monospace, Menlo, monospace; font-size: 0.9rem; }
           .primary-link { font-weight: 700; }
-          .tour-link { display: inline-block; background: var(--pine); border-radius: 999px; color: var(--base); font-family: ui-monospace, Menlo, monospace; font-weight: 700; padding: 0.45rem 0.85rem; text-decoration: none; }
-          .tour-link:hover { background: var(--rose); color: var(--base); }
+          .page-links { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+          .page-link { display: inline-block; background: var(--pine); border-radius: 999px; color: var(--base); font-family: ui-monospace, Menlo, monospace; font-weight: 700; padding: 0.45rem 0.85rem; text-decoration: none; }
+          .page-link:hover { background: var(--rose); color: var(--base); }
           details summary { cursor: pointer; color: var(--subtle); }
           details pre { margin-bottom: 0; }
           .previous-heading { margin-top: 2rem; }
@@ -708,7 +709,7 @@
             <button class="theme-toggle" id="theme-toggle" aria-label="toggle color theme">dawn &frasl; moon</button>
           </div>
           <p>Take a gander at your jj changes: a fast terminal UI for reviewing changes.</p>
-          <p><a class="tour-link" href="tour.html">Take the tour</a></p>
+          <p class="page-links"><a class="page-link" href="overview.html">overview</a><a class="page-link" href="example.html">example</a></p>
           <p><a href="https://git.sr.ht/~averagechris/gander">Source repository</a></p>
 
           <h2>What's new in {html.escape(tag)}</h2>
@@ -736,6 +737,8 @@
         """)
 
         for source_name, target_name in [
+            ("docs/pages/overview.html", "overview.html"),
+            ("docs/pages/example.html", "example.html"),
             ("docs/pages/tour.html", "tour.html"),
             ("docs/pages/sample-review.html", "sample-review.html"),
             ("docs/demo.gif", "demo.gif"),
