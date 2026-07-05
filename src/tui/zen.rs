@@ -21,6 +21,7 @@
 
 use crate::agent::{Artifact, ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
+use crate::diff::{DiffLineKind, FileDiff, Hunk};
 use crate::jj::{JjChangeSummary, ReviewTarget};
 
 use super::chunks::{ChunkRow, chunk_rows};
@@ -80,6 +81,7 @@ pub(super) struct ChapterCard {
     pub(super) summary: Option<String>,
     /// Exhibits attached to the change brief, opened with `e`.
     pub(super) artifacts: Vec<Artifact>,
+    pub(super) derived_lines: Vec<String>,
 }
 
 impl ChapterCard {
@@ -136,7 +138,8 @@ impl ZenState {
             return None;
         }
         let (chunk_stops, glance_rows, source) = if session.review_chunks.is_empty() {
-            (file_stops(session), Vec::new(), ZenSource::Files)
+            let (stops, glance) = fallback_rows(session);
+            (stops, glance, ZenSource::Files)
         } else {
             let rows: Vec<ChunkRow> = session.review_chunks.iter().flat_map(chunk_rows).collect();
             let (spotlight, glance): (Vec<_>, Vec<_>) = rows
@@ -343,7 +346,114 @@ fn chapter_card(
         artifacts: brief
             .map(|brief| brief.artifacts.clone())
             .unwrap_or_default(),
+        derived_lines: derived_chapter_lines(session),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FileRole {
+    Source,
+    Tests,
+    ConfigManifest,
+    Docs,
+}
+
+impl FileRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Tests => "tests",
+            Self::ConfigManifest => "config-manifest",
+            Self::Docs => "docs",
+        }
+    }
+}
+
+fn file_role(path: &str) -> FileRole {
+    let lower = path.to_ascii_lowercase();
+    if lower.starts_with("test")
+        || lower.contains("/test")
+        || lower.ends_with("_test.rs")
+        || lower.ends_with("_tests.rs")
+    {
+        FileRole::Tests
+    } else if lower.ends_with(".md") || lower.starts_with("doc") {
+        FileRole::Docs
+    } else if is_manifest_path(&lower) {
+        FileRole::ConfigManifest
+    } else {
+        FileRole::Source
+    }
+}
+
+fn is_manifest_path(lower: &str) -> bool {
+    matches!(
+        lower,
+        "cargo.toml"
+            | "cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "flake.nix"
+            | "flake.lock"
+    ) || lower.ends_with(".toml")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || lower.ends_with(".json")
+}
+
+fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
+    let mut counts = [0usize; 4];
+    for file in &session.files {
+        counts[file_role(&file.path) as usize] += 1;
+    }
+    let roles = [
+        (FileRole::Source, counts[0]),
+        (FileRole::Tests, counts[1]),
+        (FileRole::ConfigManifest, counts[2]),
+        (FileRole::Docs, counts[3]),
+    ]
+    .into_iter()
+    .filter(|(_, n)| *n > 0)
+    .map(|(r, n)| format!("{n} {}", r.label()))
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let additions: usize = session.files.iter().map(|f| f.additions).sum();
+    let deletions: usize = session.files.iter().map(|f| f.deletions).sum();
+    let tests = if session
+        .files
+        .iter()
+        .any(|f| file_role(&f.path) == FileRole::Tests)
+    {
+        "tests touched"
+    } else {
+        "no tests touched"
+    };
+    let symbols = top_symbols(session).join(", ");
+    vec![
+        format!("roles: {roles}"),
+        format!("churn: +{additions} −{deletions} · {tests}"),
+        format!(
+            "top changed symbols: {}",
+            if symbols.is_empty() {
+                "none detected"
+            } else {
+                &symbols
+            }
+        ),
+    ]
+}
+
+fn top_symbols(session: &ReviewSession) -> Vec<String> {
+    let mut out = Vec::new();
+    for file in &session.files {
+        for s in symbols_for_file(session, &file.diff) {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out.truncate(5);
+    out
 }
 
 /// Agents copy change ids from `review/stack_changes`, but tolerate one
@@ -370,12 +480,36 @@ fn home_change<'a>(
 
 /// Chunkless fallback: one stop per visible file, in the same order the
 /// tree shows (agent ordering respected when active).
-fn file_stops(session: &ReviewSession) -> Vec<ChunkRow> {
-    session
-        .ordered_visible_file_paths()
-        .into_iter()
-        .map(whole_file_row)
-        .collect()
+fn fallback_rows(session: &ReviewSession) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
+    let mut files: Vec<_> = session.files.iter().collect();
+    files.sort_by_key(|f| {
+        (
+            file_role(&f.path),
+            std::cmp::Reverse(f.additions + f.deletions),
+            f.path.clone(),
+        )
+    });
+    let mut stops = Vec::new();
+    let mut glance = Vec::new();
+    for file in files {
+        let role = file_role(&file.path);
+        if role != FileRole::Source || is_exports_only(&file.diff) {
+            glance.push(whole_file_row(
+                file.path.clone(),
+                Some(
+                    if is_exports_only(&file.diff) {
+                        "exports only"
+                    } else {
+                        role.label()
+                    }
+                    .to_owned(),
+                ),
+            ));
+        } else {
+            stops.push(fallback_file_row(session, &file.diff));
+        }
+    }
+    (stops, glance)
 }
 
 /// Files no chunk part mentions: they join the glance board so the briefing
@@ -390,16 +524,81 @@ fn uncovered_file_rows(session: &ReviewSession) -> Vec<ChunkRow> {
         .ordered_visible_file_paths()
         .into_iter()
         .filter(|path| !covered.contains(path.as_str()))
-        .map(whole_file_row)
+        .map(|path| {
+            let rationale = if is_exports_only_path(session, &path) {
+                "exports only".to_owned()
+            } else {
+                file_role(&path).label().to_owned()
+            };
+            whole_file_row(path, Some(rationale))
+        })
         .collect()
 }
 
-fn whole_file_row(path: String) -> ChunkRow {
+fn largest_hunk(file: &FileDiff) -> Option<&Hunk> {
+    file.hunks.iter().max_by_key(|h| {
+        h.lines
+            .iter()
+            .filter(|l| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Removed))
+            .count()
+    })
+}
+
+fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
+    let hunk = largest_hunk(file);
+    let (adds, dels) = hunk
+        .map(hunk_churn)
+        .unwrap_or((file.additions, file.deletions));
+    let symbols = symbols_touching_hunk(session, file, hunk).join(", ");
+    let start = hunk.map(|h| h.new_start.max(1));
+    let end = hunk.map(|h| (h.new_start + h.new_len.saturating_sub(1)).max(h.new_start));
+    ChunkRow {
+        title: format!("{} · {}", file.path, file_role(&file.path).label()),
+        importance: ChunkImportance::Glance,
+        change_id: None,
+        rationale: Some(format!(
+            "largest hunk +{adds} −{dels} · symbols: {}",
+            if symbols.is_empty() {
+                "none detected"
+            } else {
+                &symbols
+            }
+        )),
+        explanation: Some(format!(
+            "Showing the largest of {} hunk(s); file total +{} −{}. tab opens the full diff.",
+            file.hunks.len(),
+            file.additions,
+            file.deletions,
+        )),
+        artifacts: Vec::new(),
+        part: Some(ChunkPart {
+            path: file.path.clone(),
+            start_line: start,
+            end_line: end,
+        }),
+        part_position: None,
+    }
+}
+
+fn hunk_churn(h: &Hunk) -> (usize, usize) {
+    (
+        h.lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Added)
+            .count(),
+        h.lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Removed)
+            .count(),
+    )
+}
+
+fn whole_file_row(path: String, rationale: Option<String>) -> ChunkRow {
     ChunkRow {
         title: path.clone(),
         importance: ChunkImportance::Glance,
         change_id: None,
-        rationale: None,
+        rationale,
         explanation: None,
         artifacts: Vec::new(),
         part: Some(ChunkPart {
@@ -409,6 +608,56 @@ fn whole_file_row(path: String) -> ChunkRow {
         }),
         part_position: None,
     }
+}
+
+fn is_exports_only(file: &FileDiff) -> bool {
+    file.path.ends_with("lib.rs")
+        && file
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .filter(|l| l.kind == DiffLineKind::Added)
+            .all(|l| {
+                let t = l.text.trim();
+                t.starts_with("pub mod ") || t.starts_with("pub use ") || t.is_empty()
+            })
+}
+fn is_exports_only_path(session: &ReviewSession, path: &str) -> bool {
+    session
+        .files
+        .iter()
+        .find(|f| f.path == path)
+        .is_some_and(|f| is_exports_only(&f.diff))
+}
+
+fn new_source(file: &FileDiff) -> String {
+    file.hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter(|l| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Context))
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn symbols_for_file(session: &ReviewSession, file: &FileDiff) -> Vec<String> {
+    crate::syntax::symbol_spans(&file.path, &new_source(file), &session.syntax)
+        .into_iter()
+        .map(|s| format!("{} {}", s.kind, s.name))
+        .collect()
+}
+fn symbols_touching_hunk(
+    session: &ReviewSession,
+    file: &FileDiff,
+    hunk: Option<&Hunk>,
+) -> Vec<String> {
+    let Some(h) = hunk else { return vec![] };
+    let start = h.new_start;
+    let end = h.new_start + h.new_len.saturating_sub(1);
+    crate::syntax::symbol_spans(&file.path, &new_source(file), &session.syntax)
+        .into_iter()
+        .filter(|s| s.end_line >= start && s.start_line <= end)
+        .map(|s| format!("{} {}", s.kind, s.name))
+        .collect()
 }
 
 /// The review target a zen row wants loaded: a change-anchored row reviews
@@ -646,10 +895,84 @@ diff --git a/b.rs b/b.rs
         assert_eq!(zen.chapter_count(), 1);
         assert_eq!(chapter(&zen, 0).position, (1, 1));
         assert_eq!(chapter(&zen, 0).stop_count, 2);
-        assert_eq!(chunk_stop(&zen, 1).title, "a.rs");
-        assert_eq!(chunk_stop(&zen, 1).part.as_ref().unwrap().start_line, None);
-        assert_eq!(chunk_stop(&zen, 2).title, "b.rs");
+        assert_eq!(chunk_stop(&zen, 1).title, "a.rs · source");
+        assert_eq!(
+            chunk_stop(&zen, 1).part.as_ref().unwrap().start_line,
+            Some(1)
+        );
+        assert_eq!(chunk_stop(&zen, 2).title, "b.rs · source");
         assert!(!zen.has_glance());
+    }
+
+    #[test]
+    fn fallback_derives_roles_order_largest_hunk_symbols_and_glance_rationale() {
+        let session = snapshot_session(
+            r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1,2 @@
+ pub mod old;
++pub mod queue;
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1 +1,2 @@
+ [dependencies]
++itertools = "1"
+diff --git a/tests/basic.rs b/tests/basic.rs
+--- a/tests/basic.rs
++++ b/tests/basic.rs
+@@ -1 +1,2 @@
+ fn smoke() {}
++fn queue_orders_priority() {}
+diff --git a/src/queue.rs b/src/queue.rs
+--- a/src/queue.rs
++++ b/src/queue.rs
+@@ -1,2 +1,5 @@
+ pub struct Queue;
+ impl Queue {
++    pub fn pop(&self) {}
++    pub fn push(&self) {}
++
+ }
+@@ -20,2 +23,4 @@
+ fn helper() {}
++fn tiny() {}
+"#,
+        );
+        let zen = ZenState::new(&session, &[]).unwrap();
+
+        let chapter = chapter(&zen, 0);
+        assert!(chapter.derived_lines.iter().any(|l| l.contains("2 source")));
+        assert!(
+            chapter
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("tests touched"))
+        );
+        assert_eq!(zen.chunk_stop_count(), 1);
+        let stop = chunk_stop(&zen, 1);
+        assert_eq!(stop.part.as_ref().unwrap().path, "src/queue.rs");
+        assert_eq!(stop.part.as_ref().unwrap().start_line, Some(1));
+        assert!(stop.rationale.as_deref().unwrap().contains("+3 −0"));
+        assert!(stop.rationale.as_deref().unwrap().contains("symbols:"));
+        assert!(stop.explanation.as_deref().unwrap().contains("largest of"));
+        assert!(
+            zen.glance_rows
+                .iter()
+                .any(|r| r.title == "Cargo.toml"
+                    && r.rationale.as_deref() == Some("config-manifest"))
+        );
+        assert!(
+            zen.glance_rows
+                .iter()
+                .any(|r| r.title == "src/lib.rs" && r.rationale.as_deref() == Some("exports only"))
+        );
+        assert!(
+            zen.glance_rows
+                .iter()
+                .any(|r| r.title == "tests/basic.rs" && r.rationale.as_deref() == Some("tests"))
+        );
     }
 
     #[test]
@@ -759,6 +1082,7 @@ diff --git a/b.rs b/b.rs
             bookmarks: String::new(),
             summary: None,
             artifacts: Vec::new(),
+            derived_lines: Vec::new(),
         };
 
         assert_eq!(chapter.title(), "feat: headline");
@@ -971,7 +1295,7 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn file_fallback_stops_frame_the_whole_file() {
+    fn file_fallback_stops_frame_the_largest_hunk() {
         let mut session = snapshot_session(two_file_diff());
         let zen = ZenState::new(&session, &[]).unwrap();
 
@@ -980,7 +1304,7 @@ diff --git a/b.rs b/b.rs
         assert_eq!(session.focus, Focus::Diff);
         let focus = session.zen_focus.as_ref().unwrap();
         assert_eq!(focus.path, "a.rs");
-        assert_eq!(focus.lines, None);
+        assert_eq!(focus.lines, Some((1, 1)));
     }
 
     #[test]
@@ -1018,7 +1342,7 @@ diff --git a/b.rs b/b.rs
     #[test]
     fn stop_targets_prefer_the_change_anchor() {
         let home = crate::jj::ReviewTarget::trunk_to_current();
-        let mut row = whole_file_row("a.rs".to_owned());
+        let mut row = whole_file_row("a.rs".to_owned(), None);
         assert_eq!(row_target(&row, &home), home);
         assert_eq!(stop_target(&ZenStop::Chunk(row.clone()), &home), home);
 

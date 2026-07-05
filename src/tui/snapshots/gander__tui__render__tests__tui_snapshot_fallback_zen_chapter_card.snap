@@ -1,29 +1,28 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4173
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
-┌ zen · chapter 1/1 · then 1 at a glance ──────────────────────────────────────────────────────────┐
+┌ zen · chapter 1/1 · then 2 at a glance ──────────────────────────────────────────────────────────┐
 │▎○                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
-│                                                                                                  │
-│             ╭ chapter 1/1 · trunk()..@ · startup-fix ──────────────────────────────╮             │
-│             │ feat: swap old() for new()                                           │             │
-│             │ … d expands the description (2 more line(s))                         │             │
+│             ╭ chapter 1/1 · trunk()..@ ────────────────────────────────────────────╮             │
+│             │ (no description)                                                     │             │
 │             │                                                                      │             │
-│             │ 2 file(s) · +3 −2                                                    │             │
+│             │ 3 file(s) · +5 −2                                                    │             │
 │             │ n tours the 1 stop(s) in this chapter                                │             │
-│             │ roles: 1 source · 1 tests                                            │             │
-│             │ churn: +3 −2 · tests touched                                         │             │
+│             │ uncurated tour — derived from the diff; press @ to summon ACP/agent  │             │
+│             │ curation for intent/risk                                             │             │
+│             │ roles: 1 source · 1 tests · 1 config-manifest                        │             │
+│             │ churn: +5 −2 · tests touched                                         │             │
 │             │ top changed symbols: none detected                                   │             │
 │             │ what this change does ───────────────────────────────────────────────│             │
-│             │ Swaps the legacy old() startup call for new() and batches extra()    │             │
-│             │ alongside it, so both effects fire together.                         │             │
+│             │ No agent brief for this change — the facts above are derived from    │             │
+│             │ the diff.                                                            │             │
 │             ╰──────────────────────────────────────────────────────────────────────╯             │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments
-zen chapter 1/1 · n tours its 1 stop(s) · d description · p back · tab full diff · g glance · esc en
+3 files (0/3 viewed, 0 generated/noisy), +5/-2, 0 comments
+zen chapter 1/1 · n tours its 1 stop(s) · p back · tab full diff · g glance · esc end

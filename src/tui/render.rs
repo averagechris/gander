@@ -2080,6 +2080,18 @@ fn draw_zen_chapter(
         stops_hint,
         Style::default().fg(Color::DarkGray),
     )));
+    if zen.source == super::zen::ZenSource::Files {
+        body.push(Line::from(Span::styled(
+            "uncurated tour — derived from the diff; press @ to summon ACP/agent curation for intent/risk",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        )));
+    }
+    for line in &chapter.derived_lines {
+        body.push(Line::from(Span::styled(
+            line.clone(),
+            Style::default().fg(Color::Gray),
+        )));
+    }
     if inner.height < 8 {
         // Too small for the card layout: header only.
         body.insert(0, Line::from(location));
@@ -2094,7 +2106,7 @@ fn draw_zen_chapter(
     );
 
     let summary = chapter.summary.clone().unwrap_or_else(|| {
-        "(no change brief from the agent — @ summons one to tell this change's story)".to_owned()
+        "No agent brief for this change — the facts above are derived from the diff.".to_owned()
     });
 
     let max_card_width = inner.width.saturating_sub(4).max(20);
@@ -4123,6 +4135,37 @@ diff --git a/tests/app.rs b/tests/app.rs
         (session, zen)
     }
 
+    fn fallback_zen_snapshot_session() -> (ReviewSession, ZenState) {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,4 +1,6 @@
+ fn main() {
+-    old();
++    new();
++    extra();
+ }
++fn helper() {}
+diff --git a/tests/app.rs b/tests/app.rs
+--- a/tests/app.rs
++++ b/tests/app.rs
+@@ -1 +1 @@
+-check_old();
++check_new();
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1 +1,2 @@
+ [dependencies]
++itertools = "1"
+"#,
+        );
+        let zen = ZenState::new(&session, &[]).unwrap();
+        session.file_pane_visible = false;
+        (session, zen)
+    }
+
     #[test]
     fn tui_snapshot_zen_chapter_card() {
         let (mut session, mut zen) = zen_snapshot_session();
@@ -4141,6 +4184,36 @@ diff --git a/tests/app.rs b/tests/app.rs
     #[test]
     fn tui_snapshot_zen_focus_card() {
         let (session, zen) = zen_snapshot_session();
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            100,
+            24
+        ));
+    }
+
+    #[test]
+    fn tui_snapshot_fallback_zen_chapter_card() {
+        let (mut session, mut zen) = fallback_zen_snapshot_session();
+        zen.index = 0;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            100,
+            24
+        ));
+    }
+
+    #[test]
+    fn tui_snapshot_fallback_zen_stop() {
+        let (mut session, mut zen) = fallback_zen_snapshot_session();
+        zen.index = 1;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
 
         insta::assert_snapshot!(render_tui_text_with_zen(
             &session,
