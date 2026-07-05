@@ -4,6 +4,16 @@
 
 ### Added
 
+- `gander handoff`: one-shot, prompt-style agent handoff of the current
+  review — action items (open tasks + unresolved issue/fix comments with
+  excerpts) first, walkthrough order, then full hunks as reference.
+  Supports `--format markdown|json`, `--only-open`, `--output <path>`,
+  and `--copy` (pbcopy/wl-copy/xclip with OSC52 fallback).
+- TUI `ctrl-y` (`yank-handoff` keybinding) copies the agent handoff to
+  the clipboard without leaving the review.
+- Review artifacts (schema v5) now include session metadata, review
+  tasks, and walkthrough steps in JSON and Markdown; v4 artifacts still
+  import.
 - Dogfood evaluation loop: `eval/` harness (fixture generator, scripted
   evaluator scenarios, scoring rubric, archived baseline reports) and a
   living findings/action-item tracker in `docs/dogfood.md`.

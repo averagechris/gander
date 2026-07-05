@@ -20,19 +20,21 @@ The loop:
 
 Scores are 1–5 per rubric dimension (see `eval/rubric.md`).
 
-| Dimension                     | 2026-07-05 baseline | Target |
-| ----------------------------- | ------------------- | ------ |
-| TUI review ergonomics         | 4                   | 4.5    |
-| CLI output quality for agents | 3                   | 4      |
-| Handoff readiness             | **2**               | 4      |
-| Zen usefulness, uncurated     | **2**               | 3.5    |
-| Zen usefulness, curated       | 4                   | 4.5    |
-| Curation protocol ergonomics  | **2**               | 4      |
-| Watch: freshness / follows @  | 4                   | 4.5    |
-| Watch: change awareness       | **2**               | 4      |
-| Pane-worthiness overall       | 3                   | 4.5    |
+| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | Target |
+| ----------------------------- | ------------------- | ------------------ | ------ |
+| CLI discoverability           | 3                   | 4                  | 4      |
+| TUI review ergonomics         | 4                   | —                  | 4.5    |
+| CLI output quality for agents | 3                   | 5                  | 4      |
+| Handoff readiness             | **2**               | **4**              | 4      |
+| Zen usefulness, uncurated     | **2**               | —                  | 3.5    |
+| Zen usefulness, curated       | 4                   | —                  | 4.5    |
+| Curation protocol ergonomics  | **2**               | —                  | 4      |
+| Watch: freshness / follows @  | 4                   | —                  | 4.5    |
+| Watch: change awareness       | **2**               | —                  | 4      |
+| Pane-worthiness overall       | 3                   | —                  | 4.5    |
 
-Baseline reports: `eval/reports/2026-07-05-baseline/`.
+Baseline reports: `eval/reports/2026-07-05-baseline/`. Post-W1 recheck of
+scenario 1: `eval/reports/2026-07-05-w1-recheck/`.
 
 ## Baseline findings (2026-07-05)
 
@@ -81,18 +83,29 @@ parked).
 
 ### W1 — Seamless agent handoff
 
-- [ ] Make the agent artifact complete: session metadata, open comments
-      with kind/action/state + excerpts + anchors, tasks (with linked
-      comment ids), walkthrough steps, base/rev/repo, raw hunks as trailing
-      reference.
-- [ ] Agent-profile Markdown reads like a prompt: action items first
-      (file:line, kind/action, excerpt), reference material after.
-- [ ] `gander handoff` command: one-shot actionable review context,
-      `--format markdown|json`, `--only-open`, `--output <path>` (stable
-      path harnesses can watch), `--copy` (clipboard via OSC52 with
-      pbcopy/platform fallback).
-- [ ] TUI: one keystroke to yank/emit the handoff artifact without
-      quitting the TUI.
+- [x] Make the agent artifact complete: session metadata, comments with
+      kind/action/state + excerpts + anchors, tasks (with linked comment
+      ids), walkthrough steps, base/rev/repo, raw hunks as trailing
+      reference. Schema v5; v4 imports still accepted. *(2026-07-05)*
+- [x] Agent-profile Markdown reads like a prompt: preamble, action items
+      first (file:line, kind/action, excerpt), reference material after.
+      *(2026-07-05)*
+- [x] `gander handoff` command: `--format markdown|json`, `--only-open`,
+      `--output <path>`, `--copy` (pbcopy/wl-copy/xclip, OSC52 to
+      /dev/tty fallback). *(2026-07-05)*
+- [x] TUI: `ctrl-y` yanks the agent handoff to the clipboard without
+      quitting (`yank-handoff` keybinding, footer notice with action-item
+      count). *(2026-07-05)*
+
+Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
+
+- [ ] `handoff --format json` should be a structured action artifact
+      (action items as first-class objects), not a rendered-content dump.
+- [ ] Markdown handoff: include task bodies and render task↔comment
+      relationships explicitly.
+- [ ] Human-readable diff inspection in the CLI (e.g. `hunks show
+      --format diff`) so human reviewers aren't stuck reading JSON.
+- [ ] `--help` examples clarifying `handoff` vs `export --profile agent`.
 
 ### W2 — Zen presents useful information without an agent
 
@@ -147,3 +160,9 @@ export should inherit W2's tour content. Revisit after W4.
 - **2026-07-05** — W0 landed: quiet EPIPE exits, CLI comment anchors +
   agent-export excerpts, `--path`/`--file` flag parity. Harness
   institutionalized under `eval/`.
+- **2026-07-05** — W1 landed: artifact schema v5 (tasks, walkthroughs,
+  session meta), prompt-style agent Markdown, `gander handoff`
+  (`--only-open`/`--output`/`--copy`), TUI `ctrl-y` yank.
+- **2026-07-05** — Scenario 1 re-run post-W1: handoff readiness 2→4
+  (target met), agent output quality 3→5, discoverability 3→4, no
+  regressions. Remaining polish captured as W1 follow-ups.

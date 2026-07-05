@@ -2,6 +2,11 @@
 # TUI buffer snapshots contain arbitrary truncated text fragments.
 extend-exclude = ["src/tui/snapshots/*.snap"]
 
+[default]
+# Verbatim dogfood evaluation reports use hyphenated coinages like
+# "mis-renders" whose first token trips the checker.
+extend-ignore-re = ["[Mm]is-render\\w*"]
+
 [default.extend-words]
 Ratatui = "Ratatui"
 ratatui = "ratatui"
