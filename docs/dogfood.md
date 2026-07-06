@@ -119,17 +119,23 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
 - [x] Glance board entries carry a rationale (role / "exports only") so
       bulk mark-viewed is a confident act; manifests/tests/docs route to
       glance instead of full-screen stops. *(2026-07-05)*
-- [ ] Multi-part spotlight chunks render as "part 1/2 / part 2/2" with
+- [x] Multi-part spotlight chunks render as "part 1/2 / part 2/2" with
       cross-references, not disconnected stops; glance board groups
       multi-part conceptual chunks instead of duplicating bullets.
+      *(2026-07-05)*
 - [ ] Chapter-level dependency narration between stack changes (which
       change builds on which).
-- [ ] Recheck gap: fallback rationale is still mostly metadata — explore
-      derived risk labels (e.g. "touches error handling path",
-      "public API change") that stay factual.
-- [ ] Recheck gap: zen card headers wrap poorly for long titles/paths.
-- [ ] Recheck gap (TUI-wide): help overlay needs a task-oriented "first
-      review loop" section.
+- [x] Recheck gap: fallback rationale is still mostly metadata —
+      factual derived risk labels landed ("public API change",
+      "touches error handling") on fallback stops and chapter lines.
+      *(2026-07-05)*
+- [x] Recheck gap: zen card headers wrap poorly for long titles/paths.
+      Width-aware truncation (tail for titles, middle for paths) on
+      stop/chapter cards, reading panel, and backdrop header.
+      *(2026-07-05)*
+- [x] Recheck gap (TUI-wide): help overlay needs a task-oriented "first
+      review loop" section. Landed, plus an in-zen keys cluster.
+      *(2026-07-05)*
 
 ### W3 — Curation protocol ergonomics
 
@@ -138,15 +144,23 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       out-of-range lines, or unknown change ids (full reject, per-part
       reasons); overlay files loaded from disk get invalid parts excluded
       with a TUI footer notice. *(2026-07-05)*
-- [ ] Incremental chunk updates (add/update/remove) alongside full replace.
-- [ ] Friendlier authoring path than hand-written JSON-RPC (e.g. spec file
-      / stdin document the CLI translates).
+- [x] Incremental chunk updates (add/update/remove) alongside full
+      replace: ACP `review/update_chunks` (upsert by id) and
+      `review/remove_chunks` (strict), mirrored as MCP tools.
+      *(2026-07-05)*
+- [x] Friendlier authoring path than hand-written JSON-RPC: `gander
+      chunks list/set/update/remove/clear` over plain JSON spec files
+      (or stdin), validated against the session diff with per-part
+      reasons, writing the same overlay a live TUI watches.
+      *(2026-07-05)*
 - [x] Live-bridge transparency: `gander acp`/`mcp` warn on stderr when
       bridging to a live TUI whose target differs from the invoked flags;
       `review/summary` gains additive `active_target`/`live_session`
       fields. *(2026-07-05)*
-- [ ] Badge invalid chunks in the TUI chunk list popup (`S`) — exclusion
-      + notice landed; the badge was deferred.
+- [x] Badge invalid chunks in the TUI chunk list popup (`S`) — excluded
+      parts stay listed with an `[invalid]` badge and reason; overlay
+      re-applies after refresh now validate like the initial load.
+      *(2026-07-05)*
 - [ ] MCP `comment_add` still stores `anchor: None` (it never loads full
       diff context), so MCP-created comments lack excerpts in agent
       exports. Derive anchors once MCP loads diff context (M14 parity;
@@ -154,14 +168,18 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
 
 ### W4 — Watch / ambient pane legibility
 
-- [ ] Per-file/hunk "changed since last look" badges, plus a distinct
-      "viewed but changed since viewed" state.
-- [ ] Activity feed of refresh events (`queue.rs updated 3×, +9`, `@ moved
-      …`, `change abandoned …`), collapsed and calm.
-- [ ] Explicit follow-mode indication for symbolic revsets (`following @`)
-      and durable notices when `@` moves or a change enters/leaves the
-      reviewed range.
-- [ ] Navigation keys for next/previous changed-since-last-look hunk.
+- [x] Per-file/hunk "changed since last look" badges (`±` files,
+      marked hunk headers), plus a distinct "viewed but changed since
+      viewed" state (`~`) instead of silently unmarking viewed.
+      *(2026-07-05)*
+- [x] Activity feed of refresh events (`ctrl-a` popup; `@ moved …`,
+      `change … entered range/updated/left range`, collapsed repeats),
+      with the footer notice summarizing each refresh batch.
+      *(2026-07-05)*
+- [x] Explicit follow-mode indication for symbolic revsets
+      (`following @` in the footer). *(2026-07-05)*
+- [x] Navigation keys for next/previous changed-since-last-look hunk
+      (`}`/`{`, cross-file). *(2026-07-05)*
 
 ### W5 — Web (parked)
 
@@ -188,3 +206,11 @@ export should inherit W2's tour content. Revisit after W4.
   (target 3.5), curation ergonomics 2→3 (target 4), curated 4, TUI 4.
   Remaining friction is authoring ergonomics (spec-file/incremental
   updates) and glance grouping — both still open above.
+- **2026-07-05** — W3b curation authoring (incremental
+  update/remove_chunks over ACP/MCP, `gander chunks` spec-file CLI,
+  invalid-chunk badges in `S`), W2 polish (multi-part grouping +
+  sibling cross-references, factual risk labels, width-aware card
+  truncation, "first review loop" help section), and W4 watch
+  legibility (freshness badges, viewed-stale state, activity feed with
+  `@ moved`/entered/left events, follow-mode indicator, `}`/`{`
+  changed-hunk navigation) landed.

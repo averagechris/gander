@@ -4,6 +4,39 @@
 
 ### Added
 
+- Incremental chunk curation: new ACP methods `review/update_chunks`
+  (upsert by id, position-preserving) and `review/remove_chunks`
+  (strict remove by id), mirrored as MCP tools, alongside the existing
+  full-replace `set_chunks`.
+- `gander chunks` command group for scriptable curation without
+  JSON-RPC: `list`, `set --file <spec|->`, `update --file <spec|->`,
+  `remove --id …`, and `clear` all operate on the same overlay file a
+  live TUI watches; specs are plain JSON `{ "chunks": [...] }`
+  documents with optional ids, validated against the session diff with
+  per-part reasons on reject.
+- The TUI chunk list popup (`S`) now badges chunk parts that were
+  excluded as invalid, with the exclusion reason; overlay re-applies
+  after refresh run the same validation as the initial load.
+- Multi-part review chunks read as one concept: spotlight stops
+  cross-reference their sibling parts, and the zen glance board groups
+  a multi-part chunk into a single entry listing its parts.
+- Derived zen content now includes factual risk labels ("public API
+  change", "touches error handling") on fallback stops and aggregated
+  chapter lines.
+- Help overlay (`?`) gained a task-oriented "first review loop" section
+  and a cluster documenting the in-zen keys.
+- Watch legibility: file tree rows badge files changed since you last
+  looked (`±`) and viewed-but-changed-since-viewed files (`~`), with
+  changed hunk headers marked in the diff pane; `}`/`{` jump to the
+  next/previous changed hunk across files.
+- Activity feed (`ctrl-a`): a bounded, timestamped feed of refresh
+  events — `@ moved to <id>`, `change <id> entered range/updated/left
+  range`, per-file update collapsing — with the footer notice
+  summarizing each refresh batch instead of a generic message.
+- The footer indicates follow mode (`following @`) whenever the review
+  target contains a symbolic revset.
+- Zen card titles and locations truncate width-aware instead of
+  clipping against the card border; long paths keep their tails.
 - Zen tours without agent curation now derive useful content from the
   diff itself: chapter cards show files-by-role, churn, tests-touched,
   and top changed symbols; fallback stops anchor on each file's largest

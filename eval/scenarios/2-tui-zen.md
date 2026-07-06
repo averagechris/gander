@@ -35,11 +35,11 @@ nix shell nixpkgs#tmux --command tmux kill-session -t gander-tui-eval
    - Enter zen and step stop by stop.
    - Keep a stop-by-stop log: did each stop add information beyond normal browsing?
    - Note whether zen explained intent, risk, dependencies, and review questions.
-5. Curate via `gander acp` JSON-RPC per `docs/acp.md` while the TUI is live:
-   - Set change briefs for the meaningful fixture changes.
-   - Set 3-4 chunks, mixing spotlight and glance where appropriate.
+5. Curate while the TUI is live, evaluating both authoring paths:
+   - Set change briefs for the meaningful fixture changes via `gander acp` JSON-RPC per `docs/acp.md`.
+   - Set 3-4 chunks, mixing spotlight and glance where appropriate. Author at least one full set via the `gander chunks` CLI (`gander chunks --help`; spec file or stdin) and at least one incremental edit (`chunks update` / `chunks remove` or ACP `review/update_chunks`).
    - Draft one comment through ACP.
-   - Record friction around change IDs, line spaces, validation, and authoring JSON.
+   - Record friction around change IDs, line spaces, validation, and authoring JSON — and whether the CLI path is discoverable and materially easier than raw JSON-RPC.
 6. Run zen again and compare curated vs uncurated usefulness.
 7. Kill the tmux session.
 
