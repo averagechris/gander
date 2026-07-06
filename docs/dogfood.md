@@ -20,18 +20,18 @@ The loop:
 
 Scores are 1–5 per rubric dimension (see `eval/rubric.md`).
 
-| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | 2026-07-05 round 2 | 2026-07-05 round 3 | Target |
-| ----------------------------- | ------------------- | ------------------ | --------------------- | ------------------ | ------------------ | ------ |
-| CLI discoverability           | 3                   | 4                  | —                     | —                  | —                  | 4      |
-| TUI review ergonomics         | 4                   | —                  | 4                     | **2**¹             | 3.5³               | 4.5    |
-| CLI output quality for agents | 3                   | 5                  | —                     | —                  | —                  | 4      |
-| Handoff readiness             | **2**               | **4**              | —                     | —                  | —                  | 4      |
-| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3                  | 3³                 | 3.5    |
-| Zen usefulness, curated       | 4                   | —                  | 4                     | 3.5¹               | 4³                 | 4.5    |
-| Curation protocol ergonomics  | **2**               | —                  | 3                     | 3.5                | 3.5³               | 4      |
-| Watch: freshness / follows @  | 4                   | —                  | —                     | 4²                 | 4³                 | 4.5    |
-| Watch: change awareness       | **2**               | —                  | —                     | 3²                 | 4³                 | 4      |
-| Pane-worthiness overall       | 3                   | —                  | —                     | 3.5²               | 3³                 | 4.5    |
+| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | 2026-07-05 round 2 | 2026-07-05 round 3 | 2026-07-05 round 4 | Target |
+| ----------------------------- | ------------------- | ------------------ | --------------------- | ------------------ | ------------------ | ------------------ | ------ |
+| CLI discoverability           | 3                   | 4                  | —                     | —                  | —                  | 3⁴                 | 4      |
+| TUI review ergonomics         | 4                   | —                  | 4                     | **2**¹             | 3.5³               | 4⁴                 | 4.5    |
+| CLI output quality for agents | 3                   | 5                  | —                     | —                  | —                  | 4⁴                 | 4      |
+| Handoff readiness             | **2**               | **4**              | —                     | —                  | —                  | 3⁴                 | 4      |
+| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3                  | 3³                 | **2**⁴             | 3.5    |
+| Zen usefulness, curated       | 4                   | —                  | 4                     | 3.5¹               | 4³                 | 4⁴                 | 4.5    |
+| Curation protocol ergonomics  | **2**               | —                  | 3                     | 3.5                | 3.5³               | 3.5⁴               | 4      |
+| Watch: freshness / follows @  | 4                   | —                  | —                     | 4²                 | 4³                 | **5** ✓            | 4.5    |
+| Watch: change awareness       | **2**               | —                  | —                     | 3²                 | 4³                 | **4** ✓            | 4      |
+| Pane-worthiness overall       | 3                   | —                  | —                     | 3.5²               | 3³                 | 4⁴                 | 4.5    |
 
 ¹ Round-2 scenario 2 hit the state-erasure blocker and the
 chapter-stats bug; both (plus the launch-target and chooser majors)
@@ -46,13 +46,25 @@ day.
 drove the round-3 scores (op-log pollution/undo trap, vanishing
 comment annotations, CLI backtrace noise) were fixed the same day —
 the scores predate those fixes (W7 below).
+⁴ Round-4 re-runs (all three scenarios, reports in
+`eval/reports/2026-07-05-round4-recheck/`) graded the build with W7
+open items landed. Watch hit 5/4/4 — freshness and awareness targets
+met, op-log clean, comments surviving refreshes confirmed. Zen
+uncurated dropped 3→2: per-change chapters landed but derived facts
+came from the wrong diff (worse than saying nothing). CLI
+discoverability 4→3 on empty help descriptions; handoff 3 on
+markdown/JSON disagreement and a `set-state` panic blocker. The
+blocker and all seven round-4 majors were fixed the same day (W8
+below) — the scores predate those fixes.
 
 Baseline reports: `eval/reports/2026-07-05-baseline/`. Post-W1 recheck of
 scenario 1: `eval/reports/2026-07-05-w1-recheck/`. Post-W2/W3 recheck of
 scenario 2: `eval/reports/2026-07-05-w2w3-recheck/`. Round-2 reports
 (scenario 2 full run + fix verification, scenario 3 broken-build run +
 re-run): `eval/reports/2026-07-05-w2w3b-w4-recheck/`. Round-3 re-runs of
-scenarios 2 and 3: `eval/reports/2026-07-05-round3-recheck/`.
+scenarios 2 and 3: `eval/reports/2026-07-05-round3-recheck/`. Round-4
+re-runs of all three scenarios:
+`eval/reports/2026-07-05-round4-recheck/`.
 
 ## Baseline findings (2026-07-05)
 
@@ -117,13 +129,17 @@ parked).
 
 Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
 
-- [ ] `handoff --format json` should be a structured action artifact
-      (action items as first-class objects), not a rendered-content dump.
-- [ ] Markdown handoff: include task bodies and render task↔comment
-      relationships explicitly.
-- [ ] Human-readable diff inspection in the CLI (e.g. `hunks show
-      --format diff`) so human reviewers aren't stuck reading JSON.
-- [ ] `--help` examples clarifying `handoff` vs `export --profile agent`.
+- [x] `handoff --format json` should be a structured action artifact
+      (action items as first-class objects), not a rendered-content
+      dump. Landed; round 4 graded it "close to the rubric's 5".
+      *(2026-07-05)*
+- [x] Markdown handoff: include task bodies and render task↔comment
+      relationships explicitly. *(2026-07-05)*
+- [x] Human-readable diff inspection in the CLI: `hunks show
+      --format diff` (JSON stays the default). *(2026-07-05)*
+- [x] `--help` examples clarifying `handoff` vs `export --profile
+      agent`; the two markdown outputs are now genuinely distinct
+      (W8). *(2026-07-05)*
 
 ### W2 — Zen presents useful information without an agent
 
@@ -273,39 +289,111 @@ Majors, fixed same day:
       stale diff rows). Anchors are re-derived on every diff reload.
       *(2026-07-05)*
 
-Open:
+Open, landed in the round-4 build (graded by the round-4 re-runs):
 
-- [ ] Uncurated zen ignores the jj stack: three described changes
-      collapse into one chapter titled "(no description)" (the empty
-      `@`). Build per-change chapters from `stack_changes` so commit
-      messages deliver intent for free.
-- [ ] Uncurated stop "why this matters" contains no why — it describes
-      presentation mechanics ("showing the largest of 2 hunks").
-      Derive something (symbol roles, pub-API delta, callers) or
-      rename the section.
-- [ ] Briefs for changes with only glance chunks are silently dropped
-      from curated zen; warn at authoring time or render them.
-- [ ] Chunk line-space authoring is manual: nothing helps produce
-      correct post-image ranges (need a per-change `hunks`-style
-      listing or part preview).
-- [ ] Comment editor is anchorless (no file:line in the box) and save
-      is undiscoverable (`C-s` by guessing); footer keeps a stale info
-      line while editing. Reported by both evaluators.
-- [ ] Viewed→changed transitions are quiet: `✓` drops to `±` and the
-      progress counter decrements with no "needs re-review" messaging,
-      and there is no interdiff of what changed since the viewed mark.
-- [ ] File tree re-sorts on viewed/changed transitions, so rows jump
-      around under an ambient-pane user.
+- [x] Uncurated zen ignores the jj stack — per-change chapters with
+      commit-message intent landed and were verified by the round-4
+      evaluator; the derived-facts-from-wrong-diff residual it found
+      is fixed under W8. *(2026-07-05)*
+- [x] Uncurated stop "why this matters" contains no why — intent
+      sections now derive from roles/symbols/API evidence and the
+      mechanics line moved to a footer; W8 fixed the remaining
+      wrong-diff sourcing. *(2026-07-05)*
+- [x] Briefs for changes with only glance chunks are silently dropped
+      — authoring-time warnings over ACP/MCP/CLI ("no spotlight chunk
+      yet"), verified firing 3× in round 4. *(2026-07-05)*
+- [x] Chunk line-space authoring is manual — `gander chunks lines`
+      landed; its coordinate-mixing bug (round-4 finding) is fixed
+      under W8 with a helper shared with the validator.
+      *(2026-07-05)*
+- [x] Comment editor is anchorless / save undiscoverable — anchored
+      title, `ctrl-s save · esc cancel` hints, editing footer;
+      verified in round 4. *(2026-07-05)*
+- [x] Viewed→changed transitions are quiet — "was viewed, needs
+      re-review" in footer notice and activity feed; verified in
+      round 4. *(2026-07-05)*
+- [x] File tree re-sorts on state transitions — stable path ordering;
+      verified in round 4 ("rows never re-sorted"). *(2026-07-05)*
+- [x] Papercut batch: tree-sitter debug line removed (root cause:
+      fragments parsed standalone, noted for later), `j`/`k`/arrows
+      everywhere, `G` clamps, base-commit stepping excluded (fully
+      fixed under W8), `1 comment` pluralization, glance truncation /
+      count mismatch / card clipping / duplicate paths. *(2026-07-05)*
+
+Still open:
+
 - [ ] jj `undo`-of-snapshot residual footgun (upstream jj behavior):
       documented in code and docs; revisit if jj grows a non-mutating
       working-copy fingerprint.
-- [ ] Papercuts: tree-sitter debug line in every diff header
-      (`errors=true` on valid Rust), inconsistent movement keys across
-      panes, `G` scrolls past end and blanks the diff pane, glance row
-      truncation mangles ids into paths, glance header/footer count
-      mismatch, chapter cards clip brief text without an indicator,
-      stack stepping walks into the base commit, `1 comments`
-      pluralization, uncurated glance prints paths twice.
+
+### W8 — Round-4 findings (from the fourth eval round)
+
+Blocker and majors, fixed same day:
+
+- [x] **Blocker:** `gander comments set-state` panicked on every
+      invocation (clap arg-id collision with the global `--state`
+      state-file flag, which is now `--state-file`). Regression net:
+      `Command::debug_assert` test + parse tests for every mutating
+      subcommand. *(2026-07-05)*
+- [x] Mutation-path user errors (unknown task/comment/step ids)
+      dumped color-eyre backtrace walls; now clean one-line errors.
+      *(2026-07-05)*
+- [x] Markdown handoff contradicted the JSON artifact (question/note
+      comments demoted below the walkthrough; header counted them
+      anyway); selection now shared with JSON. Handoff markdown is
+      now a distinct implementation prompt (trimmed reference hunks)
+      vs the complete export artifact, and the help says so.
+      *(2026-07-05)*
+- [x] `followup`/`follow-up` round-trip trap: enums serialize as the
+      CLI accepts (`follow-up`), legacy accepted on input.
+      *(2026-07-05)*
+- [x] Anchoring mistakes were irreversible: `comments edit` (anchor
+      re-derivation) and `comments delete` added. *(2026-07-05)*
+- [x] Zen/stack/ACP counted the session base as a reviewable change
+      and stepping denominators jumped (`3/4`→`3/5`): stack list now
+      strictly `base..rev` from the launch target, consistent across
+      TUI stepping, zen chapters, and ACP `stack_changes`.
+      *(2026-07-05)*
+- [x] Uncurated zen derived facts came from the session-global diff
+      while excerpts were change-scoped (churn/API claims about code
+      introduced chapters later; "no tests touched" on a change
+      adding tests): facts now derive from each change's own cached
+      diff, omitted when unavailable; purely-added symbols read "new
+      public API", and test-subject changes spotlight their tests.
+      *(2026-07-05)*
+- [x] `gander chunks lines` reported ranges the validator rejected
+      (old/new side mixing): listing and validator now share one
+      line-space helper; round-trip property test. *(2026-07-05)*
+- [x] The `I` op picker ignored standard movement keys, had no
+      hints, and mass-applied against the newest op with no preview:
+      standard keys, hint line, and a live `will mark N caught up …`
+      preview landed. *(2026-07-05)*
+
+Minors fixed same day: chunks/briefs/drafts warn when a live TUI
+session targets a different range; describe-only updates say
+"description updated"; reverts to previously seen content are
+announced and clear the `±` badge; empty help descriptions filled
+across reviews/comments/tasks/walkthrough with documented `--line`
+semantics; `session: null` no longer emitted silently.
+
+Open:
+
+- [ ] Handoff action items carry no priority/ordering signal;
+      consider explicit ordering (severity, path, or reviewer-set).
+- [ ] Human-authored comments render with a `[draft]` label in the
+      TUI with no visible way to finalize; label or flow needs
+      rethinking (comment states are draft/todo/resolved — surface
+      them).
+- [ ] Curated zen: repetition between chapter cards and stops;
+      chapter card text hard-wraps mid-sentence ("keeps a / band").
+- [ ] Activity feed lines truncate at pane width with no wrap/expand;
+      jj operation names could label feed events.
+- [ ] `chunks set` validation errors don't mention `chunks lines` as
+      the way to discover valid ranges.
+- [ ] Key overloading noted by evaluators (same key different
+      meanings across panes); audit once bindings settle.
+- [ ] tree-sitter parses diff fragments standalone so `errors=true`
+      is common; revisit if syntax quality complaints surface.
 
 ### W5 — Web (parked)
 
@@ -369,5 +457,23 @@ export should inherit W2's tour content. Revisit after W4.
   two new majors: vanishing comment annotations after refresh and
   op-log pollution making `jj undo` a trap. Both plus the CLI
   backtrace major were fixed the same day (W7); the remaining opens
-  are tracked in W7. Next re-run should grade the post-W7 build,
-  with uncurated zen stack-chapters as the highest-leverage open item.
+  are tracked in W7.
+- **2026-07-05** — Round-4 build landed the W7 opens plus the W1
+  follow-ups in one stack: per-change uncurated zen chapters with
+  honest intent sections, `gander chunks lines`, brief-drop warnings,
+  anchored comment editor, viewed-changed callouts, stable file-tree
+  order, the TUI papercut batch, structured handoff JSON, markdown
+  task bodies/links, and `hunks show --format diff`.
+- **2026-07-05** — Round-4 re-runs of ALL THREE scenarios (reports in
+  `eval/reports/2026-07-05-round4-recheck/`): watch pane vindicated —
+  freshness 5, awareness 4, pane-worthiness 4, op-log confirmed
+  clean, comments survive refreshes, no re-sorting. TUI 3.5→4;
+  curated zen 4 with the CLI curation path "materially easier" and
+  verified end-to-end. But: a CLI blocker (`comments set-state`
+  panic), zen uncurated 3→2 (facts derived from the wrong diff),
+  handoff markdown/JSON disagreement, and `chunks lines`
+  contradicting its own validator. The blocker plus all seven majors
+  were fixed the same day (W8); remaining minors tracked open under
+  W8. Next re-run grades the post-W8 build — scenarios 1 and 2 are
+  the ones with headroom (discoverability help gaps now filled,
+  set-state fixed, zen facts change-scoped).

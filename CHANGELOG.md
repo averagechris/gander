@@ -4,6 +4,56 @@
 
 ### Added
 
+- Uncurated zen tours the stack change by change: one chapter per
+  stack change with the commit message (title and body) as the intent
+  card, stops grouped under the change that owns them, and derived
+  facts (largest hunk, churn, tests-touched, API evidence) computed
+  from each change's own diff — never the session-global diff. Purely
+  added public items read `new public API: …` instead of "signature
+  changed", and test-subject changes spotlight their test files
+  instead of auto-glancing them.
+- `gander chunks lines [--change <id>] [--path <p>]` lists the exact
+  line ranges chunk validation accepts (computed by the same shared
+  helper the validator uses), with per-hunk excerpts for orientation.
+- Setting change briefs warns — over ACP, MCP, and `gander briefs
+  set` — when a brief's change has no spotlight chunk yet and would
+  not render as a curated chapter.
+- `gander comments edit <id>` (retarget line/range/path, re-derived
+  anchors and excerpts) and `gander comments delete <id>`, so
+  anchoring mistakes are no longer permanent.
+- `gander handoff --format json` is now a structured action artifact:
+  first-class `action_items` (source, kind/action, path, line,
+  excerpt, body, state, linked ids), session metadata, walkthrough,
+  and reference hunks — not a rendered-content dump. Markdown handoff
+  includes task bodies and explicit task↔comment cross-references,
+  and is now a distinct, tighter implementation prompt (reference
+  hunks trimmed to files with action items or walkthrough stops)
+  while `export markdown --profile agent` stays the complete session
+  artifact. `--help` examples on both commands explain the split.
+- `gander hunks show --format diff` prints a human-readable unified
+  diff (JSON stays the default).
+- The `I` operation picker joins the standard movement keys
+  (`n`/`e`, `j`/`k`, arrows), shows a key-hint line, and renders a
+  live preview of what Enter will do (`will mark 3 caught up · 2
+  already viewed · 2 need re-review`) before anything is applied.
+- Watch notices are revert-aware: description-only updates read
+  `change <id> description updated`, and a file whose content returns
+  to a previously seen viewed/caught-up version reads `<path> reverted
+  to previously seen content` (and drops its `±` badge) instead of
+  looking like a forward edit.
+- Refresh callouts when reviewed files change: the footer batch notice
+  and activity feed flag `was viewed, needs re-review` per file.
+- The comment editor shows its anchor in the title
+  (`comment · src/config.rs:10`) and `ctrl-s save · esc cancel` hints
+  in the popup border and footer.
+- `j`/`k` and arrow keys move in every list-like pane; the file tree
+  keeps a stable order across badge and viewed-state transitions.
+- CLI overlay commands (`chunks`/`briefs`/`drafts`) warn on stderr
+  when a live TUI session on the workspace is reviewing a different
+  target than the invoked flags.
+- Every `reviews`/`comments`/`tasks`/`walkthrough` subcommand and flag
+  now has real `--help` documentation, including 1-indexed post-image
+  `--line` semantics.
 - `gander briefs` (`list`, `set --file <spec|->`, `clear`) and
   `gander drafts` (`list`, `add --file <spec|->`, `remove --id …`)
   command groups extend the chunks spec-file pattern to change briefs
@@ -83,8 +133,49 @@
   evaluator scenarios, scoring rubric, archived baseline reports) and a
   living findings/action-item tracker in `docs/dogfood.md`.
 
+### Changed
+
+- The global `--state <STATE-FILE>` flag is now `--state-file` — it
+  collided with `comments set-state --state`, making that subcommand
+  panic on every invocation.
+- `gander handoff --format json` output shape changed (see Added);
+  consumers of the old rendered-content envelope must migrate.
+- Kind/action enums serialize exactly as the CLI accepts them
+  (`follow-up`, not `followup`); legacy `followup` values are still
+  accepted on input.
+
 ### Fixed
 
+- `gander comments set-state` no longer panics (clap arg-id
+  collision with the global state-file flag).
+- Mutating verbs (`tasks complete/reopen`, `comments
+  resolve/set-state/edit/delete`, `walkthrough remove-step`) print
+  clean `error: unknown task/comment/step …` messages instead of
+  color-eyre backtrace walls on bad ids.
+- Zen chapters, TUI stack stepping, and ACP `review/stack_changes`
+  scope strictly to `base..rev`: the base change no longer appears as
+  a chapter or stack position, and step denominators are stable (no
+  more `3/4` → `3/5` jumps).
+- `gander chunks lines` no longer mixes old-side and new-side
+  coordinates (ranges that overlapped and rejected valid-looking
+  parts); the listing and the validator share one line-space helper.
+- Markdown handoff action items match the JSON artifact: all
+  unresolved comments count, regardless of kind — question/note
+  comments with reviewer-set actions are no longer demoted below the
+  walkthrough while the header claims otherwise.
+- Handoff/export artifacts no longer emit silent `id: null` session
+  metadata when no durable session exists.
+- Reverting a file to previously viewed content clears its `±`
+  freshness badge instead of leaving a flagged row that counts as
+  viewed.
+- The tree-sitter debug line (`tree-sitter: rust root=… errors=true`)
+  no longer renders at the top of every diff.
+- `G` clamps to the last diff line instead of scrolling into a blank
+  pane; footer counts pluralize correctly (`1 comment`).
+- Zen glance rows truncate change ids and paths independently
+  (no more mangled `[id…path` strings), glance header/footer counts
+  agree, chapter cards mark truncated text with an ellipsis, and
+  single-file glance rows no longer print their path twice.
 - Watch polling no longer pollutes the jj op log: every read-only jj
   invocation passes `--ignore-working-copy`, with exactly one
   deliberate `jj util snapshot` per poll tick so working-copy edits
