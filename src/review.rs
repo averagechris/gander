@@ -107,6 +107,19 @@ pub fn find_session<'a>(state: &'a ReviewState, prefix: &str) -> Result<&'a Revi
     }
 }
 
+pub fn resolve_comment_id(comments: &[Comment], prefix: &str) -> Result<String> {
+    let matches = comments
+        .iter()
+        .filter(|comment| comment.id.starts_with(prefix))
+        .map(|comment| comment.id.as_str())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [id] => Ok((*id).to_owned()),
+        [] => Err(eyre!("unknown comment `{prefix}`")),
+        _ => Err(eyre!("ambiguous comment prefix `{prefix}`")),
+    }
+}
+
 #[allow(dead_code)]
 pub fn find_session_mut<'a>(
     state: &'a mut ReviewState,
@@ -178,10 +191,11 @@ pub fn set_comment_state(
     id: &str,
     new_state: CommentState,
 ) -> Result<Comment> {
+    let canonical_id = resolve_comment_id(comments, id)?;
     let comment = comments
         .iter_mut()
-        .find(|comment| comment.id.starts_with(id))
-        .ok_or_else(|| eyre!("unknown comment `{id}`"))?;
+        .find(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
     comment.state = new_state;
     touch(session);
     Ok(comment.clone())
@@ -201,10 +215,11 @@ pub fn edit_comment(
     id: &str,
     edits: CommentEdits,
 ) -> Result<Comment> {
+    let canonical_id = resolve_comment_id(comments, id)?;
     let comment = comments
         .iter_mut()
-        .find(|comment| comment.id.starts_with(id))
-        .ok_or_else(|| eyre!("unknown comment `{id}`"))?;
+        .find(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
     if let Some(path) = edits.path {
         comment.path = path;
     }
@@ -229,10 +244,11 @@ pub fn delete_comment(
     comments: &mut Vec<Comment>,
     id: &str,
 ) -> Result<Comment> {
+    let canonical_id = resolve_comment_id(comments, id)?;
     let index = comments
         .iter()
-        .position(|comment| comment.id.starts_with(id))
-        .ok_or_else(|| eyre!("unknown comment `{id}`"))?;
+        .position(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
     let comment = comments.remove(index);
     touch(session);
     Ok(comment)
@@ -436,6 +452,45 @@ mod tests {
         assert_eq!(
             reopen_task(&mut session, &task.id).unwrap().status,
             ReviewTaskStatus::Open
+        );
+    }
+
+    #[test]
+    fn resolve_comment_id_canonicalizes_prefix_and_rejects_bad_links() {
+        fn comment(id: &str) -> Comment {
+            Comment {
+                id: id.into(),
+                path: "a.txt".into(),
+                line: None,
+                end_line: None,
+                anchor: None,
+                body: String::new(),
+                kind: None,
+                action: None,
+                state: CommentState::Draft,
+                created_at: chrono::Utc::now(),
+            }
+        }
+        let comments = vec![
+            comment("abcdef00-0000-0000-0000-000000000000"),
+            comment("abc12300-0000-0000-0000-000000000000"),
+        ];
+
+        assert_eq!(
+            resolve_comment_id(&comments, "abcdef").unwrap(),
+            "abcdef00-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            resolve_comment_id(&comments, "deadbeef")
+                .unwrap_err()
+                .to_string(),
+            "unknown comment `deadbeef`"
+        );
+        assert_eq!(
+            resolve_comment_id(&comments, "abc")
+                .unwrap_err()
+                .to_string(),
+            "ambiguous comment prefix `abc`"
         );
     }
 

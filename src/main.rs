@@ -135,13 +135,13 @@ enum Command {
     },
     /// Print or copy a prompt-style handoff for a coding agent.
     #[command(
-        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready and compact: action items, walkthrough, then hunks limited to files with action items or walkthrough stops. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class task/comment objects with id, source, kind/action, path/line, excerpt, body, state, and linked ids; reference.hunks comes last for diff context.",
+        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready and compact: action items, walkthrough, then hunks limited to files with action items or walkthrough stops. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class open task/unresolved comment objects with id, source, kind/action, path/line, excerpt, body, state, and canonical linked ids; reference.hunks comes last for diff context.",
         after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export markdown --profile agent --output review.md\n      Use export for the complete session artifact with all comments and full hunks."
     )]
     Handoff {
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
-        /// Include only unresolved comments and open tasks.
+        /// Include only unresolved comments and open tasks (the default for handoff formats).
         #[arg(long)]
         only_open: bool,
         #[arg(short, long)]
@@ -956,6 +956,7 @@ fn run() -> color_eyre::Result<()> {
                     .iter()
                     .find(|file| file.path == path)
                     .and_then(|file| comment_anchor_for_file_lines(file, line, end_line));
+                warn_if_anchorless_line(&path, line, anchor.is_some());
                 let spec = session_target_spec(&repo, &session.target);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
@@ -1010,12 +1011,14 @@ fn run() -> color_eyre::Result<()> {
                 end_line,
                 body,
             } => {
+                let canonical_id =
+                    review::resolve_comment_id(&state.comments, &id).map_err(into_user_error)?;
                 let existing = state
                     .comments
                     .iter()
-                    .find(|comment| comment.id.starts_with(&id))
+                    .find(|comment| comment.id == canonical_id)
                     .cloned()
-                    .ok_or_else(|| user_error(format!("unknown comment `{id}`")))?;
+                    .expect("resolved comment id must exist");
                 let new_line = start_line.or(line);
                 let effective_path = if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
@@ -1036,13 +1039,20 @@ fn run() -> color_eyre::Result<()> {
                             comment_anchor_for_file_lines(file, effective_line, effective_end_line)
                         })
                 });
+                if anchor_changed {
+                    warn_if_anchorless_line(
+                        &effective_path,
+                        effective_line,
+                        anchor.as_ref().and_then(|anchor| anchor.as_ref()).is_some(),
+                    );
+                }
                 let spec = session_target_spec(&repo, &session.target);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment = review::edit_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
-                    &id,
+                    &canonical_id,
                     review::CommentEdits {
                         path: path.or(Some(effective_path)),
                         line: (start_line.is_some() || line.is_some()).then_some(new_line),
@@ -1100,6 +1110,11 @@ fn run() -> color_eyre::Result<()> {
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                 }
+                let comment = comment
+                    .as_deref()
+                    .map(|id| review::resolve_comment_id(&state.comments, id))
+                    .transpose()
+                    .map_err(into_user_error)?;
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let target = path.map(|file| StateReviewTarget {
@@ -1517,6 +1532,16 @@ fn ensure_diff_file(session: &ReviewSession, path: &str) -> color_eyre::Result<(
         Err(user_error(format!(
             "`{path}` is not a file in the current diff"
         )))
+    }
+}
+
+fn warn_if_anchorless_line(path: &str, line: Option<usize>, anchored: bool) {
+    if let Some(line) = line
+        && !anchored
+    {
+        eprintln!(
+            "warning: line {line} is not in the current diff for {path}; comment stored without an excerpt anchor — use 'comments edit' to fix"
+        );
     }
 }
 

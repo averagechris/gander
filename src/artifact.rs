@@ -281,8 +281,9 @@ impl<'a> ReviewArtifact<'a> {
 
 pub fn render_handoff_json(
     session: &ReviewSession,
-    options: ArtifactBuildOptions,
+    mut options: ArtifactBuildOptions,
 ) -> Result<String> {
+    options.only_open = true;
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
     let mut items = Vec::new();
     for task in &artifact.tasks {
@@ -1533,6 +1534,12 @@ mod tests {
                     action: ActionIntent::Test,
                     ..ReviewTask::default()
                 },
+                ReviewTask {
+                    id: "task-done".to_owned(),
+                    title: "Done task".to_owned(),
+                    status: ReviewTaskStatus::Done,
+                    ..ReviewTask::default()
+                },
             ],
             ..crate::state::ReviewSession::default()
         });
@@ -1593,6 +1600,7 @@ mod tests {
         assert_eq!(markdown.matches("- [comment]").count(), 3);
         assert!(markdown.contains("Open task one"));
         assert!(markdown.contains("Open task two"));
+        assert!(!markdown.contains("Done task"));
         assert!(markdown.contains("Fix it"));
         assert!(markdown.contains("Should this change?"));
         assert!(markdown.contains("Add test"));

@@ -63,8 +63,10 @@ gander comments delete <id>
 are 1-indexed new-side (post-image) line numbers in the current jj diff;
 omitting them creates a file-level anchor. `edit` updates the body and/or
 re-anchors the comment with the same post-image line semantics, recomputing the
-stored excerpt anchor from the current diff. `delete` removes the comment from
-local Gander review state. Example:
+stored excerpt anchor from the current diff. If a supplied line is not in the
+current diff for the file, Gander stores the comment without an excerpt anchor
+and prints a warning so intentional unchanged-context comments remain possible.
+`delete` removes the comment from local Gander review state. Example:
 
 ```json
 {
@@ -95,7 +97,9 @@ gander tasks reopen <id>
 Tasks are review-state todos for humans or agents. Example `tasks list`:
 `--line` is a 1-indexed new-side (post-image) line number in the current jj
 diff. `--action` emits `follow-up`; legacy JSON or CLI input spelled
-`followup` is still accepted.
+`followup` is still accepted. `--comment` accepts a full comment id or
+unambiguous prefix and stores the canonical full id; unknown or ambiguous
+comment ids are rejected.
 
 ```json
 {
@@ -148,11 +152,13 @@ gander summary
 
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
 defaults to action items first, walkthrough next, then reference hunks limited
-to files that carry action items or walkthrough stops. `handoff --format json` is a stable action artifact shaped
+to files that carry action items or walkthrough stops. JSON uses the same
+default action-item selection: open tasks plus unresolved comments. `handoff
+--format json` is a stable action artifact shaped
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
 are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
-`excerpt`, `body`, `state`, and linked task/comment ids. `--only-open` filters
-to unresolved comments and open tasks; `--output` writes without stdout body
+`excerpt`, `body`, `state`, and canonical linked task/comment ids. `--only-open`
+is accepted for compatibility and matches the default; `--output` writes without stdout body
 output; `--copy` copies it to the clipboard (pbcopy, wl-copy, xclip, or OSC52
 via `/dev/tty`). Use `export --profile agent` instead when you need the full
 session artifact for import/archive or broad automation.

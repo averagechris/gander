@@ -555,12 +555,17 @@ impl GanderMcp {
         }
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
+            let comment_id = params
+                .comment_id
+                .as_deref()
+                .map(|id| review::resolve_comment_id(&state.comments, id))
+                .transpose()?;
             Ok(review::add_task(
                 &mut state.sessions[idx],
                 params.title,
                 params.body,
                 params.action.unwrap_or_default(),
-                params.comment_id,
+                comment_id,
                 params.path.map(|file| StateReviewTarget {
                     file: Some(file),
                     line: params.line,
