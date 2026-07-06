@@ -294,18 +294,72 @@ fn chaptered_stops(
     }
     let total = groups.len();
     let mut stops = Vec::new();
+    let mut previous_scopes: Vec<Vec<&FileDiff>> = Vec::new();
     for (index, (anchor, rows)) in groups.into_iter().enumerate() {
-        stops.push(ZenStop::Chapter(chapter_card(
+        let file_scope = chapter_file_scope(session, &rows, total);
+        let mut chapter = chapter_card(
             anchor,
             (index + 1, total),
             rows.len(),
-            chapter_file_scope(session, &rows, total),
+            file_scope.clone(),
             session,
             stack,
-        )));
+        );
+        if let Some(files) = file_scope.as_deref()
+            && let Some(line) = chapter_dependency_line(session, files, &previous_scopes, &stops)
+        {
+            chapter.derived_lines.push(line);
+        }
+        if let Some(files) = file_scope {
+            previous_scopes.push(files);
+        }
+        stops.push(ZenStop::Chapter(chapter));
         stops.extend(rows.into_iter().map(ZenStop::Chunk));
     }
     stops
+}
+
+fn chapter_dependency_line(
+    session: &ReviewSession,
+    files: &[&FileDiff],
+    previous_scopes: &[Vec<&FileDiff>],
+    existing_stops: &[ZenStop],
+) -> Option<String> {
+    let current_paths: std::collections::BTreeSet<&str> =
+        files.iter().map(|f| f.path.as_str()).collect();
+    let current_symbols: std::collections::BTreeSet<String> =
+        top_symbols(session, files).into_iter().collect();
+    for (prev_idx, prev_files) in previous_scopes.iter().enumerate().rev() {
+        let prev_paths: std::collections::BTreeSet<&str> =
+            prev_files.iter().map(|f| f.path.as_str()).collect();
+        let prev_symbols: std::collections::BTreeSet<String> =
+            top_symbols(session, prev_files).into_iter().collect();
+        let mut evidence = current_paths
+            .intersection(&prev_paths)
+            .map(|path| (*path).to_owned())
+            .collect::<Vec<_>>();
+        evidence.extend(current_symbols.intersection(&prev_symbols).cloned());
+        evidence.sort();
+        evidence.dedup();
+        evidence.truncate(4);
+        if !evidence.is_empty() {
+            let title = existing_stops
+                .iter()
+                .filter_map(|stop| match stop {
+                    ZenStop::Chapter(chapter) => Some(chapter.title()),
+                    ZenStop::Chunk(_) => None,
+                })
+                .nth(prev_idx)
+                .unwrap_or_default();
+            return Some(format!(
+                "builds on ch.{} \"{}\": {}",
+                prev_idx + 1,
+                title,
+                evidence.join(", ")
+            ));
+        }
+    }
+    None
 }
 
 /// Resolve one chapter's metadata: the jj summary for its change (or for
@@ -602,10 +656,16 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
     let end = hunk.map(|h| (h.new_start + h.new_len.saturating_sub(1)).max(h.new_start));
     let mut facts = Vec::new();
     if public_api_change(file) {
-        facts.push("public API change");
+        facts.push(public_api_fact(file).unwrap_or_else(|| "public API change".to_owned()));
+        facts.push("review question: do callers handle the new signature?".to_owned());
     }
-    if error_handling_touches(file) >= 2 {
-        facts.push("touches error handling");
+    let error_count = error_handling_touches(file);
+    if error_count >= 2 {
+        facts.push(
+            error_handling_fact(session, file, hunk)
+                .unwrap_or_else(|| "touches error handling".to_owned()),
+        );
+        facts.push("review question: is the new error path covered?".to_owned());
     }
     let fact_suffix = if facts.is_empty() {
         String::new()
@@ -640,6 +700,58 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
         part_position: None,
         invalid_reason: None,
     }
+}
+
+fn public_api_fact(file: &FileDiff) -> Option<String> {
+    added_text_lines(file)
+        .find(|line| is_public_api_line(line))
+        .map(|line| {
+            format!(
+                "public API change: {} signature changed",
+                signature_summary(line)
+            )
+        })
+}
+
+fn is_public_api_line(line: &str) -> bool {
+    [
+        "pub fn ",
+        "pub struct ",
+        "pub enum ",
+        "pub trait ",
+        "pub type ",
+        "pub mod ",
+        "pub use ",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
+fn signature_summary(line: &str) -> String {
+    line.split('{')
+        .next()
+        .unwrap_or(line)
+        .split(';')
+        .next()
+        .unwrap_or(line)
+        .trim()
+        .to_owned()
+}
+
+fn error_handling_fact(
+    session: &ReviewSession,
+    file: &FileDiff,
+    hunk: Option<&Hunk>,
+) -> Option<String> {
+    let count = error_handling_touches(file);
+    (count > 0).then(|| {
+        let symbol = symbols_touching_hunk(session, file, hunk)
+            .into_iter()
+            .next()
+            .or_else(|| symbols_for_file(session, file).into_iter().next())
+            .unwrap_or_else(|| file.path.clone());
+        format!("error handling: {count} changed Result/unwrap/error sites in {symbol}")
+    })
 }
 
 fn hunk_churn(h: &Hunk) -> (usize, usize) {
@@ -680,21 +792,15 @@ fn changed_text_lines(file: &FileDiff) -> impl Iterator<Item = &str> {
     })
 }
 
+fn added_text_lines(file: &FileDiff) -> impl Iterator<Item = &str> {
+    file.hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter_map(|line| (line.kind == DiffLineKind::Added).then_some(line.text.trim()))
+}
+
 fn public_api_change(file: &FileDiff) -> bool {
-    file.path.ends_with(".rs")
-        && changed_text_lines(file).any(|line| {
-            [
-                "pub fn ",
-                "pub struct ",
-                "pub enum ",
-                "pub trait ",
-                "pub type ",
-                "pub mod ",
-                "pub use ",
-            ]
-            .iter()
-            .any(|prefix| line.starts_with(prefix))
-        })
+    file.path.ends_with(".rs") && changed_text_lines(file).any(is_public_api_line)
 }
 
 fn error_handling_touches(file: &FileDiff) -> usize {
@@ -1239,6 +1345,76 @@ diff --git a/tests/beta.rs b/tests/beta.rs
                 .iter()
                 .any(|l| l.contains("public API"))
         );
+    }
+
+    #[test]
+    fn multi_change_chapters_narrate_overlap_with_earlier_chapters() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/parser.rs b/src/parser.rs
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -1,3 +1,5 @@
+ pub fn parse_entry() {
+-    old();
++    groundwork();
++    followup();
+ }
+diff --git a/src/render.rs b/src/render.rs
+--- a/src/render.rs
++++ b/src/render.rs
+@@ -1 +1,2 @@
+ fn render() {}
++fn render_more() {}
+"#,
+        );
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![
+                spotlight("s1", "parser groundwork", Some("aaabbbcc"), "src/parser.rs"),
+                spotlight("s2", "parser follow-up", Some("dddeeeff"), "src/parser.rs"),
+            ],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        let first = chapter(&zen, 0);
+        assert!(
+            !first
+                .derived_lines
+                .iter()
+                .any(|l| l.starts_with("builds on"))
+        );
+        let second = chapter(&zen, 2);
+        assert!(second.derived_lines.iter().any(
+            |l| l.starts_with("builds on ch.1 \"feat: first\":") && l.contains("src/parser.rs")
+        ));
+    }
+
+    #[test]
+    fn fallback_risk_lines_name_specific_evidence_and_review_questions() {
+        let session = snapshot_session(
+            r#"diff --git a/src/retry.rs b/src/retry.rs
+--- a/src/retry.rs
++++ b/src/retry.rs
+@@ -1,4 +1,7 @@
+-pub fn retry_with_backoff() {}
++pub fn retry_with_backoff(limit: usize) -> Result<(), Error> {
++    run_loop()?;
++    state.unwrap();
++    Ok(())
++}
+"#,
+        );
+
+        let zen = ZenState::new(&session, &[]).unwrap();
+        let rationale = chunk_stop(&zen, 1).rationale.as_deref().unwrap();
+
+        assert!(rationale.contains(
+            "public API change: pub fn retry_with_backoff(limit: usize) -> Result<(), Error> signature changed"
+        ));
+        assert!(rationale.contains("error handling: 3 changed Result/unwrap/error sites in"));
+        assert!(rationale.contains("review question: do callers handle the new signature?"));
+        assert!(rationale.contains("review question: is the new error path covered?"));
     }
 
     #[test]
