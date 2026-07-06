@@ -1,4 +1,4 @@
-use std::{fs, io::Write, path::Path};
+use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
 use chrono::Utc;
 use color_eyre::eyre::Result;
@@ -362,20 +362,33 @@ pub fn render_handoff_json(
             })
         })
         .collect::<Vec<_>>();
-    let value = serde_json::json!({
-        "session": {
+    let mut session_meta = serde_json::json!({
             "repo": artifact.repo,
             "base": artifact.base,
             "rev": artifact.revision,
             "generated_at": artifact.generated_at,
-            "id": artifact.session.as_ref().map(|s| s.id),
-            "title": artifact.session.as_ref().and_then(|s| s.title),
-        },
+    });
+    if let Some(session) = &artifact.session {
+        session_meta["id"] = serde_json::json!(session.id);
+        if let Some(title) = session.title {
+            session_meta["title"] = serde_json::json!(title);
+        }
+    }
+    let value = serde_json::json!({
+        "session": session_meta,
         "action_items": items,
         "walkthrough": walkthrough,
         "reference": { "hunks": hunks },
     });
     Ok(serde_json::to_string_pretty(&value)?)
+}
+
+pub fn render_handoff_markdown(
+    session: &ReviewSession,
+    options: ArtifactBuildOptions,
+) -> Result<String> {
+    let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
+    Ok(to_handoff_markdown(&artifact))
 }
 
 fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::ReviewSession> {
@@ -543,20 +556,7 @@ pub fn render_artifact_with_options(
 }
 
 pub fn action_item_count(artifact: &ReviewArtifact<'_>) -> usize {
-    artifact
-        .tasks
-        .iter()
-        .filter(|task| task.status == ReviewTaskStatus::Open)
-        .count()
-        + artifact
-            .comments
-            .iter()
-            .filter(|comment| comment.comment.state != CommentState::Resolved)
-            .filter(|comment| {
-                comment.comment.kind == Some(CommentKind::Issue)
-                    || comment.comment.action == Some(ActionIntent::Fix)
-            })
-            .count()
+    action_item_tasks(artifact).count() + action_item_comments(artifact).count()
 }
 
 pub fn write_artifact_to(
@@ -674,18 +674,39 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
 
 fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
-    let open_tasks = artifact
-        .tasks
-        .iter()
-        .filter(|task| task.status == ReviewTaskStatus::Open)
-        .count();
-    let unresolved_comments = artifact
-        .comments
-        .iter()
-        .filter(|comment| comment.comment.state != CommentState::Resolved)
-        .count();
     out.push_str("# Human review handoff for a coding agent\n\n");
-    out.push_str("You are a coding agent consuming a human Gander review. Prioritize the action items before using full hunks as reference.\n\n");
+    out.push_str("**Export artifact (agent profile).**\n\n");
+    out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
+    write_agent_header(artifact, &mut out);
+    write_action_items(artifact, &mut out);
+
+    out.push_str("\n## Walkthrough\n\n");
+    write_walkthroughs(&mut out, artifact);
+
+    out.push_str("\n## Other comments\n\n");
+    write_other_comments(artifact, &mut out);
+
+    out.push_str("\n## Reference: full hunks\n\n");
+    write_full_hunks(artifact, &mut out);
+    out
+}
+
+fn to_handoff_markdown(artifact: &ReviewArtifact<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("# Human review handoff for a coding agent\n\n");
+    out.push_str("One-shot actionable prompt: implement these action items first, then use the walkthrough and trimmed reference hunks as supporting context. Use `gander export markdown --profile agent` for the complete session artifact.\n\n");
+    write_agent_header(artifact, &mut out);
+    write_action_items(artifact, &mut out);
+
+    out.push_str("\n## Walkthrough\n\n");
+    write_walkthroughs(&mut out, artifact);
+
+    out.push_str("\n## Reference: action/walkthrough hunks\n\n");
+    write_limited_hunks(artifact, &mut out);
+    out
+}
+
+fn write_agent_header(artifact: &ReviewArtifact<'_>, out: &mut String) {
     out.push_str(&format!("- Repository: `{}`\n", artifact.repo.display()));
     out.push_str(&format!(
         "- Target: `{}` → `{}`\n",
@@ -697,16 +718,17 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
         out.push_str(&format!("- Session: {}\n", title));
     }
     out.push_str(&format!(
-        "- Action counts: {open_tasks} open task(s), {unresolved_comments} unresolved comment(s)\n\n"
+        "- Action items: {} item(s) ({} open task(s), {} unresolved comment(s))\n\n",
+        action_item_count(artifact),
+        action_item_tasks(artifact).count(),
+        action_item_comments(artifact).count()
     ));
+}
 
+fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
     out.push_str("## Action items\n\n");
     let mut wrote = false;
-    for task in artifact
-        .tasks
-        .iter()
-        .filter(|task| task.status == ReviewTaskStatus::Open)
-    {
+    for task in action_item_tasks(artifact) {
         wrote = true;
         out.push_str(&format!(
             "- [task][{}] {}",
@@ -714,33 +736,25 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
             task.title
         ));
         if let Some(target) = &task.target {
-            write_target_suffix(&mut out, target);
+            write_target_suffix(out, target);
         }
         if !task.linked_comment_ids.is_empty() {
             out.push_str("; ");
-            write_linked_comments(&mut out, artifact, &task.linked_comment_ids);
+            write_linked_comments(out, artifact, &task.linked_comment_ids);
         }
         out.push('\n');
         if let Some(body) = task.body.filter(|body| !body.trim().is_empty()) {
             out.push_str(&format!("  Body: {}\n", body.trim()));
         }
     }
-    for comment in artifact
-        .comments
-        .iter()
-        .filter(|comment| comment.comment.state != CommentState::Resolved)
-        .filter(|comment| {
-            comment.comment.kind == Some(CommentKind::Issue)
-                || comment.comment.action == Some(ActionIntent::Fix)
-        })
-    {
+    for comment in action_item_comments(artifact) {
         wrote = true;
         out.push_str(&format!(
             "- [comment][{}][{}] ",
             kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
             action_label(comment.comment.action.unwrap_or(ActionIntent::None))
         ));
-        write_comment_location_inline(&mut out, comment.comment);
+        write_comment_location_inline(out, comment.comment);
         out.push_str(" — ");
         out.push_str(comment.comment.body.trim());
         let linked_tasks = linked_tasks_for_comment(artifact, comment.comment.id.as_str());
@@ -749,26 +763,21 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
             out.push_str(&linked_tasks.join(", "));
         }
         out.push('\n');
-        write_excerpt(&mut out, comment.excerpt.as_deref());
+        write_excerpt(out, comment.excerpt.as_deref());
     }
     if !wrote {
-        out.push_str("No open tasks or unresolved issue/fix comments.\n");
+        out.push_str("No open tasks or unresolved comments.\n");
     }
+}
 
-    out.push_str("\n## Walkthrough\n\n");
-    write_walkthroughs(&mut out, artifact);
-
-    out.push_str("\n## Other comments\n\n");
+fn write_other_comments(artifact: &ReviewArtifact<'_>, out: &mut String) {
     let mut other = false;
     for comment in &artifact.comments {
-        if comment.comment.state != CommentState::Resolved
-            && (comment.comment.kind == Some(CommentKind::Issue)
-                || comment.comment.action == Some(ActionIntent::Fix))
-        {
+        if comment.comment.state != CommentState::Resolved {
             continue;
         }
         other = true;
-        write_comment_heading(&mut out, comment.comment);
+        write_comment_heading(out, comment.comment);
         out.push_str(&format!(
             "Status: {}; kind: {}; action: {}\n\n",
             comment.comment.state.label(),
@@ -777,13 +786,14 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
         ));
         out.push_str(comment.comment.body.trim());
         out.push_str("\n\n");
-        write_excerpt(&mut out, comment.excerpt.as_deref());
+        write_excerpt(out, comment.excerpt.as_deref());
     }
     if !other {
         out.push_str("No other comments recorded.\n");
     }
+}
 
-    out.push_str("\n## Reference: full hunks\n\n");
+fn write_full_hunks(artifact: &ReviewArtifact<'_>, out: &mut String) {
     for file in &artifact.files {
         if let Some(hunks) = &file.hunks {
             out.push_str(&format!("### `{}`\n\n", file.path));
@@ -802,7 +812,87 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
             }
         }
     }
-    out
+}
+
+fn write_limited_hunks(artifact: &ReviewArtifact<'_>, out: &mut String) {
+    let paths = referenced_hunk_paths(artifact);
+    if paths.is_empty() {
+        out.push_str("No action-item or walkthrough file hunks recorded.\n");
+        return;
+    }
+    let mut wrote = false;
+    for file in &artifact.files {
+        if !paths.contains(file.path) {
+            continue;
+        }
+        if let Some(hunks) = &file.hunks {
+            wrote = true;
+            out.push_str(&format!("### `{}`\n\n", file.path));
+            for hunk in hunks {
+                out.push_str(&format!("#### {}\n\n```diff\n", hunk.header));
+                for line in &hunk.lines {
+                    out.push_str(match line.kind {
+                        "added" => "+",
+                        "removed" => "-",
+                        _ => " ",
+                    });
+                    out.push_str(line.text);
+                    out.push('\n');
+                }
+                out.push_str("```\n\n");
+            }
+        }
+    }
+    if !wrote {
+        out.push_str("No action-item or walkthrough file hunks recorded.\n");
+    }
+}
+
+fn referenced_hunk_paths<'a>(artifact: &'a ReviewArtifact<'a>) -> BTreeSet<&'a str> {
+    let mut paths = BTreeSet::new();
+    for task in action_item_tasks(artifact) {
+        if let Some(file) = task.target.as_ref().and_then(|target| target.file) {
+            paths.insert(file);
+        }
+        for comment_id in &task.linked_comment_ids {
+            if let Some(comment) = artifact
+                .comments
+                .iter()
+                .find(|comment| comment.comment.id == *comment_id)
+            {
+                paths.insert(comment.comment.path.as_str());
+            }
+        }
+    }
+    for comment in action_item_comments(artifact) {
+        paths.insert(comment.comment.path.as_str());
+    }
+    for walkthrough in &artifact.walkthroughs {
+        for step in &walkthrough.steps {
+            if let Some(file) = step.target.file {
+                paths.insert(file);
+            }
+        }
+    }
+    paths
+}
+
+fn action_item_tasks<'a>(
+    artifact: &'a ReviewArtifact<'a>,
+) -> impl Iterator<Item = &'a TaskArtifact<'a>> {
+    artifact
+        .tasks
+        .iter()
+        .filter(|task| task.status == ReviewTaskStatus::Open)
+}
+
+fn action_item_comments<'a>(
+    artifact: &'a ReviewArtifact<'a>,
+) -> impl Iterator<Item = &'a CommentArtifact<'a>> {
+    artifact
+        .comments
+        .iter()
+        .filter(|comment| comment.comment.state != CommentState::Resolved)
 }
 
 fn linked_tasks_for_comment(artifact: &ReviewArtifact<'_>, comment_id: &str) -> Vec<String> {
@@ -988,7 +1078,7 @@ mod tests {
         app::ReviewSession,
         diff::DiffSet,
         jj::ReviewTarget,
-        state::{FileState, ReviewState},
+        state::{FileState, ReviewState, ReviewTask},
     };
 
     #[test]
@@ -1414,6 +1504,134 @@ mod tests {
         assert_eq!(value["action_items"][1]["linked_task_ids"][0], "task-1");
         assert_eq!(value["walkthrough"][0]["id"], "step-1");
         assert_eq!(value["reference"]["hunks"][0]["path"], "a.txt");
+    }
+
+    #[test]
+    fn handoff_markdown_action_items_match_json_and_header_count() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            tasks: vec![
+                ReviewTask {
+                    id: "task-1".to_owned(),
+                    title: "Open task one".to_owned(),
+                    target: Some(crate::state::ReviewTarget {
+                        file: Some("a.txt".to_owned()),
+                        line: Some(1),
+                        ..crate::state::ReviewTarget::default()
+                    }),
+                    ..ReviewTask::default()
+                },
+                ReviewTask {
+                    id: "task-2".to_owned(),
+                    title: "Open task two".to_owned(),
+                    action: ActionIntent::Test,
+                    ..ReviewTask::default()
+                },
+            ],
+            ..crate::state::ReviewSession::default()
+        });
+        let mut session = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+        for (id, body, kind, action) in [
+            (
+                "issue",
+                "Fix it",
+                Some(CommentKind::Issue),
+                Some(ActionIntent::Fix),
+            ),
+            (
+                "question",
+                "Should this change?",
+                Some(CommentKind::Question),
+                Some(ActionIntent::FollowUp),
+            ),
+            (
+                "note",
+                "Add test",
+                Some(CommentKind::Note),
+                Some(ActionIntent::Test),
+            ),
+            ("praise", "Looks nice", Some(CommentKind::Praise), None),
+        ] {
+            session.add_comment(body.to_owned());
+            let comment = session.comments.last_mut().unwrap();
+            comment.id = id.to_owned();
+            comment.kind = kind;
+            comment.action = action;
+        }
+        session.comments[3].state = CommentState::Resolved;
+
+        let json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let ids = value["action_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+
+        let markdown = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
+        assert_eq!(ids, vec!["task-1", "task-2", "issue", "question", "note"]);
+        assert!(
+            markdown
+                .contains("- Action items: 5 item(s) (2 open task(s), 3 unresolved comment(s))")
+        );
+        assert_eq!(markdown.matches("- [task]").count(), 2);
+        assert_eq!(markdown.matches("- [comment]").count(), 3);
+        assert!(markdown.contains("Open task one"));
+        assert!(markdown.contains("Open task two"));
+        assert!(markdown.contains("Fix it"));
+        assert!(markdown.contains("Should this change?"));
+        assert!(markdown.contains("Add test"));
+        assert!(markdown.contains("[comment][question][follow-up]"));
+        assert!(markdown.contains("[comment][note][test]"));
+        assert!(!markdown.contains("Looks nice"));
+    }
+
+    #[test]
+    fn handoff_markdown_differs_from_agent_export_markdown() {
+        let mut session = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old b\n+new b\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.add_comment("Action on a only".into());
+        session.comments[0].path = "a.txt".to_owned();
+        session.comments[0].kind = Some(CommentKind::Issue);
+        let handoff = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
+        let export = render_artifact_with_profile(
+            &session,
+            ArtifactFormat::Markdown,
+            ArtifactProfile::Agent,
+        )
+        .unwrap();
+
+        assert_ne!(handoff, export);
+        assert!(handoff.contains("# Human review handoff for a coding agent"));
+        assert!(handoff.contains("## Reference: action/walkthrough hunks"));
+        assert!(!handoff.contains("## Reference: full hunks"));
+        assert!(handoff.contains("### `a.txt`"));
+        assert!(!handoff.contains("### `b.txt`"));
+        assert!(export.contains("**Export artifact (agent profile).**"));
+        assert!(export.contains("## Reference: full hunks"));
+        assert!(export.contains("### `b.txt`"));
     }
 
     #[test]

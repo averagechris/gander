@@ -147,8 +147,8 @@ gander summary
 ```
 
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
-defaults to action items first, walkthrough next, other comments, then full
-hunks as reference. `handoff --format json` is a stable action artifact shaped
+defaults to action items first, walkthrough next, then reference hunks limited
+to files that carry action items or walkthrough stops. `handoff --format json` is a stable action artifact shaped
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
 are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
 `excerpt`, `body`, `state`, and linked task/comment ids. `--only-open` filters
@@ -158,7 +158,8 @@ via `/dev/tty`). Use `export --profile agent` instead when you need the full
 session artifact for import/archive or broad automation.
 
 `export html` writes a self-contained static review page. JSON and Markdown are
-the existing artifact formats; `--profile agent` adds raw excerpts for tools.
+the complete session artifact formats; `--profile agent` adds all raw hunks and
+comment excerpts for tools, including resolved comments as reference.
 
 ## MCP and ACP
 

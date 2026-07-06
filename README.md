@@ -475,12 +475,14 @@ surfaces suggestions live; draft dispositions (accept/edit/discard) are
 written back so agents observe the outcome.
 
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
-It prints the agent profile with action items first, then walkthrough context,
-comments, and full hunks as reference.
+It prints an implementation prompt with action items first, then walkthrough
+context, and reference hunks limited to files that carry action items or
+walkthrough stops.
 Use `gander handoff --format json` for the structured action schema
 `session`, `action_items`, `walkthrough`, and trailing `reference.hunks`; use
-`gander export json --profile agent` for the full session artifact when you need
-import/archive fidelity rather than a compact implementation handoff.
+`gander export markdown --profile agent` or `gander export json --profile agent`
+for the full session artifact when you need import/archive fidelity, all hunks,
+and resolved comments as reference rather than a compact implementation handoff.
 
 While the TUI is running it also serves the same protocol on a Unix socket
 (in the workspace runtime dir; see `gander paths`) backed by the **live**

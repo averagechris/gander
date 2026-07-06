@@ -169,12 +169,15 @@ pub enum CommentKind {
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
 )]
-#[serde(rename_all = "lowercase")]
 pub enum ActionIntent {
+    #[serde(rename = "none")]
     #[default]
     None,
+    #[serde(rename = "fix")]
     Fix,
+    #[serde(rename = "explain")]
     Explain,
+    #[serde(rename = "test")]
     Test,
     #[serde(rename = "follow-up", alias = "followup")]
     FollowUp,
@@ -454,5 +457,18 @@ mod tests {
             loaded.sessions[0].tasks[0].source_comment_id.as_deref(),
             Some("comment-1")
         );
+    }
+
+    #[test]
+    fn follow_up_action_accepts_legacy_spelling_and_serializes_canonical() {
+        for spelling in ["followup", "follow-up"] {
+            let action: ActionIntent = serde_json::from_str(&format!("\"{spelling}\"")).unwrap();
+            assert_eq!(action, ActionIntent::FollowUp);
+        }
+
+        let json = serde_json::to_string(&ActionIntent::FollowUp).unwrap();
+        assert_eq!(json, "\"follow-up\"");
+        let action: ActionIntent = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, ActionIntent::FollowUp);
     }
 }

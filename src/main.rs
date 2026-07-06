@@ -42,7 +42,7 @@ use crate::{
     app::ReviewSession,
     artifact::{
         ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, OwnedReviewArtifact,
-        import_json_artifact_into_state, render_artifact_with_options, render_handoff_json,
+        import_json_artifact_into_state, render_handoff_json, render_handoff_markdown,
         write_artifact, write_artifact_to,
     },
     clipboard::copy_to_clipboard,
@@ -122,7 +122,7 @@ enum Command {
     },
     /// Export the current review as JSON or Markdown.
     #[command(
-        after_help = "Examples:\n  gander export json --profile agent --output review.json\n      Full session artifact for import/archive or structured automation.\n  gander handoff --copy\n      One-shot actionable prompt for a coding agent."
+        after_help = "Examples:\n  gander export markdown --profile agent --output review.md\n      Complete session artifact with all comments and full raw hunks.\n  gander handoff --copy\n      Compact implementation prompt with action items and trimmed reference hunks."
     )]
     Export {
         #[arg(value_enum)]
@@ -135,8 +135,8 @@ enum Command {
     },
     /// Print or copy a prompt-style handoff for a coding agent.
     #[command(
-        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class task/comment objects with id, source, kind/action, path/line, excerpt, body, state, and linked ids; reference.hunks comes last for diff context.",
-        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export json --profile agent --output review.json\n      Use export for the full session artifact, import/archive, or tooling that needs all review state."
+        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready and compact: action items, walkthrough, then hunks limited to files with action items or walkthrough stops. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class task/comment objects with id, source, kind/action, path/line, excerpt, body, state, and linked ids; reference.hunks comes last for diff context.",
+        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export markdown --profile agent --output review.md\n      Use export for the complete session artifact with all comments and full hunks."
     )]
     Handoff {
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
@@ -785,12 +785,9 @@ fn run() -> color_eyre::Result<()> {
                 HandoffFormat::Json => {
                     render_handoff_json(&session, ArtifactBuildOptions { only_open })?
                 }
-                HandoffFormat::Markdown => render_artifact_with_options(
-                    &session,
-                    ArtifactFormat::Markdown,
-                    ArtifactProfile::Agent,
-                    ArtifactBuildOptions { only_open },
-                )?,
+                HandoffFormat::Markdown => {
+                    render_handoff_markdown(&session, ArtifactBuildOptions { only_open })?
+                }
             };
             if let Some(path) = output {
                 if let Some(parent) = path.parent() {
