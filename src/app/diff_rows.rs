@@ -125,23 +125,6 @@ impl ReviewSession {
             &old_source,
             &old_line_indices,
         );
-        if let Some(summary) = syntax_cache.summary.clone() {
-            rows.push(DiffRow {
-                old_lineno: None,
-                new_lineno: None,
-                prefix: " ",
-                text: format!(
-                    "tree-sitter: {} root={} errors={}",
-                    summary.language, summary.root_kind, summary.has_error
-                ),
-                syntax: Vec::new(),
-                emphasis: Vec::new(),
-                kind: DiffRowKind::SyntaxSummary,
-                hunk_index: None,
-                anchor: None,
-                gap: None,
-            });
-        }
         if syntax_cache.new_status == SyntaxCacheStatus::Failed
             || syntax_cache.old_status == SyntaxCacheStatus::Failed
         {

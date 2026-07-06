@@ -1675,6 +1675,10 @@ fn step_stack(
             return;
         }
     };
+    let stack: Vec<_> = stack
+        .into_iter()
+        .filter(|change| !change.matches_rev(&session.target.base))
+        .collect();
     if stack.is_empty() {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
@@ -3703,6 +3707,39 @@ mod tests {
         assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
         let notice = tui_state.notice.unwrap();
         assert_eq!(notice.message, "stack 2/3: feat: second");
+    }
+
+    #[test]
+    fn stack_step_excludes_base_change_from_positions() {
+        let mut session = snapshot_session("");
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.stack = vec![
+            JjChangeSummary {
+                change_id: "base".to_owned(),
+                bookmarks: "main".to_owned(),
+                description: "base".to_owned(),
+            },
+            stack_change("aaa", "feat: first"),
+            stack_change("bbb", "feat: second"),
+        ];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        session.target = ReviewTarget::new("main", "aaa");
+
+        step_stack(&loader, &mut session, -1, &mut tui_state);
+
+        assert_eq!(session.target, ReviewTarget::new("main", "aaa"));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("already at the bottom")
+        );
     }
 
     #[test]

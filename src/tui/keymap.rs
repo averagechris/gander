@@ -277,6 +277,7 @@ impl KeyMap {
             .iter()
             .find(|binding| binding.key.matches(key))
             .map(|binding| binding.action)
+            .or_else(|| normal_movement_action_for(key))
     }
 
     pub(super) fn comment_action_for(&self, key: &KeyEvent) -> Option<Action> {
@@ -306,6 +307,7 @@ impl KeyMap {
                     )
             })
             .map(|binding| binding.action)
+            .or_else(|| picker_movement_action_for(key))
     }
 
     pub(super) fn hint(&self, action: Action) -> &str {
@@ -314,6 +316,28 @@ impl KeyMap {
             .find(|binding| binding.action == action)
             .map(|binding| binding.key.label.as_str())
             .unwrap_or("?")
+    }
+}
+
+fn normal_movement_action_for(key: &KeyEvent) -> Option<Action> {
+    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
+        KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
+        _ => None,
+    }
+}
+
+fn picker_movement_action_for(key: &KeyEvent) -> Option<Action> {
+    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => Some(Action::TargetPickerMoveDown),
+        KeyCode::Char('k') | KeyCode::Up => Some(Action::TargetPickerMoveUp),
+        _ => None,
     }
 }
 
@@ -578,6 +602,43 @@ mod tests {
 
         assert_eq!(keymap.action_for(&key), Some(Action::MoveDown));
         assert_eq!(keymap.hint(Action::MoveDown), "s");
+    }
+
+    #[test]
+    fn movement_fallbacks_keep_j_k_and_arrows_available() {
+        let config = KeybindingsConfig {
+            move_down: vec!["n".to_owned()],
+            move_up: vec!["p".to_owned()],
+            target_picker_down: vec!["ctrl-j".to_owned()],
+            target_picker_up: vec!["ctrl-k".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('j'))),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('k'))),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Down)),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Up)),
+            Some(Action::MoveUp)
+        );
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::from(KeyCode::Char('j'))),
+            Some(Action::TargetPickerMoveDown)
+        );
+        assert_eq!(
+            keymap.target_picker_action_for(&KeyEvent::from(KeyCode::Char('k'))),
+            Some(Action::TargetPickerMoveUp)
+        );
     }
 
     #[test]

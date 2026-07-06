@@ -1196,6 +1196,13 @@ impl ReviewSession {
         } else {
             self.diff_scroll.saturating_add(delta as u16)
         };
+        self.clamp_diff_scroll();
+    }
+
+    fn clamp_diff_scroll(&mut self) {
+        let rows = self.diff_rows_for_selected_file();
+        let max_scroll = rows.len().saturating_sub(1).min(u16::MAX as usize) as u16;
+        self.diff_scroll = self.diff_scroll.min(max_scroll);
     }
 
     /// Scroll near the end of the diff instead of past it, and keep the cursor
@@ -1214,6 +1221,7 @@ impl ReviewSession {
         self.diff_scroll = rows
             .len()
             .saturating_sub(DIFF_CURSOR_SCROLL_MARGIN)
+            .min(rows.len().saturating_sub(1))
             .min(u16::MAX as usize) as u16;
     }
 
@@ -1859,11 +1867,19 @@ impl ReviewSession {
         let additions: usize = self.files.iter().map(|file| file.additions).sum();
         let deletions: usize = self.files.iter().map(|file| file.deletions).sum();
         format!(
-            "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {} comments",
+            "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {}",
             self.files.len(),
             self.files.len(),
-            self.comments.len()
+            pluralize(self.comments.len(), "comment")
         )
+    }
+}
+
+fn pluralize(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 
@@ -3119,6 +3135,26 @@ diff --git a/src/c.rs b/src/c.rs
             session.diff_cursor,
             rows.iter().rposition(|row| row.anchor.is_some()).unwrap()
         );
+    }
+
+    #[test]
+    fn scroll_diff_clamps_to_last_content_line() {
+        let mut session = multi_line_session();
+
+        session.scroll_diff(i16::MAX);
+
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(session.diff_scroll as usize, rows.len() - 1);
+    }
+
+    #[test]
+    fn summary_line_pluralizes_comment_count() {
+        let mut session = session();
+
+        assert!(session.summary_line().contains("0 comments"));
+        session.add_comment("one".into());
+        assert!(session.summary_line().contains("1 comment"));
+        assert!(!session.summary_line().contains("1 comments"));
     }
 
     #[test]
