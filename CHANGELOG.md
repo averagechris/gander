@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Fixed
+
+- Activity-popup snapshot tests render timestamps in UTC so the test
+  suite passes regardless of the machine or sandbox timezone. This
+  failure aborted the v0.6.0 release after its tag was pushed, so
+  the v0.6.0 tag carries no binary artifacts — use v0.6.1, which is
+  otherwise identical.
 
 ## v0.6.0 - 2026-07-05
 

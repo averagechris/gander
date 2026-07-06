@@ -3774,6 +3774,23 @@ fn draw_task_list_popup(
     frame.render_widget(paragraph, popup);
 }
 
+/// Wall-clock label for an activity event. Tests format in UTC so snapshot
+/// output does not depend on the machine (or sandbox) timezone; production
+/// uses the local timezone.
+fn activity_event_time(timestamp: &chrono::DateTime<chrono::Utc>) -> String {
+    #[cfg(test)]
+    {
+        timestamp.format("%H:%M:%S").to_string()
+    }
+    #[cfg(not(test))]
+    {
+        timestamp
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string()
+    }
+}
+
 fn draw_activity_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -3792,11 +3809,7 @@ fn draw_activity_popup(
         .iter()
         .rev()
         .map(|event| {
-            let time = event
-                .timestamp
-                .with_timezone(&chrono::Local)
-                .format("%H:%M:%S")
-                .to_string();
+            let time = activity_event_time(&event.timestamp);
             let message = if event.count > 1 {
                 format!("{} {}×", event.message, event.count)
             } else {
