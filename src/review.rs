@@ -141,6 +141,15 @@ pub struct NewComment {
     pub action: Option<ActionIntent>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommentEdits {
+    pub path: Option<String>,
+    pub line: Option<Option<usize>>,
+    pub end_line: Option<Option<usize>>,
+    pub anchor: Option<Option<crate::anchor::CommentAnchor>>,
+    pub body: Option<String>,
+}
+
 pub fn add_comment(
     session: &mut ReviewSession,
     comments: &mut Vec<Comment>,
@@ -184,6 +193,49 @@ pub fn resolve_comment(
     id: &str,
 ) -> Result<Comment> {
     set_comment_state(session, comments, id, CommentState::Resolved)
+}
+
+pub fn edit_comment(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    id: &str,
+    edits: CommentEdits,
+) -> Result<Comment> {
+    let comment = comments
+        .iter_mut()
+        .find(|comment| comment.id.starts_with(id))
+        .ok_or_else(|| eyre!("unknown comment `{id}`"))?;
+    if let Some(path) = edits.path {
+        comment.path = path;
+    }
+    if let Some(line) = edits.line {
+        comment.line = line;
+    }
+    if let Some(end_line) = edits.end_line {
+        comment.end_line = end_line;
+    }
+    if let Some(anchor) = edits.anchor {
+        comment.anchor = anchor;
+    }
+    if let Some(body) = edits.body {
+        comment.body = body;
+    }
+    touch(session);
+    Ok(comment.clone())
+}
+
+pub fn delete_comment(
+    session: &mut ReviewSession,
+    comments: &mut Vec<Comment>,
+    id: &str,
+) -> Result<Comment> {
+    let index = comments
+        .iter()
+        .position(|comment| comment.id.starts_with(id))
+        .ok_or_else(|| eyre!("unknown comment `{id}`"))?;
+    let comment = comments.remove(index);
+    touch(session);
+    Ok(comment)
 }
 
 pub fn add_task(

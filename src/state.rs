@@ -176,6 +176,7 @@ pub enum ActionIntent {
     Fix,
     Explain,
     Test,
+    #[serde(rename = "follow-up", alias = "followup")]
     FollowUp,
 }
 

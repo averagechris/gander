@@ -86,7 +86,9 @@ struct Cli {
     generated_glob: Vec<String>,
 
     /// Path to the persistent review state file.
-    #[arg(long, global = true)]
+    /// Named --state-file so subcommands can use --state for domain state
+    /// values (for example `comments set-state --state todo`).
+    #[arg(long = "state-file", global = true)]
     state: Option<PathBuf>,
 
     /// Path to a gander config file. Layered over XDG user config and a
@@ -336,66 +338,120 @@ enum HunksCommand {
 enum CommentsCommand {
     /// List comments as JSON.
     List,
+    /// Add a durable comment anchored to a changed file in the post-image.
     Add {
+        /// Changed file path to comment on. Alias: --file.
         #[arg(long, alias = "file")]
         path: String,
+        /// 1-indexed new-side (post-image) line number to anchor to.
         #[arg(long)]
         line: Option<usize>,
+        /// 1-indexed inclusive new-side (post-image) end line for a range anchor.
         #[arg(long = "end-line")]
         end_line: Option<usize>,
+        /// Comment body text.
         #[arg(long)]
         body: String,
+        /// Comment classification.
         #[arg(long, value_enum)]
         kind: Option<CommentKindArg>,
+        /// Suggested action intent for task/handoff output.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
     },
+    /// Mark a comment resolved by id or unique id prefix.
     Resolve {
+        /// Comment id or unique id prefix.
         id: String,
     },
+    /// Change a comment lifecycle state by id or unique id prefix.
     SetState {
+        /// Comment id or unique id prefix.
         id: String,
-        #[arg(long, value_enum)]
+        /// New comment state. Values: draft, todo, resolved.
+        #[arg(long, value_enum, id = "comment-state")]
         state: CommentStateArg,
+    },
+    /// Edit a durable comment's anchor and/or body.
+    Edit {
+        /// Comment id or unique id prefix.
+        id: String,
+        /// New changed file path. Alias: --file.
+        #[arg(long, alias = "file")]
+        path: Option<String>,
+        /// New 1-indexed new-side (post-image) line number.
+        #[arg(long)]
+        line: Option<usize>,
+        /// New 1-indexed inclusive new-side (post-image) start line for a range.
+        #[arg(long = "start-line")]
+        start_line: Option<usize>,
+        /// New 1-indexed inclusive new-side (post-image) end line for a range.
+        #[arg(long = "end-line")]
+        end_line: Option<usize>,
+        /// Replacement comment body text.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Permanently delete a durable comment by id or unique id prefix.
+    Delete {
+        /// Comment id or unique id prefix.
+        id: String,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum ReviewsCommand {
+    /// Create or return the durable review session for the current repo/base/rev.
     Create {
+        /// Optional human-readable title for a newly created review session.
         #[arg(long)]
         title: Option<String>,
     },
+    /// List durable review sessions as JSON.
     List,
+    /// Show one durable review session by id or unique id prefix as JSON.
     Show {
+        /// Review session id or unique id prefix.
         id: String,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum TasksCommand {
-    /// List tasks as JSON. Currently returns comment-backed todo items.
+    /// List tasks as JSON, including comment-backed todo items.
     List,
+    /// Add a durable review task.
     Add {
+        /// Task title.
         #[arg(long)]
         title: String,
+        /// Optional task details/body text.
         #[arg(long)]
         body: Option<String>,
+        /// Action intent. Accepts fix, explain, test, follow-up, and legacy followup.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
+        /// Source comment id or unique id prefix to link.
         #[arg(long = "comment")]
         comment: Option<String>,
+        /// Changed file path this task targets. Alias: --file.
         #[arg(long, alias = "file")]
         path: Option<String>,
+        /// 1-indexed new-side (post-image) line number this task targets.
         #[arg(long)]
         line: Option<usize>,
     },
+    /// Mark a task done by id or unique id prefix.
     Complete {
+        /// Task id or unique id prefix.
         id: String,
+        /// Optional completion summary.
         #[arg(long)]
         summary: Option<String>,
     },
+    /// Reopen a done task by id or unique id prefix.
     Reopen {
+        /// Task id or unique id prefix.
         id: String,
     },
 }
@@ -404,30 +460,44 @@ enum TasksCommand {
 enum WalkthroughCommand {
     /// Export persisted walkthroughs as Markdown.
     Export,
+    /// Add a walkthrough step for the current review.
     AddStep {
+        /// Step title.
         #[arg(long)]
         title: String,
+        /// Changed file path this step targets. Alias: --file.
         #[arg(long = "path", alias = "file")]
         file: Option<String>,
+        /// 1-indexed new-side (post-image) line number this step targets.
         #[arg(long)]
         line: Option<usize>,
+        /// 1-indexed inclusive new-side (post-image) end line for a range target.
         #[arg(long = "end-line")]
         end_line: Option<usize>,
+        /// Symbol/function/class name this step targets.
         #[arg(long)]
         symbol: Option<String>,
+        /// Why this step matters.
         #[arg(long)]
         why: Option<String>,
+        /// Optional step details/body text.
         #[arg(long)]
         body: Option<String>,
     },
+    /// Remove a walkthrough step by id or unique id prefix.
     RemoveStep {
+        /// Walkthrough step id or unique id prefix.
         id: String,
     },
+    /// Move a walkthrough step to a zero-based position.
     MoveStep {
+        /// Walkthrough step id or unique id prefix.
         id: String,
+        /// Zero-based destination index within the walkthrough.
         #[arg(long = "to")]
         to: usize,
     },
+    /// Show persisted walkthroughs as JSON.
     Show,
 }
 
@@ -443,6 +513,7 @@ enum ActionIntentArg {
     Fix,
     Explain,
     Test,
+    #[value(alias = "followup")]
     FollowUp,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -523,6 +594,10 @@ impl Error for UserError {}
 
 fn user_error(message: impl Into<String>) -> color_eyre::Report {
     eyre!(UserError::new(message))
+}
+
+fn into_user_error(error: color_eyre::Report) -> color_eyre::Report {
+    user_error(error.to_string())
 }
 
 fn format_user_error(error: &UserError) -> String {
@@ -905,7 +980,8 @@ fn run() -> color_eyre::Result<()> {
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment =
-                    review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)?;
+                    review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)
+                        .map_err(|error| user_error(error.to_string()))?;
                 state.save(&state_path)?;
                 print_json(&comment)?;
             }
@@ -921,7 +997,71 @@ fn run() -> color_eyre::Result<()> {
                     &mut state.comments,
                     &id,
                     new_state.into(),
-                )?;
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_json(&comment)?;
+            }
+            CommentsCommand::Edit {
+                id,
+                path,
+                line,
+                start_line,
+                end_line,
+                body,
+            } => {
+                let existing = state
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id.starts_with(&id))
+                    .cloned()
+                    .ok_or_else(|| user_error(format!("unknown comment `{id}`")))?;
+                let new_line = start_line.or(line);
+                let effective_path = if let Some(path) = path.as_deref() {
+                    ensure_diff_file(&session, path)?;
+                    path.to_owned()
+                } else {
+                    existing.path.clone()
+                };
+                let anchor_changed =
+                    path.is_some() || line.is_some() || start_line.is_some() || end_line.is_some();
+                let effective_line = new_line.or(existing.line);
+                let effective_end_line = end_line.or(existing.end_line);
+                let anchor = anchor_changed.then(|| {
+                    session
+                        .files
+                        .iter()
+                        .find(|file| file.path == effective_path)
+                        .and_then(|file| {
+                            comment_anchor_for_file_lines(file, effective_line, effective_end_line)
+                        })
+                });
+                let spec = session_target_spec(&repo, &session.target);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let comment = review::edit_comment(
+                    &mut state.sessions[idx],
+                    &mut state.comments,
+                    &id,
+                    review::CommentEdits {
+                        path: path.or(Some(effective_path)),
+                        line: (start_line.is_some() || line.is_some()).then_some(new_line),
+                        end_line: end_line.map(Some),
+                        anchor,
+                        body,
+                    },
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_json(&comment)?;
+            }
+            CommentsCommand::Delete { id } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let comment =
+                    review::delete_comment(&mut state.sessions[idx], &mut state.comments, &id)
+                        .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&comment)?;
             }
@@ -937,7 +1077,9 @@ fn run() -> color_eyre::Result<()> {
             ReviewsCommand::List => {
                 print_json(&serde_json::json!({ "sessions": review::list_sessions(&state) }))?
             }
-            ReviewsCommand::Show { id } => print_json(review::find_session(&state, &id)?)?,
+            ReviewsCommand::Show { id } => {
+                print_json(review::find_session(&state, &id).map_err(into_user_error)?)?
+            }
         },
         Command::Tasks { command } => match command {
             TasksCommand::List => {
@@ -979,14 +1121,14 @@ fn run() -> color_eyre::Result<()> {
             TasksCommand::Complete { id, summary } => {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let task = review::complete_task(rs, &id, summary)?;
+                let task = review::complete_task(rs, &id, summary).map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&task)?;
             }
             TasksCommand::Reopen { id } => {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let task = review::reopen_task(rs, &id)?;
+                let task = review::reopen_task(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&task)?;
             }
@@ -1031,14 +1173,14 @@ fn run() -> color_eyre::Result<()> {
             WalkthroughCommand::RemoveStep { id } => {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let step = review::remove_walkthrough_step(rs, &id)?;
+                let step = review::remove_walkthrough_step(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
             WalkthroughCommand::MoveStep { id, to } => {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let step = review::move_walkthrough_step(rs, &id, to)?;
+                let step = review::move_walkthrough_step(rs, &id, to).map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
@@ -1714,6 +1856,7 @@ impl From<TuiArtifactOnQuitArg> for TuiArtifactOnQuitConfig {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use clap::CommandFactory;
 
     struct BriefsTestJj;
 
@@ -2068,6 +2211,84 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    #[test]
+    fn full_cli_debug_asserts() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn mutating_subcommands_parse() {
+        let commands: &[&[&str]] = &[
+            &[
+                "gander",
+                "comments",
+                "add",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "1",
+                "--body",
+                "note",
+            ],
+            &["gander", "comments", "resolve", "abc"],
+            &["gander", "comments", "set-state", "abc", "--state", "todo"],
+            &[
+                "gander",
+                "comments",
+                "edit",
+                "abc",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "2",
+                "--body",
+                "updated",
+            ],
+            &["gander", "comments", "delete", "abc"],
+            &[
+                "gander", "tasks", "add", "--title", "fix", "--action", "followup",
+            ],
+            &[
+                "gander",
+                "tasks",
+                "add",
+                "--title",
+                "fix",
+                "--action",
+                "follow-up",
+            ],
+            &["gander", "tasks", "complete", "abc", "--summary", "done"],
+            &["gander", "tasks", "reopen", "abc"],
+            &[
+                "gander",
+                "walkthrough",
+                "add-step",
+                "--title",
+                "read",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "1",
+            ],
+            &["gander", "walkthrough", "remove-step", "abc"],
+            &["gander", "walkthrough", "move-step", "abc", "--to", "0"],
+            &["gander", "reviews", "create", "--title", "Review"],
+            &["gander", "chunks", "set", "--file", "-"],
+            &["gander", "chunks", "update", "--file", "-"],
+            &["gander", "chunks", "remove", "--id", "abc"],
+            &["gander", "chunks", "clear"],
+            &["gander", "briefs", "set", "--file", "-"],
+            &["gander", "briefs", "clear"],
+            &["gander", "drafts", "add", "--file", "-"],
+            &["gander", "drafts", "remove", "--id", "abc"],
+        ];
+
+        for command in commands {
+            Cli::try_parse_from(*command)
+                .unwrap_or_else(|error| panic!("failed to parse {command:?}: {error}"));
+        }
     }
 
     #[test]

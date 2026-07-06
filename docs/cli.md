@@ -1,13 +1,13 @@
 # Gander CLI reference
 
 Gander is CLI-first: every durable review operation writes only Gander review
-state (the `--state` file or the XDG state path shown by `gander paths`). These
+state (the `--state-file` file or the XDG state path shown by `gander paths`). These
 commands inspect jj-visible code, but mutation commands do **not** edit the code
 workspace, fetch from forges, or post reviews remotely.
 
 Global options accepted by all commands include `--repo <path>`, `--rev <revset>`
 (default `@`), `--base <revset>` (default `trunk()`), repeated `--ignore`,
-generated-file filters, `--state <path>`, and `--config <path>`.
+generated-file filters, `--state-file <path>`, and `--config <path>`.
 
 ## Reviews
 
@@ -54,9 +54,17 @@ gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
   [--kind note|issue|question|praise] [--action fix|explain|test|follow-up]
 gander comments resolve <id>
 gander comments set-state <id> --state draft|todo|resolved
+gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
+  [--body <text>]
+gander comments delete <id>
 ```
 
-`add` creates a persisted comment. Example:
+`add` creates a persisted comment. `--line`, `--start-line`, and `--end-line`
+are 1-indexed new-side (post-image) line numbers in the current jj diff;
+omitting them creates a file-level anchor. `edit` updates the body and/or
+re-anchors the comment with the same post-image line semantics, recomputing the
+stored excerpt anchor from the current diff. `delete` removes the comment from
+local Gander review state. Example:
 
 ```json
 {
@@ -85,6 +93,9 @@ gander tasks reopen <id>
 ```
 
 Tasks are review-state todos for humans or agents. Example `tasks list`:
+`--line` is a 1-indexed new-side (post-image) line number in the current jj
+diff. `--action` emits `follow-up`; legacy JSON or CLI input spelled
+`followup` is still accepted.
 
 ```json
 {
@@ -116,6 +127,8 @@ gander walkthrough export
 ```
 
 Walkthrough steps have a title, optional why/body, and an optional stable target.
+`--line` and `--end-line` are 1-indexed new-side (post-image) line numbers in
+the current jj diff.
 `show` emits JSON; `export` emits Markdown.
 
 File-anchor commands accept both `--path` and `--file` for compatibility. The
@@ -164,14 +177,14 @@ For low-context agent loops, use the CLI and `jq` directly:
 ```sh
 state="$TMPDIR/gander-review.json"
 rm -f "$state"
-review_id=$(gander --state "$state" reviews create --title "Agent pass" | jq -r .id)
-comment_id=$(gander --state "$state" comments add --path README.md --line 1 \
+review_id=$(gander --state-file "$state" reviews create --title "Agent pass" | jq -r .id)
+comment_id=$(gander --state-file "$state" comments add --path README.md --line 1 \
   --kind issue --action fix --body "Clarify the introduction." | jq -r .id)
-task_id=$(gander --state "$state" tasks add --title "Fix intro" \
+task_id=$(gander --state-file "$state" tasks add --title "Fix intro" \
   --action fix --comment "$comment_id" --path README.md --line 1 | jq -r .id)
-gander --state "$state" tasks list | jq -r '.tasks[] | select(.status == "open") | .id' |
+gander --state-file "$state" tasks list | jq -r '.tasks[] | select(.status == "open") | .id' |
   while read -r id; do
-    gander --state "$state" tasks complete "$id" --summary "Handled by agent"
+    gander --state-file "$state" tasks complete "$id" --summary "Handled by agent"
   done
-gander --state "$state" reviews show "$review_id" | jq '{id, title, tasks}'
+gander --state-file "$state" reviews show "$review_id" | jq '{id, title, tasks}'
 ```
