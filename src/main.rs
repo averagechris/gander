@@ -909,12 +909,15 @@ fn run() -> color_eyre::Result<()> {
             }
         }
         Command::Chunks { command } => {
+            warn_if_live_session_target_differs(&workspace_paths, &session);
             handle_chunks_command(command, &session, &jj, &workspace_paths.overlay_file())?
         }
         Command::Briefs { command } => {
+            warn_if_live_session_target_differs(&workspace_paths, &session);
             handle_briefs_command(command, &session, &jj, &workspace_paths.overlay_file())?
         }
         Command::Drafts { command } => {
+            warn_if_live_session_target_differs(&workspace_paths, &session);
             handle_drafts_command(command, &workspace_paths.overlay_file())?
         }
         Command::Files { command } => match command {
@@ -1190,6 +1193,22 @@ fn run() -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn warn_if_live_session_target_differs(paths: &WorkspacePaths, session: &ReviewSession) {
+    #[cfg(unix)]
+    if let Some(instance) =
+        crate::registry::find_live_for_workspace(&paths.registry_dir, &paths.workspace_root)
+        && (instance.base != session.target.base || instance.rev != session.target.rev)
+    {
+        eprintln!(
+            "warning: live TUI session is reviewing {}..{}; this command is using {}",
+            instance.base, instance.rev, session.target
+        );
+    }
+
+    #[cfg(not(unix))]
+    let _ = (paths, session);
 }
 
 fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {

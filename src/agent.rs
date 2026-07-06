@@ -254,43 +254,109 @@ pub struct ChunkLineSpaceHunk {
     pub last_line: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLineSpaceRange {
+    header: String,
+    start_line: usize,
+    end_line: usize,
+    first_line: String,
+    last_line: String,
+}
+
+fn file_diff_line_space_ranges(file: &FileDiff) -> Vec<DiffLineSpaceRange> {
+    let mut ranges = Vec::new();
+    for hunk in &file.hunks {
+        for use_new_side in [true, false] {
+            let lines = hunk
+                .lines
+                .iter()
+                .filter(|line| line.kind != DiffLineKind::Meta)
+                .filter_map(|line| {
+                    if use_new_side {
+                        line.new_lineno
+                    } else {
+                        line.old_lineno
+                    }
+                    .map(|line_no| (line_no, line.text.clone()))
+                })
+                .collect::<Vec<_>>();
+            push_contiguous_line_space_ranges(&mut ranges, &hunk.header, lines);
+        }
+    }
+    ranges.sort_by_key(|range| (range.start_line, range.end_line));
+    ranges.dedup_by(|a, b| {
+        a.start_line == b.start_line && a.end_line == b.end_line && a.header == b.header
+    });
+    let mut merged: Vec<DiffLineSpaceRange> = Vec::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start_line <= last.end_line + 1
+        {
+            if range.end_line > last.end_line {
+                last.end_line = range.end_line;
+                last.last_line = range.last_line;
+            }
+            continue;
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+fn push_contiguous_line_space_ranges(
+    ranges: &mut Vec<DiffLineSpaceRange>,
+    header: &str,
+    mut lines: Vec<(usize, String)>,
+) {
+    lines.sort_by_key(|(line_no, _)| *line_no);
+    let mut iter = lines.into_iter();
+    let Some((mut start_line, mut last_line_no, mut first_line)) =
+        iter.next().map(|(line_no, text)| (line_no, line_no, text))
+    else {
+        return;
+    };
+    let mut last_line = first_line.clone();
+    for (line_no, text) in iter {
+        if line_no == last_line_no || line_no == last_line_no + 1 {
+            last_line_no = line_no;
+            last_line = text;
+        } else {
+            ranges.push(DiffLineSpaceRange {
+                header: header.to_owned(),
+                start_line,
+                end_line: last_line_no,
+                first_line: first_line.clone(),
+                last_line: last_line.clone(),
+            });
+            start_line = line_no;
+            last_line_no = line_no;
+            first_line = text.clone();
+            last_line = text;
+        }
+    }
+    ranges.push(DiffLineSpaceRange {
+        header: header.to_owned(),
+        start_line,
+        end_line: last_line_no,
+        first_line,
+        last_line,
+    });
+}
+
 pub fn chunk_line_space(files: &[FileDiff], path_filter: Option<&str>) -> Vec<ChunkLineSpaceFile> {
     files
         .iter()
         .filter(|file| path_filter.is_none_or(|path| file.path == path))
         .map(|file| ChunkLineSpaceFile {
             path: file.path.clone(),
-            hunks: file
-                .hunks
-                .iter()
-                .filter_map(|hunk| {
-                    let lines = hunk
-                        .lines
-                        .iter()
-                        .filter(|line| line.kind != DiffLineKind::Meta)
-                        .filter_map(|line| line.new_lineno.or(line.old_lineno))
-                        .collect::<Vec<_>>();
-                    let (start_line, end_line) = (*lines.iter().min()?, *lines.iter().max()?);
-                    let first_line = hunk
-                        .lines
-                        .iter()
-                        .find(|line| line.kind != DiffLineKind::Meta)
-                        .map(|line| line.text.clone())
-                        .unwrap_or_default();
-                    let last_line = hunk
-                        .lines
-                        .iter()
-                        .rev()
-                        .find(|line| line.kind != DiffLineKind::Meta)
-                        .map(|line| line.text.clone())
-                        .unwrap_or_default();
-                    Some(ChunkLineSpaceHunk {
-                        header: hunk.header.clone(),
-                        start_line,
-                        end_line,
-                        first_line,
-                        last_line,
-                    })
+            hunks: file_diff_line_space_ranges(file)
+                .into_iter()
+                .map(|range| ChunkLineSpaceHunk {
+                    header: range.header,
+                    start_line: range.start_line,
+                    end_line: range.end_line,
+                    first_line: range.first_line,
+                    last_line: range.last_line,
                 })
                 .collect(),
         })
@@ -472,15 +538,9 @@ fn part_range_intersects_file_diff(part: &ChunkPart, file: &FileDiff) -> bool {
     if start > end {
         return false;
     }
-    file.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| {
-        if line.kind == DiffLineKind::Meta {
-            return false;
-        }
-        [line.new_lineno, line.old_lineno]
-            .into_iter()
-            .flatten()
-            .any(|line_no| (start..=end).contains(&line_no))
-    })
+    file_diff_line_space_ranges(file)
+        .iter()
+        .any(|range| start <= range.end_line && end >= range.start_line)
 }
 
 #[cfg(test)]
@@ -612,27 +672,63 @@ mod validation_tests {
     #[test]
     fn chunk_line_space_ranges_validate_round_trip_and_filter_by_path() {
         let files = diff_files(
-            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,2 +10,3 @@\n ctx\n-old\n+new\n+extra\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -20 +20 @@\n-bye\n+hi\n",
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,2 +10,3 @@\n ctx\n-old\n+new\n+extra\n@@ -25,11 +45,14 @@\n ctx25\n ctx26\n ctx27\n-old28\n-old29\n-old30\n-old31\n-old32\n-old33\n-old34\n ctx35\n+new48\n+new49\n+new50\n+new51\n+new52\n+new53\n+new54\n+new55\n+new56\n+new57\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -20 +20 @@\n-bye\n+hi\n",
         );
         let listed = chunk_line_space(&files, Some("a.rs"));
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, "a.rs");
-        let hunk = &listed[0].hunks[0];
-        // The listed range is exactly the same coordinate space accepted by chunk validation.
-        let chunks = vec![chunk(
-            "c",
-            None,
-            vec![part("a.rs", hunk.start_line, hunk.end_line)],
-        )];
+        let hunks = &listed[0].hunks;
+        assert!(!hunks.is_empty());
+        for hunk in hunks {
+            // Every listed range is exactly the same coordinate space accepted by chunk validation.
+            let chunks = vec![chunk(
+                "c",
+                None,
+                vec![part("a.rs", hunk.start_line, hunk.end_line)],
+            )];
+            assert!(
+                validate_review_chunks(
+                    &chunks,
+                    &ChunkValidationContext {
+                        session_files: &files,
+                        change_diffs: Vec::new()
+                    }
+                )
+                .is_empty(),
+                "listed range should validate: {hunk:?}"
+            );
+        }
+        for pair in hunks.windows(2) {
+            assert!(
+                pair[0].end_line < pair[1].start_line,
+                "listed line-space ranges must not overlap: {pair:?}"
+            );
+        }
+        let gap_start = 36;
+        let gap_end = 44;
+        assert!(hunks.iter().any(|hunk| hunk.end_line < gap_start));
+        assert!(hunks.iter().any(|hunk| hunk.start_line > gap_end));
+        let invalid = validate_review_chunks(
+            &[chunk("gap", None, vec![part("a.rs", gap_start, gap_end)])],
+            &ChunkValidationContext {
+                session_files: &files,
+                change_diffs: Vec::new(),
+            },
+        );
+        assert_eq!(invalid.len(), 1);
+        assert!(invalid[0].reason.contains("outside diff line space"));
         assert!(
-            validate_review_chunks(
-                &chunks,
-                &ChunkValidationContext {
-                    session_files: &files,
-                    change_diffs: Vec::new()
-                }
-            )
-            .is_empty()
+            !hunks
+                .iter()
+                .any(|hunk| hunk.start_line == 28 && hunk.end_line == 58),
+            "old/new mixed range from evaluator repro must never be listed"
+        );
+        assert_eq!(
+            hunks
+                .iter()
+                .map(|hunk| (hunk.start_line, hunk.end_line))
+                .collect::<Vec<_>>(),
+            vec![(10, 12), (25, 35), (45, 58)]
         );
     }
 
