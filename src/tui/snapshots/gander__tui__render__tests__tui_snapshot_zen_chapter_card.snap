@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4718
+assertion_line: 4862
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 ┌ zen · chapter 1/1 · then 1 at a glance ──────────────────────────────────────────────────────────┐
@@ -15,12 +15,12 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │  │                                                                                            │  │
 │  │ 2 file(s) · +3 −2                                                                          │  │
 │  │ n tours the 1 stop(s) in this chapter                                                      │  │
-│  │ stops: roles: 1 source · 1 tests                                                           │  │
-│  │ stops: churn: +3 −2 · tests touched                                                        │  │
-│  │ …                                                                                          │  │
-│  │ what this change does ─────────────────────────────────────────────────────────────────────│  │
+│  │                                                                                            │  │
+│  │ what this change does                                                                      │  │
 │  │ Swaps the legacy old() startup call for new() and batches extra() alongside it, so both    │  │
 │  │ effects fire together.                                                                     │  │
+│  │ derived ───────────────────────────────────────────────────────────────────────────────────│  │
+│  │ derived: +3 −2 · tests touched · d for detail                                              │  │
 │  ╰────────────────────────────────────────────────────────────────────────────────────────────╯  │
 │                                                                                                  │
 │                                                                                                  │

@@ -2325,11 +2325,35 @@ fn draw_zen_chapter(
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         )));
     }
-    for line in &chapter.derived_lines {
+    let has_curated_brief = chapter.summary.is_some();
+    let summary = chapter.summary.clone().unwrap_or_else(|| {
+        "No agent brief for this change — the facts above are derived from the diff.".to_owned()
+    });
+    if has_curated_brief {
+        body.push(Line::from(""));
         body.push(Line::from(Span::styled(
-            line.clone(),
-            Style::default().fg(Color::Gray),
+            "what this change does",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         )));
+        for line in summary.lines() {
+            body.push(Line::from(Span::styled(
+                line.to_owned(),
+                Style::default().fg(Color::Gray),
+            )));
+        }
+    } else if !chapter.derived_lines.is_empty() {
+        body.push(Line::from(Span::styled(
+            "derived facts",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for line in &chapter.derived_lines {
+            body.push(Line::from(Span::styled(
+                format!("  {line}"),
+                Style::default().fg(Color::Gray),
+            )));
+        }
     }
     if inner.height < 8 {
         // Too small for the card layout: header only.
@@ -2344,14 +2368,32 @@ fn draw_zen_chapter(
         Rect { height: 1, ..inner },
     );
 
-    let summary = chapter.summary.clone().unwrap_or_else(|| {
-        "No agent brief for this change — the facts above are derived from the diff.".to_owned()
-    });
-
     let max_card_width = inner.width.saturating_sub(4).max(20);
     let card_width = 100.min(max_card_width).max(50.min(max_card_width));
     let text_width = card_width.saturating_sub(4).max(20) as usize;
-    let estimated: usize = summary
+    let bottom_text = if has_curated_brief {
+        if zen.chapter_brief_expanded {
+            let facts = chapter
+                .derived_lines
+                .iter()
+                .map(|line| format!("  {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if facts.is_empty() {
+                "derived: none detected".to_owned()
+            } else {
+                format!("derived facts\n{facts}")
+            }
+        } else {
+            format!(
+                "derived: {} · d for detail",
+                derived_summary(&chapter.derived_lines)
+            )
+        }
+    } else {
+        summary.clone()
+    };
+    let estimated: usize = bottom_text
         .lines()
         .map(|line| line.chars().count().div_ceil(text_width).max(1))
         .sum();
@@ -2435,13 +2477,16 @@ fn draw_zen_chapter(
             .wrap(Wrap { trim: false }),
         sections[0],
     );
-    let summary = if !zen.chapter_brief_expanded && full_summary_height > summary_height {
+    let summary = if !has_curated_brief
+        && !zen.chapter_brief_expanded
+        && full_summary_height > summary_height
+    {
         format!(
-            "{summary}\n… d expands the brief ({} more line(s))",
+            "{bottom_text}\n… d expands the brief ({} more line(s))",
             full_summary_height - summary_height
         )
     } else {
-        summary
+        bottom_text
     };
     frame.render_widget(
         Paragraph::new(summary)
@@ -2452,7 +2497,11 @@ fn draw_zen_chapter(
                     .border_style(Style::default().fg(Color::DarkGray))
                     .padding(Padding::horizontal(1))
                     .title(Span::styled(
-                        " what this change does ",
+                        if has_curated_brief {
+                            " derived "
+                        } else {
+                            " what this change does "
+                        },
                         Style::default()
                             .fg(Color::Magenta)
                             .add_modifier(Modifier::BOLD),
@@ -2465,6 +2514,20 @@ fn draw_zen_chapter(
 
 fn chunk_location_label(location: &str, max_width: usize) -> String {
     truncate_middle(location, max_width)
+}
+
+fn derived_summary(lines: &[String]) -> String {
+    let churn = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("churn: "))
+        .unwrap_or("diff facts");
+    let symbols = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("top changed symbols: "))
+        .filter(|symbols| *symbols != "none detected")
+        .map(|symbols| format!(" · symbols: {symbols}"))
+        .unwrap_or_default();
+    format!("{churn}{symbols}")
 }
 
 /// The zen focus card: a full-screen stop showing only the critical lines

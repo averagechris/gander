@@ -526,10 +526,10 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
     };
     let symbols = top_symbols(session, files).join(", ");
     let mut lines = vec![
-        format!("stops: roles: {roles}"),
-        format!("stops: churn: +{additions} −{deletions} · {tests}"),
+        format!("roles: {roles}"),
+        format!("churn: +{additions} −{deletions} · {tests}"),
         format!(
-            "stops: top changed symbols: {}",
+            "top changed symbols: {}",
             if symbols.is_empty() {
                 "none detected"
             } else {
@@ -540,7 +540,7 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
     let public_api_files = files.iter().filter(|file| public_api_change(file)).count();
     if public_api_files > 0 {
         lines.push(format!(
-            "stops: public API: {public_api_files} file(s) change pub signatures"
+            "public API: {public_api_files} file(s) change pub signatures"
         ));
     }
     let error_files = files
@@ -549,7 +549,7 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
         .count();
     if error_files > 0 {
         lines.push(format!(
-            "stops: error handling: {error_files} file(s) touch error handling"
+            "error handling: {error_files} file(s) touch error handling"
         ));
     }
     lines
@@ -603,8 +603,8 @@ fn fallback_rows(
     };
     if fallback_stack.len() > 1 && !session.change_diffs.is_empty() {
         let mut stops = Vec::new();
-        let mut glance = Vec::new();
-        for change in &fallback_stack {
+        let mut glance_by_path = std::collections::BTreeMap::<String, (String, Vec<String>)>::new();
+        for (change_index, change) in fallback_stack.iter().enumerate() {
             if let Some((_, diff)) = session
                 .change_diffs
                 .iter()
@@ -627,10 +627,13 @@ fn fallback_rows(
                     if (role != FileRole::Source && !(role == FileRole::Tests && tests_are_subject))
                         || is_exports_only(file)
                     {
-                        glance.push(whole_file_row(
-                            file.path.clone(),
-                            Some(role.label().to_owned()),
-                        ));
+                        let entry = glance_by_path
+                            .entry(file.path.clone())
+                            .or_insert_with(|| (role.label().to_owned(), Vec::new()));
+                        let label = format!("ch.{}", change_index + 1);
+                        if !entry.1.contains(&label) {
+                            entry.1.push(label);
+                        }
                     } else {
                         stops.push(fallback_file_row(
                             session,
@@ -642,7 +645,13 @@ fn fallback_rows(
                 }
             }
         }
-        if !stops.is_empty() || !glance.is_empty() {
+        if !stops.is_empty() || !glance_by_path.is_empty() {
+            let glance = glance_by_path
+                .into_iter()
+                .map(|(path, (role, changes))| {
+                    whole_file_row(path, Some(format!("{role} · {}", changes.join(", "))))
+                })
+                .collect();
             return (stops, glance);
         }
     }
@@ -760,7 +769,7 @@ fn uncovered_file_rows(session: &ReviewSession) -> Vec<ChunkRow> {
             } else {
                 file_role(&path).label().to_owned()
             };
-            whole_file_row(path, Some(rationale))
+            whole_file_row(path, Some(format!("{rationale} · uncovered")))
         })
         .collect()
 }
@@ -1018,18 +1027,41 @@ fn is_exports_only_path(session: &ReviewSession, path: &str) -> bool {
         .is_some_and(|f| is_exports_only(&f.diff))
 }
 
-fn new_source(file: &FileDiff) -> String {
-    file.hunks
-        .iter()
-        .flat_map(|h| &h.lines)
-        .filter(|l| matches!(l.kind, DiffLineKind::Added | DiffLineKind::Context))
-        .map(|l| l.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
+fn new_source_with_indices(file: &FileDiff) -> (String, Vec<(usize, usize)>) {
+    let mut lines = Vec::new();
+    let mut indices = Vec::new();
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+        for (line_index, line) in hunk.lines.iter().enumerate() {
+            if matches!(line.kind, DiffLineKind::Added | DiffLineKind::Context) {
+                lines.push(line.text.as_str());
+                indices.push((hunk_index, line_index));
+            }
+        }
+    }
+    (lines.join("\n"), indices)
 }
+
+fn added_source_lines(file: &FileDiff, indices: &[(usize, usize)]) -> Vec<usize> {
+    indices
+        .iter()
+        .enumerate()
+        .filter_map(|(source_line, (hunk_index, line_index))| {
+            let line = file.hunks.get(*hunk_index)?.lines.get(*line_index)?;
+            (line.kind == DiffLineKind::Added).then_some(source_line)
+        })
+        .collect()
+}
+
 fn symbols_for_file(session: &ReviewSession, file: &FileDiff) -> Vec<String> {
-    crate::syntax::symbol_spans(&file.path, &new_source(file), &session.syntax)
+    let (source, indices) = new_source_with_indices(file);
+    let added = added_source_lines(file, &indices);
+    crate::syntax::symbol_spans(&file.path, &source, &session.syntax)
         .into_iter()
+        .filter(|s| {
+            added
+                .iter()
+                .any(|line| *line >= s.start_line && *line <= s.end_line)
+        })
         .map(|s| format!("{} {}", s.kind, s.name))
         .collect()
 }
@@ -1039,11 +1071,27 @@ fn symbols_touching_hunk(
     hunk: Option<&Hunk>,
 ) -> Vec<String> {
     let Some(h) = hunk else { return vec![] };
-    let start = h.new_start;
-    let end = h.new_start + h.new_len.saturating_sub(1);
-    crate::syntax::symbol_spans(&file.path, &new_source(file), &session.syntax)
+    let (source, indices) = new_source_with_indices(file);
+    let target_hunk_index = file
+        .hunks
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, h));
+    let added = added_source_lines(file, &indices)
         .into_iter()
-        .filter(|s| s.end_line >= start && s.start_line <= end)
+        .filter(|source_line| {
+            let Some((hunk_index, _)) = indices.get(*source_line) else {
+                return false;
+            };
+            Some(*hunk_index) == target_hunk_index
+        })
+        .collect::<Vec<_>>();
+    crate::syntax::symbol_spans(&file.path, &source, &session.syntax)
+        .into_iter()
+        .filter(|s| {
+            added
+                .iter()
+                .any(|line| *line >= s.start_line && *line <= s.end_line)
+        })
         .map(|s| format!("{} {}", s.kind, s.name))
         .collect()
 }
@@ -1231,6 +1279,33 @@ diff --git a/b.rs b/b.rs
             "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+let value = parse();\n",
         );
         assert_eq!(error_handling_touches(&file), 0);
+    }
+
+    #[test]
+    fn symbol_derivation_ignores_context_only_symbols() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,5 +1,6 @@
+ fn unchanged() {
+     let x = 1;
+ }
+ 
++fn changed() {}
+"#,
+        );
+        session.syntax.enabled = true;
+        let file = &session.files[0].diff;
+        let symbols = symbols_for_file(&session, file);
+
+        assert!(symbols.iter().any(|symbol| symbol.contains("changed")));
+        assert!(!symbols.iter().any(|symbol| symbol.contains("unchanged")));
+        assert!(
+            derived_chapter_lines(&session, &[file])
+                .iter()
+                .any(|line| line == "top changed symbols: fn changed")
+        );
     }
 
     fn spotlight(id: &str, title: &str, change_id: Option<&str>, path: &str) -> ReviewChunk {
@@ -1487,38 +1562,23 @@ diff --git a/tests/beta.rs b/tests/beta.rs
         let zen = ZenState::new(&session, &stack()).unwrap();
 
         let first = chapter(&zen, 0);
+        assert!(first.derived_lines.iter().any(|l| l == "roles: 1 source"));
         assert!(
             first
                 .derived_lines
                 .iter()
-                .any(|l| l == "stops: roles: 1 source")
-        );
-        assert!(
-            first
-                .derived_lines
-                .iter()
-                .any(|l| l == "stops: churn: +1 −1 · no tests touched")
+                .any(|l| l == "churn: +1 −1 · no tests touched")
         );
         assert!(first.derived_lines.iter().any(|l| l.contains("public API")));
-        assert!(
-            !first
-                .derived_lines
-                .iter()
-                .any(|l| l == "stops: roles: 1 tests")
-        );
+        assert!(!first.derived_lines.iter().any(|l| l == "roles: 1 tests"));
 
         let second = chapter(&zen, 2);
+        assert!(second.derived_lines.iter().any(|l| l == "roles: 1 tests"));
         assert!(
             second
                 .derived_lines
                 .iter()
-                .any(|l| l == "stops: roles: 1 tests")
-        );
-        assert!(
-            second
-                .derived_lines
-                .iter()
-                .any(|l| l == "stops: churn: +2 −1 · tests touched")
+                .any(|l| l == "churn: +2 −1 · tests touched")
         );
         assert!(
             !second
@@ -1679,17 +1739,12 @@ diff --git a/tests/basic.rs b/tests/basic.rs
         let zen = ZenState::new(&session, &[]).unwrap();
 
         let opener = chapter(&zen, 0);
+        assert!(opener.derived_lines.iter().any(|l| l == "roles: 2 source"));
         assert!(
             opener
                 .derived_lines
                 .iter()
-                .any(|l| l == "stops: roles: 2 source")
-        );
-        assert!(
-            opener
-                .derived_lines
-                .iter()
-                .any(|l| l == "stops: churn: +2 −2 · no tests touched")
+                .any(|l| l == "churn: +2 −2 · no tests touched")
         );
     }
 
@@ -1831,6 +1886,31 @@ diff --git a/tests/basic.rs b/tests/basic.rs
     }
 
     #[test]
+    fn uncurated_glance_dedupes_whole_file_rows_and_attributes_changes() {
+        let whole = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,3 @@\n pub mod old;\n+pub mod retry;\n+pub use retry::Retry;\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn run() {}\n";
+        let mut session = snapshot_session(whole);
+        session.change_diffs.push((
+            "aaabbbcc".to_owned(),
+            DiffSet::parse("diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n pub mod old;\n+pub mod retry;\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn run() {}\n")
+                .unwrap(),
+        ));
+        session.change_diffs.push((
+            "dddeeeff".to_owned(),
+            DiffSet::parse("diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n pub mod retry;\n+pub use retry::Retry;\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n fn run() {}\n+fn finish() {}\n")
+                .unwrap(),
+        ));
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        assert_eq!(zen.glance_rows.len(), 1);
+        assert_eq!(zen.glance_rows[0].title, "src/lib.rs");
+        assert_eq!(
+            zen.glance_rows[0].rationale.as_deref(),
+            Some("source · ch.1, ch.2")
+        );
+    }
+
+    #[test]
     fn uncurated_fallback_skips_empty_working_copy_chapter_when_stack_has_descriptions() {
         let mut stack = stack();
         stack.push(JjChangeSummary {
@@ -1909,6 +1989,10 @@ diff --git a/tests/basic.rs b/tests/basic.rs
         assert_eq!(zen.chunk_stop_count(), 1);
         assert_eq!(zen.glance_rows.len(), 1);
         assert_eq!(zen.glance_rows[0].title, "b.rs");
+        assert_eq!(
+            zen.glance_rows[0].rationale.as_deref(),
+            Some("source · uncovered")
+        );
         assert_eq!(zen.glance_rows[0].part.as_ref().unwrap().path, "b.rs");
     }
 

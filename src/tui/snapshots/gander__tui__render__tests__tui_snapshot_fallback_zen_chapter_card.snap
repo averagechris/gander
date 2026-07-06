@@ -1,11 +1,10 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4771
+assertion_line: 4915
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 ┌ zen · chapter 1/1 · then 2 at a glance ──────────────────────────────────────────────────────────┐
 │▎○                                                                                                │
-│                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 │  ╭ chapter 1/1 · trunk()..@ ──────────────────────────────────────────────────────────────────╮  │
@@ -15,9 +14,10 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │  │ n tours the 1 stop(s) in this chapter                                                      │  │
 │  │ uncurated tour — derived from the diff; press @ to summon ACP/agent curation for           │  │
 │  │ intent/risk                                                                                │  │
-│  │ stops: roles: 1 source · 1 tests · 1 config-manifest                                       │  │
-│  │ stops: churn: +5 −2 · tests touched                                                        │  │
-│  │ stops: top changed symbols: none detected                                                  │  │
+│  │ derived facts                                                                              │  │
+│  │   roles: 1 source · 1 tests · 1 config-manifest                                            │  │
+│  │   churn: +5 −2 · tests touched                                                             │  │
+│  │   top changed symbols: none detected                                                       │  │
 │  │ what this change does ─────────────────────────────────────────────────────────────────────│  │
 │  │ No agent brief for this change — the facts above are derived from the diff.                │  │
 │  ╰────────────────────────────────────────────────────────────────────────────────────────────╯  │
