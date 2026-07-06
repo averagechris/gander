@@ -2053,7 +2053,23 @@ fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
 }
 
 fn chunk_row_location_width(row: &super::chunks::ChunkRow, max_width: usize) -> String {
-    truncate_middle(&chunk_row_location_raw(row), max_width)
+    match (&row.change_id, &row.part) {
+        (Some(change_id), Some(part)) => {
+            let location = match (part.start_line, part.end_line) {
+                (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
+                (Some(start), None) => format!("{}:{start}", part.path),
+                _ => part.path.clone(),
+            };
+            let id_budget = (max_width / 4).clamp(4, 12);
+            let path_budget = max_width.saturating_sub(id_budget + 3);
+            format!(
+                "[{}] {}",
+                truncate_middle(change_id, id_budget),
+                truncate_middle(&location, path_budget)
+            )
+        }
+        _ => truncate_middle(&chunk_row_location_raw(row), max_width),
+    }
 }
 
 fn chunk_row_location_raw(row: &super::chunks::ChunkRow) -> String {
@@ -2341,8 +2357,17 @@ fn draw_zen_chapter(
         .constraints([Constraint::Min(1), Constraint::Length(summary_height)])
         .split(card_inner);
 
+    let mut chapter_body = body;
+    let body_capacity = sections[0].height.saturating_sub(1) as usize;
+    if body_capacity > 0 && chapter_body.len() > body_capacity {
+        chapter_body.truncate(body_capacity);
+        chapter_body.push(Line::from(Span::styled(
+            "…",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     frame.render_widget(
-        Paragraph::new(body)
+        Paragraph::new(chapter_body)
             .block(Block::default().padding(Padding::horizontal(1)))
             .wrap(Wrap { trim: false }),
         sections[0],
@@ -2436,13 +2461,24 @@ fn draw_zen_stop(
         excerpt.push(unified_row_line(session, &rows[index], index, 0));
     }
 
-    let explanation = stop
-        .explanation
-        .clone()
-        .or_else(|| stop.rationale.clone())
-        .unwrap_or_else(|| {
-            "(the agent gave no explanation for this stop — @ summons one)".to_owned()
-        });
+    let (explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
+        (
+            stop.rationale
+                .clone()
+                .unwrap_or_else(|| "largest changed hunk selected for review".to_owned()),
+            " why this matters ",
+        )
+    } else {
+        (
+            stop.explanation
+                .clone()
+                .or_else(|| stop.rationale.clone())
+                .unwrap_or_else(|| {
+                    "(the agent gave no explanation for this stop — @ summons one)".to_owned()
+                }),
+            " why this matters ",
+        )
+    };
 
     // Card width: hug the widest excerpt line (plus breathing room), but
     // stay wide enough for prose and inside the backdrop.
@@ -2543,6 +2579,14 @@ fn draw_zen_stop(
 
     frame.render_widget(Paragraph::new(excerpt), sections[0]);
     let mut explanation_lines = vec![Line::from(explanation)];
+    if zen.source == super::zen::ZenSource::Files
+        && let Some(mechanics) = &stop.explanation
+    {
+        explanation_lines.push(Line::from(Span::styled(
+            mechanics.clone(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     if let Some(sibling) = sibling_parts_line(zen, stop, card_width.saturating_sub(6) as usize) {
         explanation_lines.push(Line::from(Span::styled(
             sibling,
@@ -2558,7 +2602,7 @@ fn draw_zen_stop(
                     .border_style(Style::default().fg(Color::DarkGray))
                     .padding(Padding::horizontal(1))
                     .title(Span::styled(
-                        " why this matters ",
+                        explanation_title,
                         Style::default()
                             .fg(Color::Magenta)
                             .add_modifier(Modifier::BOLD),
@@ -2828,8 +2872,9 @@ fn draw_zen_glance(
             ),
             Span::styled(
                 format!(
-                    "{} remaining item(s) below — skim, then `a` marks them all viewed.",
-                    glance_groups.len()
+                    "{} glance group(s) below ({} item(s)) — skim, then `a` marks them all viewed.",
+                    glance_groups.len(),
+                    zen.glance_rows.len()
                 ),
                 Style::default()
                     .fg(Color::Yellow)
@@ -2884,10 +2929,17 @@ fn draw_zen_glance(
             .map(|row| chunk_row_location_width(row, 28))
             .collect::<Vec<_>>()
             .join(" · ");
+        let title = if group.rows.len() == 1
+            && row.part.as_ref().is_some_and(|part| part.path == row.title)
+        {
+            String::new()
+        } else {
+            format!("{} ", row.title)
+        };
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
             Span::styled(format!("{check} "), Style::default().fg(Color::Green)),
-            Span::styled(format!("{} ", row.title), style),
+            Span::styled(title, style),
             Span::styled(locations, Style::default().fg(Color::Cyan)),
             Span::styled(stats, Style::default().fg(Color::Magenta)),
             Span::styled(rationale, Style::default().fg(Color::DarkGray)),

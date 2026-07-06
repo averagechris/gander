@@ -138,7 +138,7 @@ impl ZenState {
             return None;
         }
         let (chunk_stops, glance_rows, source) = if session.review_chunks.is_empty() {
-            let (stops, glance) = fallback_rows(session);
+            let (stops, glance) = fallback_rows(session, stack);
             (stops, glance, ZenSource::Files)
         } else {
             let rows: Vec<ChunkRow> = session.review_chunks.iter().flat_map(chunk_rows).collect();
@@ -582,7 +582,15 @@ fn home_change<'a>(
 
 /// Chunkless fallback: one stop per visible file, in the same order the
 /// tree shows (agent ordering respected when active).
-fn fallback_rows(session: &ReviewSession) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
+fn fallback_rows(
+    session: &ReviewSession,
+    stack: &[JjChangeSummary],
+) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
+    let fallback_stack = if let Some(change) = home_change(session, stack) {
+        vec![change]
+    } else {
+        fallback_chapter_stack(stack)
+    };
     let mut files: Vec<_> = session.files.iter().collect();
     files.sort_by_key(|f| {
         (
@@ -593,6 +601,11 @@ fn fallback_rows(session: &ReviewSession) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
     });
     let mut stops = Vec::new();
     let mut glance = Vec::new();
+    let source_count = files
+        .iter()
+        .filter(|file| file_role(&file.path) == FileRole::Source && !is_exports_only(&file.diff))
+        .count();
+    let mut source_index = 0usize;
     for file in files {
         let role = file_role(&file.path);
         if role != FileRole::Source || is_exports_only(&file.diff) {
@@ -608,10 +621,45 @@ fn fallback_rows(session: &ReviewSession) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
                 ),
             ));
         } else {
-            stops.push(fallback_file_row(session, &file.diff));
+            let change = fallback_stack.get(change_bucket(
+                source_index,
+                source_count,
+                fallback_stack.len(),
+            ));
+            let change_id = change.map(|change| change.change_id.clone());
+            let change_description = change.map(|change| change.description.as_str());
+            source_index += 1;
+            stops.push(fallback_file_row(
+                session,
+                &file.diff,
+                change_id,
+                change_description,
+            ));
         }
     }
     (stops, glance)
+}
+
+fn fallback_chapter_stack(stack: &[JjChangeSummary]) -> Vec<&JjChangeSummary> {
+    if stack.len() <= 1 {
+        return stack.iter().collect();
+    }
+    let described = stack
+        .iter()
+        .filter(|change| !change.description.trim().is_empty())
+        .collect::<Vec<_>>();
+    if described.is_empty() {
+        stack.iter().collect()
+    } else {
+        described
+    }
+}
+
+fn change_bucket(index: usize, total_rows: usize, total_changes: usize) -> usize {
+    if total_changes == 0 || total_rows == 0 {
+        return 0;
+    }
+    (index * total_changes / total_rows).min(total_changes - 1)
 }
 
 /// Files no chunk part mentions: they join the glance board so the briefing
@@ -646,7 +694,12 @@ fn largest_hunk(file: &FileDiff) -> Option<&Hunk> {
     })
 }
 
-fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
+fn fallback_file_row(
+    session: &ReviewSession,
+    file: &FileDiff,
+    change_id: Option<String>,
+    change_description: Option<&str>,
+) -> ChunkRow {
     let hunk = largest_hunk(file);
     let (adds, dels) = hunk
         .map(hunk_churn)
@@ -667,6 +720,9 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
         );
         facts.push("review question: is the new error path covered?".to_owned());
     }
+    if let Some(description) = change_description.and_then(first_meaningful_line) {
+        facts.push(format!("owning change: {description}"));
+    }
     let fact_suffix = if facts.is_empty() {
         String::new()
     } else {
@@ -676,7 +732,7 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
         chunk_id: format!("file:{}", file.path),
         title: format!("{} · {}", file.path, file_role(&file.path).label()),
         importance: ChunkImportance::Glance,
-        change_id: None,
+        change_id,
         rationale: Some(format!(
             "largest hunk +{adds} −{dels} · symbols: {}{fact_suffix}",
             if symbols.is_empty() {
@@ -700,6 +756,10 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
         part_position: None,
         invalid_reason: None,
     }
+}
+
+fn first_meaningful_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 fn public_api_fact(file: &FileDiff) -> Option<String> {
@@ -1528,22 +1588,44 @@ diff --git a/src/render.rs b/src/render.rs
         let zen = ZenState::new(&session, &stack()).unwrap();
 
         let opener = chapter(&zen, 0);
-        assert_eq!(opener.change_id, None);
+        assert_eq!(opener.change_id.as_deref(), Some("dddeeeff"));
         assert_eq!(opener.description, "feat: second");
         assert_eq!(opener.summary.as_deref(), Some("Reworks the retry loop."));
     }
 
     #[test]
-    fn home_chapter_stays_generic_for_multi_change_ranges() {
-        // trunk()..@ over a two-change stack: the tip's description would
-        // mislead, so the opener carries no single change's metadata.
+    fn uncurated_fallback_builds_per_stack_change_chapters() {
+        // trunk()..@ over a two-change stack: uncurated zen still tells the
+        // stack story, one described jj change at a time.
         let session = snapshot_session(two_file_diff());
         let zen = ZenState::new(&session, &stack()).unwrap();
 
-        let opener = chapter(&zen, 0);
-        assert_eq!(opener.change_id, None);
-        assert_eq!(opener.description, "");
-        assert_eq!(opener.summary, None);
+        assert_eq!(zen.chapter_count(), 2);
+        assert_eq!(chapter(&zen, 0).change_id.as_deref(), Some("aaabbbcc"));
+        assert_eq!(chapter(&zen, 0).title(), "feat: first");
+        assert_eq!(chapter(&zen, 2).change_id.as_deref(), Some("dddeeeff"));
+        assert_eq!(chapter(&zen, 2).title(), "feat: second");
+        assert_eq!(chunk_stop(&zen, 1).change_id.as_deref(), Some("aaabbbcc"));
+        assert_eq!(chunk_stop(&zen, 3).change_id.as_deref(), Some("dddeeeff"));
+    }
+
+    #[test]
+    fn uncurated_fallback_skips_empty_working_copy_chapter_when_stack_has_descriptions() {
+        let mut stack = stack();
+        stack.push(JjChangeSummary {
+            change_id: "zzzyyyxx".to_owned(),
+            bookmarks: String::new(),
+            description: String::new(),
+        });
+
+        let session = snapshot_session(two_file_diff());
+        let zen = ZenState::new(&session, &stack).unwrap();
+
+        assert_eq!(zen.chapter_count(), 2);
+        assert!(zen.stops.iter().all(|stop| match stop {
+            ZenStop::Chapter(chapter) => chapter.change_id.as_deref() != Some("zzzyyyxx"),
+            ZenStop::Chunk(row) => row.change_id.as_deref() != Some("zzzyyyxx"),
+        }));
     }
 
     #[test]
