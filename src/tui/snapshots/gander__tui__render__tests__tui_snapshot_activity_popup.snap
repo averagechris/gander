@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4190
+assertion_line: 4512
 expression: "render_tui_text_with_state(&session,\n&Mode::Activity(ActivityListState::new()), &tui_state, 100, 20)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -8,18 +8,18 @@ expression: "render_tui_text_with_state(&session,\n&Mode::Activity(ActivityListS
 │  • mod     app.rs                        ││@@ -1 +1 @@                                           │
 │                                          ││    1 - old                                           │
 │             ╭ activity ────────────────────────────────────────────────────────────╮             │
-│             │ › 05:34:56  @ moved to abcdef                                        │             │
-│             │   05:34:56  queue.rs updated 3×                                      │             │
+│             │› 05:34:56  @ moved to abcdef                                         │             │
+│             │  05:34:56  queue.rs updated 3×                                       │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
-│             │                                                                      │             │
+│             │@ moved to abcdef                                                     │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
 │             ╰──────────────────────────────────────────────────────────────────────╯             │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-activity · j/k move · enter jump · esc close
+activity · j/k/n/e move · enter jump (file events) · esc close

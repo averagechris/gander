@@ -808,7 +808,7 @@ fn refresh_current_target(
         return;
     }
     refresh_identity_chip(review_loader, session, tui_state);
-    reapply_agent_overlay(session, tui_state);
+    reapply_agent_overlay(session, review_loader, tui_state);
     let mut events = fingerprint_events(previous_fingerprint, fingerprint);
     if let Some(op) = latest_operation_description(review_loader, &session.repo) {
         for event in &mut events {
@@ -861,7 +861,6 @@ fn refresh_current_target(
             " · {reviewed_changed} viewed {file_word} changed — needs re-review"
         ));
     }
-    events.push(message.clone());
     for event in events {
         push_activity(tui_state, event_key(&event), event);
     }
@@ -911,8 +910,24 @@ fn latest_operation_description(
         .operations(repo)
         .ok()
         .and_then(|ops| ops.into_iter().next())
-        .map(|op| op.description)
+        .map(|op| humanize_operation_description(&op.description))
         .filter(|description| !description.trim().is_empty())
+}
+
+fn humanize_operation_description(description: &str) -> String {
+    let mut out = String::with_capacity(description.len());
+    for token in description.split_inclusive(char::is_whitespace) {
+        let word_len = token.trim_end_matches(char::is_whitespace).len();
+        let (word, suffix) = token.split_at(word_len);
+        if word.len() == 128 && word.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            out.push_str(&word[..12]);
+            out.push('…');
+        } else {
+            out.push_str(word);
+        }
+        out.push_str(suffix);
+    }
+    out
 }
 
 fn refresh_file_event(change: &crate::app::RefreshedFileChange) -> String {
@@ -1036,25 +1051,23 @@ fn fingerprint_events(previous: &str, current: &str) -> Vec<String> {
 /// Re-apply the on-disk agent overlay to the session. Reloads (`replace_diff`)
 /// reset overlay-derived state (ordering, flags, chunks, drafts); refreshes
 /// and zen-driven retargets restore it so suggestions survive.
-fn reapply_agent_overlay(session: &mut ReviewSession, tui_state: &mut TuiState) {
+fn reapply_agent_overlay(
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) {
     let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
         return;
     };
-    if let Ok(mut overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
-        let session_files = session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        let invalid = crate::agent::validate_review_chunks(
-            &overlay.chunks,
-            &crate::agent::ChunkValidationContext {
-                session_files: &session_files,
-                change_diffs: Vec::new(),
-            },
-        );
+    if let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
+        let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
         if !invalid.is_empty() {
-            overlay.chunks = crate::agent::remove_invalid_chunk_parts(&overlay.chunks, &invalid);
+            let message = invalid_chunk_notice(invalid.len());
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: message.clone(),
+            });
+            push_activity(tui_state, "agent-overlay-invalid".to_owned(), message);
         }
         tui_state.invalid_chunk_parts = invalid;
         session.apply_agent_overlay(&overlay);
@@ -1063,6 +1076,12 @@ fn reapply_agent_overlay(session: &mut ReviewSession, tui_state: &mut TuiState) 
     tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
         .and_then(|metadata| metadata.modified())
         .ok();
+}
+
+fn invalid_chunk_notice(count: usize) -> String {
+    format!(
+        "{count} curated chunk part(s) no longer match the diff — run 'gander chunks lines' and update the spec"
+    )
 }
 
 /// Cheap change-detection payload: only the persistable parts of the session
@@ -1141,7 +1160,7 @@ fn handle_key_event(
                         if restore_target && session.target != zen.home_target {
                             match review_loader.load(session, zen.home_target.clone()) {
                                 Ok(()) => {
-                                    reapply_agent_overlay(session, tui_state);
+                                    reapply_agent_overlay(session, review_loader, tui_state);
                                     zen::mark_glance_viewed(session, &zen);
                                 }
                                 Err(error) => {
@@ -2274,7 +2293,7 @@ fn handle_chunk_list_key(
                 if session.target != desired {
                     match review_loader.load(session, desired.clone()) {
                         Ok(()) => {
-                            reapply_agent_overlay(session, tui_state);
+                            reapply_agent_overlay(session, review_loader, tui_state);
                             tui_state.notice = Some(UiNotice {
                                 level: UiNoticeLevel::Info,
                                 message: format!("loaded {desired}"),
@@ -2345,7 +2364,7 @@ fn zen_goto_stop(
         // agent's suggestions (the loader reset all three).
         zen.target_key = session.target.to_string();
         session.file_pane_visible = false;
-        reapply_agent_overlay(session, tui_state);
+        reapply_agent_overlay(session, review_loader, tui_state);
     }
     zen::jump_to_stop(session, stop);
     true
@@ -2531,7 +2550,7 @@ fn handle_zen_glance_key(
                 let desired = zen::row_target(&row, &zen.home_target);
                 if session.target != desired {
                     match review_loader.load(session, desired.clone()) {
-                        Ok(()) => reapply_agent_overlay(session, tui_state),
+                        Ok(()) => reapply_agent_overlay(session, review_loader, tui_state),
                         Err(error) => {
                             tui_state.notice = Some(UiNotice {
                                 level: UiNoticeLevel::Error,
@@ -3006,7 +3025,7 @@ fn handle_activity_key(
     list: &mut ActivityListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) -> bool {
     let len = tui_state.activity.len();
     if let Some(action) = keymap.target_picker_action_for(&key) {
@@ -3019,6 +3038,14 @@ fn handle_activity_key(
     }
     match key.code {
         KeyCode::Esc => true,
+        KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down | KeyCode::Right => {
+            list.move_selection(1, len);
+            false
+        }
+        KeyCode::Char('k') | KeyCode::Char('e') | KeyCode::Up | KeyCode::Left => {
+            list.move_selection(-1, len);
+            false
+        }
         KeyCode::Enter => {
             if let Some(event) = tui_state.activity.iter().rev().nth(list.selected)
                 && let Some(index) = session
@@ -3027,8 +3054,13 @@ fn handle_activity_key(
                     .position(|file| event.message.starts_with(&file.path))
             {
                 session.select_file_index(index);
+                return true;
             }
-            true
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "no file target for this event".to_owned(),
+            });
+            false
         }
         _ => false,
     }
@@ -3612,6 +3644,133 @@ mod tests {
                 .activity
                 .iter()
                 .any(|event| event.message.contains("op: snapshot working copy"))
+        );
+    }
+
+    #[test]
+    fn latest_operation_description_truncates_embedded_operation_ids() {
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        let long_id = "4a3b2c1d9e0f".to_owned() + &"a".repeat(116);
+        backend.operations = vec![crate::jj::JjOperationSummary {
+            operation_id: long_id.clone(),
+            time: "now".to_owned(),
+            description: format!("undo operation {long_id}"),
+        }];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+
+        assert_eq!(
+            latest_operation_description(&loader, Path::new(".")),
+            Some("undo operation 4a3b2c1d9e0f…".to_owned())
+        );
+    }
+
+    #[test]
+    fn reapply_agent_overlay_preserves_change_anchored_chunks_with_loaded_change_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "anchored".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: Some("change1".to_owned()),
+                rationale: None,
+                explanation: None,
+                artifacts: Vec::new(),
+                parts: vec![crate::agent::ChunkPart {
+                    path: "src/lib.rs".to_owned(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                }],
+            }],
+            ..Default::default()
+        }
+        .save(&overlay_path)
+        .unwrap();
+        let mut session =
+            snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n");
+        let backend = MockJjBackend::with_diff(Ok(
+            "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+        ));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..Default::default()
+        };
+
+        reapply_agent_overlay(&mut session, &loader, &mut tui_state);
+
+        assert_eq!(session.review_chunks.len(), 1);
+        assert_eq!(session.review_chunks[0].parts.len(), 1);
+        assert_eq!(backend.calls.borrow().len(), 1);
+        assert_eq!(backend.calls.borrow()[0].rev, "change1");
+        assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn reapply_agent_overlay_warns_when_change_anchored_chunks_really_invalidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "c1".to_owned(),
+                title: "anchored".to_owned(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: Some("change1".to_owned()),
+                rationale: None,
+                explanation: None,
+                artifacts: Vec::new(),
+                parts: vec![crate::agent::ChunkPart {
+                    path: "src/missing.rs".to_owned(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                }],
+            }],
+            ..Default::default()
+        }
+        .save(&overlay_path)
+        .unwrap();
+        let mut session =
+            snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n");
+        let backend = MockJjBackend::with_diff(Ok(
+            "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
+        ));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..Default::default()
+        };
+
+        reapply_agent_overlay(&mut session, &loader, &mut tui_state);
+
+        assert!(session.review_chunks.is_empty());
+        assert_eq!(tui_state.invalid_chunk_parts.len(), 1);
+        assert_eq!(
+            tui_state
+                .notice
+                .as_ref()
+                .map(|notice| notice.message.as_str()),
+            Some(
+                "1 curated chunk part(s) no longer match the diff — run 'gander chunks lines' and update the spec"
+            )
+        );
+        assert!(
+            tui_state
+                .activity
+                .back()
+                .is_some_and(|event| event.message.contains("curated chunk part"))
         );
     }
 

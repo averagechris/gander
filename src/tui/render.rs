@@ -1305,7 +1305,7 @@ fn draw_footer(
         Mode::TaskList(_) => {
             "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
         }
-        Mode::Activity(_) => "activity · j/k move · enter jump · esc close".to_owned(),
+        Mode::Activity(_) => "activity · j/k/n/e move · enter jump (file events) · esc close".to_owned(),
         Mode::WalkthroughList(_) => {
             "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
         }
@@ -1609,7 +1609,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         section("badges"),
         literal(
             "✓",
-            "viewed · ◌ caught up · ~ done, changed since · ± changed since look",
+            "• unviewed · ✓ viewed · ◌ caught up · ~ viewed, changed since · ± unviewed, changed since",
         ),
     ];
 
@@ -3816,15 +3816,47 @@ fn draw_activity_popup(
     if !items.is_empty() {
         list_state.select(Some(state.selected.min(items.len() - 1)));
     }
-    let list = List::new(items)
-        .block(block)
-        .highlight_symbol("› ")
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(list, popup, &mut list_state);
+    let inner = inner_bordered(popup);
+    let detail_height = if popup.height >= 18 {
+        4
+    } else if popup.height >= 12 {
+        3
+    } else if popup.height >= 8 {
+        2
+    } else {
+        0
+    };
+    let regions = if detail_height > 0 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(detail_height)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1)])
+            .split(inner)
+    };
+    frame.render_widget(block, popup);
+    let list = List::new(items).highlight_symbol("› ").highlight_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(list, regions[0], &mut list_state);
+    if detail_height > 0
+        && let Some(event) = tui_state.activity.iter().rev().nth(state.selected)
+    {
+        let detail = if event.count > 1 {
+            format!("{} {}×", event.message, event.count)
+        } else {
+            event.message.clone()
+        };
+        let paragraph = Paragraph::new(detail)
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, regions[1]);
+    }
 }
 
 fn notice_message_for_width(message: &str, width: u16) -> String {
