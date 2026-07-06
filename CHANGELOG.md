@@ -4,6 +4,26 @@
 
 ### Added
 
+- `gander briefs` (`list`, `set --file <spec|->`, `clear`) and
+  `gander drafts` (`list`, `add --file <spec|->`, `remove --id …`)
+  command groups extend the chunks spec-file pattern to change briefs
+  and draft comments — full CLI parity with ACP
+  `review/set_change_briefs` / `review/draft_comment`, validated with
+  per-item reasons and writing the same overlay a live TUI watches.
+- Zen chapter cards narrate stack dependencies: a derived
+  `builds on ch.N` line appears when a chapter touches files or
+  symbols an earlier chapter in the stack also touched.
+- Zen fallback stop risk facts now name their evidence — the changed
+  public signature or the count and location of changed error-handling
+  sites — and add a factual, template-based review question per
+  trigger ("do callers handle the new signature?").
+- The `I` catch-up flow distinguishes caught-up from reviewed:
+  never-viewed files unchanged since the chosen operation get a
+  quieter `◌` caught-up badge (persisted per content fingerprint)
+  instead of a full `✓`; they count as done for progress and
+  filtering, promote to viewed on explicit marking, and decay to `~`
+  like viewed marks when content changes. The catch-up notice reports
+  caught-up, already-viewed, and needs-re-review counts separately.
 - Incremental chunk curation: new ACP methods `review/update_chunks`
   (upsert by id, position-preserving) and `review/remove_chunks`
   (strict remove by id), mirrored as MCP tools, alongside the existing
@@ -65,6 +85,18 @@
 
 ### Fixed
 
+- Watch polling no longer pollutes the jj op log: every read-only jj
+  invocation passes `--ignore-working-copy`, with exactly one
+  deliberate `jj util snapshot` per poll tick so working-copy edits
+  are still noticed. (The jj-side footgun that `jj undo` of a snapshot
+  op reverts the edits it recorded remains and is documented.)
+- Inline comment annotations no longer vanish from the diff pane after
+  a watch refresh or retarget: comment anchors are re-derived against
+  the freshly loaded diff instead of pointing at stale rows.
+- CLI user errors — malformed chunk/brief/draft specs, out-of-diff
+  parts, unknown ids, bad revsets — print a clean `error: …` message
+  to stderr and exit non-zero instead of a color-eyre report with
+  backtrace frames and `Location:` noise.
 - **Data loss:** retargeting the TUI to a narrow or empty diff (e.g.
   stack-stepping onto an empty working-copy change) no longer rewrites
   the workspace review state with only what that target can see —
