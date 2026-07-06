@@ -1132,9 +1132,9 @@ fn draw_footer(
                         );
                         if !chapter.description_body().is_empty() {
                             text.push_str(if zen.chapter_description_collapsed {
-                                " · d description"
+                                " · d details"
                             } else {
-                                " · d collapse"
+                                " · d collapse/expand brief"
                             });
                         }
                         if !chapter.artifacts.is_empty() {
@@ -1489,7 +1489,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         literal("tab", "toggle focus card / reading view"),
         literal("g", "open glance board"),
         literal("e", "open artifacts"),
-        literal("d", "toggle chapter details"),
+        literal("d", "toggle chapter details / expand brief"),
         literal(".", "refocus current stop"),
         literal("a", "acknowledge glance items"),
         literal("esc", "leave zen / close artifact"),
@@ -2343,13 +2343,20 @@ fn draw_zen_chapter(
     });
 
     let max_card_width = inner.width.saturating_sub(4).max(20);
-    let card_width = 72.min(max_card_width).max(50.min(max_card_width));
+    let card_width = 100.min(max_card_width).max(50.min(max_card_width));
     let text_width = card_width.saturating_sub(4).max(20) as usize;
     let estimated: usize = summary
         .lines()
         .map(|line| line.chars().count().div_ceil(text_width).max(1))
         .sum();
-    let summary_height = (estimated as u16 + 1).clamp(2, (inner.height / 2).max(3));
+    let full_summary_height = estimated as u16 + 1;
+    let summary_height = if zen.chapter_brief_expanded {
+        full_summary_height
+            .min(inner.height.saturating_sub(6))
+            .max(2)
+    } else {
+        full_summary_height.clamp(2, (inner.height / 2).max(3))
+    };
     // Wrap-aware height for the top section so a long description body
     // gets the room it asked for (bounded by the screen).
     let estimated_body: usize = body
@@ -2422,6 +2429,14 @@ fn draw_zen_chapter(
             .wrap(Wrap { trim: false }),
         sections[0],
     );
+    let summary = if !zen.chapter_brief_expanded && full_summary_height > summary_height {
+        format!(
+            "{summary}\n… d expands the brief ({} more line(s))",
+            full_summary_height - summary_height
+        )
+    } else {
+        summary
+    };
     frame.render_widget(
         Paragraph::new(summary)
             .style(Style::default().fg(Color::Gray))

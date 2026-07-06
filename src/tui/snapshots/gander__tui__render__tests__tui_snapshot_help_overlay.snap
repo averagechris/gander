@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 3990
+assertion_line: 4124
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
 ┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
@@ -12,25 +12,25 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │           n  next unviewed file                          tab  toggle focus card / reading view  │    │
 │     │       enter  mark viewed and advance                       g  open glance board                 │    │
 │     │           c  comment on what needs work                    e  open artifacts                    │    │
-│     │           T  zen briefing for a focused pass               d  toggle chapter details            │    │
-│     │      ctrl-y  copy handoff when done                        .  refocus current stop              │    │
-│     │general                                                     a  acknowledge glance items          │    │
-│     │         tab  switch focus between files and diff         esc  leave zen / close artifact        │    │
-│     │           w  hide/show file pane                comments                                        │    │
-│     │           ?  this help                                     c  comment at cursor                 │    │
-│     │      ctrl-a  activity feed (live refresh while             r  start/finish range comment        │    │
-│     │open)                                                       e  edit comment                      │    │
-│     │      ctrl-g  dismiss range/notice                          x  delete comment                    │    │
-│     │           q  quit (writes artifact)                        C  comment list                      │    │
-│     │files                                                       X  review tasks                      │    │
-│     │         j/k  move in tree                                  W  walkthrough panel                 │    │
-│     │       space  fold/unfold directory                         Y  mark for walkthrough              │    │
-│     │  left/right  collapse/expand directory                   m/M  next/previous comment             │    │
-│     │           /  fuzzy file search                  targets & jj                                    │    │
-│     │           h  hide/show noisy files                         t  return to launch target           │    │
-│     │           f  cycle viewed filter                           p  compare @-..@                     │    │
-│     │         n/N  next/previous unviewed file                   b  base/tip chooser                  │    │
-│     │       enter  mark viewed and advance                       R  revset input                      │    │
+│     │           T  zen briefing for a focused pass               d  toggle chapter details / expand   │    │
+│     │      ctrl-y  copy handoff when done             brief                                           │    │
+│     │general                                                     .  refocus current stop              │    │
+│     │         tab  switch focus between files and diff           a  acknowledge glance items          │    │
+│     │           w  hide/show file pane                         esc  leave zen / close artifact        │    │
+│     │           ?  this help                          comments                                        │    │
+│     │      ctrl-a  activity feed (live refresh while             c  comment at cursor                 │    │
+│     │open)                                                       r  start/finish range comment        │    │
+│     │      ctrl-g  dismiss range/notice                          e  edit comment                      │    │
+│     │           q  quit (writes artifact)                        x  delete comment                    │    │
+│     │files                                                       C  comment list                      │    │
+│     │         j/k  move in tree                                  X  review tasks                      │    │
+│     │       space  fold/unfold directory                         W  walkthrough panel                 │    │
+│     │  left/right  collapse/expand directory                     Y  mark for walkthrough              │    │
+│     │           /  fuzzy file search                           m/M  next/previous comment             │    │
+│     │           h  hide/show noisy files              targets & jj                                    │    │
+│     │           f  cycle viewed filter                           t  return to launch target           │    │
+│     │         n/N  next/previous unviewed file                   p  compare @-..@                     │    │
+│     │       enter  mark viewed and advance                       b  base/tip chooser                  │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @

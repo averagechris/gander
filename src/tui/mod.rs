@@ -1099,7 +1099,10 @@ fn handle_key_event(
                         // on purpose).
                         if restore_target && session.target != zen.home_target {
                             match review_loader.load(session, zen.home_target.clone()) {
-                                Ok(()) => reapply_agent_overlay(session, tui_state),
+                                Ok(()) => {
+                                    reapply_agent_overlay(session, tui_state);
+                                    zen::mark_glance_viewed(session, &zen);
+                                }
                                 Err(error) => {
                                     tui_state.notice = Some(UiNotice {
                                         level: UiNoticeLevel::Error,
@@ -1709,6 +1712,21 @@ fn step_stack(
         }
     };
     stack.retain(|change| !change.matches_rev(&stack_target.base));
+    let mut dropped_empty_at = false;
+    if stack_target.rev == "@"
+        && let Some(change) = stack.last()
+        && change.description.trim().is_empty()
+        && review_loader
+            .jj
+            .diff(
+                &session.repo,
+                &ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone()),
+            )
+            .is_ok_and(|diff| diff.trim().is_empty())
+    {
+        stack.pop();
+        dropped_empty_at = true;
+    }
     if stack.is_empty() {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
@@ -1720,7 +1738,7 @@ fn step_stack(
     let current = stack
         .iter()
         .position(|change| change.matches_rev(&session.target.rev))
-        .or_else(|| (session.target.rev == "@").then(|| stack.len() - 1));
+        .or_else(|| (session.target.rev == "@" && !dropped_empty_at).then(|| stack.len() - 1));
     let next = match current {
         Some(index) => {
             let max = stack.len() as isize - 1;
@@ -2407,6 +2425,7 @@ fn handle_zen_key(
                 && matches!(zen.current(), Some(zen::ZenStop::Chapter(_))) =>
         {
             zen.chapter_description_collapsed = !zen.chapter_description_collapsed;
+            zen.chapter_brief_expanded = !zen.chapter_brief_expanded;
             return ZenKeyOutcome::Consumed;
         }
         _ => {}

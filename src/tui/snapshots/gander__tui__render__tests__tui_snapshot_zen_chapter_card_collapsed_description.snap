@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4724
+assertion_line: 4802
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 ┌ zen · chapter 1/1 · then 1 at a glance ──────────────────────────────────────────────────────────┐
@@ -8,22 +8,22 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
-│             ╭ chapter 1/1 · trunk()..@ · startup-fix ──────────────────────────────╮             │
-│             │ feat: swap old() for new()                                           │             │
-│             │ … d expands the description (2 more line(s))                         │             │
-│             │                                                                      │             │
-│             │ 2 file(s) · +3 −2                                                    │             │
-│             │ n tours the 1 stop(s) in this chapter                                │             │
-│             │ stops: roles: 1 source · 1 tests                                     │             │
-│             │ stops: churn: +3 −2 · tests touched                                  │             │
-│             │ …                                                                    │             │
-│             │ what this change does ───────────────────────────────────────────────│             │
-│             │ Swaps the legacy old() startup call for new() and batches extra()    │             │
-│             │ alongside it, so both effects fire together.                         │             │
-│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│  ╭ chapter 1/1 · trunk()..@ · startup-fix ────────────────────────────────────────────────────╮  │
+│  │ feat: swap old() for new()                                                                 │  │
+│  │ … d expands the description (2 more line(s))                                               │  │
+│  │                                                                                            │  │
+│  │ 2 file(s) · +3 −2                                                                          │  │
+│  │ n tours the 1 stop(s) in this chapter                                                      │  │
+│  │ stops: roles: 1 source · 1 tests                                                           │  │
+│  │ stops: churn: +3 −2 · tests touched                                                        │  │
+│  │ …                                                                                          │  │
+│  │ what this change does ─────────────────────────────────────────────────────────────────────│  │
+│  │ Swaps the legacy old() startup call for new() and batches extra() alongside it, so both    │  │
+│  │ effects fire together.                                                                     │  │
+│  ╰────────────────────────────────────────────────────────────────────────────────────────────╯  │
 │                                                                                                  │
 │                                                                                                  │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @
-zen chapter 1/1 · n tours its 1 stop(s) · d description · p back · tab full diff · g glance · esc en
+zen chapter 1/1 · n tours its 1 stop(s) · d details · p back · tab full diff · g glance · esc end

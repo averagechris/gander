@@ -292,6 +292,9 @@ fn file_diff_line_space_ranges(file: &FileDiff) -> Vec<DiffLineSpaceRange> {
         if let Some(last) = merged.last_mut()
             && range.start_line <= last.end_line + 1
         {
+            if !last.header.contains(&range.header) {
+                last.header = format!("{}; {}", last.header, range.header);
+            }
             if range.end_line > last.end_line {
                 last.end_line = range.end_line;
                 last.last_line = range.last_line;

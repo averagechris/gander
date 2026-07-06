@@ -1151,6 +1151,7 @@ impl ReviewSession {
                 file.viewed_stale = false;
             }
         }
+        self.ensure_selected_file_visible();
     }
 
     /// Incremental re-review against a prior snapshot of the same target:

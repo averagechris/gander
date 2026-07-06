@@ -51,6 +51,7 @@ pub(super) struct ZenState {
     /// Chapter cards show the change's full description body by default;
     /// `d` collapses it to the headline (sticky for the walkthrough).
     pub(super) chapter_description_collapsed: bool,
+    pub(super) chapter_brief_expanded: bool,
 }
 
 /// One station of the walkthrough: a chapter intro card for a jj change,
@@ -167,6 +168,7 @@ impl ZenState {
             home_target: session.target.clone(),
             source,
             chapter_description_collapsed: false,
+            chapter_brief_expanded: false,
         })
     }
 
@@ -787,7 +789,9 @@ fn fallback_file_row(
     let end = hunk.map(|h| (h.new_start + h.new_len.saturating_sub(1)).max(h.new_start));
     let mut facts = Vec::new();
     if public_api_change(file) {
-        let new_api = public_api_is_new(file);
+        let new_api = added_text_lines(file)
+            .find(|line| is_public_api_line(line))
+            .is_some_and(|line| public_api_symbol_is_new(file, line));
         facts.push(public_api_fact(file).unwrap_or_else(|| "public API change".to_owned()));
         facts.push(if new_api {
             "review question: is this the right surface to expose?".to_owned()
@@ -850,20 +854,43 @@ fn public_api_fact(file: &FileDiff) -> Option<String> {
         .find(|line| is_public_api_line(line))
         .map(|line| {
             let summary = signature_summary(line);
-            if public_api_is_new(file) {
+            if public_api_symbol_is_new(file, line) {
                 return format!("new public API: {summary}");
             }
             format!("public API change: {} signature changed", summary)
         })
 }
 
-fn public_api_is_new(file: &FileDiff) -> bool {
-    file.additions > 0
-        && file
-            .hunks
-            .iter()
-            .flat_map(|h| &h.lines)
-            .all(|line| line.kind != DiffLineKind::Removed)
+fn public_api_symbol_is_new(file: &FileDiff, added_line: &str) -> bool {
+    let Some(name) = public_api_name(added_line) else {
+        return false;
+    };
+    !file
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .filter(|line| line.kind == DiffLineKind::Removed)
+        .map(|line| line.text.trim())
+        .any(|line| is_public_api_line(line) && public_api_name(line).as_deref() == Some(&name))
+}
+
+fn public_api_name(line: &str) -> Option<String> {
+    let line = line
+        .trim_start()
+        .strip_prefix("pub ")
+        .unwrap_or(line.trim_start());
+    for keyword in [
+        "fn ", "struct ", "enum ", "trait ", "type ", "const ", "static ",
+    ] {
+        if let Some(rest) = line.strip_prefix(keyword) {
+            return Some(
+                rest.chars()
+                    .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                    .collect(),
+            );
+        }
+    }
+    None
 }
 
 fn is_public_api_line(line: &str) -> bool {
