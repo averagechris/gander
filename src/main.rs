@@ -34,8 +34,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent::{
         AgentDraft, AgentOverlay, ChangeBrief, ChangeDiffContext, ChunkValidationContext,
-        DraftState, ReviewChunk, invalid_chunk_parts_message, remove_review_chunks,
-        replace_review_chunks, update_review_chunks,
+        DraftState, ReviewChunk, brief_without_spotlight_warnings, chunk_line_space,
+        invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
+        update_review_chunks,
     },
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
@@ -222,6 +223,15 @@ enum Command {
 enum ChunksCommand {
     /// List current overlay chunks as pretty JSON.
     List,
+    /// List valid chunk line ranges for the current diff (or one change diff) as pretty JSON.
+    Lines {
+        /// jj change id whose change-scoped diff line space should be listed.
+        #[arg(long)]
+        change: Option<String>,
+        /// Restrict output to one file path.
+        #[arg(long)]
+        path: Option<String>,
+    },
     /// Replace all chunks from a JSON spec file (or stdin with --file - / omitted).
     Set {
         #[arg(short, long)]
@@ -1035,6 +1045,26 @@ fn handle_chunks_command(
     let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
     match command {
         ChunksCommand::List => print_json(&overlay.chunks)?,
+        ChunksCommand::Lines { change, path } => {
+            let files = if let Some(change_id) = change {
+                let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+                let raw = jj.diff(&session.repo, &target).map_err(|error| {
+                    user_error(format!(
+                        "failed to read change diff for {change_id}: {error}"
+                    ))
+                })?;
+                DiffSet::parse(&raw)
+                    .map_err(|error| user_error(format!("failed to parse change diff: {error}")))?
+                    .files
+            } else {
+                session
+                    .files
+                    .iter()
+                    .map(|file| file.diff.clone())
+                    .collect::<Vec<_>>()
+            };
+            print_json(&chunk_line_space(&files, path.as_deref()))?;
+        }
         ChunksCommand::Set { file } => {
             let spec = read_chunks_spec(file.as_ref())?;
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
@@ -1098,7 +1128,11 @@ fn handle_briefs_command(
             let spec: BriefsSpec = read_json_spec(file.as_ref(), "brief")?;
             validate_briefs_for_cli(session, jj, &spec.briefs)?;
             overlay.briefs = spec.briefs;
+            let warnings = brief_without_spotlight_warnings(&overlay.briefs, &overlay.chunks);
             overlay.save(overlay_path)?;
+            for warning in &warnings {
+                eprintln!("warning: {warning}");
+            }
             println!("Set {} briefs", overlay.briefs.len());
         }
         BriefsCommand::Clear => {

@@ -218,6 +218,85 @@ pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
         .join("; ")
 }
 
+pub fn brief_without_spotlight_warnings(
+    briefs: &[ChangeBrief],
+    chunks: &[ReviewChunk],
+) -> Vec<String> {
+    briefs
+        .iter()
+        .filter(|brief| {
+            !chunks.iter().any(|chunk| {
+                chunk.importance == ChunkImportance::Spotlight
+                    && chunk.change_id.as_deref() == Some(brief.change_id.as_str())
+            })
+        })
+        .map(|brief| {
+            format!(
+                "brief for change {} has no spotlight chunk yet and will not render on a curated zen chapter right now",
+                brief.change_id
+            )
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChunkLineSpaceFile {
+    pub path: String,
+    pub hunks: Vec<ChunkLineSpaceHunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChunkLineSpaceHunk {
+    pub header: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub first_line: String,
+    pub last_line: String,
+}
+
+pub fn chunk_line_space(files: &[FileDiff], path_filter: Option<&str>) -> Vec<ChunkLineSpaceFile> {
+    files
+        .iter()
+        .filter(|file| path_filter.is_none_or(|path| file.path == path))
+        .map(|file| ChunkLineSpaceFile {
+            path: file.path.clone(),
+            hunks: file
+                .hunks
+                .iter()
+                .filter_map(|hunk| {
+                    let lines = hunk
+                        .lines
+                        .iter()
+                        .filter(|line| line.kind != DiffLineKind::Meta)
+                        .filter_map(|line| line.new_lineno.or(line.old_lineno))
+                        .collect::<Vec<_>>();
+                    let (start_line, end_line) = (*lines.iter().min()?, *lines.iter().max()?);
+                    let first_line = hunk
+                        .lines
+                        .iter()
+                        .find(|line| line.kind != DiffLineKind::Meta)
+                        .map(|line| line.text.clone())
+                        .unwrap_or_default();
+                    let last_line = hunk
+                        .lines
+                        .iter()
+                        .rev()
+                        .find(|line| line.kind != DiffLineKind::Meta)
+                        .map(|line| line.text.clone())
+                        .unwrap_or_default();
+                    Some(ChunkLineSpaceHunk {
+                        header: hunk.header.clone(),
+                        start_line,
+                        end_line,
+                        first_line,
+                        last_line,
+                    })
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkUpdateSummary {
     pub chunks: usize,
@@ -503,6 +582,57 @@ mod validation_tests {
             invalid[0]
                 .reason
                 .contains("unknown or unresolvable change id")
+        );
+    }
+
+    #[test]
+    fn brief_warnings_reflect_current_spotlight_state() {
+        let brief = ChangeBrief {
+            change_id: "abc".to_owned(),
+            summary: "Summary".to_owned(),
+            artifacts: Vec::new(),
+        };
+        let glance = ReviewChunk {
+            importance: ChunkImportance::Glance,
+            change_id: Some("abc".to_owned()),
+            ..chunk("g", Some("abc"), Vec::new())
+        };
+        assert_eq!(
+            brief_without_spotlight_warnings(std::slice::from_ref(&brief), std::slice::from_ref(&glance)),
+            vec!["brief for change abc has no spotlight chunk yet and will not render on a curated zen chapter right now".to_owned()]
+        );
+        let spotlight = ReviewChunk {
+            importance: ChunkImportance::Spotlight,
+            change_id: Some("abc".to_owned()),
+            ..chunk("s", Some("abc"), Vec::new())
+        };
+        assert!(brief_without_spotlight_warnings(&[brief], &[glance, spotlight]).is_empty());
+    }
+
+    #[test]
+    fn chunk_line_space_ranges_validate_round_trip_and_filter_by_path() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,2 +10,3 @@\n ctx\n-old\n+new\n+extra\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -20 +20 @@\n-bye\n+hi\n",
+        );
+        let listed = chunk_line_space(&files, Some("a.rs"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "a.rs");
+        let hunk = &listed[0].hunks[0];
+        // The listed range is exactly the same coordinate space accepted by chunk validation.
+        let chunks = vec![chunk(
+            "c",
+            None,
+            vec![part("a.rs", hunk.start_line, hunk.end_line)],
+        )];
+        assert!(
+            validate_review_chunks(
+                &chunks,
+                &ChunkValidationContext {
+                    session_files: &files,
+                    change_diffs: Vec::new()
+                }
+            )
+            .is_empty()
         );
     }
 

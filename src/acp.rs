@@ -28,8 +28,8 @@ use crate::{
     agent::{
         AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief,
         ChangeDiffContext, ChunkImportance, ChunkPart, ChunkValidationContext, DraftState,
-        FlagPriority, ReviewChunk, invalid_chunk_parts_message, remove_review_chunks,
-        replace_review_chunks, update_review_chunks,
+        FlagPriority, ReviewChunk, brief_without_spotlight_warnings, invalid_chunk_parts_message,
+        remove_review_chunks, replace_review_chunks, update_review_chunks,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -449,8 +449,10 @@ impl AcpHandler {
                     .map(parse_change_brief)
                     .collect::<Result<Vec<_>, String>>()?;
                 self.overlay.briefs = briefs;
+                let warnings =
+                    brief_without_spotlight_warnings(&self.overlay.briefs, &self.overlay.chunks);
                 self.save_overlay()?;
-                Ok(json!({ "briefs": self.overlay.briefs.len() }))
+                Ok(json!({ "briefs": self.overlay.briefs.len(), "warnings": warnings }))
             }
             "review/draft_comment" => {
                 let path = require_str(params, "path")?;
@@ -1294,6 +1296,52 @@ diff --git a/README.md b/README.md
             let response = server.handle_line(&request).unwrap();
             assert!(response.get("error").is_some(), "expected error for {bad}");
         }
+    }
+
+    #[test]
+    fn set_change_briefs_warns_without_current_spotlight_chunk() {
+        let (server, _dir) = server();
+        let mut server = server.with_jj(Box::new(MockJj));
+
+        let no_chunks = call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
+        );
+        assert_eq!(
+            no_chunks["warnings"].as_array().unwrap()[0],
+            "brief for change abc has no spotlight chunk yet and will not render on a curated zen chapter right now"
+        );
+
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [{
+                "title": "skim", "importance": "glance", "change_id": "abc",
+                "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }]
+            }] }),
+        );
+        let glance_only = call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
+        );
+        assert_eq!(glance_only["warnings"].as_array().unwrap().len(), 1);
+
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [{
+                "title": "tour", "importance": "spotlight", "change_id": "abc",
+                "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }]
+            }] }),
+        );
+        let spotlight = call(
+            &mut server,
+            "review/set_change_briefs",
+            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
+        );
+        assert!(spotlight["warnings"].as_array().unwrap().is_empty());
     }
 
     #[test]

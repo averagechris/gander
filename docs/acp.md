@@ -99,7 +99,7 @@ within one poll tick.
 | `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
 | `review/update_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | upsert reviewable units. Chunks whose `id` matches an existing overlay chunk replace it in place; chunks with new/generated ids append. Response: `{chunks, updated, added}` |
 | `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
-| `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's stops |
+| `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's spotlight stops. Response: `{briefs, warnings}`; warnings are advisory |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; returns `{id}` |
 
 `artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
@@ -115,7 +115,7 @@ part before mutating the overlay. A single invalid part rejects the whole
 request with all per-part reasons and leaves the previous chunk list intact.
 `review/remove_chunks` is similarly all-or-nothing for unknown ids. The CLI
 equivalent is `gander chunks`: `list`, `set --file spec.json`,
-`update --file spec.json`, `remove --id <id>...`, and `clear`. The spec file is
+`update --file spec.json`, `remove --id <id>...`, `lines [--change <id>] [--path <p>]`, and `clear`. The spec file is
 JSON in the same chunk shape: `{ "chunks": [ { "id": "optional", "title":
 "...", "importance": "spotlight|glance", "change_id": "optional",
 "rationale": "...", "explanation": "...", "artifacts": [{"title":"...",
@@ -128,12 +128,41 @@ that file's diff line space. Unknown or unresolvable `change_id`s are invalid.
 If any part is invalid the entire request is rejected with a JSON-RPC error
 listing the invalid parts; no valid subset is applied.
 
+Use `gander chunks lines` while authoring specs to list the exact line space
+accepted by `chunks set`/`update`. Without `--change` it lists the current
+session diff; with `--change <id>` it lists the same change-scoped diff used by
+chunks whose `change_id` is that id. `--path <p>` narrows the JSON output to one
+file. Each file contains hunks with `start_line`, `end_line`, and first/last
+content excerpts for orientation:
+
+```json
+[
+  {
+    "path": "src/lib.rs",
+    "hunks": [
+      {
+        "header": "@@ -10,2 +10,3 @@",
+        "start_line": 10,
+        "end_line": 12,
+        "first_line": " unchanged context",
+        "last_line": "+new line"
+      }
+    ]
+  }
+]
+```
+
 The same spec-file authoring path is available for briefs and drafts. Use
 `gander briefs list`, `set --file spec.json`, or `clear` with the ACP
 `review/set_change_briefs` shape: `{ "briefs": [{ "change_id": "...",
 "summary": "...", "artifacts": [{"title":"...", "kind":"note",
 "body":"..."}] }] }`; `set` validates `change_id` values against the jj
-stack before replacing the overlay. Use `gander drafts list`,
+stack before replacing the overlay. If a brief's change has no spotlight chunk
+yet in the current overlay (for example, there are no chunks yet or only
+`glance` chunks for that change), ACP returns and `gander briefs set` prints an
+advisory warning: `brief for change <id> has no spotlight chunk yet and will not
+render on a curated zen chapter right now`. This does not reject the write;
+briefs are often authored before chunks. Use `gander drafts list`,
 `add --file spec.json`, or `remove --id <id>...` with the ACP
 `review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`)
 or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append pending drafts and
