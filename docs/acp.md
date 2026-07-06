@@ -128,6 +128,19 @@ that file's diff line space. Unknown or unresolvable `change_id`s are invalid.
 If any part is invalid the entire request is rejected with a JSON-RPC error
 listing the invalid parts; no valid subset is applied.
 
+The same spec-file authoring path is available for briefs and drafts. Use
+`gander briefs list`, `set --file spec.json`, or `clear` with the ACP
+`review/set_change_briefs` shape: `{ "briefs": [{ "change_id": "...",
+"summary": "...", "artifacts": [{"title":"...", "kind":"note",
+"body":"..."}] }] }`; `set` validates `change_id` values against the jj
+stack before replacing the overlay. Use `gander drafts list`,
+`add --file spec.json`, or `remove --id <id>...` with the ACP
+`review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`)
+or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append pending drafts and
+print the generated ids; remove is strict and rejects unknown ids without
+mutating the overlay. For all three groups, `--file -` or an omitted `--file`
+reads stdin and writes the same overlay file that the TUI watches.
+
 ## Two-way draft flow
 
 Draft comments start `pending`. The human accepts, edits, or discards them in

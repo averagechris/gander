@@ -31,9 +31,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{
-        AgentOverlay, ChangeDiffContext, ChunkValidationContext, ReviewChunk,
-        invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
-        update_review_chunks,
+        AgentDraft, AgentOverlay, ChangeBrief, ChangeDiffContext, ChunkValidationContext,
+        DraftState, ReviewChunk, invalid_chunk_parts_message, remove_review_chunks,
+        replace_review_chunks, update_review_chunks,
     },
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
@@ -198,6 +198,22 @@ enum Command {
         #[command(subcommand)]
         command: ChunksCommand,
     },
+    /// Author per-change briefs from JSON specs.
+    #[command(
+        long_about = "Author per-change briefs. Specs are JSON objects like {\"briefs\":[{\"change_id\":\"abc\",\"summary\":\"Explains the parser groundwork.\"}]}. Use --file - (or omit --file) to read stdin."
+    )]
+    Briefs {
+        #[command(subcommand)]
+        command: BriefsCommand,
+    },
+    /// Author agent draft comments from JSON specs.
+    #[command(
+        long_about = "Author draft comments. Add specs match review/draft_comment params, either one object like {\"path\":\"src/lib.rs\",\"line\":12,\"body\":\"Consider naming this after the invariant.\"} or {\"drafts\":[...]}. Use --file - (or omit --file) to read stdin."
+    )]
+    Drafts {
+        #[command(subcommand)]
+        command: DraftsCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,6 +242,54 @@ enum ChunksCommand {
 #[derive(Debug, Deserialize)]
 struct ChunksSpec {
     chunks: Vec<ReviewChunk>,
+}
+
+#[derive(Debug, Subcommand)]
+enum BriefsCommand {
+    /// List current overlay briefs as pretty JSON.
+    List,
+    /// Replace all briefs from a JSON spec file (or stdin with --file - / omitted).
+    Set {
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Empty the brief list.
+    Clear,
+}
+
+#[derive(Debug, Deserialize)]
+struct BriefsSpec {
+    briefs: Vec<ChangeBrief>,
+}
+
+#[derive(Debug, Subcommand)]
+enum DraftsCommand {
+    /// List current overlay drafts as pretty JSON, including state.
+    List,
+    /// Append pending drafts from a JSON spec file (or stdin with --file - / omitted).
+    Add {
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Remove drafts by id. Repeat --id for multiple drafts.
+    Remove {
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum DraftsSpec {
+    One(DraftCommentSpec),
+    Many { drafts: Vec<DraftCommentSpec> },
+}
+
+#[derive(Debug, Deserialize)]
+struct DraftCommentSpec {
+    path: String,
+    line: Option<usize>,
+    body: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -714,6 +778,12 @@ fn run() -> color_eyre::Result<()> {
         Command::Chunks { command } => {
             handle_chunks_command(command, &session, &jj, &workspace_paths.overlay_file())?
         }
+        Command::Briefs { command } => {
+            handle_briefs_command(command, &session, &jj, &workspace_paths.overlay_file())?
+        }
+        Command::Drafts { command } => {
+            handle_drafts_command(command, &workspace_paths.overlay_file())?
+        }
         Command::Files { command } => match command {
             FilesCommand::List => print_json(&session_files_json(&session))?,
         },
@@ -978,17 +1048,144 @@ fn handle_chunks_command(
 }
 
 fn read_chunks_spec(file: Option<&PathBuf>) -> color_eyre::Result<ChunksSpec> {
+    read_json_spec(file, "chunk")
+}
+
+fn handle_briefs_command(
+    command: BriefsCommand,
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    overlay_path: &std::path::Path,
+) -> color_eyre::Result<()> {
+    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
+    match command {
+        BriefsCommand::List => print_json(&overlay.briefs)?,
+        BriefsCommand::Set { file } => {
+            let spec: BriefsSpec = read_json_spec(file.as_ref(), "brief")?;
+            validate_briefs_for_cli(session, jj, &spec.briefs)?;
+            overlay.briefs = spec.briefs;
+            overlay.save(overlay_path)?;
+            println!("Set {} briefs", overlay.briefs.len());
+        }
+        BriefsCommand::Clear => {
+            overlay.briefs.clear();
+            overlay.save(overlay_path)?;
+            println!("Cleared briefs");
+        }
+    }
+    Ok(())
+}
+
+fn handle_drafts_command(
+    command: DraftsCommand,
+    overlay_path: &std::path::Path,
+) -> color_eyre::Result<()> {
+    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
+    match command {
+        DraftsCommand::List => print_json(&overlay.drafts)?,
+        DraftsCommand::Add { file } => {
+            let spec: DraftsSpec = read_json_spec(file.as_ref(), "draft")?;
+            let drafts = match spec {
+                DraftsSpec::One(draft) => vec![draft],
+                DraftsSpec::Many { drafts } => drafts,
+            };
+            let mut ids = Vec::new();
+            for draft in drafts {
+                if draft.path.trim().is_empty() {
+                    return Err(eyre!("path must not be empty"));
+                }
+                if draft.body.trim().is_empty() {
+                    return Err(eyre!("body must not be empty"));
+                }
+                let id = uuid::Uuid::new_v4().to_string();
+                overlay.drafts.push(AgentDraft {
+                    id: id.clone(),
+                    path: draft.path,
+                    line: draft.line,
+                    body: draft.body,
+                    state: DraftState::Pending,
+                    accepted_comment_id: None,
+                });
+                ids.push(id);
+            }
+            merge_draft_dispositions_from_disk(&mut overlay, overlay_path);
+            overlay.save(overlay_path)?;
+            print_json(&serde_json::json!({ "ids": ids }))?;
+        }
+        DraftsCommand::Remove { ids } => {
+            let unknown = ids
+                .iter()
+                .filter(|id| !overlay.drafts.iter().any(|draft| &draft.id == *id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                return Err(eyre!("unknown draft id(s): {}", unknown.join(", ")));
+            }
+            overlay.drafts.retain(|draft| !ids.contains(&draft.id));
+            overlay.save(overlay_path)?;
+            println!("Removed {}; remaining {}", ids.len(), overlay.drafts.len());
+        }
+    }
+    Ok(())
+}
+
+fn read_json_spec<T: for<'de> Deserialize<'de>>(
+    file: Option<&PathBuf>,
+    spec_name: &str,
+) -> color_eyre::Result<T> {
     let mut contents = String::new();
     match file {
         Some(path) if path != std::path::Path::new("-") => {
             contents = std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read chunk spec {}", path.display()))?;
+                .with_context(|| format!("failed to read {spec_name} spec {}", path.display()))?;
         }
         _ => {
             std::io::stdin().read_to_string(&mut contents)?;
         }
     }
-    serde_json::from_str(&contents).wrap_err("failed to parse chunk spec JSON")
+    serde_json::from_str(&contents).wrap_err(format!("failed to parse {spec_name} spec JSON"))
+}
+
+fn validate_briefs_for_cli(
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    briefs: &[ChangeBrief],
+) -> color_eyre::Result<()> {
+    let changes = jj.stack_changes(&session.repo)?;
+    let invalid = briefs
+        .iter()
+        .filter_map(|brief| {
+            if brief.change_id.trim().is_empty() {
+                Some("change_id must not be empty".to_owned())
+            } else if brief.summary.trim().is_empty() {
+                Some(format!("{}: summary must not be empty", brief.change_id))
+            } else if !changes
+                .iter()
+                .any(|change| change.change_id == brief.change_id.trim())
+            {
+                Some(format!("{}: unknown change id", brief.change_id))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+        return Err(eyre!("invalid brief(s): {}", invalid.join("; ")));
+    }
+    Ok(())
+}
+
+fn merge_draft_dispositions_from_disk(overlay: &mut AgentOverlay, overlay_path: &std::path::Path) {
+    if let Ok(on_disk) = AgentOverlay::load_or_default(overlay_path) {
+        for draft in &mut overlay.drafts {
+            if let Some(disk_draft) = on_disk.drafts.iter().find(|disk| disk.id == draft.id)
+                && draft.state == DraftState::Pending
+            {
+                draft.state = disk_draft.state;
+                draft.accepted_comment_id = disk_draft.accepted_comment_id.clone();
+            }
+        }
+    }
 }
 
 fn chunk_validation_context_for_cli(
@@ -1390,6 +1587,138 @@ impl From<TuiArtifactOnQuitArg> for TuiArtifactOnQuitConfig {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    struct BriefsTestJj;
+
+    impl JjBackend for BriefsTestJj {
+        fn diff(&self, _: &std::path::Path, _: &ReviewTarget) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn change_summaries(
+            &self,
+            _: &std::path::Path,
+        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn stack_changes(
+            &self,
+            _: &std::path::Path,
+        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(vec![crate::jj::JjChangeSummary {
+                change_id: "abc".to_owned(),
+                bookmarks: String::new(),
+                description: "test".to_owned(),
+            }])
+        }
+
+        fn change_fingerprint(
+            &self,
+            _: &std::path::Path,
+            _: &ReviewTarget,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn operations(
+            &self,
+            _: &std::path::Path,
+        ) -> color_eyre::Result<Vec<crate::jj::JjOperationSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn diff_at_operation(
+            &self,
+            _: &std::path::Path,
+            _: &ReviewTarget,
+            _: &str,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn file_contents(
+            &self,
+            _: &std::path::Path,
+            _: &str,
+            _: &str,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn run_command(&self, _: &std::path::Path, _: &[String]) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn briefs_cli_validates_change_ids() {
+        let repo = tempfile::tempdir().unwrap();
+        let session = ReviewSession::new(
+            repo.path().to_path_buf(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet {
+                raw_header: Vec::new(),
+                files: Vec::new(),
+            },
+            ReviewState::default(),
+        );
+        let valid = vec![ChangeBrief {
+            change_id: "abc".to_owned(),
+            summary: "Summary".to_owned(),
+            artifacts: Vec::new(),
+        }];
+        assert!(validate_briefs_for_cli(&session, &BriefsTestJj, &valid).is_ok());
+
+        let invalid = vec![ChangeBrief {
+            change_id: "missing".to_owned(),
+            summary: "Summary".to_owned(),
+            artifacts: Vec::new(),
+        }];
+        let error = validate_briefs_for_cli(&session, &BriefsTestJj, &invalid).unwrap_err();
+        assert!(error.to_string().contains("missing: unknown change id"));
+    }
+
+    #[test]
+    fn drafts_cli_adds_and_strictly_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_path = dir.path().join("agent.json");
+        let spec_path = dir.path().join("draft.json");
+        std::fs::write(
+            &spec_path,
+            r#"{"path":"src/lib.rs","line":12,"body":"Please check this."}"#,
+        )
+        .unwrap();
+
+        handle_drafts_command(
+            DraftsCommand::Add {
+                file: Some(spec_path),
+            },
+            &overlay_path,
+        )
+        .unwrap();
+        let overlay = AgentOverlay::load_or_default(&overlay_path).unwrap();
+        assert_eq!(overlay.drafts.len(), 1);
+        assert_eq!(overlay.drafts[0].state, DraftState::Pending);
+        let id = overlay.drafts[0].id.clone();
+
+        let error = handle_drafts_command(
+            DraftsCommand::Remove {
+                ids: vec!["missing".to_owned()],
+            },
+            &overlay_path,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown draft id(s): missing"));
+
+        handle_drafts_command(DraftsCommand::Remove { ids: vec![id] }, &overlay_path).unwrap();
+        assert!(
+            AgentOverlay::load_or_default(&overlay_path)
+                .unwrap()
+                .drafts
+                .is_empty()
+        );
+    }
 
     #[test]
     fn merge_ignores_appends_cli_to_config() {
