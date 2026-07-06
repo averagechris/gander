@@ -9,12 +9,12 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
 │target chooser, or adjust                 ││                                                      │
 │--base/--┌prior operations──────────────────────────────────────────────────────────────┐hooser,  │
-│         │Compare against a prior operation: unchanged files are marked viewed          │         │
+│         │Compare against a prior operation: unchanged files are marked caught up       │         │
 │         │› abc123def     5 minutes ago     snapshot working copy                       │nore     │
 │         │  456fed789     2 hours ago       commit working copy                         │         │
 │         │                                                                              │         │
-│         │↑/↓ or j/k move · enter compare · esc cancel                                  │         │
-│         │                                                                              │         │
+│         │select an operation to preview catch-up                                       │         │
+│         │↑/↓ or n/e move · enter apply · esc cancel                                    │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
@@ -26,4 +26,4 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
-prior operation · refresh paused · down/up or j/k move · enter compare · esc cancel
+prior operation · refresh paused · ↑/↓ or n/e move · enter apply · esc cancel

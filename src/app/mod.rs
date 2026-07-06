@@ -145,6 +145,9 @@ pub struct RefreshedFileChange {
     /// This file had already been reviewed (viewed or caught up) before the
     /// refresh changed its fingerprint, so the new diff needs re-review.
     pub was_reviewed: bool,
+    /// The refreshed fingerprint matches a previously viewed/caught-up
+    /// fingerprint, so the apparent change is a revert to known content.
+    pub reverted_to_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -452,6 +455,13 @@ impl ReviewSession {
                 .map(|old| old.hunk_fingerprints.clone())
                 .unwrap_or_default();
             if file_changed {
+                let reverted_to_seen = previous.is_some()
+                    && (file.viewed
+                        || file.caught_up
+                        || self.persisted_files.get(&file.path).is_some_and(|saved| {
+                            saved.is_viewed_fingerprint(&file.fingerprint)
+                                || saved.is_caught_up_fingerprint(&file.fingerprint)
+                        }));
                 refresh_changes.push(RefreshedFileChange {
                     path: file.path.clone(),
                     is_new: previous.is_none(),
@@ -459,10 +469,20 @@ impl ReviewSession {
                         - previous.map_or(0, |old| old.additions as i64),
                     deletions_delta: file.diff.deletions as i64
                         - previous.map_or(0, |old| old.deletions as i64),
-                    was_reviewed: previous.is_some_and(|old| old.viewed || old.caught_up),
+                    was_reviewed: previous.is_some_and(|old| old.viewed || old.caught_up)
+                        && !reverted_to_seen,
+                    reverted_to_seen,
                 });
             }
-            file.changed_since_look = carried_file || file_changed;
+            let reverted_to_seen = file_changed
+                && previous.is_some()
+                && (file.viewed
+                    || file.caught_up
+                    || self.persisted_files.get(&file.path).is_some_and(|saved| {
+                        saved.is_viewed_fingerprint(&file.fingerprint)
+                            || saved.is_caught_up_fingerprint(&file.fingerprint)
+                    }));
+            file.changed_since_look = (carried_file || file_changed) && !reverted_to_seen;
             file.changed_hunks = carried_hunks;
             for (index, fingerprint) in new_hunks.iter().enumerate() {
                 if !old_hunks.iter().any(|old| old == fingerprint) {
@@ -2137,6 +2157,65 @@ diff --git a/new.rs b/new.rs
         session.select_file_index(0);
         session.mark_selected_viewed();
         assert!(!session.files[0].changed_since_look);
+    }
+
+    #[test]
+    fn refresh_revert_to_seen_content_clears_freshness_badge() {
+        let mut session = session();
+        let original_fingerprint = session.files[0].fingerprint.clone();
+        session.files[0].viewed = true;
+        session.persisted_files.insert(
+            "src/tui.rs".to_owned(),
+            FileState {
+                fingerprint: original_fingerprint.clone(),
+                viewed: true,
+                viewed_fingerprints: [original_fingerprint].into_iter().collect(),
+                ..Default::default()
+            },
+        );
+
+        let changed = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++newer
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), changed);
+        assert!(session.files[0].changed_since_look);
+        assert!(session.last_refresh_changes[0].was_reviewed);
+
+        let reverted = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), reverted);
+
+        assert!(session.files[0].viewed);
+        assert!(!session.files[0].changed_since_look);
+        assert!(session.last_refresh_changes[0].reverted_to_seen);
+        assert!(!session.last_refresh_changes[0].was_reviewed);
     }
 
     #[test]

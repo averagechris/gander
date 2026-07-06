@@ -1239,11 +1239,8 @@ fn draw_footer(
                 .to_owned()
         }
         Mode::OperationPicker(_) => {
-            format!(
-                "prior operation · refresh paused · {down}/{up} or j/k move · enter compare · esc cancel",
-                down = keymap.hint(Action::TargetPickerMoveDown),
-                up = keymap.hint(Action::TargetPickerMoveUp),
-            )
+            "prior operation · refresh paused · ↑/↓ or n/e move · enter apply · esc cancel"
+                .to_owned()
         }
         Mode::JjHelpers(state) => {
             if state.confirming {
@@ -1786,7 +1783,7 @@ fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagL
     frame.render_widget(Clear, popup);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
-    let fixed_lines = 3usize;
+    let fixed_lines = 4usize;
     let list_height = inner_height.saturating_sub(fixed_lines).max(1);
     let visible_window = picker_visible_window(list.selected, list.flags.len(), list_height);
 
@@ -3145,7 +3142,7 @@ fn draw_operation_picker_popup(
         picker_visible_window(picker.selected, picker.operations.len(), list_height);
 
     let mut lines = vec![Line::from(Span::styled(
-        "Compare against a prior operation: unchanged files are marked viewed",
+        "Compare against a prior operation: unchanged files are marked caught up",
         Style::default().fg(Color::DarkGray),
     ))];
     if picker.operations.is_empty() {
@@ -3201,7 +3198,14 @@ fn draw_operation_picker_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter compare · esc cancel",
+        picker
+            .preview
+            .as_deref()
+            .unwrap_or("select an operation to preview catch-up"),
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(Span::styled(
+        "↑/↓ or n/e move · enter apply · esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
 

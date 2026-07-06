@@ -7,6 +7,7 @@ use crate::jj::JjOperationSummary;
 pub(super) struct OperationPickerState {
     pub(super) operations: Vec<JjOperationSummary>,
     pub(super) selected: usize,
+    pub(super) preview: Option<String>,
 }
 
 impl OperationPickerState {
@@ -14,6 +15,7 @@ impl OperationPickerState {
         Self {
             operations,
             selected: 0,
+            preview: None,
         }
     }
 
@@ -28,6 +30,10 @@ impl OperationPickerState {
 
     pub(super) fn selected_operation(&self) -> Option<&JjOperationSummary> {
         self.operations.get(self.selected)
+    }
+
+    pub(super) fn set_preview(&mut self, preview: Option<String>) {
+        self.preview = preview;
     }
 }
 

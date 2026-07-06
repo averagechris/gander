@@ -445,6 +445,9 @@ fn run_loop(
             // could misanchor what the human is doing).
             if mode_allows_live_refresh(mode) {
                 maybe_refresh_review(review_loader, session, tui_state);
+                if let Mode::OperationPicker(picker) = mode {
+                    refresh_operation_picker_preview(picker, session, review_loader);
+                }
             }
             continue;
         }
@@ -787,7 +790,10 @@ fn maybe_refresh_review(
 }
 
 fn mode_allows_live_refresh(mode: &Mode) -> bool {
-    matches!(mode, Mode::Normal | Mode::Activity(_) | Mode::Help)
+    matches!(
+        mode,
+        Mode::Normal | Mode::Activity(_) | Mode::Help | Mode::OperationPicker(_)
+    )
 }
 
 /// Reload the current target in place: view state survives, agent
@@ -812,28 +818,9 @@ fn refresh_current_target(
     let mut file_events = session
         .last_refresh_changes
         .iter()
-        .map(|change| {
-            // Diff-churn growth from this refresh; shrinking diffs (undo,
-            // abandon) just say "updated" rather than negative churn.
-            let added = change.additions_delta.max(0);
-            let removed = change.deletions_delta.max(0);
-            let churn = if added == 0 && removed == 0 {
-                String::new()
-            } else {
-                format!(" (+{added} −{removed})")
-            };
-            let rereview = if change.was_reviewed {
-                " — was viewed, needs re-review"
-            } else {
-                ""
-            };
-            if change.is_new {
-                format!("{} appeared{churn}{rereview}", change.path)
-            } else {
-                format!("{} updated{churn}{rereview}", change.path)
-            }
-        })
+        .map(refresh_file_event)
         .collect::<Vec<_>>();
+    specialize_description_only_events(&mut events, file_events.is_empty());
     let reviewed_changed = session
         .last_refresh_changes
         .iter()
@@ -885,6 +872,45 @@ fn refresh_current_target(
         level: UiNoticeLevel::Info,
         message,
     });
+}
+
+fn refresh_file_event(change: &crate::app::RefreshedFileChange) -> String {
+    // Diff-churn growth from this refresh; shrinking diffs (undo, abandon) just
+    // say "updated" rather than negative churn unless the content is recognized
+    // as a revert to already-seen content.
+    let added = change.additions_delta.max(0);
+    let removed = change.deletions_delta.max(0);
+    let churn = if added == 0 && removed == 0 {
+        String::new()
+    } else {
+        format!(" (+{added} −{removed})")
+    };
+    let rereview = if change.was_reviewed {
+        " — was viewed, needs re-review"
+    } else {
+        ""
+    };
+    if change.reverted_to_seen {
+        format!("{} reverted to previously seen content", change.path)
+    } else if change.is_new {
+        format!("{} appeared{churn}{rereview}", change.path)
+    } else {
+        format!("{} updated{churn}{rereview}", change.path)
+    }
+}
+
+fn specialize_description_only_events(events: &mut [String], no_file_events: bool) {
+    if !no_file_events {
+        return;
+    }
+    for event in events {
+        if let Some(change) = event
+            .strip_prefix("change ")
+            .and_then(|rest| rest.strip_suffix(" updated"))
+        {
+            *event = format!("change {change} description updated");
+        }
+    }
 }
 
 fn event_key(message: &str) -> String {
@@ -1264,7 +1290,9 @@ fn handle_normal_action(
                 });
             }
             Ok(operations) => {
-                *mode = Mode::OperationPicker(OperationPickerState::new(operations));
+                let mut picker = OperationPickerState::new(operations);
+                refresh_operation_picker_preview(&mut picker, session, review_loader);
+                *mode = Mode::OperationPicker(picker);
             }
             Err(error) => {
                 tui_state.notice = Some(UiNotice {
@@ -1856,10 +1884,32 @@ fn handle_operation_picker_key(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
+    if let Some(action) = keymap.action_for(&key) {
+        match action {
+            Action::MoveDown => {
+                picker.move_selection(1);
+                refresh_operation_picker_preview(picker, session, review_loader);
+                return false;
+            }
+            Action::MoveUp => {
+                picker.move_selection(-1);
+                refresh_operation_picker_preview(picker, session, review_loader);
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     if let Some(action) = keymap.target_picker_action_for(&key) {
         match action {
-            Action::TargetPickerMoveDown => picker.move_selection(1),
-            Action::TargetPickerMoveUp => picker.move_selection(-1),
+            Action::TargetPickerMoveDown => {
+                picker.move_selection(1);
+                refresh_operation_picker_preview(picker, session, review_loader);
+            }
+            Action::TargetPickerMoveUp => {
+                picker.move_selection(-1);
+                refresh_operation_picker_preview(picker, session, review_loader);
+            }
             _ => {}
         }
         return false;
@@ -1873,16 +1923,55 @@ fn handle_operation_picker_key(
             }
             true
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            picker.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            picker.move_selection(-1);
-            false
-        }
         _ => false,
     }
+}
+
+fn refresh_operation_picker_preview(
+    picker: &mut OperationPickerState,
+    session: &ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+) {
+    let preview = picker
+        .selected_operation()
+        .map(|operation| match load_prior_fingerprints(review_loader, session, operation) {
+            Ok(prior_fingerprints) => {
+                let (caught_up, already_viewed, changed) =
+                    preview_incremental_review(session, &prior_fingerprints);
+                format!(
+                    "will mark {caught_up} caught up · {already_viewed} already viewed · {changed} need re-review"
+                )
+            }
+            Err(error) => format!(
+                "preview unavailable for {}: {error:?}",
+                operation.operation_id
+            ),
+        });
+    picker.set_preview(preview);
+}
+
+fn load_prior_fingerprints(
+    review_loader: &ReviewLoader<'_>,
+    session: &ReviewSession,
+    operation: &crate::jj::JjOperationSummary,
+) -> Result<BTreeMap<String, String>> {
+    let prior = review_loader
+        .jj
+        .diff_at_operation(&session.repo, &session.target, &operation.operation_id)
+        .and_then(|diff_text| DiffSet::parse(&diff_text))?;
+    Ok(prior
+        .files
+        .into_iter()
+        .map(|file| (file.path, file.fingerprint))
+        .collect())
+}
+
+fn preview_incremental_review(
+    session: &ReviewSession,
+    prior_fingerprints: &BTreeMap<String, String>,
+) -> (usize, usize, usize) {
+    let mut preview = session.clone();
+    preview.apply_incremental_review(prior_fingerprints)
 }
 
 /// Compare the current diff against the same target at a prior operation:
@@ -1903,12 +1992,8 @@ fn apply_incremental_review(
         });
         return;
     }
-    let prior = review_loader
-        .jj
-        .diff_at_operation(&session.repo, &target, &operation.operation_id)
-        .and_then(|diff_text| DiffSet::parse(&diff_text));
-    let prior = match prior {
-        Ok(prior) => prior,
+    let prior_fingerprints = match load_prior_fingerprints(review_loader, session, operation) {
+        Ok(prior_fingerprints) => prior_fingerprints,
         Err(error) => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
@@ -1920,11 +2005,6 @@ fn apply_incremental_review(
             return;
         }
     };
-    let prior_fingerprints: std::collections::BTreeMap<String, String> = prior
-        .files
-        .into_iter()
-        .map(|file| (file.path, file.fingerprint))
-        .collect();
     let (caught_up, already_viewed, changed) =
         session.apply_incremental_review(&prior_fingerprints);
     tui_state.notice = Some(UiNotice {
@@ -3938,6 +4018,137 @@ diff --git a/changed.rs b/changed.rs
     }
 
     #[test]
+    fn operation_picker_uses_standard_movement_bindings_and_fallbacks() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let config = KeybindingsConfig {
+            move_down: vec!["n".to_owned()],
+            move_up: vec!["e".to_owned()],
+            target_picker_down: vec!["ctrl-j".to_owned()],
+            target_picker_up: vec!["ctrl-k".to_owned()],
+            ..Default::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let op = |id: &str| crate::jj::JjOperationSummary {
+            operation_id: id.to_owned(),
+            time: String::new(),
+            description: String::new(),
+        };
+        let mut picker = OperationPickerState::new(vec![op("one"), op("two"), op("three")]);
+
+        assert!(!handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Char('n')),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(picker.selected, 1);
+
+        assert!(!handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Char('j')),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(picker.selected, 2);
+
+        assert!(!handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Char('e')),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(picker.selected, 1);
+
+        assert!(!handle_operation_picker_key(
+            KeyEvent::from(KeyCode::Up),
+            &mut picker,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn operation_picker_preview_uses_incremental_review_counts() {
+        let current_diff = r#"diff --git a/same.rs b/same.rs
+--- a/same.rs
++++ b/same.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/viewed.rs b/viewed.rs
+--- a/viewed.rs
++++ b/viewed.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/changed.rs b/changed.rs
+--- a/changed.rs
++++ b/changed.rs
+@@ -1 +1 @@
+-old
++other
+"#;
+        let mut session = snapshot_session(current_diff);
+        session
+            .files
+            .iter_mut()
+            .find(|file| file.path == "viewed.rs")
+            .unwrap()
+            .viewed = true;
+        let same_file_diff = session
+            .files
+            .iter()
+            .find(|file| file.path == "same.rs")
+            .unwrap()
+            .diff
+            .raw
+            .clone();
+        let viewed_file_diff = session
+            .files
+            .iter()
+            .find(|file| file.path == "viewed.rs")
+            .unwrap()
+            .diff
+            .raw
+            .clone();
+        let mut backend = MockJjBackend::with_diff(Ok(current_diff.to_owned()));
+        backend.diff_at_op = Some(format!("{same_file_diff}\n{viewed_file_diff}\n"));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut picker = OperationPickerState::new(vec![crate::jj::JjOperationSummary {
+            operation_id: "op123".to_owned(),
+            time: String::new(),
+            description: String::new(),
+        }]);
+
+        refresh_operation_picker_preview(&mut picker, &session, &loader);
+
+        assert_eq!(
+            picker.preview.as_deref(),
+            Some("will mark 1 caught up · 1 already viewed · 1 need re-review")
+        );
+    }
+
+    #[test]
     fn operation_compare_refreshes_current_diff_before_marking_viewed() {
         let initial = r#"diff --git a/file.rs b/file.rs
 --- a/file.rs
@@ -5250,6 +5461,29 @@ diff --git a/c.rs b/c.rs
         );
         assert!(events.iter().any(|event| event == "change rewrite updated"));
         assert!(events.iter().any(|event| event == "change old left range"));
+    }
+
+    #[test]
+    fn description_only_refresh_events_name_description_updates() {
+        let mut events = vec!["change rewrite updated".to_owned()];
+
+        specialize_description_only_events(&mut events, true);
+
+        assert_eq!(events, vec!["change rewrite description updated"]);
+    }
+
+    #[test]
+    fn refresh_file_events_name_reverts_to_seen_content() {
+        let event = refresh_file_event(&crate::app::RefreshedFileChange {
+            path: "src/worker.rs".to_owned(),
+            is_new: false,
+            additions_delta: -2,
+            deletions_delta: 0,
+            was_reviewed: false,
+            reverted_to_seen: true,
+        });
+
+        assert_eq!(event, "src/worker.rs reverted to previously seen content");
     }
 
     #[test]
