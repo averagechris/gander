@@ -166,6 +166,10 @@ struct TuiState {
     /// review should refresh in place.
     repo_fingerprint: Option<(String, String)>,
     activity: VecDeque<ActivityEvent>,
+    /// Consecutive fingerprint-poll failures; surfaces a footer warning at
+    /// [`FINGERPRINT_FAILURE_NOTICE_THRESHOLD`] so a broken watcher cannot
+    /// freeze silently behind a "following @" indicator.
+    fingerprint_failures: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -686,6 +690,10 @@ fn validated_overlay_for_tui(
 /// How often the idle loop polls jj for new work in the reviewed range.
 const REPO_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Consecutive fingerprint failures tolerated as transient before the
+/// footer warns that live refresh is not working.
+const FINGERPRINT_FAILURE_NOTICE_THRESHOLD: u32 = 5;
+
 /// Poll the repo (throttled) and refresh the review in place when the
 /// reviewed range changed underneath it — new changes landing, rewrites,
 /// or working-copy edits (the fingerprint query snapshots the working copy
@@ -707,13 +715,38 @@ fn maybe_refresh_review(
     }
     tui_state.last_repo_poll = Some(now);
     // Transient jj failures (locks, mid-operation states) must not spam the
-    // footer: skip this tick and try again on the next one.
-    let Ok(fingerprint) = review_loader
+    // footer: skip the tick and try again. But a *persistently* failing poll
+    // means the pane is frozen while claiming to follow the repo, so after a
+    // run of consecutive failures surface it once as an error.
+    let fingerprint = match review_loader
         .jj
         .change_fingerprint(&session.repo, &session.target)
-    else {
-        return;
+    {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            tui_state.fingerprint_failures = tui_state.fingerprint_failures.saturating_add(1);
+            if tui_state.fingerprint_failures == FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
+                let reason = error
+                    .to_string()
+                    .lines()
+                    .next()
+                    .unwrap_or("unknown error")
+                    .to_string();
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!("live refresh is failing — {reason}"),
+                });
+            }
+            return;
+        }
     };
+    if tui_state.fingerprint_failures >= FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "live refresh recovered".to_string(),
+        });
+    }
+    tui_state.fingerprint_failures = 0;
     let target_key = session.target.to_string();
     let baseline = tui_state
         .repo_fingerprint
@@ -4934,6 +4967,43 @@ diff --git a/c.rs b/c.rs
         maybe_refresh_review(&loader, &mut session, &mut tui_state);
         assert!(backend.calls.borrow().is_empty());
         assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn persistent_fingerprint_failures_surface_an_error_then_recovery() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        *backend.fingerprint.borrow_mut() =
+            Err("jj log failed fingerprinting trunk()..@".to_owned());
+        for tick in 1..FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
+            tui_state.last_repo_poll = None;
+            maybe_refresh_review(&loader, &mut session, &mut tui_state);
+            assert!(tui_state.notice.is_none(), "quiet failure #{tick}");
+        }
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.clone().expect("failure notice");
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("live refresh is failing"));
+        assert!(notice.message.contains("jj log failed fingerprinting"));
+
+        // Further failures do not re-post (no footer spam).
+        tui_state.notice = None;
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(tui_state.notice.is_none());
+
+        // Recovery replaces the warning and resets the counter.
+        *backend.fingerprint.borrow_mut() = Ok("baseline".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.clone().expect("recovery notice");
+        assert_eq!(notice.level, UiNoticeLevel::Info);
+        assert!(notice.message.contains("live refresh recovered"));
+        assert_eq!(tui_state.fingerprint_failures, 0);
     }
 
     #[test]

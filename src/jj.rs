@@ -226,7 +226,7 @@ impl JjCommand {
             .arg("--no-pager")
             .arg("--template")
             .arg(
-                "if(self, \"@ \" ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\", \"\") ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"",
+                "if(current_working_copy, \"@ \" ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\", \"\") ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"",
             )
             .stdin(Stdio::null())
             .current_dir(repo)
