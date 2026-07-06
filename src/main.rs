@@ -58,42 +58,77 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ListFormat {
+    Json,
+    Text,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
     /// Repository root. Defaults to the current directory.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Target & state (global)")]
     repo: Option<PathBuf>,
 
     /// jj revision to review. Defaults to the working copy commit.
-    #[arg(short, long, default_value = "@", global = true)]
+    #[arg(
+        short,
+        long,
+        default_value = "@",
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     rev: String,
 
     /// jj revision/revset to compare from. Defaults to trunk().
-    #[arg(short, long, default_value = "trunk()", global = true)]
+    #[arg(
+        short,
+        long,
+        default_value = "trunk()",
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     base: String,
 
     /// Hide files matching this glob. Can be repeated.
-    #[arg(long = "ignore", global = true)]
+    #[arg(
+        long = "ignore",
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     ignore: Vec<String>,
 
     /// Treat files matching this generated/noisy preset as generated. Can be repeated.
-    #[arg(long = "generated-preset", value_enum, global = true)]
+    #[arg(
+        long = "generated-preset",
+        value_enum,
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     generated_preset: Vec<GeneratedPresetArg>,
 
     /// Treat files matching this glob as generated/noisy. Can be repeated.
-    #[arg(long = "generated-glob", global = true)]
+    #[arg(
+        long = "generated-glob",
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     generated_glob: Vec<String>,
 
     /// Path to the persistent review state file.
     /// Named --state-file so subcommands can use --state for domain state
     /// values (for example `comments set-state --state todo`).
-    #[arg(long = "state-file", global = true)]
+    #[arg(
+        long = "state-file",
+        global = true,
+        help_heading = "Target & state (global)"
+    )]
     state: Option<PathBuf>,
 
     /// Path to a gander config file. Layered over XDG user config and a
     /// committed gander.toml at the repo root.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Target & state (global)")]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -125,8 +160,10 @@ enum Command {
         after_help = "Examples:\n  gander export markdown --profile agent --output review.md\n      Complete session artifact with all comments and full raw hunks.\n  gander handoff --copy\n      Compact implementation prompt with action items and trimmed reference hunks."
     )]
     Export {
+        /// Artifact format to export (json or markdown). Defaults to markdown.
         #[arg(value_enum)]
         format: Option<OutputFormat>,
+        /// Write output to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Artifact profile; agent adds raw hunks and comment excerpts.
@@ -139,11 +176,13 @@ enum Command {
         after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export markdown --profile agent --output review.md\n      Use export for the complete session artifact with all comments and full hunks."
     )]
     Handoff {
+        /// Handoff output format. Action items are ordered by action priority (fix, test, follow-up, other), then path and line.
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
         /// Include only unresolved comments and open tasks (the default for handoff formats).
         #[arg(long)]
         only_open: bool,
+        /// Write handoff to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Copy the rendered handoff to the clipboard instead of printing it.
@@ -315,19 +354,30 @@ struct DraftCommentSpec {
 
 #[derive(Debug, Subcommand)]
 enum FilesCommand {
-    /// List changed files as JSON.
-    List,
+    /// List changed files as JSON or compact text.
+    List {
+        /// Output format for the changed file list.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum HunksCommand {
-    /// List hunks as JSON. Optionally narrow to one file.
+    /// List hunks as JSON or compact text. Optionally narrow to one file.
     List {
-        #[arg(long)]
+        /// Changed file path to list hunks for.
+        file_arg: Option<String>,
+        /// Changed file path to list hunks for.
+        #[arg(long, conflicts_with = "file_arg")]
         file: Option<String>,
+        /// Output format for the hunk list.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Show one hunk by id (`<path>:<index>`, as returned by list).
     Show {
+        /// Hunk id (`<path>:<index>`) to show.
         id: String,
         #[arg(long, value_enum, default_value_t = HunkShowFormat::Json)]
         format: HunkShowFormat,
@@ -336,8 +386,12 @@ enum HunksCommand {
 
 #[derive(Debug, Subcommand)]
 enum CommentsCommand {
-    /// List comments as JSON.
-    List,
+    /// List comments as JSON or compact text.
+    List {
+        /// Output format for the comment list.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
     /// Add a durable comment anchored to a changed file in the post-image.
     Add {
         /// Changed file path to comment on. Alias: --file.
@@ -358,6 +412,9 @@ enum CommentsCommand {
         /// Suggested action intent for task/handoff output.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
+        /// Echo format for the added comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Mark a comment resolved by id or unique id prefix.
     Resolve {
@@ -391,6 +448,9 @@ enum CommentsCommand {
         /// Replacement comment body text.
         #[arg(long)]
         body: Option<String>,
+        /// Echo format for the edited comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Permanently delete a durable comment by id or unique id prefix.
     Delete {
@@ -407,8 +467,12 @@ enum ReviewsCommand {
         #[arg(long)]
         title: Option<String>,
     },
-    /// List durable review sessions as JSON.
-    List,
+    /// List durable review sessions as JSON or compact text.
+    List {
+        /// Output format for the review session list.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
     /// Show one durable review session by id or unique id prefix as JSON.
     Show {
         /// Review session id or unique id prefix.
@@ -418,8 +482,12 @@ enum ReviewsCommand {
 
 #[derive(Debug, Subcommand)]
 enum TasksCommand {
-    /// List tasks as JSON, including comment-backed todo items.
-    List,
+    /// List tasks as JSON or compact text, including comment-backed todo items.
+    List {
+        /// Output format for the task list.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
     /// Add a durable review task.
     Add {
         /// Task title.
@@ -451,6 +519,34 @@ enum TasksCommand {
     },
     /// Reopen a done task by id or unique id prefix.
     Reopen {
+        /// Task id or unique id prefix.
+        id: String,
+    },
+    /// Edit a durable review task by id or unique id prefix.
+    Edit {
+        /// Task id or unique id prefix.
+        id: String,
+        /// Replacement task title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Replacement task details/body text.
+        #[arg(long)]
+        body: Option<String>,
+        /// Replacement action intent.
+        #[arg(long, value_enum)]
+        action: Option<ActionIntentArg>,
+        /// Replacement changed file path. Alias: --file.
+        #[arg(long, alias = "file")]
+        path: Option<String>,
+        /// Replacement 1-indexed new-side line.
+        #[arg(long)]
+        line: Option<usize>,
+        /// Replacement linked comment id or unique prefix.
+        #[arg(long = "comment")]
+        comment: Option<String>,
+    },
+    /// Permanently delete a durable review task by id or unique id prefix.
+    Delete {
         /// Task id or unique id prefix.
         id: String,
     },
@@ -858,8 +954,13 @@ fn run() -> color_eyre::Result<()> {
                         instance.base, instance.rev, session.target
                     );
                 }
+                eprintln!(
+                    "gander acp: bridged to live TUI session (target {})",
+                    session.target
+                );
                 return crate::acp::socket::bridge_stdio(&instance.socket_path);
             }
+            eprintln!("gander acp: serving snapshot (no live TUI for this workspace)");
             let overlay_path = workspace_paths.overlay_file();
             let mut server =
                 crate::acp::AcpServer::new(session, overlay_path)?.with_jj(Box::new(jj.clone()));
@@ -921,11 +1022,22 @@ fn run() -> color_eyre::Result<()> {
             handle_drafts_command(command, &workspace_paths.overlay_file())?
         }
         Command::Files { command } => match command {
-            FilesCommand::List => print_json(&session_files_json(&session))?,
+            FilesCommand::List { format } => match format {
+                ListFormat::Json => print_json(&session_files_json(&session))?,
+                ListFormat::Text => print!("{}", session_files_text(&session)),
+            },
         },
         Command::Hunks { command } => match command {
-            HunksCommand::List { file } => {
-                print_json(&session_hunks_json(&session, file.as_deref()))?
+            HunksCommand::List {
+                file_arg,
+                file,
+                format,
+            } => {
+                let file = file.or(file_arg);
+                match format {
+                    ListFormat::Json => print_json(&session_hunks_json(&session, file.as_deref()))?,
+                    ListFormat::Text => print!("{}", session_hunks_text(&session, file.as_deref())),
+                }
             }
             HunksCommand::Show { id, format } => match format {
                 HunkShowFormat::Json => {
@@ -941,7 +1053,10 @@ fn run() -> color_eyre::Result<()> {
             },
         },
         Command::Comments { command } => match command {
-            CommentsCommand::List => print_json(&session_comments_json(&session))?,
+            CommentsCommand::List { format } => match format {
+                ListFormat::Json => print_json(&session_comments_json(&session))?,
+                ListFormat::Text => print!("{}", session_comments_text(&session)),
+            },
             CommentsCommand::Add {
                 path,
                 line,
@@ -949,6 +1064,7 @@ fn run() -> color_eyre::Result<()> {
                 body,
                 kind,
                 action,
+                format,
             } => {
                 ensure_diff_file(&session, &path)?;
                 let anchor = session
@@ -974,7 +1090,10 @@ fn run() -> color_eyre::Result<()> {
                     },
                 );
                 state.save(&state_path)?;
-                print_json(&comment)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
             }
             CommentsCommand::Resolve { id } => {
                 let spec = session_target_spec(&repo, &session.target);
@@ -1010,6 +1129,7 @@ fn run() -> color_eyre::Result<()> {
                 start_line,
                 end_line,
                 body,
+                format,
             } => {
                 let canonical_id =
                     review::resolve_comment_id(&state.comments, &id).map_err(into_user_error)?;
@@ -1063,7 +1183,10 @@ fn run() -> color_eyre::Result<()> {
                 )
                 .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&comment)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
             }
             CommentsCommand::Delete { id } => {
                 let spec = session_target_spec(&repo, &session.target);
@@ -1084,20 +1207,25 @@ fn run() -> color_eyre::Result<()> {
                 state.save(&state_path)?;
                 print_json(&review_session)?;
             }
-            ReviewsCommand::List => {
-                print_json(&serde_json::json!({ "sessions": review::list_sessions(&state) }))?
-            }
+            ReviewsCommand::List { format } => match format {
+                ListFormat::Json => {
+                    print_json(&serde_json::json!({ "sessions": review::list_sessions(&state) }))?
+                }
+                ListFormat::Text => print!("{}", reviews_text(&state)),
+            },
             ReviewsCommand::Show { id } => {
                 print_json(review::find_session(&state, &id).map_err(into_user_error)?)?
             }
         },
         Command::Tasks { command } => match command {
-            TasksCommand::List => {
+            TasksCommand::List { format } => {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None).clone();
-                print_json(
-                    &serde_json::json!({ "tasks": review::list_tasks(&rs, &state.comments) }),
-                )?;
+                let tasks = review::list_tasks(&rs, &state.comments);
+                match format {
+                    ListFormat::Json => print_json(&serde_json::json!({ "tasks": tasks }))?,
+                    ListFormat::Text => print!("{}", tasks_text(&tasks)),
+                }
             }
             TasksCommand::Add {
                 title,
@@ -1144,6 +1272,52 @@ fn run() -> color_eyre::Result<()> {
                 let spec = session_target_spec(&repo, &session.target);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let task = review::reopen_task(rs, &id).map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_json(&task)?;
+            }
+            TasksCommand::Edit {
+                id,
+                title,
+                body,
+                action,
+                path,
+                line,
+                comment,
+            } => {
+                if let Some(path) = path.as_deref() {
+                    ensure_diff_file(&session, path)?;
+                }
+                let comment = comment
+                    .as_deref()
+                    .map(|id| review::resolve_comment_id(&state.comments, id))
+                    .transpose()
+                    .map_err(into_user_error)?;
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let target = (path.is_some() || line.is_some()).then(|| StateReviewTarget {
+                    file: path,
+                    line,
+                    ..StateReviewTarget::default()
+                });
+                let task = review::edit_task(
+                    rs,
+                    &id,
+                    review::TaskEdits {
+                        title,
+                        body,
+                        action: action.map(Into::into),
+                        source_comment_id: comment,
+                        target,
+                    },
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_json(&task)?;
+            }
+            TasksCommand::Delete { id } => {
+                let spec = session_target_spec(&repo, &session.target);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let task = review::delete_task(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&task)?;
             }
@@ -1589,6 +1763,196 @@ fn session_files_json(session: &ReviewSession) -> serde_json::Value {
             "hunk_count": file.diff.hunks.len(),
         })).collect::<Vec<_>>()
     })
+}
+
+fn ellipsize(input: &str, max: usize) -> String {
+    let text = input.trim().lines().next().unwrap_or("").trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let keep = max.saturating_sub(1);
+    format!("{}…", text.chars().take(keep).collect::<String>())
+}
+
+fn action_label_opt(action: Option<ActionIntent>) -> &'static str {
+    action_label(action.unwrap_or(ActionIntent::None))
+}
+fn action_label(action: ActionIntent) -> &'static str {
+    match action {
+        ActionIntent::Fix => "fix",
+        ActionIntent::Explain => "explain",
+        ActionIntent::Test => "test",
+        ActionIntent::FollowUp => "follow-up",
+        ActionIntent::None => "none",
+    }
+}
+fn kind_label(kind: Option<CommentKind>) -> &'static str {
+    match kind.unwrap_or(CommentKind::Note) {
+        CommentKind::Note => "note",
+        CommentKind::Issue => "issue",
+        CommentKind::Question => "question",
+        CommentKind::Praise => "praise",
+    }
+}
+fn task_status_label(status: crate::state::ReviewTaskStatus) -> &'static str {
+    match status {
+        crate::state::ReviewTaskStatus::Open => "open",
+        crate::state::ReviewTaskStatus::Done => "done",
+        crate::state::ReviewTaskStatus::Dismissed => "dismissed",
+    }
+}
+
+fn loc(path: &str, line: Option<usize>, end_line: Option<usize>) -> String {
+    match (line, end_line) {
+        (Some(a), Some(b)) if b != a => format!("{path}:{a}-{b}"),
+        (Some(a), _) => format!("{path}:{a}"),
+        _ => path.to_owned(),
+    }
+}
+
+fn session_files_text(session: &ReviewSession) -> String {
+    let mut out = String::new();
+    for f in &session.files {
+        out.push_str(&format!(
+            "{} {:<8} {:<48} +{:<4} -{:<4} {:>3} hunk{}{}\n",
+            if f.viewed { "✓" } else { "•" },
+            f.status.to_string(),
+            ellipsize(&f.path, 48),
+            f.additions,
+            f.deletions,
+            f.diff.hunks.len(),
+            if f.diff.hunks.len() == 1 { " " } else { "s" },
+            if f.generated { " gen" } else { "" }
+        ));
+    }
+    out
+}
+
+fn session_hunks_text(session: &ReviewSession, file_filter: Option<&str>) -> String {
+    let mut out = String::new();
+    for f in session
+        .files
+        .iter()
+        .filter(|f| file_filter.is_none_or(|p| f.path == p))
+    {
+        for (i, h) in f.diff.hunks.iter().enumerate() {
+            let adds = h
+                .lines
+                .iter()
+                .filter(|l| l.kind == crate::diff::DiffLineKind::Added)
+                .count();
+            let dels = h
+                .lines
+                .iter()
+                .filter(|l| l.kind == crate::diff::DiffLineKind::Removed)
+                .count();
+            let first = h
+                .lines
+                .iter()
+                .find(|l| l.kind != crate::diff::DiffLineKind::Meta)
+                .map(|l| l.text.as_str())
+                .unwrap_or("");
+            out.push_str(&format!(
+                "{:<48} +{:<3} -{:<3} {:<32} {}\n",
+                ellipsize(&hunk_id(&f.path, i), 48),
+                adds,
+                dels,
+                ellipsize(&h.header, 32),
+                ellipsize(first, 60)
+            ));
+        }
+    }
+    out
+}
+
+fn session_comments_text(session: &ReviewSession) -> String {
+    let mut out = String::new();
+    for c in &session.comments {
+        out.push_str(&format!(
+            "{:<8} [{:<8}] {:<20} {:<36} {}\n",
+            &c.id[..c.id.len().min(8)],
+            c.state.label(),
+            format!("[{}/{}]", kind_label(c.kind), action_label_opt(c.action)),
+            ellipsize(&loc(&c.path, c.line, c.end_line), 36),
+            ellipsize(&c.body, 80)
+        ));
+    }
+    out
+}
+
+fn tasks_text(tasks: &[review::ListedTask]) -> String {
+    let mut out = String::new();
+    for t in tasks {
+        let location = t
+            .target
+            .as_ref()
+            .and_then(|x| x.file.as_ref().map(|p| loc(p, x.line, x.end_line)))
+            .unwrap_or_default();
+        let linked = t
+            .source_comment_id
+            .as_ref()
+            .map(|id| id[..id.len().min(8)].to_owned())
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{:<8} {:<9} [{:<9}] {:<54} {:<32} {}\n",
+            &t.id[..t.id.len().min(8)],
+            task_status_label(t.status),
+            action_label_opt(t.action),
+            ellipsize(&t.title, 54),
+            ellipsize(&location, 32),
+            linked
+        ));
+    }
+    out
+}
+
+fn reviews_text(state: &ReviewState) -> String {
+    let mut out = String::new();
+    for s in review::list_sessions(state) {
+        out.push_str(&format!(
+            "{:<8} {:<9} {:<36} {:<28} {} task(s), {} walkthrough(s)\n",
+            &s.id[..s.id.len().min(8)],
+            format!("{:?}", s.status).to_lowercase(),
+            ellipsize(s.title.as_deref().unwrap_or("(untitled)"), 36),
+            ellipsize(
+                s.target
+                    .revset
+                    .as_deref()
+                    .or(s.target.revision.as_deref())
+                    .unwrap_or(""),
+                28
+            ),
+            s.task_count,
+            s.walkthrough_count
+        ));
+    }
+    out
+}
+
+fn comment_echo_text(c: &crate::state::Comment) -> String {
+    let anchored = c
+        .anchor
+        .as_ref()
+        .map(|a| {
+            let first = match a {
+                crate::anchor::CommentAnchor::File { .. } => "",
+                crate::anchor::CommentAnchor::Line { line_text, .. } => line_text.as_str(),
+                crate::anchor::CommentAnchor::Range { lines, .. } => {
+                    lines.first().map(|l| l.line_text.as_str()).unwrap_or("")
+                }
+            };
+            format!("anchored: {}", ellipsize(first, 80))
+        })
+        .unwrap_or_else(|| "no anchor ⚠".to_owned());
+    format!(
+        "id: {}\nstate/kind/action: {}/{}/{}\nanchor: {} ({})\n",
+        c.id,
+        c.state.label(),
+        kind_label(c.kind),
+        action_label_opt(c.action),
+        loc(&c.path, c.line, c.end_line),
+        anchored
+    )
 }
 
 fn hunk_id(path: &str, index: usize) -> String {
@@ -2550,6 +2914,15 @@ mod tests {
         assert_eq!(json["files"][0]["path"], "src/lib.rs");
         assert_eq!(json["files"][0]["status"], "mod");
         assert_eq!(json["files"][0]["hunk_count"], 1);
+    }
+
+    #[test]
+    fn comments_text_is_compact_one_line_per_comment() {
+        let text = session_comments_text(&sample_session());
+        assert_eq!(
+            text,
+            "c1       [todo    ] [issue/fix]          src/lib.rs:2                         please fix\n"
+        );
     }
 
     #[test]

@@ -165,6 +165,7 @@ impl AcpHandler {
             "initialize" => Ok(json!({
                 "protocol": "gander-acp",
                 "version": ACP_PROTOCOL_VERSION,
+                "mode": if self.live_session { "live-bridge" } else { "snapshot" },
                 "capabilities": [
                     "review/summary",
                     "review/files",

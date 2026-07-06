@@ -677,7 +677,7 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
     out.push_str("# Human review handoff for a coding agent\n\n");
     out.push_str("**Export artifact (agent profile).**\n\n");
-    out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
+    out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks (open items first, resolved/done items below) plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
     write_agent_header(artifact, &mut out);
     write_action_items(artifact, &mut out);
 
@@ -728,43 +728,50 @@ fn write_agent_header(artifact: &ReviewArtifact<'_>, out: &mut String) {
 
 fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
     out.push_str("## Action items\n\n");
+    out.push_str(
+        "Ordered by action priority (fix, test, follow-up, other), then path and line.\n\n",
+    );
     let mut wrote = false;
-    for task in action_item_tasks(artifact) {
-        wrote = true;
-        out.push_str(&format!(
-            "- [task][{}] {}",
-            action_label(task.action),
-            task.title
-        ));
-        if let Some(target) = &task.target {
-            write_target_suffix(out, target);
+    for item in ordered_action_items(artifact) {
+        match item {
+            OrderedActionItem::Task(task) => {
+                wrote = true;
+                out.push_str(&format!(
+                    "- [task][{}] {}",
+                    action_label(task.action),
+                    task.title
+                ));
+                if let Some(target) = &task.target {
+                    write_target_suffix(out, target);
+                }
+                if !task.linked_comment_ids.is_empty() {
+                    out.push_str("; ");
+                    write_linked_comments(out, artifact, &task.linked_comment_ids);
+                }
+                out.push('\n');
+                if let Some(body) = task.body.filter(|body| !body.trim().is_empty()) {
+                    out.push_str(&format!("  Body: {}\n", body.trim()));
+                }
+            }
+            OrderedActionItem::Comment(comment) => {
+                wrote = true;
+                out.push_str(&format!(
+                    "- [comment][{}][{}] ",
+                    kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
+                    action_label(comment.comment.action.unwrap_or(ActionIntent::None))
+                ));
+                write_comment_location_inline(out, comment.comment);
+                out.push_str(" — ");
+                out.push_str(comment.comment.body.trim());
+                let linked_tasks = linked_tasks_for_comment(artifact, comment.comment.id.as_str());
+                if !linked_tasks.is_empty() {
+                    out.push_str("; linked to task ");
+                    out.push_str(&linked_tasks.join(", "));
+                }
+                out.push('\n');
+                write_excerpt(out, comment.excerpt.as_deref());
+            }
         }
-        if !task.linked_comment_ids.is_empty() {
-            out.push_str("; ");
-            write_linked_comments(out, artifact, &task.linked_comment_ids);
-        }
-        out.push('\n');
-        if let Some(body) = task.body.filter(|body| !body.trim().is_empty()) {
-            out.push_str(&format!("  Body: {}\n", body.trim()));
-        }
-    }
-    for comment in action_item_comments(artifact) {
-        wrote = true;
-        out.push_str(&format!(
-            "- [comment][{}][{}] ",
-            kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
-            action_label(comment.comment.action.unwrap_or(ActionIntent::None))
-        ));
-        write_comment_location_inline(out, comment.comment);
-        out.push_str(" — ");
-        out.push_str(comment.comment.body.trim());
-        let linked_tasks = linked_tasks_for_comment(artifact, comment.comment.id.as_str());
-        if !linked_tasks.is_empty() {
-            out.push_str("; linked to task ");
-            out.push_str(&linked_tasks.join(", "));
-        }
-        out.push('\n');
-        write_excerpt(out, comment.excerpt.as_deref());
     }
     if !wrote {
         out.push_str("No open tasks or unresolved comments.\n");
@@ -894,6 +901,50 @@ fn action_item_comments<'a>(
         .comments
         .iter()
         .filter(|comment| comment.comment.state != CommentState::Resolved)
+}
+
+enum OrderedActionItem<'a> {
+    Task(&'a TaskArtifact<'a>),
+    Comment(&'a CommentArtifact<'a>),
+}
+
+fn action_priority(action: ActionIntent) -> u8 {
+    match action {
+        ActionIntent::Fix => 0,
+        ActionIntent::Test => 1,
+        ActionIntent::FollowUp => 2,
+        ActionIntent::Explain | ActionIntent::None => 3,
+    }
+}
+
+fn ordered_action_items<'a>(artifact: &'a ReviewArtifact<'a>) -> Vec<OrderedActionItem<'a>> {
+    let mut indexed = Vec::new();
+    for (idx, task) in action_item_tasks(artifact).enumerate() {
+        indexed.push((
+            action_priority(task.action),
+            task.target.as_ref().and_then(|t| t.file).unwrap_or("~"),
+            task.target
+                .as_ref()
+                .and_then(|t| t.line)
+                .unwrap_or(usize::MAX),
+            idx,
+            OrderedActionItem::Task(task),
+        ));
+    }
+    let offset = indexed.len();
+    for (idx, comment) in action_item_comments(artifact).enumerate() {
+        indexed.push((
+            action_priority(comment.comment.action.unwrap_or(ActionIntent::None)),
+            comment.comment.path.as_str(),
+            comment.comment.line.unwrap_or(usize::MAX),
+            offset + idx,
+            OrderedActionItem::Comment(comment),
+        ));
+    }
+    indexed.sort_by_key(|(priority, path, line, stable, _)| {
+        (*priority, *path == "~", *path, *line, *stable)
+    });
+    indexed.into_iter().map(|(_, _, _, _, item)| item).collect()
 }
 
 fn linked_tasks_for_comment(artifact: &ReviewArtifact<'_>, comment_id: &str) -> Vec<String> {

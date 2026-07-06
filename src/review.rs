@@ -35,7 +35,7 @@ pub struct SessionSummary {
 pub struct ListedTask {
     pub id: String,
     pub source: String,
-    pub title: Option<String>,
+    pub title: String,
     pub body: Option<String>,
     pub status: ReviewTaskStatus,
     pub action: Option<ActionIntent>,
@@ -285,11 +285,12 @@ pub fn complete_task(
     id: &str,
     summary: Option<String>,
 ) -> Result<ReviewTask> {
+    let canonical_id = resolve_task_id(session, id)?;
     let task = session
         .tasks
         .iter_mut()
-        .find(|task| task.id.starts_with(id))
-        .ok_or_else(|| eyre!("unknown task `{id}`"))?;
+        .find(|task| task.id == canonical_id)
+        .unwrap();
     task.status = ReviewTaskStatus::Done;
     task.resolution = summary;
     task.updated_at = Some(chrono::Utc::now());
@@ -299,11 +300,12 @@ pub fn complete_task(
 }
 
 pub fn reopen_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> {
+    let canonical_id = resolve_task_id(session, id)?;
     let task = session
         .tasks
         .iter_mut()
-        .find(|task| task.id.starts_with(id))
-        .ok_or_else(|| eyre!("unknown task `{id}`"))?;
+        .find(|task| task.id == canonical_id)
+        .unwrap();
     task.status = ReviewTaskStatus::Open;
     task.resolution = None;
     task.updated_at = Some(chrono::Utc::now());
@@ -319,7 +321,7 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
         .map(|task| ListedTask {
             id: task.id.clone(),
             source: "session".to_owned(),
-            title: Some(task.title.clone()),
+            title: task.title.clone(),
             body: task.body.clone(),
             status: task.status,
             action: Some(task.action),
@@ -335,7 +337,7 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
             .map(|c| ListedTask {
                 id: c.id.clone(),
                 source: "comment".to_owned(),
-                title: None,
+                title: title_from_comment(c),
                 body: Some(c.body.clone()),
                 status: ReviewTaskStatus::Open,
                 action: c.action,
@@ -350,6 +352,79 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
             }),
     );
     tasks
+}
+
+fn title_from_comment(comment: &Comment) -> String {
+    let first = comment.body.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        format!("comment {}", &comment.id[..comment.id.len().min(8)])
+    } else if first.chars().count() > 72 {
+        format!("{}…", first.chars().take(71).collect::<String>())
+    } else {
+        first.to_owned()
+    }
+}
+
+pub fn resolve_task_id(session: &ReviewSession, id: &str) -> Result<String> {
+    let matches = session
+        .tasks
+        .iter()
+        .filter(|task| task.id.starts_with(id))
+        .map(|task| task.id.clone())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Err(eyre!("unknown task `{id}`")),
+        [only] => Ok(only.clone()),
+        _ => Err(eyre!("ambiguous task id prefix `{id}`")),
+    }
+}
+
+pub struct TaskEdits {
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub action: Option<ActionIntent>,
+    pub source_comment_id: Option<String>,
+    pub target: Option<ReviewTarget>,
+}
+
+pub fn edit_task(session: &mut ReviewSession, id: &str, edits: TaskEdits) -> Result<ReviewTask> {
+    let canonical_id = resolve_task_id(session, id)?;
+    let task = session
+        .tasks
+        .iter_mut()
+        .find(|task| task.id == canonical_id)
+        .unwrap();
+    if let Some(title) = edits.title {
+        task.title = title;
+    }
+    if edits.body.is_some() {
+        task.body = edits.body;
+    }
+    if let Some(action) = edits.action {
+        task.action = action;
+    }
+    if edits.source_comment_id.is_some() {
+        task.source_comment_id = edits.source_comment_id;
+    }
+    if edits.target.is_some() {
+        task.target = edits.target;
+    }
+    task.updated_at = Some(chrono::Utc::now());
+    let out = task.clone();
+    touch(session);
+    Ok(out)
+}
+
+pub fn delete_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> {
+    let canonical_id = resolve_task_id(session, id)?;
+    let index = session
+        .tasks
+        .iter()
+        .position(|task| task.id == canonical_id)
+        .unwrap();
+    let task = session.tasks.remove(index);
+    touch(session);
+    Ok(task)
 }
 
 pub fn add_walkthrough_step(session: &mut ReviewSession, step: WalkthroughStep) -> WalkthroughStep {

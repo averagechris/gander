@@ -206,7 +206,7 @@ fn new_chunk_id() -> String {
 }
 
 pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
-    invalid
+    let mut message = invalid
         .iter()
         .map(|part| {
             format!(
@@ -215,7 +215,14 @@ pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; ");
+    if invalid
+        .iter()
+        .any(|part| part.reason.contains("line range outside diff line space"))
+    {
+        message.push_str("; run 'gander chunks lines' to list accepted ranges");
+    }
+    message
 }
 
 pub fn brief_without_spotlight_warnings(
@@ -482,11 +489,25 @@ pub fn validate_review_chunks(
                 continue;
             };
             if !part_range_intersects_file_diff(part, file) {
+                let ranges = file_diff_line_space_ranges(file)
+                    .into_iter()
+                    .map(|range| format!("{}-{}", range.start_line, range.end_line))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 invalid.push(invalid_part(
                     chunk,
                     index,
                     part,
-                    format!("line range outside diff line space for {}", part.path),
+                    format!(
+                        "line range outside diff line space for {}; valid ranges for {}: {}",
+                        part.path,
+                        part.path,
+                        if ranges.is_empty() {
+                            "none"
+                        } else {
+                            ranges.as_str()
+                        }
+                    ),
                 ));
             }
         }
