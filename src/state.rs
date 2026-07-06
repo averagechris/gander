@@ -34,6 +34,7 @@ pub struct FileState {
     pub fingerprint: String,
     pub viewed: bool,
     pub viewed_fingerprints: BTreeSet<String>,
+    pub caught_up_fingerprints: BTreeSet<String>,
 }
 
 impl FileState {
@@ -47,8 +48,12 @@ impl FileState {
         self.viewed_fingerprints.contains(fingerprint)
     }
 
+    pub fn is_caught_up_fingerprint(&self, fingerprint: &str) -> bool {
+        self.caught_up_fingerprints.contains(fingerprint)
+    }
+
     pub fn has_any_viewed_fingerprint(&self) -> bool {
-        !self.viewed_fingerprints.is_empty()
+        !self.viewed_fingerprints.is_empty() || !self.caught_up_fingerprints.is_empty()
     }
 }
 
@@ -278,6 +283,40 @@ mod tests {
         let file = &state.files["src/main.rs"];
         assert!(file.viewed);
         assert!(file.viewed_fingerprints.contains("abc"));
+        assert!(file.caught_up_fingerprints.is_empty());
+    }
+
+    #[test]
+    fn caught_up_fingerprints_round_trip_and_legacy_defaults_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "src/main.rs".to_owned(),
+            FileState {
+                fingerprint: "abc".to_owned(),
+                caught_up_fingerprints: BTreeSet::from(["abc".to_owned()]),
+                ..Default::default()
+            },
+        );
+
+        state.save(&path).unwrap();
+        let loaded = ReviewState::load_or_default(&path).unwrap();
+        assert!(
+            loaded.files["src/main.rs"]
+                .caught_up_fingerprints
+                .contains("abc")
+        );
+
+        let legacy: ReviewState = serde_json::from_str(
+            r#"{ "files": { "src/main.rs": { "fingerprint": "abc", "viewed": false } } }"#,
+        )
+        .unwrap();
+        assert!(
+            legacy.files["src/main.rs"]
+                .caught_up_fingerprints
+                .is_empty()
+        );
     }
 
     #[test]

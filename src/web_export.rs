@@ -30,7 +30,13 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
         out.push_str("<a class=\"file-link\" href=\"#");
         out.push_str(&file_anchor(&file.path));
         out.push_str("\"><span>");
-        out.push_str(if file.viewed { "✓ " } else { "◌ " });
+        out.push_str(if file.viewed {
+            "✓ "
+        } else if file.caught_up {
+            "◌ "
+        } else {
+            "• "
+        });
         esc_to(&mut out, &file.path);
         out.push_str("</span><small><ins>+");
         out.push_str(&file.additions.to_string());

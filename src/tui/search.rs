@@ -31,7 +31,7 @@ impl FileSearchState {
                 FileSearchRow {
                     file_index,
                     path: file.path.clone(),
-                    viewed: file.viewed,
+                    viewed: file.viewed || file.caught_up,
                 }
             })
             .collect();

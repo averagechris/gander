@@ -1852,11 +1852,12 @@ fn apply_incremental_review(
         .into_iter()
         .map(|file| (file.path, file.fingerprint))
         .collect();
-    let (unchanged, changed) = session.apply_incremental_review(&prior_fingerprints);
+    let (caught_up, already_viewed, changed) =
+        session.apply_incremental_review(&prior_fingerprints);
     tui_state.notice = Some(UiNotice {
         level: UiNoticeLevel::Info,
         message: format!(
-            "mark {unchanged} file(s) unchanged since {} as viewed; {changed} changed/new file(s) need re-review",
+            "{caught_up} file(s) caught up (unchanged since {}), {already_viewed} already viewed; {changed} changed/new file(s) need re-review",
             operation.operation_id
         ),
     });
@@ -3809,13 +3810,15 @@ diff --git a/changed.rs b/changed.rs
             .iter()
             .find(|file| file.path == "changed.rs")
             .unwrap();
-        assert!(same.viewed);
+        assert!(!same.viewed);
+        assert!(same.caught_up);
         assert!(!changed.viewed);
+        assert!(!changed.caught_up);
         let notice = tui_state.notice.unwrap();
         assert!(
             notice
                 .message
-                .contains("mark 1 file(s) unchanged since op123 as viewed")
+                .contains("1 file(s) caught up (unchanged since op123), 0 already viewed")
         );
         assert!(notice.message.contains("1 changed/new"));
     }
@@ -3858,14 +3861,11 @@ diff --git a/changed.rs b/changed.rs
         apply_incremental_review(&loader, &mut session, &operation, &mut tui_state);
 
         assert!(!session.files[0].viewed);
+        assert!(!session.files[0].caught_up);
         assert_eq!(session.files[0].diff.raw, refreshed.trim_end());
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("mark 0 file(s) unchanged since op123 as viewed; 1 changed/new")
-        );
+        assert!(tui_state.notice.unwrap().message.contains(
+            "0 file(s) caught up (unchanged since op123), 0 already viewed; 1 changed/new"
+        ));
     }
 
     #[test]

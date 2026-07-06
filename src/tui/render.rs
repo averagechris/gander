@@ -247,10 +247,12 @@ fn render_file_row(
         ("~", Style::default().fg(Color::Yellow))
     } else if file.viewed {
         ("✓", Style::default().fg(Color::Green))
+    } else if file.caught_up {
+        ("◌", Style::default().fg(Color::DarkGray))
     } else {
         ("•", Style::default().fg(Color::Green))
     };
-    let style = if file.viewed {
+    let style = if file.viewed || file.caught_up {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::White)
@@ -733,7 +735,13 @@ fn diff_pane_title(session: &ReviewSession) -> String {
         Some(file) => format!(
             "diff · {}{}",
             file.path,
-            if file.viewed { " ✓" } else { "" }
+            if file.viewed {
+                " ✓"
+            } else if file.caught_up {
+                " ◌"
+            } else {
+                ""
+            }
         ),
         None => "diff".to_owned(),
     }
@@ -1522,7 +1530,10 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::Zen], "zen briefing (focus stops + glance)"),
         entry(&[Action::DraftList], "agent draft comments"),
         section("badges"),
-        literal("±", "changed since look · ~ viewed, changed since"),
+        literal(
+            "✓",
+            "viewed · ◌ caught up · ~ done, changed since · ± changed since look",
+        ),
     ];
 
     frame.render_widget(Block::default().borders(Borders::ALL).title("help"), popup);

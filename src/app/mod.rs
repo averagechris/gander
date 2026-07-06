@@ -162,11 +162,11 @@ pub enum ViewedFilter {
 }
 
 impl ViewedFilter {
-    fn admits(self, viewed: bool) -> bool {
+    fn admits(self, done: bool) -> bool {
         match self {
             Self::All => true,
-            Self::Unviewed => !viewed,
-            Self::Viewed => viewed,
+            Self::Unviewed => !done,
+            Self::Viewed => done,
         }
     }
 
@@ -220,6 +220,8 @@ pub struct ReviewFile {
     #[serde(default)]
     pub generated: bool,
     pub viewed: bool,
+    #[serde(default)]
+    pub caught_up: bool,
     #[serde(default)]
     pub changed_since_look: bool,
     #[serde(default)]
@@ -304,6 +306,7 @@ impl ReviewSession {
                     deletions: file.deletions,
                     generated: false,
                     viewed: false,
+                    caught_up: false,
                     changed_since_look: false,
                     viewed_stale: false,
                     changed_hunks: BTreeSet::new(),
@@ -504,7 +507,9 @@ impl ReviewSession {
         for file in &mut self.files {
             if let Some(saved) = self.persisted_files.get(&file.path) {
                 file.viewed = saved.is_viewed_fingerprint(&file.fingerprint);
-                file.viewed_stale = !file.viewed && saved.has_any_viewed_fingerprint();
+                file.caught_up = !file.viewed && saved.is_caught_up_fingerprint(&file.fingerprint);
+                file.viewed_stale =
+                    !file.viewed && !file.caught_up && saved.has_any_viewed_fingerprint();
             }
         }
     }
@@ -949,7 +954,7 @@ impl ReviewSession {
                         label: file.path.clone(),
                         kind: FlatTreeRowKind::File { file_index },
                         stats: crate::file_tree::ViewedStats {
-                            viewed: usize::from(file.viewed),
+                            viewed: usize::from(file.viewed || file.caught_up),
                             total: 1,
                         },
                     }
@@ -967,7 +972,7 @@ impl ReviewSession {
             .map(|(index, file)| FileTreeInput {
                 index,
                 path: &file.path,
-                viewed: file.viewed,
+                viewed: file.viewed || file.caught_up,
                 group: self.tree_group_for_file(file),
             })
             .collect();
@@ -1050,6 +1055,7 @@ impl ReviewSession {
     pub fn toggle_viewed(&mut self) {
         if let Some(file) = self.selected_file_mut() {
             file.viewed = !file.viewed;
+            file.caught_up = false;
             file.changed_since_look = false;
             file.changed_hunks.clear();
             file.viewed_stale = false;
@@ -1062,6 +1068,7 @@ impl ReviewSession {
         let next = self.next_unviewed_index(1, Some(selected));
         if let Some(file) = self.selected_file_mut() {
             file.viewed = true;
+            file.caught_up = false;
             file.changed_since_look = false;
             file.changed_hunks.clear();
             file.viewed_stale = false;
@@ -1075,6 +1082,7 @@ impl ReviewSession {
     pub fn mark_all_viewed(&mut self) {
         for file in &mut self.files {
             file.viewed = true;
+            file.caught_up = false;
             file.changed_since_look = false;
             file.changed_hunks.clear();
             file.viewed_stale = false;
@@ -1086,6 +1094,7 @@ impl ReviewSession {
         for file in &mut self.files {
             if predicate(file) {
                 file.viewed = true;
+                file.caught_up = false;
                 file.changed_since_look = false;
                 file.changed_hunks.clear();
                 file.viewed_stale = false;
@@ -1094,28 +1103,36 @@ impl ReviewSession {
     }
 
     /// Incremental re-review against a prior snapshot of the same target:
-    /// files whose diff fingerprint is unchanged are marked viewed, files
+    /// files whose diff fingerprint is unchanged are marked caught-up unless
+    /// already explicitly viewed; files
     /// that changed (or are new) since the snapshot are marked unviewed.
     ///
     /// `prior_fingerprints` maps file path to the diff fingerprint the file
-    /// had at the prior snapshot. Returns `(unchanged, changed)` counts.
+    /// had at the prior snapshot. Returns `(caught_up, already_viewed, changed)` counts.
     pub fn apply_incremental_review(
         &mut self,
         prior_fingerprints: &BTreeMap<String, String>,
-    ) -> (usize, usize) {
-        let mut unchanged = 0;
+    ) -> (usize, usize, usize) {
+        let mut caught_up = 0;
+        let mut already_viewed = 0;
         let mut changed = 0;
         for file in &mut self.files {
             if prior_fingerprints.get(&file.path) == Some(&file.fingerprint) {
-                file.viewed = true;
-                unchanged += 1;
+                if file.viewed {
+                    file.caught_up = false;
+                    already_viewed += 1;
+                } else {
+                    file.caught_up = true;
+                    caught_up += 1;
+                }
             } else {
                 file.viewed = false;
+                file.caught_up = false;
                 changed += 1;
             }
         }
         self.ensure_selected_file_visible();
-        (unchanged, changed)
+        (caught_up, already_viewed, changed)
     }
 
     pub fn annotate_generated_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
@@ -1126,7 +1143,8 @@ impl ReviewSession {
     }
 
     fn file_visible(&self, file: &ReviewFile) -> bool {
-        (!self.hide_generated || !file.generated) && self.viewed_filter.admits(file.viewed)
+        (!self.hide_generated || !file.generated)
+            && self.viewed_filter.admits(file.viewed || file.caught_up)
     }
 
     fn ensure_selected_file_visible(&mut self) {
@@ -1782,10 +1800,17 @@ impl ReviewSession {
                     state.normalize_legacy();
                     if file.viewed {
                         state.viewed_fingerprints.insert(file.fingerprint.clone());
+                        state.caught_up_fingerprints.remove(&file.fingerprint);
+                    } else if file.caught_up {
+                        state
+                            .caught_up_fingerprints
+                            .insert(file.fingerprint.clone());
+                        state.viewed_fingerprints.remove(&file.fingerprint);
                     } else {
                         // Unmarking a file only removes the current content version;
                         // marks for other fingerprints remain valid when switching targets.
                         state.viewed_fingerprints.remove(&file.fingerprint);
+                        state.caught_up_fingerprints.remove(&file.fingerprint);
                     }
                     state.fingerprint = file.fingerprint.clone();
                     state.viewed = state.is_viewed_fingerprint(&file.fingerprint);
@@ -1799,7 +1824,11 @@ impl ReviewSession {
     }
 
     pub fn summary_line(&self) -> String {
-        let viewed = self.files.iter().filter(|file| file.viewed).count();
+        let viewed = self
+            .files
+            .iter()
+            .filter(|file| file.viewed || file.caught_up)
+            .count();
         let generated = self.files.iter().filter(|file| file.generated).count();
         let additions: usize = self.files.iter().map(|file| file.additions).sum();
         let deletions: usize = self.files.iter().map(|file| file.deletions).sum();
@@ -2125,6 +2154,7 @@ diff --git a/new.rs b/new.rs
                 fingerprint: current.clone(),
                 viewed: true,
                 viewed_fingerprints: BTreeSet::from([current.clone(), other.clone()]),
+                ..Default::default()
             },
         );
         session.apply_state_files();
@@ -2173,8 +2203,8 @@ diff --git a/new.rs b/new.rs
         assert!(session.zen_focus.is_none());
     }
 
-    fn three_file_session() -> ReviewSession {
-        let diff = DiffSet::parse(
+    fn three_file_diff() -> DiffSet {
+        DiffSet::parse(
             r#"diff --git a/src/a.rs b/src/a.rs
 --- a/src/a.rs
 +++ b/src/a.rs
@@ -2195,7 +2225,11 @@ diff --git a/src/c.rs b/src/c.rs
 +new
 "#,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    fn three_file_session() -> ReviewSession {
+        let diff = three_file_diff();
         ReviewSession::new(
             ".".into(),
             ReviewTarget::trunk_to_current(),
@@ -2258,12 +2292,80 @@ diff --git a/src/c.rs b/src/c.rs
         prior.insert("src/a.rs".to_owned(), session.files[0].fingerprint.clone());
         prior.insert("src/b.rs".to_owned(), "different".to_owned());
 
-        let (unchanged, changed) = session.apply_incremental_review(&prior);
+        let (caught_up, already_viewed, changed) = session.apply_incremental_review(&prior);
 
-        assert_eq!((unchanged, changed), (1, 2));
+        assert_eq!((caught_up, already_viewed, changed), (0, 1, 2));
         assert!(session.files[0].viewed);
+        assert!(!session.files[0].caught_up);
         assert!(!session.files[1].viewed);
+        assert!(!session.files[1].caught_up);
         assert!(!session.files[2].viewed);
+        assert!(!session.files[2].caught_up);
+    }
+
+    #[test]
+    fn incremental_review_marks_never_viewed_unchanged_caught_up() {
+        let mut session = three_file_session();
+        let mut prior = BTreeMap::new();
+        prior.insert("src/a.rs".to_owned(), session.files[0].fingerprint.clone());
+
+        let counts = session.apply_incremental_review(&prior);
+
+        assert_eq!(counts, (1, 0, 2));
+        assert!(!session.files[0].viewed);
+        assert!(session.files[0].caught_up);
+    }
+
+    #[test]
+    fn caught_up_persists_promotes_and_decays_to_stale_on_change() {
+        let mut session = three_file_session();
+        session.files[0].caught_up = true;
+        let state = session.to_state();
+        assert!(!state.files["src/a.rs"].viewed);
+        assert!(
+            state.files["src/a.rs"]
+                .caught_up_fingerprints
+                .contains(&session.files[0].fingerprint)
+        );
+
+        let loaded = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            three_file_diff(),
+            state.clone(),
+        );
+        assert!(loaded.files[0].caught_up);
+        assert!(!loaded.files[0].viewed);
+
+        let mut promoted = loaded;
+        promoted.mark_selected_viewed();
+        let promoted_state = promoted.to_state();
+        assert!(
+            promoted_state.files["src/a.rs"]
+                .viewed_fingerprints
+                .contains(&promoted.files[0].fingerprint)
+        );
+        assert!(
+            !promoted_state.files["src/a.rs"]
+                .caught_up_fingerprints
+                .contains(&promoted.files[0].fingerprint)
+        );
+
+        let changed = DiffSet::parse(
+            r#"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1 +1 @@
+-old
++changed again
+"#,
+        )
+        .unwrap();
+        let stale =
+            ReviewSession::new(".".into(), ReviewTarget::trunk_to_current(), changed, state);
+        assert!(!stale.files[0].viewed);
+        assert!(!stale.files[0].caught_up);
+        assert!(stale.files[0].viewed_stale);
     }
 
     #[test]

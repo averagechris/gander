@@ -961,7 +961,7 @@ pub(super) fn glance_row_viewed(session: &ReviewSession, row: &ChunkRow) -> bool
             .files
             .iter()
             .find(|file| file.path == part.path)
-            .is_some_and(|file| file.viewed)
+            .is_some_and(|file| file.viewed || file.caught_up)
     })
 }
 
