@@ -15,6 +15,9 @@ pub(super) struct ChunkListState {
 /// One selectable row: a part of a chunk (or a part-less chunk itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ChunkRow {
+    /// Stable review chunk id. Multi-part chunks share this id so zen can
+    /// group their glance entry and cross-reference sibling stops.
+    pub(super) chunk_id: String,
     pub(super) title: String,
     pub(super) importance: ChunkImportance,
     /// The jj change the chunk is anchored to, when the review spans a
@@ -44,6 +47,7 @@ impl ChunkListState {
     pub(super) fn new_with_invalid(session: &ReviewSession, invalid: &[InvalidChunkPart]) -> Self {
         let mut rows: Vec<_> = session.review_chunks.iter().flat_map(chunk_rows).collect();
         rows.extend(invalid.iter().map(|part| ChunkRow {
+            chunk_id: part.chunk_id.clone(),
             title: part.chunk_title.clone(),
             importance: ChunkImportance::Glance,
             change_id: None,
@@ -78,6 +82,7 @@ impl ChunkListState {
 pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
     if chunk.parts.is_empty() {
         return vec![ChunkRow {
+            chunk_id: chunk.id.clone(),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -95,6 +100,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         .iter()
         .enumerate()
         .map(|(index, part)| ChunkRow {
+            chunk_id: chunk.id.clone(),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -155,9 +161,12 @@ mod tests {
 
         assert_eq!(state.rows.len(), 3);
         assert_eq!(state.rows[0].title, "auth flow");
+        assert_eq!(state.rows[0].chunk_id, "c1");
+        assert_eq!(state.rows[1].chunk_id, "c1");
         assert_eq!(state.rows[0].part_position, Some((1, 2)));
         assert_eq!(state.rows[1].part.as_ref().unwrap().path, "b.rs");
         assert_eq!(state.rows[2].title, "docs only");
+        assert_eq!(state.rows[2].chunk_id, "c2");
         assert!(state.rows[2].part.is_none());
     }
 

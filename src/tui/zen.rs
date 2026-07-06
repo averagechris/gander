@@ -429,7 +429,7 @@ fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
         "no tests touched"
     };
     let symbols = top_symbols(session).join(", ");
-    vec![
+    let mut lines = vec![
         format!("roles: {roles}"),
         format!("churn: +{additions} −{deletions} · {tests}"),
         format!(
@@ -440,7 +440,28 @@ fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
                 &symbols
             }
         ),
-    ]
+    ];
+    let public_api_files = session
+        .files
+        .iter()
+        .filter(|file| public_api_change(&file.diff))
+        .count();
+    if public_api_files > 0 {
+        lines.push(format!(
+            "public API: {public_api_files} file(s) change pub signatures"
+        ));
+    }
+    let error_files = session
+        .files
+        .iter()
+        .filter(|file| error_handling_touches(&file.diff) >= 2)
+        .count();
+    if error_files > 0 {
+        lines.push(format!(
+            "error handling: {error_files} file(s) touch error handling"
+        ));
+    }
+    lines
 }
 
 fn top_symbols(session: &ReviewSession) -> Vec<String> {
@@ -552,12 +573,25 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
     let symbols = symbols_touching_hunk(session, file, hunk).join(", ");
     let start = hunk.map(|h| h.new_start.max(1));
     let end = hunk.map(|h| (h.new_start + h.new_len.saturating_sub(1)).max(h.new_start));
+    let mut facts = Vec::new();
+    if public_api_change(file) {
+        facts.push("public API change");
+    }
+    if error_handling_touches(file) >= 2 {
+        facts.push("touches error handling");
+    }
+    let fact_suffix = if facts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", facts.join(" · "))
+    };
     ChunkRow {
+        chunk_id: format!("file:{}", file.path),
         title: format!("{} · {}", file.path, file_role(&file.path).label()),
         importance: ChunkImportance::Glance,
         change_id: None,
         rationale: Some(format!(
-            "largest hunk +{adds} −{dels} · symbols: {}",
+            "largest hunk +{adds} −{dels} · symbols: {}{fact_suffix}",
             if symbols.is_empty() {
                 "none detected"
             } else {
@@ -596,6 +630,7 @@ fn hunk_churn(h: &Hunk) -> (usize, usize) {
 
 fn whole_file_row(path: String, rationale: Option<String>) -> ChunkRow {
     ChunkRow {
+        chunk_id: format!("file:{path}"),
         title: path.clone(),
         importance: ChunkImportance::Glance,
         change_id: None,
@@ -610,6 +645,44 @@ fn whole_file_row(path: String, rationale: Option<String>) -> ChunkRow {
         part_position: None,
         invalid_reason: None,
     }
+}
+
+fn changed_text_lines(file: &FileDiff) -> impl Iterator<Item = &str> {
+    file.hunks.iter().flat_map(|h| &h.lines).filter_map(|line| {
+        matches!(line.kind, DiffLineKind::Added | DiffLineKind::Removed).then_some(line.text.trim())
+    })
+}
+
+fn public_api_change(file: &FileDiff) -> bool {
+    file.path.ends_with(".rs")
+        && changed_text_lines(file).any(|line| {
+            [
+                "pub fn ",
+                "pub struct ",
+                "pub enum ",
+                "pub trait ",
+                "pub type ",
+                "pub mod ",
+                "pub use ",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        })
+}
+
+fn error_handling_touches(file: &FileDiff) -> usize {
+    changed_text_lines(file)
+        .filter(|line| {
+            line.contains("Result<")
+                || line.contains("?;")
+                || line.contains(".unwrap()")
+                || line.contains(".expect(")
+                || line.contains("panic!")
+                || line.contains("catch")
+                || line.contains("raise")
+                || line.contains("except")
+        })
+        .count()
 }
 
 fn is_exports_only(file: &FileDiff) -> bool {
@@ -814,6 +887,36 @@ diff --git a/b.rs b/b.rs
             ..Default::default()
         });
         session
+    }
+
+    fn first_file(diff: &str) -> FileDiff {
+        snapshot_session(diff).files.remove(0).diff
+    }
+
+    #[test]
+    fn public_api_change_detector_is_rust_pub_signature_only() {
+        let file = first_file(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-fn old() {}\n+pub fn new_api() {}\n",
+        );
+        assert!(public_api_change(&file));
+
+        let file = first_file(
+            "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+pub fn docs only\n",
+        );
+        assert!(!public_api_change(&file));
+    }
+
+    #[test]
+    fn error_handling_detector_counts_observed_error_lines() {
+        let file = first_file(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old\n+let value: Result<u8, Error> = parse()?;\n+panic!(\"bad\");\n",
+        );
+        assert_eq!(error_handling_touches(&file), 2);
+
+        let file = first_file(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+let value = parse();\n",
+        );
+        assert_eq!(error_handling_touches(&file), 0);
     }
 
     fn spotlight(id: &str, title: &str, change_id: Option<&str>, path: &str) -> ReviewChunk {

@@ -1,10 +1,11 @@
 ---
 source: src/tui/render.rs
+assertion_line: 4480
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 ┌ zen · stop 1/1 · then 1 at a glance ─────────────────────────────────────────────────────────────┐
 │▎●                                                                                                │
-│                                                                                                  │
+│core change  src/app.rs:2-3                                                                       │
 │                                                                                                  │
 │                                                                                                  │
 │                        ╭ core change · src/app.rs:2-3 · e 1 artifact(s) ╮                        │

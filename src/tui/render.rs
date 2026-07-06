@@ -8,6 +8,7 @@ use ratatui::{
         Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
     },
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{DiffRow, DiffRowKind, Focus, ReviewSession, SplitRow, split_index_of, split_rows},
@@ -1373,8 +1374,24 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
             Span::styled(label.to_owned(), Style::default().fg(Color::Gray)),
         ])
     };
+    let literal = |keys: &str, label: &str| {
+        Line::from(vec![
+            Span::styled(
+                format!("  {:>10}  ", keys),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(label.to_owned(), Style::default().fg(Color::Gray)),
+        ])
+    };
 
     let left = vec![
+        section("first review loop"),
+        entry(&[Action::FileSearch], "open a file or fuzzy jump"),
+        entry(&[Action::NextUnviewed], "next unviewed file"),
+        entry(&[Action::MarkViewed], "mark viewed and advance"),
+        entry(&[Action::Comment], "comment on what needs work"),
+        entry(&[Action::Zen], "zen briefing for a focused pass"),
+        entry(&[Action::YankHandoff], "copy handoff when done"),
         section("general"),
         entry(
             &[Action::ToggleFocus],
@@ -1424,6 +1441,15 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
     ];
     let right = vec![
+        section("zen keys"),
+        literal("n/p", "next/back stop"),
+        literal("tab", "toggle focus card / reading view"),
+        literal("g", "open glance board"),
+        literal("e", "open artifacts"),
+        literal("d", "toggle chapter details"),
+        literal(".", "refocus current stop"),
+        literal("a", "acknowledge glance items"),
+        literal("esc", "leave zen / close artifact"),
         section("comments"),
         entry(&[Action::Comment], "comment at cursor"),
         entry(&[Action::RangeComment], "start/finish range comment"),
@@ -1869,7 +1895,7 @@ fn draw_zen_panel(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    headline,
+                    truncate_tail(&headline, area.width.saturating_sub(18) as usize),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -1887,7 +1913,7 @@ fn draw_zen_panel(
                 .part_position
                 .map(|(part, total)| format!(" (part {part}/{total})"))
                 .unwrap_or_default();
-            let location = chunk_row_location(stop);
+            let location = chunk_row_location_width(stop, area.width.saturating_div(2) as usize);
             flagged = stop
                 .part
                 .as_ref()
@@ -1901,7 +1927,11 @@ fn draw_zen_panel(
                 .unwrap_or(0);
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{}{position}  ", stop.title),
+                    format!(
+                        "{}{}  ",
+                        truncate_tail(&stop.title, area.width.saturating_div(2) as usize),
+                        position
+                    ),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
@@ -1919,8 +1949,8 @@ fn draw_zen_panel(
     }
     if !zen.glance_rows.is_empty() {
         let shown = zen.glance_rows.iter().take(3).map(|row| {
-            let location = chunk_row_location(row);
-            format!("{} @ {location}", row.title)
+            let location = chunk_row_location_width(row, 32);
+            format!("{} @ {location}", truncate_tail(&row.title, 24))
         });
         let mut glance = shown.collect::<Vec<_>>().join("  ·  ");
         let hidden = zen.glance_rows.len().saturating_sub(3);
@@ -1960,13 +1990,24 @@ fn draw_zen_panel(
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(Block::default().borders(Borders::ALL).title(truncate_tail(
+                &title,
+                panel.width.saturating_sub(4) as usize,
+            )))
             .wrap(Wrap { trim: false }),
         panel,
     );
 }
 
 fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
+    chunk_row_location_raw(row)
+}
+
+fn chunk_row_location_width(row: &super::chunks::ChunkRow, max_width: usize) -> String {
+    truncate_middle(&chunk_row_location_raw(row), max_width)
+}
+
+fn chunk_row_location_raw(row: &super::chunks::ChunkRow) -> String {
     let location = match &row.part {
         Some(part) => match (part.start_line, part.end_line) {
             (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
@@ -1980,6 +2021,75 @@ fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
         Some(change_id) => format!("[{change_id}] {location}"),
         None => location,
     }
+}
+
+fn truncate_tail(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 1 {
+        return "…".to_owned();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > max_width - 1 {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out.push('…');
+    out
+}
+
+fn truncate_middle(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 1 {
+        return "…".to_owned();
+    }
+    let left_w = (max_width - 1) / 3;
+    let right_w = max_width - 1 - left_w;
+    let left = take_width_prefix(text, left_w);
+    let right = take_width_suffix(text, right_w);
+    format!("{left}…{right}")
+}
+
+fn take_width_prefix(text: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > max_width {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out
+}
+
+fn take_width_suffix(text: &str, max_width: usize) -> String {
+    let mut chars = Vec::new();
+    let mut width = 0;
+    for ch in text.chars().rev() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > max_width {
+            break;
+        }
+        chars.push(ch);
+        width += w;
+    }
+    chars.into_iter().rev().collect()
 }
 
 /// The zen focus surface: a chapter intro card between changes, or a
@@ -2157,6 +2267,7 @@ fn draw_zen_chapter(
     }
 
     frame.render_widget(Clear, card);
+    let chapter_location = chunk_location_label(&location, card.width.saturating_sub(22) as usize);
     let card_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2168,7 +2279,10 @@ fn draw_zen_chapter(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("· {location} "), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                format!("· {chapter_location} "),
+                Style::default().fg(Color::Cyan),
+            ),
         ]));
     let card_inner = card_block.inner(card);
     frame.render_widget(card_block, card);
@@ -2202,6 +2316,10 @@ fn draw_zen_chapter(
             .wrap(Wrap { trim: false }),
         sections[1],
     );
+}
+
+fn chunk_location_label(location: &str, max_width: usize) -> String {
+    truncate_middle(location, max_width)
 }
 
 /// The zen focus card: a full-screen stop showing only the critical lines
@@ -2243,7 +2361,10 @@ fn draw_zen_stop(
     // Progress dots stay on the backdrop, top-left, like a slide counter.
     frame.render_widget(
         Paragraph::new(zen_focus_header_lines(zen, stop)),
-        Rect { height: 1, ..inner },
+        Rect {
+            height: 2.min(inner.height),
+            ..inner
+        },
     );
 
     // Build the excerpt first: the card is sized to its content so the code
@@ -2320,6 +2441,12 @@ fn draw_zen_stop(
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
         .unwrap_or_default();
+    let title_budget = card.width.saturating_sub(4) as usize;
+    let location_title = chunk_row_location_width(stop, title_budget / 2);
+    let stop_title = truncate_tail(
+        &stop.title,
+        title_budget.saturating_sub(location_title.width() + position.width() + 8),
+    );
     let card_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2331,13 +2458,13 @@ fn draw_zen_stop(
         .title(Line::from({
             let mut spans = vec![
                 Span::styled(
-                    format!(" {}{position} ", stop.title),
+                    format!(" {stop_title}{position} "),
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("· {} ", chunk_row_location(stop)),
+                    format!("· {location_title} "),
                     Style::default().fg(Color::Cyan),
                 ),
             ];
@@ -2366,8 +2493,15 @@ fn draw_zen_stop(
         .split(card_inner);
 
     frame.render_widget(Paragraph::new(excerpt), sections[0]);
+    let mut explanation_lines = vec![Line::from(explanation)];
+    if let Some(sibling) = sibling_parts_line(zen, stop, card_width.saturating_sub(6) as usize) {
+        explanation_lines.push(Line::from(Span::styled(
+            sibling,
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     frame.render_widget(
-        Paragraph::new(explanation)
+        Paragraph::new(explanation_lines)
             .style(Style::default().fg(Color::Gray))
             .block(
                 Block::default()
@@ -2396,16 +2530,44 @@ fn zen_focus_header_lines(zen: &ZenState, stop: &super::chunks::ChunkRow) -> Vec
         zen_progress_line(zen),
         Line::from(vec![
             Span::styled(
-                format!("{}{position}", stop.title),
+                format!("{}{position}", truncate_tail(&stop.title, 48)),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
-            Span::styled(chunk_row_location(stop), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                chunk_row_location_width(stop, 48),
+                Style::default().fg(Color::Cyan),
+            ),
         ]),
         Line::from(""),
     ]
+}
+
+fn sibling_parts_line(
+    zen: &ZenState,
+    stop: &super::chunks::ChunkRow,
+    max_width: usize,
+) -> Option<String> {
+    let parts = zen
+        .stops
+        .iter()
+        .filter_map(|candidate| match candidate {
+            ZenStop::Chunk(row) if row.chunk_id == stop.chunk_id && row.part != stop.part => {
+                Some(format!(
+                    "{}{}",
+                    chunk_row_location_width(row, 40),
+                    row.part_position
+                        .map(|(part, total)| format!(" ({part}/{total})"))
+                        .unwrap_or_default()
+                ))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!parts.is_empty())
+        .then(|| truncate_tail(&format!("other parts: {}", parts.join(" · ")), max_width))
 }
 
 /// The walkthrough progress strip: a dot per spotlight stop, grouped by
@@ -2600,9 +2762,14 @@ fn draw_zen_glance(
     );
     let inner = inner_bordered(area);
 
+    let glance_groups = grouped_glance_rows(&zen.glance_rows);
+    let selected_group = glance_groups
+        .iter()
+        .position(|group| group.indices.contains(&zen.glance_selected))
+        .unwrap_or(0);
     let fixed_lines = 4usize;
     let list_height = (inner.height as usize).saturating_sub(fixed_lines).max(1);
-    let window = picker_visible_window(zen.glance_selected, zen.glance_rows.len(), list_height);
+    let window = picker_visible_window(selected_group, glance_groups.len(), list_height);
 
     let mut lines = vec![
         Line::from(vec![
@@ -2613,7 +2780,7 @@ fn draw_zen_glance(
             Span::styled(
                 format!(
                     "{} remaining item(s) below — skim, then `a` marks them all viewed.",
-                    zen.glance_rows.len()
+                    glance_groups.len()
                 ),
                 Style::default()
                     .fg(Color::Yellow)
@@ -2628,16 +2795,19 @@ fn draw_zen_glance(
             Style::default().fg(Color::DarkGray),
         )));
     }
-    for (index, row) in zen
-        .glance_rows
+    for (group_index, group) in glance_groups
         .iter()
         .enumerate()
         .skip(window.start)
         .take(window.end.saturating_sub(window.start))
     {
-        let selected = index == zen.glance_selected;
+        let row = group.rows[0];
+        let selected = group_index == selected_group;
         let marker = if selected { "›" } else { " " };
-        let viewed = super::zen::glance_row_viewed(session, row);
+        let viewed = group
+            .rows
+            .iter()
+            .all(|row| super::zen::glance_row_viewed(session, row));
         let check = if viewed { "✓" } else { "•" };
         let style = if selected {
             Style::default()
@@ -2659,11 +2829,17 @@ fn draw_zen_glance(
             .as_deref()
             .map(|rationale| format!(" — {rationale}"))
             .unwrap_or_default();
+        let locations = group
+            .rows
+            .iter()
+            .map(|row| chunk_row_location_width(row, 28))
+            .collect::<Vec<_>>()
+            .join(" · ");
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
             Span::styled(format!("{check} "), Style::default().fg(Color::Green)),
             Span::styled(format!("{} ", row.title), style),
-            Span::styled(chunk_row_location(row), Style::default().fg(Color::Cyan)),
+            Span::styled(locations, Style::default().fg(Color::Cyan)),
             Span::styled(stats, Style::default().fg(Color::Magenta)),
             Span::styled(rationale, Style::default().fg(Color::DarkGray)),
         ]));
@@ -2675,6 +2851,34 @@ fn draw_zen_glance(
         )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+struct GlanceGroup<'a> {
+    indices: Vec<usize>,
+    rows: Vec<&'a super::chunks::ChunkRow>,
+}
+
+fn grouped_glance_rows(rows: &[super::chunks::ChunkRow]) -> Vec<GlanceGroup<'_>> {
+    let mut groups: Vec<GlanceGroup<'_>> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if row.part_position.is_some()
+            && let Some(group) = groups.iter_mut().find(|group| {
+                group
+                    .rows
+                    .first()
+                    .is_some_and(|first| first.chunk_id == row.chunk_id)
+            })
+        {
+            group.indices.push(index);
+            group.rows.push(row);
+            continue;
+        }
+        groups.push(GlanceGroup {
+            indices: vec![index],
+            rows: vec![row],
+        });
+    }
+    groups
 }
 
 fn draw_draft_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &DraftListState) {
@@ -4203,6 +4407,31 @@ diff --git a/Cargo.toml b/Cargo.toml
     }
 
     #[test]
+    fn tui_snapshot_zen_focus_card_long_header_truncates() {
+        let (mut session, mut zen) = zen_snapshot_session();
+        if let Some(ZenStop::Chunk(row)) = zen.stops.get_mut(1) {
+            row.title =
+                "very long generated client compatibility migration with unusually verbose title"
+                    .to_owned();
+            if let Some(part) = row.part.as_mut() {
+                part.path =
+                    "src/deeply/nested/generated/client/compatibility/transport/retry_policy.rs"
+                        .to_owned();
+            }
+        }
+        zen.index = 1;
+        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
+
+        insta::assert_snapshot!(render_tui_text_with_zen(
+            &session,
+            &Mode::Normal,
+            Some(&zen),
+            80,
+            24
+        ));
+    }
+
+    #[test]
     fn tui_snapshot_fallback_zen_chapter_card() {
         let (mut session, mut zen) = fallback_zen_snapshot_session();
         zen.index = 0;
@@ -4296,6 +4525,7 @@ diff --git a/Cargo.toml b/Cargo.toml
     #[test]
     fn chunk_row_location_names_the_anchored_change() {
         let mut row = crate::tui::chunks::ChunkRow {
+            chunk_id: "c1".to_owned(),
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
@@ -4317,6 +4547,41 @@ diff --git a/Cargo.toml b/Cargo.toml
     }
 
     #[test]
+    fn truncation_helpers_are_width_aware() {
+        assert_eq!(truncate_tail("abcdef", 4), "abc…");
+        assert_eq!(
+            truncate_middle("src/very/deep/path/file.rs:10-20", 16),
+            "src/v…e.rs:10-20"
+        );
+        assert!(truncate_tail("界界界", 5).width() <= 5);
+    }
+
+    #[test]
+    fn glance_rows_group_multi_part_chunks() {
+        let row = |path: &str, pos| crate::tui::chunks::ChunkRow {
+            chunk_id: "c1".to_owned(),
+            title: "shared".to_owned(),
+            importance: crate::agent::ChunkImportance::Glance,
+            change_id: None,
+            rationale: Some("one reason".to_owned()),
+            explanation: None,
+            artifacts: Vec::new(),
+            part: Some(crate::agent::ChunkPart {
+                path: path.to_owned(),
+                start_line: Some(1),
+                end_line: Some(2),
+            }),
+            part_position: Some(pos),
+            invalid_reason: None,
+        };
+        let rows = vec![row("a.rs", (1, 2)), row("b.rs", (2, 2))];
+        let groups = grouped_glance_rows(&rows);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].indices, vec![0, 1]);
+        assert_eq!(groups[0].rows.len(), 2);
+    }
+
+    #[test]
     fn zen_excerpt_follows_a_wandering_cursor_and_reports_it() {
         let mut body = String::from(
             "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,30 +1,30 @@\n",
@@ -4328,6 +4593,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.focus = Focus::Diff;
         let rows = session.diff_rows_for_selected_file().to_vec();
         let stop = crate::tui::chunks::ChunkRow {
+            chunk_id: "c1".to_owned(),
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
