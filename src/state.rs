@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::anchor::CommentAnchor;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReviewState {
     pub meta: ReviewStateMeta,
@@ -18,7 +18,7 @@ pub struct ReviewState {
     pub sessions: Vec<ReviewSession>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReviewStateMeta {
     pub version: u8,
@@ -28,7 +28,7 @@ pub struct ReviewStateMeta {
     pub saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FileState {
     pub fingerprint: String,
@@ -57,7 +57,7 @@ impl FileState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Comment {
     pub id: String,
     pub path: String,
@@ -238,6 +238,181 @@ impl ReviewState {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewStateTombstones {
+    pub comments: BTreeSet<String>,
+    pub sessions: BTreeSet<String>,
+    pub tasks: BTreeSet<String>,
+    pub walkthroughs: BTreeSet<String>,
+    pub walkthrough_steps: BTreeSet<String>,
+}
+
+impl ReviewState {
+    /// Merge a newer on-disk review state into this in-memory TUI state.
+    ///
+    /// The TUI remains authoritative for file view-state and untimestamped
+    /// conflicts, while externally-added durable objects are adopted so a
+    /// later save cannot clobber writes from CLI/MCP processes.
+    pub fn merge_external(&mut self, external: ReviewState, tombstones: &ReviewStateTombstones) {
+        self.merge_external_files(external.files);
+        merge_vec_by_id(
+            &mut self.comments,
+            external.comments,
+            &tombstones.comments,
+            |_, _| false,
+        );
+        self.merge_external_sessions(external.sessions, tombstones);
+    }
+
+    fn merge_external_files(&mut self, external: BTreeMap<String, FileState>) {
+        for (path, external_file) in external {
+            self.files.entry(path).or_insert(external_file);
+        }
+    }
+
+    fn merge_external_sessions(
+        &mut self,
+        external: Vec<ReviewSession>,
+        tombstones: &ReviewStateTombstones,
+    ) {
+        for mut external_session in external {
+            if tombstones.sessions.contains(&external_session.id) {
+                continue;
+            }
+            if let Some(local_session) = self
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == external_session.id)
+            {
+                merge_session_children(local_session, &mut external_session, tombstones);
+                if *local_session != external_session
+                    && prefer_external_by_updated_at(
+                        local_session.updated_at,
+                        external_session.updated_at,
+                    )
+                {
+                    *local_session = external_session;
+                }
+            } else {
+                external_session
+                    .tasks
+                    .retain(|task| !tombstones.tasks.contains(&task.id));
+                external_session
+                    .walkthroughs
+                    .retain(|walkthrough| !tombstones.walkthroughs.contains(&walkthrough.id));
+                for walkthrough in &mut external_session.walkthroughs {
+                    walkthrough
+                        .steps
+                        .retain(|step| !tombstones.walkthrough_steps.contains(&step.id));
+                }
+                self.sessions.push(external_session);
+            }
+        }
+    }
+}
+
+fn merge_session_children(
+    local: &mut ReviewSession,
+    external: &mut ReviewSession,
+    tombstones: &ReviewStateTombstones,
+) {
+    merge_vec_by_id(
+        &mut local.tasks,
+        external.tasks.clone(),
+        &tombstones.tasks,
+        |local, external| prefer_external_by_updated_at(local.updated_at, external.updated_at),
+    );
+    merge_vec_by_id(
+        &mut local.walkthroughs,
+        external.walkthroughs.clone(),
+        &tombstones.walkthroughs,
+        |_, _| false,
+    );
+    for external_walkthrough in &external.walkthroughs {
+        if let Some(local_walkthrough) = local
+            .walkthroughs
+            .iter_mut()
+            .find(|walkthrough| walkthrough.id == external_walkthrough.id)
+        {
+            merge_vec_by_id(
+                &mut local_walkthrough.steps,
+                external_walkthrough.steps.clone(),
+                &tombstones.walkthrough_steps,
+                |_, _| false,
+            );
+        }
+    }
+    external.tasks = local.tasks.clone();
+    external.walkthroughs = local.walkthroughs.clone();
+}
+
+fn prefer_external_by_updated_at(
+    local: Option<chrono::DateTime<chrono::Utc>>,
+    external: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    matches!((local, external), (Some(local), Some(external)) if external > local)
+}
+
+trait Identified {
+    fn id(&self) -> &str;
+}
+
+impl Identified for Comment {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for ReviewSession {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for ReviewTask {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for Walkthrough {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl Identified for WalkthroughStep {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+fn merge_vec_by_id<T, F>(
+    local: &mut Vec<T>,
+    external: Vec<T>,
+    tombstones: &BTreeSet<String>,
+    prefer_external: F,
+) where
+    T: Identified + PartialEq,
+    F: Fn(&T, &T) -> bool,
+{
+    for external_item in external {
+        if tombstones.contains(external_item.id()) {
+            continue;
+        }
+        if let Some(local_item) = local
+            .iter_mut()
+            .find(|item| item.id() == external_item.id())
+        {
+            if *local_item != external_item && prefer_external(local_item, &external_item) {
+                *local_item = external_item;
+            }
+        } else {
+            local.push(external_item);
+        }
+    }
+}
+
 impl ReviewState {
     pub fn normalize_legacy_file_state(&mut self) {
         for file in self.files.values_mut() {
@@ -321,6 +496,177 @@ mod tests {
                 .caught_up_fingerprints
                 .is_empty()
         );
+    }
+
+    fn comment(id: &str, body: &str) -> Comment {
+        Comment {
+            id: id.to_owned(),
+            path: "src/lib.rs".to_owned(),
+            line: Some(1),
+            end_line: None,
+            anchor: None,
+            body: body.to_owned(),
+            kind: None,
+            action: None,
+            state: CommentState::Draft,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn task(
+        id: &str,
+        title: &str,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ReviewTask {
+        ReviewTask {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            updated_at,
+            ..ReviewTask::default()
+        }
+    }
+
+    #[test]
+    fn merge_external_adopts_external_additions() {
+        let mut local = ReviewState::default();
+        let mut external = ReviewState::default();
+        external
+            .comments
+            .push(comment("external-comment", "external"));
+        external.sessions.push(ReviewSession {
+            id: "session".to_owned(),
+            tasks: vec![task("task", "external task", None)],
+            walkthroughs: vec![Walkthrough {
+                id: "walkthrough".to_owned(),
+                steps: vec![WalkthroughStep {
+                    id: "step".to_owned(),
+                    title: Some("external step".to_owned()),
+                    ..WalkthroughStep::default()
+                }],
+                ..Walkthrough::default()
+            }],
+            ..ReviewSession::default()
+        });
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(local.comments[0].id, "external-comment");
+        assert_eq!(local.sessions[0].tasks[0].id, "task");
+        assert_eq!(local.sessions[0].walkthroughs[0].steps[0].id, "step");
+    }
+
+    #[test]
+    fn merge_external_does_not_resurrect_tombstoned_ids() {
+        let mut local = ReviewState::default();
+        let mut external = ReviewState::default();
+        external
+            .comments
+            .push(comment("deleted-comment", "external"));
+        external.sessions.push(ReviewSession {
+            id: "session".to_owned(),
+            tasks: vec![task("deleted-task", "external task", None)],
+            ..ReviewSession::default()
+        });
+        let tombstones = ReviewStateTombstones {
+            comments: BTreeSet::from(["deleted-comment".to_owned()]),
+            tasks: BTreeSet::from(["deleted-task".to_owned()]),
+            ..ReviewStateTombstones::default()
+        };
+
+        local.merge_external(external, &tombstones);
+
+        assert!(local.comments.is_empty());
+        assert!(local.sessions[0].tasks.is_empty());
+    }
+
+    #[test]
+    fn merge_external_uses_newer_updated_at_for_conflicts() {
+        let older = chrono::Utc::now();
+        let newer = older + chrono::TimeDelta::seconds(5);
+        let mut local = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "session".to_owned(),
+                tasks: vec![task("task", "old", Some(older))],
+                updated_at: Some(older),
+                ..ReviewSession::default()
+            }],
+            ..ReviewState::default()
+        };
+        let external = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "session".to_owned(),
+                tasks: vec![task("task", "new", Some(newer))],
+                updated_at: Some(newer),
+                ..ReviewSession::default()
+            }],
+            ..ReviewState::default()
+        };
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(local.sessions[0].tasks[0].title, "new");
+    }
+
+    #[test]
+    fn merge_external_keeps_in_memory_conflicts_without_timestamps() {
+        let mut local = ReviewState {
+            comments: vec![comment("comment", "local")],
+            sessions: vec![ReviewSession {
+                id: "session".to_owned(),
+                title: Some("local".to_owned()),
+                ..ReviewSession::default()
+            }],
+            ..ReviewState::default()
+        };
+        let external = ReviewState {
+            comments: vec![comment("comment", "external")],
+            sessions: vec![ReviewSession {
+                id: "session".to_owned(),
+                title: Some("external".to_owned()),
+                ..ReviewSession::default()
+            }],
+            ..ReviewState::default()
+        };
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(local.comments[0].body, "local");
+        assert_eq!(local.sessions[0].title.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn merge_external_prefers_in_memory_view_state_but_adopts_unknown_files() {
+        let mut local = ReviewState::default();
+        local.files.insert(
+            "known.rs".to_owned(),
+            FileState {
+                fingerprint: "local".to_owned(),
+                viewed: true,
+                ..FileState::default()
+            },
+        );
+        let mut external = ReviewState::default();
+        external.files.insert(
+            "known.rs".to_owned(),
+            FileState {
+                fingerprint: "external".to_owned(),
+                viewed: false,
+                ..FileState::default()
+            },
+        );
+        external.files.insert(
+            "unknown.rs".to_owned(),
+            FileState {
+                fingerprint: "external".to_owned(),
+                viewed: true,
+                ..FileState::default()
+            },
+        );
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(local.files["known.rs"].fingerprint, "local");
+        assert_eq!(local.files["unknown.rs"].fingerprint, "external");
     }
 
     #[test]

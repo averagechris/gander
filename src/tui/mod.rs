@@ -27,7 +27,7 @@ mod walkthroughs;
 mod zen;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     path::{Path, PathBuf},
     time::Duration,
@@ -57,7 +57,7 @@ use crate::{
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
     review,
-    state::{ReviewState, WalkthroughStep},
+    state::{ReviewState, ReviewStateTombstones, WalkthroughStep},
 };
 
 use chooser::TargetChooserState;
@@ -146,6 +146,8 @@ struct TuiState {
     /// suggestions written mid-session are picked up without reloading on
     /// every tick.
     overlay_mtime: Option<std::time::SystemTime>,
+    state_mtime: Option<std::time::SystemTime>,
+    state_tombstones: ReviewStateTombstones,
     invalid_chunk_parts: Vec<crate::agent::InvalidChunkPart>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
@@ -323,6 +325,7 @@ pub fn run(
         launch_target: Some(session.target.clone()),
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
+        state_mtime: state_path.as_deref().and_then(state_file_mtime),
         agent_log_path,
         agent_config,
         notice: acp_notice.map(|message| UiNotice {
@@ -440,6 +443,9 @@ fn run_loop(
             if let Some(overlay_path) = agent_overlay_path {
                 maybe_reload_agent_overlay(session, overlay_path, tui_state, review_loader, true);
             }
+            if let Some(state_path) = state_path {
+                maybe_reload_review_state(session, state_path, tui_state, true);
+            }
             notice_agent_exit(tui_state);
             // Live refresh: pick up new/rewritten changes while nothing
             // modal is open (a reload underneath a popup or comment editor
@@ -457,6 +463,9 @@ fn run_loop(
             Event::Key(key)
                 if handle_key_event(key, session, mode, keymap, review_loader, tui_state)? =>
             {
+                if let Some(state_path) = state_path {
+                    autosave_state(session, state_path, tui_state);
+                }
                 break;
             }
             Event::Key(_) => {}
@@ -629,6 +638,58 @@ fn maybe_reload_agent_overlay(
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: format!("failed to load agent overlay: {error}"),
+            });
+        }
+    }
+}
+
+fn state_file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+fn maybe_reload_review_state(
+    session: &mut ReviewSession,
+    state_path: &Path,
+    tui_state: &mut TuiState,
+    notify: bool,
+) {
+    let mtime = state_file_mtime(state_path);
+    if mtime.is_none() || mtime == tui_state.state_mtime {
+        return;
+    }
+    match ReviewState::load_or_default(state_path) {
+        Ok(external) => {
+            let before_comments: BTreeSet<String> = session
+                .comments
+                .iter()
+                .map(|comment| comment.id.clone())
+                .collect();
+            let mut merged = session.to_state();
+            merged.merge_external(external, &tui_state.state_tombstones);
+            let added_comments = merged
+                .comments
+                .iter()
+                .filter(|comment| !before_comments.contains(&comment.id))
+                .count();
+            session.apply_review_state(merged);
+            tui_state.state_mtime = mtime;
+            tui_state.last_autosave = Some(state_fingerprint(session));
+            if notify && added_comments > 0 {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!(
+                        "review state updated externally — {added_comments} comment{} added",
+                        if added_comments == 1 { "" } else { "s" }
+                    ),
+                });
+            }
+        }
+        Err(error) => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("failed to load review state: {error}"),
             });
         }
     }
@@ -1091,35 +1152,26 @@ fn state_fingerprint(session: &ReviewSession) -> String {
     serde_json::to_string(&(&state.files, &state.comments)).unwrap_or_default()
 }
 
-fn autosave_state(session: &ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
+fn autosave_state(session: &mut ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
     let fingerprint = state_fingerprint(session);
-    if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str()) {
+    let disk_mtime = state_file_mtime(state_path);
+    if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str())
+        && disk_mtime == tui_state.state_mtime
+    {
         return;
     }
     let mut state = session.to_state();
-    if let Ok(on_disk) = crate::state::ReviewState::load_or_default(state_path) {
-        let current_paths = session.current_diff_paths();
-        for (path, file_state) in on_disk.files {
-            if !current_paths.contains(path.as_str()) {
-                state.files.insert(path, file_state);
-            }
-        }
-        let mut comment_ids: std::collections::BTreeSet<String> = state
-            .comments
-            .iter()
-            .map(|comment| comment.id.clone())
-            .collect();
-        for comment in on_disk.comments {
-            if comment_ids.insert(comment.id.clone()) {
-                state.comments.push(comment);
-            }
-        }
-        if state.sessions.is_empty() {
-            state.sessions = on_disk.sessions;
-        }
+    if disk_mtime != tui_state.state_mtime
+        && let Ok(on_disk) = crate::state::ReviewState::load_or_default(state_path)
+    {
+        state.merge_external(on_disk, &tui_state.state_tombstones);
+        session.apply_review_state(state.clone());
     }
     match state.save(state_path) {
-        Ok(()) => tui_state.last_autosave = Some(fingerprint),
+        Ok(()) => {
+            tui_state.state_mtime = state_file_mtime(state_path);
+            tui_state.last_autosave = Some(state_fingerprint(session));
+        }
         Err(error) => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
@@ -1633,6 +1685,7 @@ fn handle_normal_action(
         Action::DeleteComment => {
             if let Some(id) = session.selected_comment().map(|comment| comment.id.clone()) {
                 session.delete_comment(&id);
+                tui_state.state_tombstones.comments.insert(id);
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "deleted comment".to_owned(),
@@ -2945,6 +2998,7 @@ fn handle_comment_list_key(
         KeyCode::Char('x') => {
             if let Some(id) = list.selected_comment_id(session) {
                 session.delete_comment(&id);
+                tui_state.state_tombstones.comments.insert(id);
                 list.clamp(session);
             }
             session.comments.is_empty()
@@ -3863,12 +3917,12 @@ mod tests {
         };
 
         // No changes yet: nothing should be written.
-        autosave_state(&session, &state_path, &mut tui_state);
+        autosave_state(&mut session, &state_path, &mut tui_state);
         assert!(!state_path.exists());
 
         session.toggle_viewed();
         session.add_comment("note".into());
-        autosave_state(&session, &state_path, &mut tui_state);
+        autosave_state(&mut session, &state_path, &mut tui_state);
 
         let saved = crate::state::ReviewState::load_or_default(&state_path).unwrap();
         assert!(saved.files["a.txt"].viewed);
@@ -3877,7 +3931,7 @@ mod tests {
 
         // Unchanged session: fingerprint short-circuits the write.
         let modified_before = std::fs::metadata(&state_path).unwrap().modified().unwrap();
-        autosave_state(&session, &state_path, &mut tui_state);
+        autosave_state(&mut session, &state_path, &mut tui_state);
         let modified_after = std::fs::metadata(&state_path).unwrap().modified().unwrap();
         assert_eq!(modified_before, modified_after);
     }
@@ -3925,7 +3979,7 @@ mod tests {
         session.toggle_viewed();
         session.add_comment("from current target".into());
 
-        autosave_state(&session, &state_path, &mut tui_state);
+        autosave_state(&mut session, &state_path, &mut tui_state);
 
         let saved = crate::state::ReviewState::load_or_default(&state_path).unwrap();
         assert!(saved.files["a.txt"].viewed);
@@ -4164,6 +4218,76 @@ mod tests {
                 .unwrap()
                 .message
                 .contains("already at the bottom")
+        );
+    }
+
+    #[test]
+    fn autosave_merges_external_write_made_after_tui_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut initial = crate::state::ReviewState::default();
+        initial.comments.push(Comment {
+            id: "initial".to_owned(),
+            path: "a.txt".to_owned(),
+            line: Some(1),
+            end_line: None,
+            anchor: None,
+            body: "initial".to_owned(),
+            kind: None,
+            action: None,
+            state: CommentState::Draft,
+            created_at: chrono::Utc::now(),
+        });
+        initial.save(&state_path).unwrap();
+
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        session
+            .apply_review_state(crate::state::ReviewState::load_or_default(&state_path).unwrap());
+        let mut tui_state = TuiState {
+            state_mtime: state_file_mtime(&state_path),
+            last_autosave: Some(state_fingerprint(&session)),
+            ..TuiState::default()
+        };
+
+        let mut external = crate::state::ReviewState::load_or_default(&state_path).unwrap();
+        external.comments.push(Comment {
+            id: "external".to_owned(),
+            path: "a.txt".to_owned(),
+            line: Some(2),
+            end_line: None,
+            anchor: None,
+            body: "probe B".to_owned(),
+            kind: None,
+            action: None,
+            state: CommentState::Draft,
+            created_at: chrono::Utc::now(),
+        });
+        external.save(&state_path).unwrap();
+        session.toggle_viewed();
+
+        autosave_state(&mut session, &state_path, &mut tui_state);
+
+        let saved = crate::state::ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.comments.iter().any(|comment| comment.id == "initial"));
+        assert!(
+            saved
+                .comments
+                .iter()
+                .any(|comment| comment.id == "external")
+        );
+        assert!(
+            session
+                .comments
+                .iter()
+                .any(|comment| comment.id == "external")
         );
     }
 

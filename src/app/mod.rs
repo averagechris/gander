@@ -591,8 +591,12 @@ impl ReviewSession {
         }
     }
 
-    pub fn current_diff_paths(&self) -> BTreeSet<&str> {
-        self.files.iter().map(|file| file.path.as_str()).collect()
+    pub fn apply_review_state(&mut self, mut state: ReviewState) {
+        state.normalize_legacy_file_state();
+        self.persisted_files = state.files;
+        self.comments = state.comments;
+        self.sessions = state.sessions;
+        self.apply_state_files();
     }
 
     pub fn selected_file(&self) -> Option<&ReviewFile> {
