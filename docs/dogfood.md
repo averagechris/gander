@@ -508,67 +508,110 @@ stderr and in the `initialize` response.
 
 ### W10 — Round-6 findings (from the sixth eval round)
 
-Majors, open:
+Majors, fixed same day (round-7 build):
 
-- [ ] Silent default-base session trap: with no `-b`, the default
-      base (`trunk()`) can resolve past the session's base (fixture:
-      no remote bookmark, `trunk()` == `root()`), so `gander handoff`
-      emits a plausible-but-truncated artifact (comments present; 0
-      tasks, no walkthrough, no title) with zero warning while
-      `reviews list` shows an open `main..@` session in the same
-      repo. Warn or auto-attach when exactly one open session exists;
-      at minimum say "no session matched target".
-- [ ] Comments and tasks disagree on scoping: `comments list` returns
-      comments regardless of base while `tasks list` is
-      session-scoped — the asymmetry is what makes the base trap look
-      like valid state instead of obviously empty.
-- [ ] Live sessions silently drop curated chunks on working-copy
-      snapshot reload: after any repo change that triggers a snapshot
-      refresh, `S` reports "no review chunks suggested" and zen tours
-      derived stops, while `chunks list` (bridged to the same
-      session) still returns all chunks; briefs and drafts survive
-      the same reload; re-applying the identical spec restores
-      everything. Revalidate/carry chunks across reloads, and warn if
-      any are genuinely dropped.
-- [ ] Contradictory partial-curation rendering: with briefs present
-      but no (or dropped) chunks, the chapter card renders the agent
-      brief directly beneath the "uncurated tour — press @ to
-      curate" banner — simultaneously claiming curation does and
-      doesn't exist.
+- [x] Silent default-base session trap: read commands (`handoff`,
+      `export`, `tasks list`, `walkthrough show/export`,
+      `comments list`) no longer create phantom sessions and warn on
+      stderr when the target matches no open session while one
+      exists for another target; mutations note when they implicitly
+      create a new session alongside an existing one. *(2026-07-05)*
+- [x] Comments and tasks disagree on scoping: the shared mismatch
+      warning now fires on `comments list` too, making the
+      asymmetry visible instead of a trap (deep rescoping of
+      comments deliberately deferred — comments stay
+      workspace-scoped by design). *(2026-07-05)*
+- [x] Live sessions silently drop curated chunks on snapshot reload:
+      root cause was `reapply_agent_overlay` revalidating against an
+      empty change-diff context after every refresh/zen retarget —
+      all five call sites now validate against real per-change
+      diffs, and genuinely-invalid chunks warn
+      (`N curated chunk part(s) no longer match the diff …`)
+      instead of vanishing. Regression tests cover survive +
+      warn-on-invalid. *(2026-07-05)*
+- [x] Contradictory partial-curation rendering: chapter cards show
+      an honest `partially curated — agent briefs below; stops are
+      derived from the diff (no spotlight chunks yet)` banner when
+      briefs exist without chunks. *(2026-07-05)*
 
-Minors:
+Blocker found during wave-7 smoke (orchestrator, not evaluators),
+fixed same day:
 
-- [ ] `hunks show` rejects `--format text` (has `diff` instead —
-      alias or unify); tasks mutations (`add/complete/reopen/edit/
-      delete`) and `comments delete` have no text echo and dump
-      20-50 lines of JSON at a human.
-- [ ] Range anchors collapse to a single line in handoff (both
-      formats, no `end_line`) while export JSON preserves them;
-      export JSON comments lack the `linked_task_ids` back-pointer
-      handoff JSON has.
-- [ ] Trait impls mislabeled in derived symbol facts:
-      `impl Default for Priority` renders as a duplicate
-      `impl Priority`.
+- [x] Lost-update data loss: a comment added via CLI while a TUI
+      held the session was clobbered on the TUI's next save
+      (including quit). The TUI now watches the state-file mtime,
+      merges external writes by id (with delete-tombstones and
+      `updated_at` conflict resolution) on poll and before every
+      save, and announces `review state updated externally — 1
+      comment added`. CLI-added comments appear in the live TUI
+      within a poll and survive quit. *(2026-07-05)*
+
+Minors, fixed same day (round-7 build):
+
+- [x] `hunks show --format text` (alias of `diff`); text echoes on
+      `tasks add/complete/reopen/edit/delete` and
+      `comments delete/resolve/set-state`. *(2026-07-05)*
+- [x] Handoff JSON action items carry `end_line`; export JSON
+      comments carry `linked_task_ids`. *(2026-07-05)*
+- [x] Trait impls labeled `impl Default for Priority` (duplicate
+      `impl Priority` gone). *(2026-07-05)*
+- [x] Canned review questions appear once per tour. *(2026-07-05)*
+- [x] Comments render on zen stops covering their lines
+      (`comment [todo] a3c7b887: …`); a stop-card height under-count
+      that clipped appended lines was found and fixed during
+      integration. *(2026-07-05)*
+- [x] Activity feed: aggregate row is footer-only (no triplication),
+      op attribution once per batch, 128-char op ids truncated,
+      `j/k`/`n/e`/arrows all move, Enter on non-file rows keeps the
+      popup open with a hint, selected event's full message wraps in
+      a detail area. *(2026-07-05)*
+- [x] Badge legend matches actual behavior (`~ viewed, changed
+      since` vs `± unviewed, changed since`). *(2026-07-05)*
+- [x] Spec files warn on unknown fields (found via a `role:` →
+      `importance` typo during smoke). *(2026-07-05)*
+
+Papercuts fixed same day: `… d expands` labels on truncated chapter
+cards; multi-part explanations render once (parts 2+ point back); zen
+chrome shows the home target during tours; `draft_comment` line space
+documented in docs/acp.md; `summary` status-column alignment (the
+same width-ignoring Display bug as the round-6 `files list` fix).
+
+Open:
+
 - [ ] Dependency claims are file-overlap only: chapter cards miss
       call-graph dependencies (worker → `enqueue_with_priority`) and
       test chapters that share no files get no builds-on line.
-- [ ] One canned review question (`is this the right surface to
-      expose?`) repeated verbatim on 4 of 6 uncurated stops.
-- [ ] Human comments are invisible on zen stops covering the
-      annotated line — render existing comments on their stops.
-- [ ] Activity feed: ~3 near-duplicate rows per refresh (aggregate +
-      per-change + per-file), raw 128-char op ids leak into notices,
-      `n`/`e` don't move feed selection, Enter on non-file events
-      silently closes the feed, "ctrl-a for detail" doesn't actually
-      expand truncated content.
-- [ ] Badge legend advertises `~ done, changed since` but the default
-      flow surfaces `±`; reconcile legend and behavior.
-
-Papercuts: unlabeled `…` truncation on chapter cards (say which key
-expands); multi-part chunk explanation repeated verbatim per part; zen
-chrome scoped to the retargeted change during tours; no goto-line in
-the diff pane for comment targeting; `draft_comment` line space
-undocumented in docs/acp.md.
+- [ ] No goto-line in the diff pane for comment targeting.
+- [ ] Deep comment scoping (per-session comments) deferred pending a
+      deliberate data-model decision.
+- [ ] Handoff prompt noise: linked task+comment pairs render as two
+      near-identical action items (merge the pair), and
+      `praise`-kind comments count as action items in an
+      implementation prompt.
+- [ ] Markdown excerpt readability: old-side `-` lines interleave
+      between new-side line numbers in action-item excerpts —
+      technically correct per side, reads out-of-order; group
+      removed lines before added lines.
+- [ ] Export JSON optional-field convention is inconsistent:
+      `end_line` omitted-when-unset on comments vs explicit `null`
+      elsewhere; schema consumers must handle both.
+- [ ] Walkthrough verb convention: `add-step`/`remove-step`/
+      `move-step` vs `add`/`edit`/`delete` everywhere else; no
+      `walkthrough edit-step`; walkthrough mutations have no
+      `--format text` echo.
+- [ ] `tasks reopen` on an already-open task exits 0 and bumps
+      `updated_at` with no "already open" notice.
+- [ ] Ambient identity weight: revision identity lives only in the
+      small footer line; evaluators want it in the diff/files pane
+      titles (with a brief highlight when `@` moves) for
+      across-the-room glances.
+- [ ] Hunk-level freshness: after catch-up or a viewed-file change,
+      mark which hunks are new since last look so re-reviewing a
+      large file doesn't mean rereading all of it (`}`/`{` navigate
+      changed hunks, but nothing marks them).
+- [ ] Per-op digest rows in the activity feed (one expandable row
+      per jj op with per-file children) so catching up after long
+      agent runs scales with ops, not rows.
 
 ### W5 — Web (parked)
 
@@ -701,3 +744,21 @@ export should inherit W2's tour content. Revisit after W4.
   the latter pinned zen curated at 3.5 despite the rendering
   upgrades landing as designed. Remaining below target: TUI 4/4.5,
   zen uncurated 3/3.5, curated 3.5/4.5, humans 3.5/4.
+- **2026-07-05** — Round-7 build landed all four W10 majors and the
+  round's minors in a four-track stack: session-mismatch warnings
+  with non-creating read lookups (the default-base trap), overlay
+  revalidation against real per-change diffs on every refresh/zen
+  retarget (the chunk-drop trust-breaker), the honest
+  partially-curated banner, comments rendered on zen stops (plus a
+  stop-card height under-count found during integration), trait-impl
+  labels, per-tour question dedup, activity-feed digest rows with
+  humanized op ids and a working detail area, reconciled badge
+  legend, `end_line`/`linked_task_ids` artifact parity, the
+  remaining text echoes, and spec-file unknown-field warnings.
+  Orchestrator smoke also caught a blocker the evaluators missed:
+  CLI comments added while a TUI held the session were clobbered on
+  the TUI's next save — fixed with mtime-watched state merging
+  (tombstones + `updated_at` resolution), giving live CLI→TUI
+  comment pickup as a bonus. 534 tests green. Next re-run grades
+  this build — headroom: humans 3.5→4, zen uncurated 3→3.5, curated
+  3.5→4.5, TUI 4→4.5.

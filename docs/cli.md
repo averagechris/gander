@@ -7,13 +7,27 @@ workspace, fetch from forges, or post reviews remotely.
 
 Global options accepted by all commands include `--repo <path>`, `--rev <revset>`
 (default `@`), `--base <revset>` (default `trunk()`), repeated `--ignore`,
-generated-file filters, `--state-file <path>`, and `--config <path>`.
+generated-file filters, `--state-file <path>`, and `--config <path>`. They are
+listed under a separate "Target & state (global)" heading in every
+subcommand's `--help`.
+
+Durable review objects (sessions, tasks, walkthroughs) are keyed by the exact
+`base..rev` target. When a read command's target matches no open session but
+one exists for another target, Gander warns on stderr and names the session
+(`warning: no open review session matches 'trunk()..@'; open session "…"
+targets 'main..@' …`) instead of silently emitting a truncated artifact; read
+commands never create sessions as a side effect. Comments are
+workspace-scoped and visible regardless of target.
+
+Most list commands and mutation echoes accept `--format <json|text>`. JSON is
+always the default (agent-stable); `text` prints compact aligned rows or a
+short human echo.
 
 ## Reviews
 
 ```sh
 gander reviews create [--title <title>]
-gander reviews list
+gander reviews list [--format json|text]
 gander reviews show <id>
 ```
 
@@ -38,25 +52,27 @@ gander reviews show <id>
 ## Files and hunks
 
 ```sh
-gander files list
-gander hunks list [--file <path>]
-gander hunks show <path:index>
+gander files list [--format json|text]
+gander hunks list [<path>] [--file <path>] [--format json|text]
+gander hunks show <path:index> [--format json|diff|text]
 ```
 
-These are read-only JSON queries over the current jj diff. `hunks list` returns
-hunk ids suitable for `hunks show`.
+These are read-only queries over the current jj diff. `hunks list` returns
+hunk ids suitable for `hunks show` and accepts the file as a positional or
+`--file`. `hunks show --format diff` (alias `text`) prints a unified diff.
 
 ## Comments
 
 ```sh
-gander comments list
+gander comments list [--format json|text]
 gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
-  [--kind note|issue|question|praise] [--action fix|explain|test|follow-up]
-gander comments resolve <id>
-gander comments set-state <id> --state draft|todo|resolved
+  [--kind note|issue|question|praise] [--action fix|explain|test|follow-up] \
+  [--format json|text]
+gander comments resolve <id> [--format json|text]
+gander comments set-state <id> --state draft|todo|resolved [--format json|text]
 gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
-  [--body <text>]
-gander comments delete <id>
+  [--body <text>] [--format json|text]
+gander comments delete <id> [--format json|text]
 ```
 
 `add` creates a persisted comment. `--line`, `--start-line`, and `--end-line`
@@ -88,13 +104,21 @@ and prints a warning so intentional unchanged-context comments remain possible.
 
 ```sh
 gander tasks add --title <title> [--body <text>] [--action fix|explain|test|follow-up] \
-  [--comment <comment-id>] [--path <path>] [--line <n>]
-gander tasks list
-gander tasks complete <id> [--summary <resolution>]
-gander tasks reopen <id>
+  [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
+gander tasks list [--format json|text]
+gander tasks complete <id> [--summary <resolution>] [--format json|text]
+gander tasks reopen <id> [--format json|text]
+gander tasks edit <id> [--title <title>] [--body <text>] [--action <action>] \
+  [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
+gander tasks delete <id> [--format json|text]
 ```
 
-Tasks are review-state todos for humans or agents. Example `tasks list`:
+Tasks are review-state todos for humans or agents. Ids on `complete`,
+`reopen`, `edit`, and `delete` accept unambiguous prefixes; unknown or
+ambiguous prefixes are one-line errors. Comment-backed todo entries in
+`tasks list` always carry a string `title` (synthesized from the comment
+body's first line when the comment has no explicit title).
+Example `tasks list`:
 `--line` is a 1-indexed new-side (post-image) line number in the current jj
 diff. `--action` emits `follow-up`; legacy JSON or CLI input spelled
 `followup` is still accepted. `--comment` accepts a full comment id or
@@ -138,6 +162,41 @@ the current jj diff.
 File-anchor commands accept both `--path` and `--file` for compatibility. The
 canonical form in docs and JSON remains `--path`.
 
+## Curation overlay (chunks, briefs, drafts)
+
+```sh
+gander chunks list
+gander chunks lines [--change <change-id>] [--path <path>]
+gander chunks set [--file <spec.json|->]
+gander chunks update [--file <spec.json|->]
+gander chunks remove --id <id> [--id <id> ...]
+gander chunks clear
+gander briefs list|set [--file <spec>]|clear
+gander drafts list|add [--file <spec>]|remove --id <id>
+```
+
+These author the same agent-curation overlay ACP/MCP write (zen spotlight and
+glance chunks, per-change briefs, draft comments) — full CLI parity, no
+JSON-RPC required. Specs are JSON files or stdin; see `gander chunks --help`
+for the inline spec example. `chunks lines` prints the exact line ranges the
+validator accepts (per change with `--change`), closing the line-space
+guessing loop. Validation is all-or-nothing with per-part reasons; line-range
+errors echo the valid ranges for the failing path. Unknown spec fields warn
+(typos never silently degrade to defaults). A live TUI on the same workspace
+picks up overlay writes within a poll; the CLI warns when the live session is
+reviewing a different target.
+
+Chunk line numbers live in the new-side (post-image) line space of the
+session diff, or of `<change_id>`'s own diff when the chunk carries a
+`change_id` — see `docs/acp.md` for the shared semantics.
+
+## Live state and the TUI
+
+Review-state writes are safe while a TUI holds the session: the TUI watches
+the state file and merges external changes (a CLI-added comment appears in
+the running TUI within a poll and survives the TUI's save/quit). Deletions
+made in the TUI are not resurrected by merges.
+
 ## Export/import and state utilities
 
 ```sh
@@ -153,15 +212,19 @@ gander summary
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
 defaults to action items first, walkthrough next, then reference hunks limited
 to files that carry action items or walkthrough stops. JSON uses the same
-default action-item selection: open tasks plus unresolved comments. `handoff
+default action-item selection: open tasks plus unresolved comments. Action
+items are deterministically ordered the same way in both formats: action
+priority (fix > test > follow-up > other), then path, then line. `handoff
 --format json` is a stable action artifact shaped
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
 are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
-`excerpt`, `body`, `state`, and canonical linked task/comment ids. `--only-open`
-is accepted for compatibility and matches the default; `--output` writes without stdout body
-output; `--copy` copies it to the clipboard (pbcopy, wl-copy, xclip, or OSC52
-via `/dev/tty`). Use `export --profile agent` instead when you need the full
-session artifact for import/archive or broad automation.
+`end_line`, `excerpt`, `body`, `state`, and canonical linked task/comment ids.
+`--only-open` is accepted for compatibility and matches the default; `--output`
+writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
+wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
+when you need the full session artifact for import/archive or broad
+automation (its H1 is `# Review session export (agent profile)`; the two
+artifacts cross-reference each other).
 
 `export html` writes a self-contained static review page. JSON and Markdown are
 the complete session artifact formats; `--profile agent` adds all raw hunks and
@@ -175,7 +238,10 @@ gander acp
 ```
 
 `mcp` exposes typed tools for harnesses, including CLI-parity state tools.
-`acp` is the line-delimited JSON-RPC bridge used by older live-session flows.
+`acp` is the line-delimited JSON-RPC bridge for live-session curation: it
+bridges to a running TUI on the same workspace when one exists (announcing
+`bridged to live TUI session` vs `serving snapshot` on stderr, and a `mode`
+field in the `initialize` response). See `docs/acp.md`.
 
 ## Automation without MCP
 

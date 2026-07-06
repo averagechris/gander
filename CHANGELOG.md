@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### Fixed
+
+- Live TUI sessions no longer silently drop curated chunks when the
+  repository refreshes: overlay revalidation now runs against real
+  per-change diffs on every reload and zen retarget, and chunks that
+  genuinely no longer match the diff produce a visible warning
+  instead of vanishing.
+- External review-state writes (e.g. `gander comments add` while a
+  TUI is open) are merged instead of clobbered: the TUI picks them up
+  within a poll (`review state updated externally — 1 comment
+  added`), merges by id with delete-tombstones before every save,
+  and CLI-added comments survive TUI quit.
+- The silent default-base trap: read commands (`handoff`, `export`,
+  `tasks list`, `walkthrough show/export`, `comments list`) no longer
+  create phantom sessions and warn when the target matches no open
+  session while one exists for another target
+  (`warning: no open review session matches 'trunk()..@'; open
+  session "…" targets 'main..@' …`); mutations note when they
+  implicitly create a new session alongside an existing one.
+- Chunk/brief/draft spec files warn on unknown fields (a typo'd
+  `role:` no longer silently degrades to defaults; the warning lists
+  the allowed fields).
+- `gander summary` aligns its status column (`added` rows no longer
+  shift the path column).
+
+### Added
+
+- Zen chapter cards render an honest `partially curated` banner when
+  briefs exist without spotlight chunks, instead of claiming the
+  tour is uncurated directly above an agent brief.
+- Zen stops surface existing review comments anchored inside the
+  stop's line range (`comment [todo] a3c7b887: …`).
+- Trait impls are labeled precisely in derived symbol facts
+  (`impl Default for Priority`, not a duplicate `impl Priority`).
+- Handoff JSON action items carry `end_line` for range anchors, and
+  export JSON comments carry `linked_task_ids` back-pointers.
+- `hunks show --format text` (alias of `diff`), plus compact
+  `--format text` echoes on the remaining task/comment mutations
+  (`tasks add/complete/reopen/edit/delete`, `comments
+  delete/resolve/set-state`).
+- The activity feed shows one structured row per event (the
+  aggregate summary stays in the footer), annotates change rows with
+  the causing jj operation once, truncates embedded 128-char
+  operation ids, moves with `j/k`/`n/e`/arrows, keeps the popup open
+  on non-file rows, and renders the selected event's full message
+  wrapped in a detail area.
+- Zen chrome shows the human-facing home target during tours instead
+  of the per-change retarget revset; multi-part chunk explanations
+  render once (parts 2+ point back to part 1); truncated chapter
+  cards say `… d expands`.
+- Canned zen review questions appear once per tour instead of
+  repeating verbatim on every triggering stop.
+
+### Changed
+
+- The file-badge legend matches actual badge behavior
+  (`~ viewed, changed since` vs `± unviewed, changed since`).
+- `docs/acp.md` documents `review/draft_comment` line-space
+  semantics (new-side, 1-indexed).
+
 ### Added
 
 - `--format text` on `files`/`hunks`/`comments`/`tasks`/`reviews
