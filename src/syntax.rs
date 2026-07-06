@@ -386,12 +386,15 @@ pub fn symbol_spans(path: &str, source: &str, config: &SyntaxConfig) -> Vec<Symb
 
 fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], symbols: &mut Vec<SymbolSpan>) {
     if let Some(kind) = symbol_kind_label(node.kind()) {
-        let name = node
-            .child_by_field_name("name")
-            .or_else(|| node.child_by_field_name("type"))
-            .and_then(|name_node| name_node.utf8_text(source).ok())
-            .unwrap_or("")
-            .to_owned();
+        let name = if node.kind() == "impl_item" {
+            impl_symbol_name(node, source)
+        } else {
+            node.child_by_field_name("name")
+                .or_else(|| node.child_by_field_name("type"))
+                .and_then(|name_node| name_node.utf8_text(source).ok())
+                .unwrap_or("")
+                .to_owned()
+        };
         if !name.is_empty() {
             symbols.push(SymbolSpan {
                 name,
@@ -405,6 +408,25 @@ fn collect_symbols(node: tree_sitter::Node<'_>, source: &[u8], symbols: &mut Vec
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         collect_symbols(child, source, symbols);
+    }
+}
+
+fn impl_symbol_name(node: tree_sitter::Node<'_>, source: &[u8]) -> String {
+    let ty = node
+        .child_by_field_name("type")
+        .and_then(|name_node| name_node.utf8_text(source).ok())
+        .unwrap_or("");
+    let Some(trait_name) = node
+        .child_by_field_name("trait")
+        .and_then(|trait_node| trait_node.utf8_text(source).ok())
+        .filter(|trait_name| !trait_name.is_empty())
+    else {
+        return ty.to_owned();
+    };
+    if ty.is_empty() {
+        trait_name.to_owned()
+    } else {
+        format!("{trait_name} for {ty}")
     }
 }
 
@@ -756,6 +778,26 @@ mod tests {
             kind: "fn",
             start_line: 5,
             end_line: 7,
+        }));
+    }
+
+    #[test]
+    fn labels_trait_impls_with_trait_and_type() {
+        let source = "enum Priority { High }\n\nimpl Default for Priority {\n    fn default() -> Self { Self::High }\n}\n\nimpl Priority {\n    fn rank(&self) -> u8 { 1 }\n}\n";
+
+        let symbols = symbol_spans("src/lib.rs", source, &SyntaxConfig::default());
+
+        assert!(symbols.contains(&SymbolSpan {
+            name: "Default for Priority".to_owned(),
+            kind: "impl",
+            start_line: 2,
+            end_line: 4,
+        }));
+        assert!(symbols.contains(&SymbolSpan {
+            name: "Priority".to_owned(),
+            kind: "impl",
+            start_line: 6,
+            end_line: 8,
         }));
     }
 

@@ -1221,6 +1221,7 @@ fn draw_footer(
         }
         Mode::Normal if session.focus == Focus::Files => footer_line(files_footer_segments(
             session,
+            zen,
             keymap,
             &format!(
                 "focus files{}{}{}",
@@ -1240,6 +1241,7 @@ fn draw_footer(
         Mode::Normal => {
             let mut text = footer_line(diff_footer_segments(
                 session,
+                zen,
                 keymap,
                 &format!(
                 "focus diff{}{}{}",
@@ -1329,8 +1331,12 @@ fn draw_footer(
         Mode::Help => "help · any key to close".to_owned(),
     };
     let mut summary = session.summary_line();
-    if session.target.is_symbolic() {
-        summary.push_str(&format!(" · following {}", session.target.rev));
+    let display_target = context
+        .zen
+        .map(|zen| &zen.home_target)
+        .unwrap_or(&session.target);
+    if display_target.is_symbolic() {
+        summary.push_str(&format!(" · following {}", display_target.rev));
     }
     if let Some(identity) = context.identity_chip {
         let prefix_width = summary.width() + " · ".width();
@@ -1396,6 +1402,7 @@ fn hint_segments(keymap: &KeyMap, hints: &[FooterHint]) -> Vec<String> {
 
 fn files_footer_segments(
     session: &ReviewSession,
+    zen: Option<&ZenState>,
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
@@ -1413,13 +1420,17 @@ fn files_footer_segments(
         FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
-    let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
+    let target = zen
+        .map(|zen| zen.home_target.to_string())
+        .unwrap_or_else(|| session.target.to_string());
+    let mut segments = vec![target, focus_label.to_owned()];
     segments.extend(hint_segments(keymap, &hints));
     segments
 }
 
 fn diff_footer_segments(
     session: &ReviewSession,
+    zen: Option<&ZenState>,
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
@@ -1434,7 +1445,10 @@ fn diff_footer_segments(
         FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
-    let mut segments = vec![session.target.to_string(), focus_label.to_owned()];
+    let target = zen
+        .map(|zen| zen.home_target.to_string())
+        .unwrap_or_else(|| session.target.to_string());
+    let mut segments = vec![target, focus_label.to_owned()];
     segments.extend(hint_segments(keymap, &hints));
     segments
 }
@@ -2048,7 +2062,7 @@ fn draw_zen_panel(
         Some(ZenStop::Chapter(chapter)) => {
             let (number, total) = chapter.position;
             let headline = if chapter.description.is_empty() {
-                session.target.to_string()
+                zen.home_target.to_string()
             } else {
                 chapter.title().to_owned()
             };
@@ -2317,7 +2331,7 @@ fn draw_zen_chapter(
     // Where this chapter lives: its own change, or the walkthrough's target.
     let mut location = match &chapter.change_id {
         Some(change_id) => format!("change {change_id}"),
-        None => session.target.to_string(),
+        None => zen.home_target.to_string(),
     };
     if !chapter.bookmarks.is_empty() {
         location.push_str(&format!(" · {}", chapter.bookmarks));
@@ -2379,11 +2393,20 @@ fn draw_zen_chapter(
         stops_hint,
         Style::default().fg(Color::DarkGray),
     )));
-    if zen.source == super::zen::ZenSource::Files {
-        body.push(Line::from(Span::styled(
+    match zen.curation_state(session) {
+        super::zen::ZenCurationState::Uncurated => {
+            body.push(Line::from(Span::styled(
             "uncurated tour — derived from the diff; press @ to summon ACP/agent curation for intent/risk",
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         )));
+        }
+        super::zen::ZenCurationState::PartiallyCurated => {
+            body.push(Line::from(Span::styled(
+                "partially curated — agent briefs below; stops are derived from the diff (no spotlight chunks yet)",
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            )));
+        }
+        super::zen::ZenCurationState::Curated => {}
     }
     let has_curated_brief = chapter.summary.is_some();
     let summary = chapter.summary.clone().unwrap_or_else(|| {
@@ -2527,7 +2550,7 @@ fn draw_zen_chapter(
     if body_capacity > 0 && chapter_body.len() > body_capacity {
         chapter_body.truncate(body_capacity);
         chapter_body.push(Line::from(Span::styled(
-            "…",
+            "… d expands",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -2588,6 +2611,18 @@ fn derived_summary(lines: &[String]) -> String {
         .map(|symbols| format!(" · symbols: {symbols}"))
         .unwrap_or_default();
     format!("{churn}{symbols}")
+}
+
+fn zen_stop_comment_lines(session: &ReviewSession, stop: &super::chunks::ChunkRow) -> Vec<String> {
+    super::zen::comments_for_stop(&session.comments, stop)
+        .into_iter()
+        .map(|comment| {
+            let state = comment.state.label();
+            let id = truncate_tail(&comment.id, 8);
+            let first_line = comment.body.lines().next().unwrap_or_default().trim();
+            format!("comment [{state}] {id}: {first_line}")
+        })
+        .collect()
 }
 
 /// The zen focus card: a full-screen stop showing only the critical lines
@@ -2655,7 +2690,7 @@ fn draw_zen_stop(
         excerpt.push(unified_row_line(session, &rows[index], index, 0));
     }
 
-    let (explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
+    let (mut explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
         (
             stop.rationale
                 .clone()
@@ -2673,6 +2708,12 @@ fn draw_zen_stop(
             " why this matters ",
         )
     };
+    if let Some((part, total)) = stop.part_position
+        && part > 1
+        && total > 1
+    {
+        explanation = format!("explanation with part 1/{total}");
+    }
 
     // Card width: hug the widest excerpt line (plus breathing room), but
     // stay wide enough for prose and inside the backdrop.
@@ -2682,10 +2723,21 @@ fn draw_zen_stop(
         ((widest as u16).saturating_add(4)).clamp(50.min(max_card_width), max_card_width);
 
     let text_width = card_width.saturating_sub(4).max(20) as usize;
-    let estimated: usize = explanation
-        .lines()
-        .map(|line| line.chars().count().div_ceil(text_width).max(1))
-        .sum();
+    let comment_lines = zen_stop_comment_lines(session, stop);
+    let mechanics_line = if zen.source == super::zen::ZenSource::Files {
+        stop.explanation.clone()
+    } else {
+        None
+    };
+    let sibling_line = sibling_parts_line(zen, stop, card_width.saturating_sub(6) as usize);
+    let wrapped_height = |line: &str| line.chars().count().div_ceil(text_width).max(1);
+    let estimated: usize = explanation.lines().map(wrapped_height).sum::<usize>()
+        + mechanics_line.as_deref().map(wrapped_height).unwrap_or(0)
+        + sibling_line.as_deref().map(wrapped_height).unwrap_or(0)
+        + comment_lines
+            .iter()
+            .map(|line| wrapped_height(line))
+            .sum::<usize>();
     // The explanation block carries its own top border (the divider), so
     // +1 covers it; clamp so prose can never crowd out the code.
     let explanation_height = (estimated as u16 + 1).clamp(2, (inner.height / 3).max(3));
@@ -2773,18 +2825,22 @@ fn draw_zen_stop(
 
     frame.render_widget(Paragraph::new(excerpt), sections[0]);
     let mut explanation_lines = vec![Line::from(explanation)];
-    if zen.source == super::zen::ZenSource::Files
-        && let Some(mechanics) = &stop.explanation
-    {
+    if let Some(mechanics) = mechanics_line {
         explanation_lines.push(Line::from(Span::styled(
-            mechanics.clone(),
+            mechanics,
             Style::default().fg(Color::DarkGray),
         )));
     }
-    if let Some(sibling) = sibling_parts_line(zen, stop, card_width.saturating_sub(6) as usize) {
+    if let Some(sibling) = sibling_line {
         explanation_lines.push(Line::from(Span::styled(
             sibling,
             Style::default().fg(Color::DarkGray),
+        )));
+    }
+    for comment in comment_lines {
+        explanation_lines.push(Line::from(Span::styled(
+            comment,
+            Style::default().fg(Color::Blue),
         )));
     }
     frame.render_widget(

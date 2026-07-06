@@ -23,6 +23,7 @@ use crate::agent::{Artifact, ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
 use crate::diff::{DiffLineKind, FileDiff, Hunk};
 use crate::jj::{JjChangeSummary, ReviewTarget};
+use crate::state::Comment;
 
 use super::chunks::{ChunkRow, chunk_rows};
 
@@ -123,6 +124,13 @@ pub(super) enum ZenSource {
     Files,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ZenCurationState {
+    Curated,
+    PartiallyCurated,
+    Uncurated,
+}
+
 impl ZenState {
     /// Build a walkthrough: spotlight chunks become full-screen stops and
     /// everything else (glance chunks + uncovered files) lands on the
@@ -170,6 +178,14 @@ impl ZenState {
             chapter_description_collapsed: false,
             chapter_brief_expanded: false,
         })
+    }
+
+    pub(super) fn curation_state(&self, session: &ReviewSession) -> ZenCurationState {
+        match (self.source, session.change_briefs.is_empty()) {
+            (ZenSource::Chunks, _) => ZenCurationState::Curated,
+            (ZenSource::Files, false) => ZenCurationState::PartiallyCurated,
+            (ZenSource::Files, true) => ZenCurationState::Uncurated,
+        }
     }
 
     /// Rebuild the stops and glance rows from the (freshly reloaded)
@@ -596,6 +612,7 @@ fn fallback_rows(
     session: &ReviewSession,
     stack: &[JjChangeSummary],
 ) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
+    let mut emitted_questions = std::collections::BTreeSet::new();
     let fallback_stack = if let Some(change) = home_change(session, stack) {
         vec![change]
     } else {
@@ -640,6 +657,7 @@ fn fallback_rows(
                             file,
                             Some(change.change_id.clone()),
                             Some(change.description.as_str()),
+                            &mut emitted_questions,
                         ));
                     }
                 }
@@ -704,6 +722,7 @@ fn fallback_rows(
                 &file.diff,
                 change_id,
                 change_description,
+                &mut emitted_questions,
             ));
         }
     }
@@ -788,6 +807,7 @@ fn fallback_file_row(
     file: &FileDiff,
     change_id: Option<String>,
     change_description: Option<&str>,
+    emitted_questions: &mut std::collections::BTreeSet<&'static str>,
 ) -> ChunkRow {
     let hunk = largest_hunk(file);
     let (adds, dels) = hunk
@@ -802,11 +822,14 @@ fn fallback_file_row(
             .find(|line| is_public_api_line(line))
             .is_some_and(|line| public_api_symbol_is_new(file, line));
         facts.push(public_api_fact(file).unwrap_or_else(|| "public API change".to_owned()));
-        facts.push(if new_api {
-            "review question: is this the right surface to expose?".to_owned()
+        let question = if new_api {
+            "is this the right surface to expose?"
         } else {
-            "review question: do callers handle the new signature?".to_owned()
-        });
+            "do callers handle the new signature?"
+        };
+        if emitted_questions.insert(question) {
+            facts.push(format!("review question: {question}"));
+        }
     }
     let error_count = error_handling_touches(file);
     if error_count >= 2 {
@@ -814,7 +837,10 @@ fn fallback_file_row(
             error_handling_fact(session, file, hunk)
                 .unwrap_or_else(|| "touches error handling".to_owned()),
         );
-        facts.push("review question: is the new error path covered?".to_owned());
+        let question = "is the new error path covered?";
+        if emitted_questions.insert(question) {
+            facts.push(format!("review question: {question}"));
+        }
     }
     if let Some(description) = change_description.and_then(first_meaningful_line) {
         facts.push(format!("owning change: {description}"));
@@ -852,6 +878,35 @@ fn fallback_file_row(
         part_position: None,
         invalid_reason: None,
     }
+}
+
+pub(super) fn comments_for_stop<'a>(comments: &'a [Comment], stop: &ChunkRow) -> Vec<&'a Comment> {
+    let Some(part) = &stop.part else {
+        return Vec::new();
+    };
+    comments
+        .iter()
+        .filter(|comment| comment.path == part.path && comment_intersects_part(comment, part))
+        .collect()
+}
+
+fn comment_intersects_part(comment: &Comment, part: &ChunkPart) -> bool {
+    let Some(comment_start) = comment.line else {
+        return part.start_line.is_none() && part.end_line.is_none();
+    };
+    let comment_end = comment.end_line.unwrap_or(comment_start).max(comment_start);
+    match (part.start_line, part.end_line) {
+        (Some(start), Some(end)) => {
+            ranges_intersect(comment_start, comment_end, start, end.max(start))
+        }
+        (Some(start), None) => comment_end >= start,
+        (None, Some(end)) => comment_start <= end,
+        (None, None) => true,
+    }
+}
+
+fn ranges_intersect(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
+    a_start <= b_end && b_start <= a_end
 }
 
 fn first_meaningful_line(text: &str) -> Option<&str> {
@@ -1358,6 +1413,118 @@ diff --git a/b.rs b/b.rs
     fn zen_requires_something_to_review() {
         let session = snapshot_session("");
         assert!(ZenState::new(&session, &[]).is_none());
+    }
+
+    #[test]
+    fn curation_state_distinguishes_briefs_without_chunks() {
+        let mut session = snapshot_session(two_file_diff());
+        let zen = ZenState::new(&session, &[]).unwrap();
+        assert_eq!(zen.curation_state(&session), ZenCurationState::Uncurated);
+
+        session.change_briefs.push(ChangeBrief {
+            change_id: "aaabbbcc".to_owned(),
+            summary: "Agent narrative exists.".to_owned(),
+            artifacts: Vec::new(),
+        });
+        let zen = ZenState::new(&session, &[]).unwrap();
+        assert_eq!(
+            zen.curation_state(&session),
+            ZenCurationState::PartiallyCurated
+        );
+
+        let curated = session_with_chunks();
+        let zen = ZenState::new(&curated, &[]).unwrap();
+        assert_eq!(zen.curation_state(&curated), ZenCurationState::Curated);
+    }
+
+    fn comment(path: &str, line: Option<usize>, end_line: Option<usize>) -> Comment {
+        Comment {
+            id: "a3c7b887".to_owned(),
+            path: path.to_owned(),
+            line,
+            end_line,
+            anchor: None,
+            body: "please revisit".to_owned(),
+            kind: None,
+            action: None,
+            state: crate::state::CommentState::Todo,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn comments_match_stop_line_ranges_and_file_level_stops() {
+        let row = ChunkRow {
+            chunk_id: "file:src/retry.rs".to_owned(),
+            title: "retry".to_owned(),
+            importance: ChunkImportance::Spotlight,
+            change_id: None,
+            rationale: None,
+            explanation: None,
+            artifacts: Vec::new(),
+            part: Some(ChunkPart {
+                path: "src/retry.rs".to_owned(),
+                start_line: Some(9),
+                end_line: Some(22),
+            }),
+            part_position: None,
+            invalid_reason: None,
+        };
+        assert_eq!(
+            comments_for_stop(&[comment("src/retry.rs", Some(20), None)], &row).len(),
+            1
+        );
+        assert_eq!(
+            comments_for_stop(&[comment("src/retry.rs", Some(1), Some(9))], &row).len(),
+            1
+        );
+        assert!(comments_for_stop(&[comment("src/retry.rs", Some(23), None)], &row).is_empty());
+
+        let mut file_row = row.clone();
+        file_row.part.as_mut().unwrap().start_line = None;
+        file_row.part.as_mut().unwrap().end_line = None;
+        assert_eq!(
+            comments_for_stop(&[comment("src/retry.rs", Some(20), None)], &file_row).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn fallback_review_questions_are_deduped_per_tour() {
+        let session = snapshot_session(
+            r#"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1 +1 @@
+-fn old_a() {}
++pub fn new_a() {}
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1 +1 @@
+-fn old_b() {}
++pub fn new_b() {}
+"#,
+        );
+
+        let zen = ZenState::new(&session, &[]).unwrap();
+        let rationales = zen
+            .stops
+            .iter()
+            .filter_map(|stop| match stop {
+                ZenStop::Chunk(row) => row.rationale.as_deref(),
+                ZenStop::Chapter(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rationales
+                .iter()
+                .filter(|rationale| {
+                    rationale.contains("review question: is this the right surface to expose?")
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]
