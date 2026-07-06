@@ -4,6 +4,17 @@
 
 ### Added
 
+- Zen chapter cards size to the terminal (up to ~100 cols instead of
+  a fixed 72) and `d` expands a truncated curated brief in place,
+  with an explicit `… d expands the brief` affordance when clipped.
+- `comments add`/`comments edit` warn on stderr when the target line
+  is outside the current diff ("comment stored without an excerpt
+  anchor — use 'comments edit' to fix") instead of silently storing
+  an anchorless comment.
+- Footer refresh notices ellipsize width-aware and append
+  `· ctrl-a for detail` when content was dropped; activity-feed lines
+  ellipsize instead of hard-clipping.
+
 - Uncurated zen tours the stack change by change: one chapter per
   stack change with the commit message (title and body) as the intent
   card, stops grouped under the change that owns them, and derived
@@ -146,6 +157,30 @@
 
 ### Fixed
 
+- Zen glance "mark all viewed" now actually persists: marks made
+  while zen had retargeted the session to a per-change diff were
+  dropped when the tour restored the home target.
+- The `I` operation picker fits small panes: preview and key-hint
+  lines are always visible (the op list shrinks instead), and long
+  op descriptions middle-truncate to exactly one aligned row (no
+  more wrapped 128-hex op ids).
+- `gander handoff --format json` defaults to the same action-item
+  selection as the markdown handoff (open tasks + unresolved
+  comments); completed tasks no longer pad `action_items`.
+- `tasks add --comment <id>` resolves prefixes to canonical full
+  comment ids and rejects unknown or ambiguous references instead of
+  storing dangling raw strings.
+- "New public API" detection is symbol-scoped: a brand-new `pub fn`
+  inside a mixed hunk is labeled new instead of "signature changed"
+  with a nonsense review question.
+- Stack stepping no longer offers the empty, undescribed working
+  copy as a dead final position.
+- A never-viewed file that changes and then reverts clears its `±`
+  freshness badge (revert detection previously covered only
+  viewed/caught-up files), and catching up or viewing a file always
+  clears a stale `±`.
+- `gander chunks lines` emits honest headers for coalesced adjacent
+  hunks instead of only the first hunk's `@@` line.
 - `gander comments set-state` no longer panics (clap arg-id
   collision with the global state-file flag).
 - Mutating verbs (`tasks complete/reopen`, `comments

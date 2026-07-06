@@ -20,18 +20,18 @@ The loop:
 
 Scores are 1–5 per rubric dimension (see `eval/rubric.md`).
 
-| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | 2026-07-05 round 2 | 2026-07-05 round 3 | 2026-07-05 round 4 | Target |
-| ----------------------------- | ------------------- | ------------------ | --------------------- | ------------------ | ------------------ | ------------------ | ------ |
-| CLI discoverability           | 3                   | 4                  | —                     | —                  | —                  | 3⁴                 | 4      |
-| TUI review ergonomics         | 4                   | —                  | 4                     | **2**¹             | 3.5³               | 4⁴                 | 4.5    |
-| CLI output quality for agents | 3                   | 5                  | —                     | —                  | —                  | 4⁴                 | 4      |
-| Handoff readiness             | **2**               | **4**              | —                     | —                  | —                  | 3⁴                 | 4      |
-| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3                  | 3³                 | **2**⁴             | 3.5    |
-| Zen usefulness, curated       | 4                   | —                  | 4                     | 3.5¹               | 4³                 | 4⁴                 | 4.5    |
-| Curation protocol ergonomics  | **2**               | —                  | 3                     | 3.5                | 3.5³               | 3.5⁴               | 4      |
-| Watch: freshness / follows @  | 4                   | —                  | —                     | 4²                 | 4³                 | **5** ✓            | 4.5    |
-| Watch: change awareness       | **2**               | —                  | —                     | 3²                 | 4³                 | **4** ✓            | 4      |
-| Pane-worthiness overall       | 3                   | —                  | —                     | 3.5²               | 3³                 | 4⁴                 | 4.5    |
+| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | 2026-07-05 round 2 | 2026-07-05 round 3 | 2026-07-05 round 4 | 2026-07-05 round 5 | Target |
+| ----------------------------- | ------------------- | ------------------ | --------------------- | ------------------ | ------------------ | ------------------ | ------------------ | ------ |
+| CLI discoverability           | 3                   | 4                  | —                     | —                  | —                  | 3⁴                 | **4** ✓            | 4      |
+| TUI review ergonomics         | 4                   | —                  | 4                     | **2**¹             | 3.5³               | 4⁴                 | 4⁵                 | 4.5    |
+| CLI output quality for agents | 3                   | 5                  | —                     | —                  | —                  | 4⁴                 | **4** ✓            | 4      |
+| Handoff readiness             | **2**               | **4**              | —                     | —                  | —                  | 3⁴                 | **4** ✓            | 4      |
+| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3                  | 3³                 | **2**⁴             | 3⁵                 | 3.5    |
+| Zen usefulness, curated       | 4                   | —                  | 4                     | 3.5¹               | 4³                 | 4⁴                 | 3.5⁵               | 4.5    |
+| Curation protocol ergonomics  | **2**               | —                  | 3                     | 3.5                | 3.5³               | 3.5⁴               | **4** ✓            | 4      |
+| Watch: freshness / follows @  | 4                   | —                  | —                     | 4²                 | 4³                 | **5** ✓            | **5** ✓            | 4.5    |
+| Watch: change awareness       | **2**               | —                  | —                     | 3²                 | 4³                 | **4** ✓            | **4** ✓            | 4      |
+| Pane-worthiness overall       | 3                   | —                  | —                     | 3.5²               | 3³                 | 4⁴                 | 4⁵                 | 4.5    |
 
 ¹ Round-2 scenario 2 hit the state-erasure blocker and the
 chapter-stats bug; both (plus the launch-target and chooser majors)
@@ -56,6 +56,14 @@ discoverability 4→3 on empty help descriptions; handoff 3 on
 markdown/JSON disagreement and a `set-state` panic blocker. The
 blocker and all seven round-4 majors were fixed the same day (W8
 below) — the scores predate those fixes.
+⁵ Round-5 re-runs (all three scenarios, reports in
+`eval/reports/2026-07-05-round5-recheck/`) graded the post-W8 build.
+Six of ten dimensions now at/above target. All round-4 fixes
+verified working (set-state, clean errors, round-trips, base-scoped
+stack, change-scoped facts, `chunks lines` agreeing with the
+validator, op-log clean, comment anchoring hints). Zen curated dipped
+4→3.5 on brief truncation; the six round-5 majors were fixed the
+same day (W9 below) — the scores predate those fixes.
 
 Baseline reports: `eval/reports/2026-07-05-baseline/`. Post-W1 recheck of
 scenario 1: `eval/reports/2026-07-05-w1-recheck/`. Post-W2/W3 recheck of
@@ -64,7 +72,8 @@ scenario 2: `eval/reports/2026-07-05-w2w3-recheck/`. Round-2 reports
 re-run): `eval/reports/2026-07-05-w2w3b-w4-recheck/`. Round-3 re-runs of
 scenarios 2 and 3: `eval/reports/2026-07-05-round3-recheck/`. Round-4
 re-runs of all three scenarios:
-`eval/reports/2026-07-05-round4-recheck/`.
+`eval/reports/2026-07-05-round4-recheck/`. Round-5 re-runs of all
+three scenarios: `eval/reports/2026-07-05-round5-recheck/`.
 
 ## Baseline findings (2026-07-05)
 
@@ -384,16 +393,62 @@ Open:
       TUI with no visible way to finalize; label or flow needs
       rethinking (comment states are draft/todo/resolved — surface
       them).
-- [ ] Curated zen: repetition between chapter cards and stops;
-      chapter card text hard-wraps mid-sentence ("keeps a / band").
-- [ ] Activity feed lines truncate at pane width with no wrap/expand;
-      jj operation names could label feed events.
+- [ ] Curated zen: repetition between chapter cards and stops.
+- [ ] Activity feed: jj operation names could label feed events.
 - [ ] `chunks set` validation errors don't mention `chunks lines` as
       the way to discover valid ranges.
 - [ ] Key overloading noted by evaluators (same key different
       meanings across panes); audit once bindings settle.
 - [ ] tree-sitter parses diff fragments standalone so `errors=true`
       is common; revisit if syntax quality complaints surface.
+
+### W9 — Round-5 findings (from the fifth eval round)
+
+Majors, fixed same day:
+
+- [x] Zen glance "mark all viewed" didn't stick: marks were applied
+      to the per-change retargeted session and dropped when the tour
+      restored the home target; marking now re-applies against the
+      restored session through the standard viewed path.
+      *(2026-07-05)*
+- [x] Curated brief text silently truncated on a fixed 72-col
+      chapter card: cards now size to the terminal (≤ ~100 cols) and
+      `d` expands the brief, with an explicit affordance when
+      clipped. *(2026-07-05)*
+- [x] The op-picker preview and hint lines were invisible at 50-row
+      pane height (the geometry watch mode targets): fixed-line
+      accounting corrected, ops render as exactly one aligned row,
+      list shrinks before hints clip; render tests at 50 and 30
+      rows. *(2026-07-05)*
+- [x] Default markdown handoff ≠ default JSON handoff (JSON included
+      done tasks): JSON now defaults to the markdown selection —
+      open tasks + unresolved comments. *(2026-07-05)*
+- [x] Task→comment links stored unvalidated raw strings (dangling
+      ids, prefixes): links resolve to canonical full ids; unknown
+      and ambiguous references are clean errors (CLI + MCP).
+      *(2026-07-05)*
+- [x] Comments with an out-of-diff `--line` persisted silently
+      without an anchor: `comments add`/`edit` now warn on stderr
+      and point at `comments edit`. *(2026-07-05)*
+
+Minors/papercuts fixed same day: symbol-scoped "new public API"
+labels (new fns in mixed hunks no longer read "signature changed"),
+empty undescribed `@` removed from stack positions, stale `±` clears
+when a never-viewed file reverts (and on catch-up/view), footer and
+activity-feed lines ellipsize with a `ctrl-a for detail` cue,
+`chunks lines` coalesced-hunk headers are honest.
+
+Open:
+
+- [ ] Human-readable output for list commands: everything except
+      `hunks show --format diff` is JSON-only (scored "output
+      quality for humans" 3); range-comment echoes dump ~70 lines.
+- [ ] `hunks list` positional-argument trap and a blank `--file`
+      help string; global/domain flags interleave confusingly in
+      `--help`.
+- [ ] Comment-backed tasks emit `title: null` in JSON artifacts.
+- [ ] No persistent current-`@` identity chip in the TUI chrome for
+      ambient use.
 
 ### W5 — Web (parked)
 
@@ -477,3 +532,16 @@ export should inherit W2's tour content. Revisit after W4.
   W8. Next re-run grades the post-W8 build — scenarios 1 and 2 are
   the ones with headroom (discoverability help gaps now filled,
   set-state fixed, zen facts change-scoped).
+- **2026-07-05** — Round-5 re-runs of all three scenarios against the
+  post-W8 build (reports in
+  `eval/reports/2026-07-05-round5-recheck/`): six of ten dimensions
+  at/above target — discoverability 3→4 ✓, agent output 4 ✓, handoff
+  3→4 ✓, curation ergonomics 3.5→4 ✓, watch 5/4 held ✓✓. Every W8
+  fix verified working by fresh evaluators. New majors: zen glance
+  marks not persisting, curated brief truncation (curated 4→3.5),
+  op-picker hints invisible at 50 rows, handoff JSON/markdown default
+  mismatch, dangling task→comment links, silent anchorless comments —
+  all six fixed the same day (W9), plus the round's minors.
+  Remaining below target: TUI 4/4.5, zen uncurated 3/3.5, curated
+  3.5/4.5, pane-worthiness 4/4.5 — zen curated polish and human
+  output formats are the highest-leverage opens.
