@@ -70,19 +70,38 @@
   the workspace review state with only what that target can see —
   viewed-state entries and comments outside the current diff now
   survive every save.
+- Viewed marks are persisted per content fingerprint
+  (`viewed_fingerprints` per path; legacy state files still load), so
+  visiting a target where the same path diffs differently no longer
+  clobbers the mark, and the viewed-but-changed (`~`) state survives
+  refreshes durably.
 - Live watch actually refreshes again: the repo-poll fingerprint
   template used `if(self, …)`, which real jj rejects, so the 2s poll
   failed silently on every tick. Persistent poll failures now surface
   a footer error (and a recovery notice) instead of freezing behind
   the `following @` indicator.
+- Read-only popups (activity feed, help) no longer pause live refresh;
+  popups that do pause show a "refresh paused" hint.
+- `}`/`{` changed-hunk navigation cycles within and across files
+  instead of sticking on the first changed hunk, and freshness badges
+  no longer decay when the file-tree cursor merely passes a file —
+  only when its diff is focused or it is marked viewed.
+- Activity events name only the files that changed in that refresh,
+  with honest churn deltas ("appeared" for new files) instead of
+  re-listing every un-reviewed file with whole-file totals; timestamps
+  render in local time; help documents `ctrl-a`, `}`/`{`, and the
+  freshness badge legend.
 - Zen chapter cards no longer repeat session-global stats on every
-  chapter: derived facts are scoped to the chapter's own files, or
-  omitted when they cannot be honestly attributed.
+  chapter: derived facts are scoped to the chapter's own files
+  (labelled `stops:`), or omitted when they cannot be honestly
+  attributed.
 - `t` returns to the target the TUI was launched with (e.g. `-b main`)
   instead of hard-coded `trunk()..@`, so stack stepping always has a
   way home.
 - The target chooser ranks exact bookmark matches (then prefix
-  matches) above fuzzy matches, so typing `main` selects `main`.
+  matches) above fuzzy matches, snaps the selection cursor to the top
+  match as you type, and drops scattered fuzzy matches when a better
+  tier exists — typing `main` and pressing Enter selects `main`.
 - The prior-operation catch-up flow (`I`) refreshes the diff before
   comparing, and its notice states exactly how many unchanged files
   were marked viewed vs changed files needing re-review.

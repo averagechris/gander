@@ -20,22 +20,32 @@ The loop:
 
 Scores are 1–5 per rubric dimension (see `eval/rubric.md`).
 
-| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | Target |
-| ----------------------------- | ------------------- | ------------------ | --------------------- | ------ |
-| CLI discoverability           | 3                   | 4                  | —                     | 4      |
-| TUI review ergonomics         | 4                   | —                  | 4                     | 4.5    |
-| CLI output quality for agents | 3                   | 5                  | —                     | 4      |
-| Handoff readiness             | **2**               | **4**              | —                     | 4      |
-| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3.5    |
-| Zen usefulness, curated       | 4                   | —                  | 4                     | 4.5    |
-| Curation protocol ergonomics  | **2**               | —                  | 3                     | 4      |
-| Watch: freshness / follows @  | 4                   | —                  | —                     | 4.5    |
-| Watch: change awareness       | **2**               | —                  | —                     | 4      |
-| Pane-worthiness overall       | 3                   | —                  | —                     | 4.5    |
+| Dimension                     | 2026-07-05 baseline | 2026-07-05 post-W1 | 2026-07-05 post-W2/W3 | 2026-07-05 round 2 | Target |
+| ----------------------------- | ------------------- | ------------------ | --------------------- | ------------------ | ------ |
+| CLI discoverability           | 3                   | 4                  | —                     | —                  | 4      |
+| TUI review ergonomics         | 4                   | —                  | 4                     | **2**¹             | 4.5    |
+| CLI output quality for agents | 3                   | 5                  | —                     | —                  | 4      |
+| Handoff readiness             | **2**               | **4**              | —                     | —                  | 4      |
+| Zen usefulness, uncurated     | **2**               | —                  | 3                     | 3                  | 3.5    |
+| Zen usefulness, curated       | 4                   | —                  | 4                     | 3.5¹               | 4.5    |
+| Curation protocol ergonomics  | **2**               | —                  | 3                     | 3.5                | 4      |
+| Watch: freshness / follows @  | 4                   | —                  | —                     | 4²                 | 4.5    |
+| Watch: change awareness       | **2**               | —                  | —                     | 3²                 | 4      |
+| Pane-worthiness overall       | 3                   | —                  | —                     | 3.5²               | 4.5    |
+
+¹ Round-2 scenario 2 hit the state-erasure blocker and the
+chapter-stats bug; both (plus the launch-target and chooser majors)
+were fixed and re-verified the same day — the scores predate the fixes.
+² Scenario 3 re-run after the fingerprint-template fix; the residual
+majors it found (stuck `}` navigation, badge decay, popup-paused
+polling, noisy per-file events) were fixed and re-verified the same
+day.
 
 Baseline reports: `eval/reports/2026-07-05-baseline/`. Post-W1 recheck of
 scenario 1: `eval/reports/2026-07-05-w1-recheck/`. Post-W2/W3 recheck of
-scenario 2: `eval/reports/2026-07-05-w2w3-recheck/`.
+scenario 2: `eval/reports/2026-07-05-w2w3-recheck/`. Round-2 reports
+(scenario 2 full run + fix verification, scenario 3 broken-build run +
+re-run): `eval/reports/2026-07-05-w2w3b-w4-recheck/`.
 
 ## Baseline findings (2026-07-05)
 
@@ -188,12 +198,24 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       tests could not catch it). Fixed with `current_working_copy`;
       persistent poll failures now surface a footer error and a
       recovery notice instead of freezing silently. *(2026-07-05)*
-- [ ] Round-2 gap: popups block polling by design, so leaving the
-      activity feed (`ctrl-a`) open freezes the very updates it shows.
-      Consider allowing refresh under read-only popups.
+- [x] Round-2 gap: popups block polling by design, so leaving the
+      activity feed (`ctrl-a`) open froze the very updates it shows.
+      Read-only popups (activity, help) now refresh live; editing
+      popups show a "refresh paused" hint. *(2026-07-05)*
 - [ ] Round-2 gap: `I` catch-up marks never-viewed files as viewed when
       unchanged since the op — the notice copy is now honest, but
       consider distinguishing "unchanged since op" from "reviewed".
+- [x] Round-3 fix: `}`/`{` changed-hunk navigation got stuck on the
+      first hunk; now cycles within and across files and wraps.
+      *(2026-07-05)*
+- [x] Round-3 fix: freshness badges decayed on mere file-tree
+      selection; "looked" now means focusing the file's diff or marking
+      it viewed. *(2026-07-05)*
+- [x] Round-3 fix: activity events re-listed every un-reviewed file
+      with whole-file churn on each refresh; events now name only the
+      files that changed in that refresh, with honest churn deltas and
+      local timestamps; help documents `ctrl-a`, `}`/`{`, and the badge
+      legend. *(2026-07-05)*
 
 ### W6 — Round-2 trust fixes (from the second eval round)
 
@@ -208,6 +230,17 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       hard-coded `trunk()..@`; chooser ranks exact bookmark matches
       first; `I` op-compare refreshes the diff before comparing and
       reports accurate counts. *(2026-07-05)*
+- [x] Round-3 (fix-verification residuals): viewed marks are now
+      persisted per content fingerprint (`viewed_fingerprints` set per
+      path, legacy state honored), so visiting a target where the same
+      path diffs differently no longer clobbers the mark, and the `~`
+      viewed-stale state survives refreshes durably. *(2026-07-05)*
+- [x] Round-3: chooser selection cursor snaps to the top-ranked match
+      when the filter changes (Enter now targets what `›` points at),
+      and scattered fuzzy matches are dropped when an exact/prefix
+      match exists. Zen derived chapter lines carry a `stops:` scope
+      label so the two churn figures on a card read as intended.
+      *(2026-07-05)*
 
 ### W5 — Web (parked)
 
@@ -250,5 +283,12 @@ export should inherit W2's tour content. Revisit after W4.
   Scenario 2 scored TUI 2 (erasure-driven), zen uncurated 3, curated
   3.5, curation ergonomics 3.5 — evaluator called the chunks CLI +
   incremental updates "genuinely good". All four blockers/majors fixed
-  same day (W6 above); scenario 3 re-run pending against the fixed
-  build.
+  same day (W6 above).
+- **2026-07-05** — Scenario 3 re-run against the fixed build: watch
+  freshness 1→4, change awareness 1→3, pane-worthiness 1.5→3.5. A
+  targeted scenario-2 fix-verification confirmed the erasure fix,
+  chapter scoping, and launch-target return, and surfaced residuals
+  (viewed marks clobbered across targets, chooser cursor stale index,
+  stuck `}` navigation, badge decay, popup-frozen polling, noisy
+  per-file events) — all fixed and manually re-verified the same day
+  (round-3 items above). Next re-run should grade the round-3 build.
