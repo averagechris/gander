@@ -234,6 +234,11 @@ pub struct ReviewFile {
     pub caught_up: bool,
     #[serde(default)]
     pub changed_since_look: bool,
+    /// Fingerprint the file had when `changed_since_look` was first raised.
+    /// If a later refresh returns to this baseline, the freshness badge clears
+    /// even when the file was never explicitly viewed.
+    #[serde(default)]
+    pub changed_since_look_baseline: Option<String>,
     #[serde(default)]
     pub viewed_stale: bool,
     #[serde(default)]
@@ -318,6 +323,7 @@ impl ReviewSession {
                     viewed: false,
                     caught_up: false,
                     changed_since_look: false,
+                    changed_since_look_baseline: None,
                     viewed_stale: false,
                     changed_hunks: BTreeSet::new(),
                     fingerprint: file.fingerprint.clone(),
@@ -403,6 +409,7 @@ impl ReviewSession {
         struct PreviousFile {
             fingerprint: String,
             changed_since_look: bool,
+            changed_since_look_baseline: Option<String>,
             changed_hunks: BTreeSet<usize>,
             hunk_fingerprints: Vec<String>,
             additions: usize,
@@ -419,6 +426,7 @@ impl ReviewSession {
                     PreviousFile {
                         fingerprint: file.fingerprint.clone(),
                         changed_since_look: file.changed_since_look,
+                        changed_since_look_baseline: file.changed_since_look_baseline.clone(),
                         changed_hunks: file.changed_hunks.clone(),
                         hunk_fingerprints: file
                             .diff
@@ -448,6 +456,11 @@ impl ReviewSession {
             let previous = old_files.get(&file.path);
             let file_changed = previous.is_none_or(|old| old.fingerprint != file.fingerprint);
             let carried_file = previous.is_some_and(|old| old.changed_since_look);
+            let baseline = previous.and_then(|old| {
+                old.changed_since_look_baseline
+                    .clone()
+                    .or_else(|| old.changed_since_look.then(|| old.fingerprint.clone()))
+            });
             let carried_hunks = previous
                 .map(|old| old.changed_hunks.clone())
                 .unwrap_or_default();
@@ -455,9 +468,11 @@ impl ReviewSession {
                 .map(|old| old.hunk_fingerprints.clone())
                 .unwrap_or_default();
             if file_changed {
+                let reverted_to_baseline = baseline.as_ref() == Some(&file.fingerprint);
                 let reverted_to_seen = previous.is_some()
                     && (file.viewed
                         || file.caught_up
+                        || reverted_to_baseline
                         || self.persisted_files.get(&file.path).is_some_and(|saved| {
                             saved.is_viewed_fingerprint(&file.fingerprint)
                                 || saved.is_caught_up_fingerprint(&file.fingerprint)
@@ -474,15 +489,22 @@ impl ReviewSession {
                     reverted_to_seen,
                 });
             }
+            let reverted_to_baseline = baseline.as_ref() == Some(&file.fingerprint);
             let reverted_to_seen = file_changed
                 && previous.is_some()
                 && (file.viewed
                     || file.caught_up
+                    || reverted_to_baseline
                     || self.persisted_files.get(&file.path).is_some_and(|saved| {
                         saved.is_viewed_fingerprint(&file.fingerprint)
                             || saved.is_caught_up_fingerprint(&file.fingerprint)
                     }));
             file.changed_since_look = (carried_file || file_changed) && !reverted_to_seen;
+            file.changed_since_look_baseline = if file.changed_since_look {
+                baseline.or_else(|| previous.map(|old| old.fingerprint.clone()))
+            } else {
+                None
+            };
             file.changed_hunks = carried_hunks;
             for (index, fingerprint) in new_hunks.iter().enumerate() {
                 if !old_hunks.iter().any(|old| old == fingerprint) {
@@ -1108,6 +1130,8 @@ impl ReviewSession {
             file.viewed = !file.viewed;
             file.caught_up = false;
             file.changed_since_look = false;
+            file.changed_since_look_baseline = None;
+            file.changed_since_look_baseline = None;
             file.changed_hunks.clear();
             file.viewed_stale = false;
         }
@@ -1121,6 +1145,7 @@ impl ReviewSession {
             file.viewed = true;
             file.caught_up = false;
             file.changed_since_look = false;
+            file.changed_since_look_baseline = None;
             file.changed_hunks.clear();
             file.viewed_stale = false;
         }
@@ -1135,6 +1160,7 @@ impl ReviewSession {
             file.viewed = true;
             file.caught_up = false;
             file.changed_since_look = false;
+            file.changed_since_look_baseline = None;
             file.changed_hunks.clear();
             file.viewed_stale = false;
         }
@@ -1147,6 +1173,7 @@ impl ReviewSession {
                 file.viewed = true;
                 file.caught_up = false;
                 file.changed_since_look = false;
+                file.changed_since_look_baseline = None;
                 file.changed_hunks.clear();
                 file.viewed_stale = false;
             }
@@ -1172,9 +1199,13 @@ impl ReviewSession {
             if prior_fingerprints.get(&file.path) == Some(&file.fingerprint) {
                 if file.viewed {
                     file.caught_up = false;
+                    file.changed_since_look = false;
+                    file.changed_since_look_baseline = None;
                     already_viewed += 1;
                 } else {
                     file.caught_up = true;
+                    file.changed_since_look = false;
+                    file.changed_since_look_baseline = None;
                     caught_up += 1;
                 }
             } else {
@@ -2220,6 +2251,30 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn refresh_revert_to_unviewed_baseline_clears_freshness_badge() {
+        let mut session = session();
+        assert!(!session.files[0].viewed);
+
+        let changed = DiffSet::parse(
+            "diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+newer\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), changed);
+        assert!(session.files[0].changed_since_look);
+        assert!(session.files[0].changed_since_look_baseline.is_some());
+
+        let reverted = DiffSet::parse(
+            "diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), reverted);
+
+        assert!(!session.files[0].changed_since_look);
+        assert!(session.files[0].changed_since_look_baseline.is_none());
+        assert!(session.last_refresh_changes[0].reverted_to_seen);
+    }
+
+    #[test]
     fn apply_state_files_marks_viewed_mismatch_stale() {
         let mut state = ReviewState::default();
         state.files.insert(
@@ -2475,6 +2530,8 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn incremental_review_marks_never_viewed_unchanged_caught_up() {
         let mut session = three_file_session();
+        session.files[0].changed_since_look = true;
+        session.files[0].changed_since_look_baseline = Some("baseline".to_owned());
         let mut prior = BTreeMap::new();
         prior.insert("src/a.rs".to_owned(), session.files[0].fingerprint.clone());
 
@@ -2483,6 +2540,8 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(counts, (1, 0, 2));
         assert!(!session.files[0].viewed);
         assert!(session.files[0].caught_up);
+        assert!(!session.files[0].changed_since_look);
+        assert!(session.files[0].changed_since_look_baseline.is_none());
     }
 
     #[test]

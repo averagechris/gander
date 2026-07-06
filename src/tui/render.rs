@@ -1288,9 +1288,13 @@ fn draw_footer(
             UiNoticeLevel::Info => ("info", Style::default().fg(Color::Blue)),
             UiNoticeLevel::Error => ("error", Style::default().fg(Color::Red)),
         };
+        let message_width = area.width.saturating_sub((label.len() + 2) as u16);
         lines[1] = Line::from(vec![
             Span::styled(format!("{label}: "), style.add_modifier(Modifier::BOLD)),
-            Span::styled(notice.message.clone(), style),
+            Span::styled(
+                notice_message_for_width(&notice.message, message_width),
+                style,
+            ),
         ]);
     }
     frame.render_widget(
@@ -1860,7 +1864,9 @@ fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Chun
     frame.render_widget(Clear, popup);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
-    let fixed_lines = 3usize;
+    // Header + spacer + live preview + key hints. The operation list must
+    // shrink before these footer lines disappear at side-pane heights.
+    let fixed_lines = 4usize;
     let list_height = inner_height.saturating_sub(fixed_lines).max(1);
     let visible_window = picker_visible_window(list.selected, list.rows.len(), list_height);
 
@@ -3194,13 +3200,20 @@ fn draw_operation_picker_popup(
                     } else {
                         &operation.description
                     };
+                    let prefix_width = 1 + 1 + 14 + 18;
+                    let description_width = popup
+                        .width
+                        .saturating_sub(2)
+                        .saturating_sub(prefix_width)
+                        .max(1) as usize;
+                    let description = truncate_middle(description, description_width);
                     Line::from(vec![
                         Span::styled(format!("{marker} {:<14}", operation.operation_id), style),
                         Span::styled(
                             format!("{:<18}", operation.time),
                             Style::default().fg(Color::Cyan),
                         ),
-                        Span::styled(description.to_owned(), style),
+                        Span::styled(description, style),
                     ])
                 }),
         );
@@ -3225,13 +3238,11 @@ fn draw_operation_picker_popup(
     )));
 
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("prior operations"),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("prior operations"),
+        ),
         popup,
     );
 }
@@ -3615,7 +3626,10 @@ fn draw_activity_popup(
             ListItem::new(Line::from(vec![
                 Span::styled(time, Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
-                Span::raw(message),
+                Span::raw(truncate_tail(
+                    &message,
+                    popup.width.saturating_sub(16) as usize,
+                )),
             ]))
         })
         .collect();
@@ -3632,6 +3646,18 @@ fn draw_activity_popup(
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, popup, &mut list_state);
+}
+
+fn notice_message_for_width(message: &str, width: u16) -> String {
+    const CUE: &str = " · ctrl-a for detail";
+    let width = width as usize;
+    if message.width() <= width {
+        return message.to_owned();
+    }
+    if width <= CUE.width() + 1 {
+        return truncate_tail(message, width);
+    }
+    format!("{}{}", truncate_tail(message, width - CUE.width()), CUE)
 }
 
 fn draw_walkthrough_list_popup(
@@ -4390,6 +4416,61 @@ diff --git a/README.md b/README.md
         ]));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn operation_picker_keeps_preview_and_hints_visible_at_watch_heights() {
+        let session = snapshot_session("");
+        let long_id = "abcdef0123456789".repeat(8);
+        let mut picker = OperationPickerState::new(
+            (0..40)
+                .map(|index| crate::jj::JjOperationSummary {
+                    operation_id: format!("op{index:03}"),
+                    time: "moments ago".to_owned(),
+                    description: format!("undo operation {long_id} with a long raw id"),
+                })
+                .collect(),
+        );
+        picker.preview =
+            Some("will mark 5 caught up · 1 already viewed · 1 need re-review".to_owned());
+        let mode = Mode::OperationPicker(picker);
+
+        for height in [50, 30] {
+            let rendered = render_tui_text(&session, &mode, 200, height);
+            assert!(rendered.contains("will mark 5 caught up"));
+            assert!(rendered.contains("↑/↓ or n/e move · enter apply · esc cancel"));
+        }
+    }
+
+    #[test]
+    fn operation_picker_truncates_long_descriptions_to_one_row() {
+        let session = snapshot_session("");
+        let long_id = "abcdef0123456789".repeat(8);
+        let mut picker = OperationPickerState::new(vec![crate::jj::JjOperationSummary {
+            operation_id: "op000".to_owned(),
+            time: "moments ago".to_owned(),
+            description: format!("undo operation {long_id} with a long raw id"),
+        }]);
+        picker.preview = Some("will mark 1 caught up".to_owned());
+
+        let rendered = render_tui_text(&session, &Mode::OperationPicker(picker), 100, 24);
+        assert_eq!(rendered.matches("op000").count(), 1);
+        assert!(rendered.contains('…'));
+    }
+
+    #[test]
+    fn long_footer_notices_ellipsize_with_activity_cue() {
+        let session = snapshot_session("");
+        let tui_state = TuiState {
+            notice: Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "repository changed — change abcdef updated · src/config.rs updated (+1 −0) · tests/basic.rs updated (+6 −0)".to_owned(),
+            }),
+            ..TuiState::default()
+        };
+
+        let rendered = render_tui_text_with_state(&session, &Mode::Normal, &tui_state, 80, 18);
+        assert!(rendered.contains("… · ctrl-a for detail"));
     }
 
     #[test]
