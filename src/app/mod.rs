@@ -138,6 +138,9 @@ pub struct RefreshedFileChange {
     pub is_new: bool,
     pub additions_delta: i64,
     pub deletions_delta: i64,
+    /// This file had already been reviewed (viewed or caught up) before the
+    /// refresh changed its fingerprint, so the new diff needs re-review.
+    pub was_reviewed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -396,6 +399,8 @@ impl ReviewSession {
             hunk_fingerprints: Vec<String>,
             additions: usize,
             deletions: usize,
+            viewed: bool,
+            caught_up: bool,
         }
         let old_files: BTreeMap<String, PreviousFile> = self
             .files
@@ -415,6 +420,8 @@ impl ReviewSession {
                             .collect(),
                         additions: file.diff.additions,
                         deletions: file.diff.deletions,
+                        viewed: file.viewed,
+                        caught_up: file.caught_up,
                     },
                 )
             })
@@ -447,6 +454,7 @@ impl ReviewSession {
                         - previous.map_or(0, |old| old.additions as i64),
                     deletions_delta: file.diff.deletions as i64
                         - previous.map_or(0, |old| old.deletions as i64),
+                    was_reviewed: previous.is_some_and(|old| old.viewed || old.caught_up),
                 });
             }
             file.changed_since_look = carried_file || file_changed;

@@ -822,13 +822,23 @@ fn refresh_current_target(
             } else {
                 format!(" (+{added} −{removed})")
             };
-            if change.is_new {
-                format!("{} appeared{churn}", change.path)
+            let rereview = if change.was_reviewed {
+                " — was viewed, needs re-review"
             } else {
-                format!("{} updated{churn}", change.path)
+                ""
+            };
+            if change.is_new {
+                format!("{} appeared{churn}{rereview}", change.path)
+            } else {
+                format!("{} updated{churn}{rereview}", change.path)
             }
         })
         .collect::<Vec<_>>();
+    let reviewed_changed = session
+        .last_refresh_changes
+        .iter()
+        .filter(|change| change.was_reviewed)
+        .count();
     events.append(&mut file_events);
     let mut message = if events.is_empty() {
         format!("repository changed — refreshed {}", session.target)
@@ -851,6 +861,16 @@ fn refresh_current_target(
             zen::end(session, &zen);
             message.push_str(" · zen ended (nothing left to walk through)");
         }
+    }
+    if reviewed_changed > 0 {
+        let file_word = if reviewed_changed == 1 {
+            "file"
+        } else {
+            "files"
+        };
+        message.push_str(&format!(
+            " · {reviewed_changed} viewed {file_word} changed — needs re-review"
+        ));
     }
     events.push(message.clone());
     for event in events {
@@ -5097,7 +5117,7 @@ diff --git a/b.rs b/b.rs
 +++ b/a.rs
 @@ -1 +1 @@
 -old
-+new
++newer
 diff --git a/b.rs b/b.rs
 --- a/b.rs
 +++ b/b.rs
@@ -5166,6 +5186,7 @@ diff --git a/c.rs b/c.rs
     #[test]
     fn repo_polling_notice_and_activity_include_specific_events() {
         let mut session = zen_session();
+        session.files[0].viewed = true;
         let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
         let loader = zen_loader(&backend);
         let mut tui_state = TuiState::default();
@@ -5178,6 +5199,7 @@ diff --git a/c.rs b/c.rs
         assert!(notice.contains("@ moved to new"));
         assert!(notice.contains("change new entered range"));
         assert!(notice.contains("change old left range"));
+        assert!(notice.contains("1 viewed file changed — needs re-review"));
         assert!(
             tui_state
                 .activity
@@ -5193,10 +5215,16 @@ diff --git a/c.rs b/c.rs
                 .any(|event| event.message == "c.rs appeared (+1 −1)")
         );
         assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message == "a.rs updated — was viewed, needs re-review")
+        );
+        assert!(
             !tui_state
                 .activity
                 .iter()
-                .any(|event| event.message.starts_with("a.rs"))
+                .any(|event| event.message.starts_with("b.rs"))
         );
     }
 

@@ -149,11 +149,11 @@ impl TreeNode {
             path: parts.join("/"),
             viewed: input.viewed,
         });
-        node.files.sort_by(|left, right| {
-            left.viewed
-                .cmp(&right.viewed)
-                .then_with(|| left.name.cmp(&right.name))
-        });
+        // Keep row positions stable across refreshes and viewed/caught-up state
+        // flips: sibling files are path/name ordered, not badge ordered. New
+        // files may insert alphabetically; existing files do not jump merely
+        // because their review state changed.
+        node.files.sort_by(|left, right| left.name.cmp(&right.name));
     }
 
     fn flatten(
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn sorts_viewed_files_after_unviewed_files() {
+    fn sorts_files_by_path_not_viewed_state() {
         let tree = FileTreeView::build(
             &[
                 input(0, "src/a.rs", true),
@@ -277,7 +277,23 @@ mod tests {
         );
 
         let labels: Vec<_> = tree.rows.iter().map(|row| row.label.as_str()).collect();
-        assert_eq!(labels, ["src", "b.rs", "c.rs", "a.rs"]);
+        assert_eq!(labels, ["src", "a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn file_order_is_stable_when_viewed_state_flips() {
+        let before = FileTreeView::build(
+            &[input(0, "src/a.rs", false), input(1, "src/b.rs", true)],
+            &BTreeSet::new(),
+        );
+        let after = FileTreeView::build(
+            &[input(0, "src/a.rs", true), input(1, "src/b.rs", false)],
+            &BTreeSet::new(),
+        );
+
+        let before_paths: Vec<_> = before.rows.iter().map(|row| row.path.as_str()).collect();
+        let after_paths: Vec<_> = after.rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(before_paths, after_paths);
     }
 
     #[test]

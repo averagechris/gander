@@ -121,7 +121,9 @@ pub(super) fn draw(
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
         Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
         Mode::ViewOptions(state) => draw_view_options_popup(frame, frame.area(), session, state),
-        Mode::CommentInput { editor, .. } => draw_comment_popup(frame, frame.area(), editor),
+        Mode::CommentInput { editor, target } => {
+            draw_comment_popup(frame, frame.area(), session, editor, target, keymap)
+        }
         Mode::Help => draw_help_popup(frame, frame.area(), keymap),
         Mode::Normal => {}
     }
@@ -1546,12 +1548,33 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
     frame.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), columns[1]);
 }
 
-fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &CommentEditor) {
+fn draw_comment_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    editor: &CommentEditor,
+    target: &CommentInputTarget,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(70, 40, area);
     frame.render_widget(Clear, popup);
+    let title = comment_popup_title(session, target, popup.width.saturating_sub(4) as usize);
+    let hint = format!(
+        "{} save · {} cancel",
+        keymap.hint(Action::SubmitComment),
+        keymap.hint(Action::CancelComment)
+    );
     frame.render_widget(
         Paragraph::new(editor.text.clone())
-            .block(Block::default().borders(Borders::ALL).title("comment"))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(Line::from(Span::styled(
+                        hint,
+                        Style::default().fg(Color::DarkGray),
+                    ))),
+            )
             .wrap(Wrap { trim: false }),
         popup,
     );
@@ -1563,6 +1586,36 @@ fn draw_comment_popup(frame: &mut ratatui::Frame<'_>, area: Rect, editor: &Comme
         inner_x.saturating_add(col as u16),
         inner_y.saturating_add(line as u16),
     ));
+}
+
+fn comment_popup_title(
+    session: &ReviewSession,
+    target: &CommentInputTarget,
+    max_width: usize,
+) -> String {
+    let kind = match target {
+        CommentInputTarget::New => "comment",
+        CommentInputTarget::Edit { .. } => "edit comment",
+        CommentInputTarget::AcceptDraft { .. } => "accept draft",
+    };
+    let target_anchor = match target {
+        CommentInputTarget::Edit { id } => session
+            .comments
+            .iter()
+            .find(|comment| &comment.id == id)
+            .and_then(|comment| comment.anchor.clone()),
+        _ => session.selected_comment_anchor(),
+    };
+    let location = target_anchor
+        .map(
+            |anchor| match (anchor.path(), anchor.line(), anchor.end_line()) {
+                (path, Some(line), Some(end)) if end != line => format!("{path}:{line}-{end}"),
+                (path, Some(line), _) => format!("{path}:{line}"),
+                (path, None, _) => path.to_owned(),
+            },
+        )
+        .unwrap_or_else(|| "unanchored".to_owned());
+    truncate_middle(&format!("{kind} · {location}"), max_width)
 }
 
 fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &RevsetInputState) {
@@ -4034,7 +4087,6 @@ diff --git a/README.md b/README.md
 +new title
 "#,
         );
-
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 100, 24));
     }
 
@@ -4106,7 +4158,7 @@ diff --git a/README.md b/README.md
 
     #[test]
     fn tui_snapshot_comment_popup() {
-        let session = snapshot_session(
+        let mut session = snapshot_session(
             r#"diff --git a/src/app.rs b/src/app.rs
 --- a/src/app.rs
 +++ b/src/app.rs
@@ -4115,6 +4167,13 @@ diff --git a/README.md b/README.md
 +new
 "#,
         );
+        session.toggle_focus();
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "new")
+            .unwrap();
+        session.select_diff_row(row);
         let mode = Mode::CommentInput {
             editor: CommentEditor {
                 text: "Looks good\nexcept this line".to_owned(),
