@@ -477,6 +477,10 @@ written back so agents observe the outcome.
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
 It prints the agent profile with action items first, then walkthrough context,
 comments, and full hunks as reference.
+Use `gander handoff --format json` for the structured action schema
+`session`, `action_items`, `walkthrough`, and trailing `reference.hunks`; use
+`gander export json --profile agent` for the full session artifact when you need
+import/archive fidelity rather than a compact implementation handoff.
 
 While the TUI is running it also serves the same protocol on a Unix socket
 (in the workspace runtime dir; see `gander paths`) backed by the **live**

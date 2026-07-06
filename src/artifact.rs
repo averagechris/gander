@@ -111,6 +111,8 @@ pub struct CommentArtifact<'a> {
 pub struct TaskArtifact<'a> {
     pub id: &'a str,
     pub title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<&'a str>,
     pub status: ReviewTaskStatus,
     pub action: ActionIntent,
     pub linked_comment_ids: Vec<&'a str>,
@@ -247,6 +249,7 @@ impl<'a> ReviewArtifact<'a> {
                 .map(|task| TaskArtifact {
                     id: &task.id,
                     title: &task.title,
+                    body: task.body.as_deref(),
                     status: task.status,
                     action: task.action,
                     linked_comment_ids: task.source_comment_id.iter().map(String::as_str).collect(),
@@ -274,6 +277,105 @@ impl<'a> ReviewArtifact<'a> {
                 .collect(),
         }
     }
+}
+
+pub fn render_handoff_json(
+    session: &ReviewSession,
+    options: ArtifactBuildOptions,
+) -> Result<String> {
+    let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
+    let mut items = Vec::new();
+    for task in &artifact.tasks {
+        let linked = task.linked_comment_ids.clone();
+        items.push(serde_json::json!({
+            "id": task.id,
+            "source": "task",
+            "kind": null,
+            "action": task.action,
+            "path": task.target.as_ref().and_then(|t| t.file),
+            "line": task.target.as_ref().and_then(|t| t.line),
+            "excerpt": null,
+            "body": task.body.unwrap_or(task.title),
+            "title": task.title,
+            "state": task.status,
+            "linked_comment_ids": linked,
+            "linked_task_ids": Vec::<&str>::new(),
+        }));
+    }
+    for comment in &artifact.comments {
+        if comment.comment.state == CommentState::Resolved {
+            continue;
+        }
+        let linked_tasks = artifact
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.linked_comment_ids
+                    .iter()
+                    .any(|id| *id == comment.comment.id)
+            })
+            .map(|task| task.id)
+            .collect::<Vec<_>>();
+        items.push(serde_json::json!({
+            "id": comment.comment.id,
+            "source": "comment",
+            "kind": comment.comment.kind,
+            "action": comment.comment.action,
+            "path": comment.comment.path,
+            "line": comment.comment.line,
+            "excerpt": comment.excerpt,
+            "body": comment.comment.body,
+            "state": comment.comment.state,
+            "linked_comment_ids": Vec::<&str>::new(),
+            "linked_task_ids": linked_tasks,
+        }));
+    }
+    let walkthrough = artifact
+        .walkthroughs
+        .iter()
+        .flat_map(|walkthrough| {
+            walkthrough
+                .steps
+                .iter()
+                .enumerate()
+                .map(move |(index, step)| {
+                    serde_json::json!({
+                        "id": step.id,
+                        "order": index + 1,
+                        "title": step.title,
+                        "why": step.why,
+                        "body": step.body,
+                        "target": step.target,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    let hunks = artifact
+        .files
+        .iter()
+        .filter_map(|file| {
+            file.hunks.as_ref().map(|hunks| {
+                serde_json::json!({
+                    "path": file.path,
+                    "hunks": hunks,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "session": {
+            "repo": artifact.repo,
+            "base": artifact.base,
+            "rev": artifact.revision,
+            "generated_at": artifact.generated_at,
+            "id": artifact.session.as_ref().map(|s| s.id),
+            "title": artifact.session.as_ref().and_then(|s| s.title),
+        },
+        "action_items": items,
+        "walkthrough": walkthrough,
+        "reference": { "hunks": hunks },
+    });
+    Ok(serde_json::to_string_pretty(&value)?)
 }
 
 fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::ReviewSession> {
@@ -615,12 +717,13 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
             write_target_suffix(&mut out, target);
         }
         if !task.linked_comment_ids.is_empty() {
-            out.push_str(&format!(
-                "; linked comments: {}",
-                task.linked_comment_ids.join(", ")
-            ));
+            out.push_str("; ");
+            write_linked_comments(&mut out, artifact, &task.linked_comment_ids);
         }
         out.push('\n');
+        if let Some(body) = task.body.filter(|body| !body.trim().is_empty()) {
+            out.push_str(&format!("  Body: {}\n", body.trim()));
+        }
     }
     for comment in artifact
         .comments
@@ -640,6 +743,11 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
         write_comment_location_inline(&mut out, comment.comment);
         out.push_str(" — ");
         out.push_str(comment.comment.body.trim());
+        let linked_tasks = linked_tasks_for_comment(artifact, comment.comment.id.as_str());
+        if !linked_tasks.is_empty() {
+            out.push_str("; linked to task ");
+            out.push_str(&linked_tasks.join(", "));
+        }
         out.push('\n');
         write_excerpt(&mut out, comment.excerpt.as_deref());
     }
@@ -695,6 +803,38 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
         }
     }
     out
+}
+
+fn linked_tasks_for_comment(artifact: &ReviewArtifact<'_>, comment_id: &str) -> Vec<String> {
+    artifact
+        .tasks
+        .iter()
+        .filter(|task| task.linked_comment_ids.contains(&comment_id))
+        .map(|task| task.id.to_owned())
+        .collect()
+}
+
+fn write_linked_comments(out: &mut String, artifact: &ReviewArtifact<'_>, ids: &[&str]) {
+    let labels = ids
+        .iter()
+        .map(|id| {
+            if let Some(comment) = artifact
+                .comments
+                .iter()
+                .find(|comment| comment.comment.id == *id)
+            {
+                let line = comment
+                    .comment
+                    .line
+                    .map(|line| format!(":{line}"))
+                    .unwrap_or_default();
+                format!("linked to comment {id} ({}{})", comment.comment.path, line)
+            } else {
+                format!("linked to comment {id}")
+            }
+        })
+        .collect::<Vec<_>>();
+    out.push_str(&labels.join(", "));
 }
 
 fn write_walkthroughs(out: &mut String, artifact: &ReviewArtifact<'_>) {
@@ -1212,6 +1352,112 @@ mod tests {
             value["walkthroughs"][0]["steps"][0]["target"]["symbol"],
             "parse"
         );
+    }
+
+    #[test]
+    fn handoff_json_is_structured_action_artifact() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            tasks: vec![crate::state::ReviewTask {
+                id: "task-1".to_owned(),
+                title: "Fix parser".to_owned(),
+                body: Some("Handle the edge case.".to_owned()),
+                action: ActionIntent::Fix,
+                source_comment_id: Some("comment-1".to_owned()),
+                target: Some(crate::state::ReviewTarget {
+                    file: Some("a.txt".to_owned()),
+                    line: Some(1),
+                    ..crate::state::ReviewTarget::default()
+                }),
+                ..crate::state::ReviewTask::default()
+            }],
+            walkthroughs: vec![crate::state::Walkthrough {
+                id: "walk-1".to_owned(),
+                steps: vec![crate::state::WalkthroughStep {
+                    id: "step-1".to_owned(),
+                    title: Some("Read parser".to_owned()),
+                    target: crate::state::ReviewTarget {
+                        file: Some("a.txt".to_owned()),
+                        line: Some(1),
+                        ..crate::state::ReviewTarget::default()
+                    },
+                    ..crate::state::WalkthroughStep::default()
+                }],
+                ..crate::state::Walkthrough::default()
+            }],
+            ..crate::state::ReviewSession::default()
+        });
+        let mut session = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+        session.add_comment("Please fix".into());
+        session.comments[0].id = "comment-1".to_owned();
+        session.comments[0].kind = Some(CommentKind::Issue);
+
+        let json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["session"]["base"], "trunk()");
+        assert_eq!(value["action_items"][0]["source"], "task");
+        assert_eq!(value["action_items"][0]["body"], "Handle the edge case.");
+        assert_eq!(value["action_items"][1]["linked_task_ids"][0], "task-1");
+        assert_eq!(value["walkthrough"][0]["id"], "step-1");
+        assert_eq!(value["reference"]["hunks"][0]["path"], "a.txt");
+    }
+
+    #[test]
+    fn agent_markdown_includes_task_bodies_and_explicit_links() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "session-1".to_owned(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".to_owned()),
+                revision: Some("@".to_owned()),
+                ..crate::state::ReviewTarget::default()
+            },
+            tasks: vec![crate::state::ReviewTask {
+                id: "task-1".to_owned(),
+                title: "Fix parser".to_owned(),
+                body: Some("Add regression coverage.".to_owned()),
+                source_comment_id: Some("comment-1".to_owned()),
+                ..crate::state::ReviewTask::default()
+            }],
+            ..crate::state::ReviewSession::default()
+        });
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+        session.add_comment("Please fix".into());
+        session.comments[0].id = "comment-1".to_owned();
+        session.comments[0].kind = Some(CommentKind::Issue);
+        session.comments[0].line = Some(1);
+
+        let markdown = render_artifact_with_profile(
+            &session,
+            ArtifactFormat::Markdown,
+            ArtifactProfile::Agent,
+        )
+        .unwrap();
+        assert!(markdown.contains("Body: Add regression coverage."));
+        assert!(markdown.contains("linked to comment comment-1 (a.txt:1)"));
+        assert!(markdown.contains("linked to task task-1"));
     }
 
     #[test]

@@ -133,12 +133,16 @@ gander paths
 gander summary
 ```
 
-`handoff` is the one-shot agent handoff. It always uses the agent artifact
-profile and defaults to prompt-style Markdown on stdout: action items first,
-walkthrough next, other comments, then full hunks as reference. `--only-open`
-filters the core artifact to unresolved comments and open tasks; `--output`
-writes the rendered handoff without stdout body output; `--copy` copies it to
-the clipboard (pbcopy, wl-copy, xclip, or OSC52 via `/dev/tty`).
+`handoff` is the one-shot actionable prompt for an implementer agent. Markdown
+defaults to action items first, walkthrough next, other comments, then full
+hunks as reference. `handoff --format json` is a stable action artifact shaped
+as `{ "session", "action_items", "walkthrough", "reference" }`: action items
+are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
+`excerpt`, `body`, `state`, and linked task/comment ids. `--only-open` filters
+to unresolved comments and open tasks; `--output` writes without stdout body
+output; `--copy` copies it to the clipboard (pbcopy, wl-copy, xclip, or OSC52
+via `/dev/tty`). Use `export --profile agent` instead when you need the full
+session artifact for import/archive or broad automation.
 
 `export html` writes a self-contained static review page. JSON and Markdown are
 the existing artifact formats; `--profile agent` adds raw excerpts for tools.

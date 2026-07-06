@@ -42,8 +42,8 @@ use crate::{
     app::ReviewSession,
     artifact::{
         ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, OwnedReviewArtifact,
-        import_json_artifact_into_state, render_artifact_with_options, write_artifact,
-        write_artifact_to,
+        import_json_artifact_into_state, render_artifact_with_options, render_handoff_json,
+        write_artifact, write_artifact_to,
     },
     clipboard::copy_to_clipboard,
     config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
@@ -119,6 +119,9 @@ enum Command {
         artifact_output: Option<PathBuf>,
     },
     /// Export the current review as JSON or Markdown.
+    #[command(
+        after_help = "Examples:\n  gander export json --profile agent --output review.json\n      Full session artifact for import/archive or structured automation.\n  gander handoff --copy\n      One-shot actionable prompt for a coding agent."
+    )]
     Export {
         #[arg(value_enum)]
         format: Option<OutputFormat>,
@@ -129,6 +132,10 @@ enum Command {
         profile: Option<OutputProfile>,
     },
     /// Print or copy a prompt-style handoff for a coding agent.
+    #[command(
+        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class task/comment objects with id, source, kind/action, path/line, excerpt, body, state, and linked ids; reference.hunks comes last for diff context.",
+        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export json --profile agent --output review.json\n      Use export for the full session artifact, import/archive, or tooling that needs all review state."
+    )]
     Handoff {
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
@@ -168,7 +175,7 @@ enum Command {
         #[command(subcommand)]
         command: FilesCommand,
     },
-    /// Machine-readable hunk queries for the current review session.
+    /// Hunk queries for the current review session.
     Hunks {
         #[command(subcommand)]
         command: HunksCommand,
@@ -317,8 +324,12 @@ enum HunksCommand {
         #[arg(long)]
         file: Option<String>,
     },
-    /// Show one hunk as JSON by id (`<path>:<index>`, as returned by list).
-    Show { id: String },
+    /// Show one hunk by id (`<path>:<index>`, as returned by list).
+    Show {
+        id: String,
+        #[arg(long, value_enum, default_value_t = HunkShowFormat::Json)]
+        format: HunkShowFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -452,6 +463,12 @@ enum OutputFormat {
 enum HandoffFormat {
     Json,
     Markdown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum HunkShowFormat {
+    Json,
+    Diff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -689,16 +706,17 @@ fn run() -> color_eyre::Result<()> {
             output,
             copy,
         } => {
-            let format = match format {
-                HandoffFormat::Json => ArtifactFormat::Json,
-                HandoffFormat::Markdown => ArtifactFormat::Markdown,
+            let body = match format {
+                HandoffFormat::Json => {
+                    render_handoff_json(&session, ArtifactBuildOptions { only_open })?
+                }
+                HandoffFormat::Markdown => render_artifact_with_options(
+                    &session,
+                    ArtifactFormat::Markdown,
+                    ArtifactProfile::Agent,
+                    ArtifactBuildOptions { only_open },
+                )?,
             };
-            let body = render_artifact_with_options(
-                &session,
-                format,
-                ArtifactProfile::Agent,
-                ArtifactBuildOptions { only_open },
-            )?;
             if let Some(path) = output {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -834,11 +852,18 @@ fn run() -> color_eyre::Result<()> {
             HunksCommand::List { file } => {
                 print_json(&session_hunks_json(&session, file.as_deref()))?
             }
-            HunksCommand::Show { id } => {
-                let hunk = session_hunk_json(&session, &id)
-                    .ok_or_else(|| user_error(format!("unknown hunk id `{id}`")))?;
-                print_json(&hunk)?;
-            }
+            HunksCommand::Show { id, format } => match format {
+                HunkShowFormat::Json => {
+                    let hunk = session_hunk_json(&session, &id)
+                        .ok_or_else(|| user_error(format!("unknown hunk id `{id}`")))?;
+                    print_json(&hunk)?;
+                }
+                HunkShowFormat::Diff => {
+                    let diff = session_hunk_diff(&session, &id)
+                        .ok_or_else(|| user_error(format!("unknown hunk id `{id}`")))?;
+                    print!("{diff}");
+                }
+            },
         },
         Command::Comments { command } => match command {
             CommentsCommand::List => print_json(&session_comments_json(&session))?,
@@ -1431,6 +1456,27 @@ fn session_hunk_json(session: &ReviewSession, id: &str) -> Option<serde_json::Va
         "header": hunk.header,
         "lines": hunk.lines,
     }))
+}
+
+fn session_hunk_diff(session: &ReviewSession, id: &str) -> Option<String> {
+    let (path, index) = id.rsplit_once(':')?;
+    let index: usize = index.parse().ok()?;
+    let file = session.files.iter().find(|file| file.path == path)?;
+    let hunk = file.diff.hunks.get(index)?;
+    let old_path = file.old_path.as_deref().unwrap_or(&file.path);
+    let mut out = format!("--- a/{old_path}\n+++ b/{}\n{}\n", file.path, hunk.header);
+    for line in &hunk.lines {
+        let prefix = match line.kind {
+            crate::diff::DiffLineKind::Added => '+',
+            crate::diff::DiffLineKind::Removed => '-',
+            crate::diff::DiffLineKind::Context => ' ',
+            crate::diff::DiffLineKind::Meta => '\\',
+        };
+        out.push(prefix);
+        out.push_str(&line.text);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 fn session_comments_json(session: &ReviewSession) -> serde_json::Value {
@@ -2051,6 +2097,30 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn hunks_show_parses_diff_format_and_renders_unified_diff() {
+        let cli = Cli::try_parse_from([
+            "gander",
+            "hunks",
+            "show",
+            "src/lib.rs:0",
+            "--format",
+            "diff",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Hunks {
+                command: HunksCommand::Show { format, .. },
+            } => assert_eq!(format, HunkShowFormat::Diff),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let diff = session_hunk_diff(&sample_session(), "src/lib.rs:0").unwrap();
+        assert!(diff.starts_with("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@"));
+        assert!(diff.contains("-"));
+        assert!(diff.contains("+"));
     }
 
     #[test]
