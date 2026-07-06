@@ -299,6 +299,7 @@ fn chaptered_stops(
             anchor,
             (index + 1, total),
             rows.len(),
+            chapter_file_scope(session, &rows, total),
             session,
             stack,
         )));
@@ -314,6 +315,7 @@ fn chapter_card(
     anchor: Option<String>,
     position: (usize, usize),
     stop_count: usize,
+    file_scope: Option<Vec<&FileDiff>>,
     session: &ReviewSession,
     stack: &[JjChangeSummary],
 ) -> ChapterCard {
@@ -346,8 +348,42 @@ fn chapter_card(
         artifacts: brief
             .map(|brief| brief.artifacts.clone())
             .unwrap_or_default(),
-        derived_lines: derived_chapter_lines(session),
+        derived_lines: file_scope
+            .as_deref()
+            .map(|files| derived_chapter_lines(session, files))
+            .unwrap_or_default(),
     }
+}
+
+/// The honest file set for chapter-level derived facts.
+///
+/// A single chapter represents the whole reviewed target (the normal fallback
+/// and one-change case), so session-wide facts remain accurate. Multi-chapter
+/// curated tours only know chapter membership from the chunk parts that formed
+/// that chapter; if those parts do not identify files in the loaded session,
+/// we omit derived facts rather than repeating global numbers on every card.
+fn chapter_file_scope<'a>(
+    session: &'a ReviewSession,
+    rows: &[ChunkRow],
+    total_chapters: usize,
+) -> Option<Vec<&'a FileDiff>> {
+    if total_chapters == 1 {
+        return Some(session.files.iter().map(|file| &file.diff).collect());
+    }
+    let paths: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|row| row.part.as_ref().map(|part| part.path.as_str()))
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let files = session
+        .files
+        .iter()
+        .filter(|file| paths.contains(file.path.as_str()))
+        .map(|file| &file.diff)
+        .collect::<Vec<_>>();
+    (!files.is_empty()).then_some(files)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -401,9 +437,9 @@ fn is_manifest_path(lower: &str) -> bool {
         || lower.ends_with(".json")
 }
 
-fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
+fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<String> {
     let mut counts = [0usize; 4];
-    for file in &session.files {
+    for file in files {
         counts[file_role(&file.path) as usize] += 1;
     }
     let roles = [
@@ -417,18 +453,14 @@ fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
     .map(|(r, n)| format!("{n} {}", r.label()))
     .collect::<Vec<_>>()
     .join(" · ");
-    let additions: usize = session.files.iter().map(|f| f.additions).sum();
-    let deletions: usize = session.files.iter().map(|f| f.deletions).sum();
-    let tests = if session
-        .files
-        .iter()
-        .any(|f| file_role(&f.path) == FileRole::Tests)
-    {
+    let additions: usize = files.iter().map(|f| f.additions).sum();
+    let deletions: usize = files.iter().map(|f| f.deletions).sum();
+    let tests = if files.iter().any(|f| file_role(&f.path) == FileRole::Tests) {
         "tests touched"
     } else {
         "no tests touched"
     };
-    let symbols = top_symbols(session).join(", ");
+    let symbols = top_symbols(session, files).join(", ");
     let mut lines = vec![
         format!("roles: {roles}"),
         format!("churn: +{additions} −{deletions} · {tests}"),
@@ -441,20 +473,15 @@ fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
             }
         ),
     ];
-    let public_api_files = session
-        .files
-        .iter()
-        .filter(|file| public_api_change(&file.diff))
-        .count();
+    let public_api_files = files.iter().filter(|file| public_api_change(file)).count();
     if public_api_files > 0 {
         lines.push(format!(
             "public API: {public_api_files} file(s) change pub signatures"
         ));
     }
-    let error_files = session
-        .files
+    let error_files = files
         .iter()
-        .filter(|file| error_handling_touches(&file.diff) >= 2)
+        .filter(|file| error_handling_touches(file) >= 2)
         .count();
     if error_files > 0 {
         lines.push(format!(
@@ -464,10 +491,10 @@ fn derived_chapter_lines(session: &ReviewSession) -> Vec<String> {
     lines
 }
 
-fn top_symbols(session: &ReviewSession) -> Vec<String> {
+fn top_symbols(session: &ReviewSession, files: &[&FileDiff]) -> Vec<String> {
     let mut out = Vec::new();
-    for file in &session.files {
-        for s in symbols_for_file(session, &file.diff) {
+    for file in files {
+        for s in symbols_for_file(session, file) {
             if !out.contains(&s) {
                 out.push(s);
             }
@@ -1142,6 +1169,92 @@ diff --git a/src/queue.rs b/src/queue.rs
             Some("Builds the follow-up on the first change.")
         );
         assert_eq!(chunk_stop(&zen, 4).title, "third stop");
+    }
+
+    #[test]
+    fn multi_change_chapters_scope_derived_lines_to_their_chunk_files() {
+        let mut session = snapshot_session(
+            r#"diff --git a/src/alpha.rs b/src/alpha.rs
+--- a/src/alpha.rs
++++ b/src/alpha.rs
+@@ -1 +1 @@
+-fn old_alpha() {}
++pub fn alpha() {}
+diff --git a/tests/beta.rs b/tests/beta.rs
+--- a/tests/beta.rs
++++ b/tests/beta.rs
+@@ -1 +1,2 @@
+-fn old_beta() {}
++fn beta_smoke() {}
++panic!("beta");
+"#,
+        );
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![
+                spotlight("s1", "alpha", Some("aaabbbcc"), "src/alpha.rs"),
+                spotlight("s2", "beta", Some("dddeeeff"), "tests/beta.rs"),
+            ],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        let first = chapter(&zen, 0);
+        assert!(first.derived_lines.iter().any(|l| l == "roles: 1 source"));
+        assert!(
+            first
+                .derived_lines
+                .iter()
+                .any(|l| l == "churn: +1 −1 · no tests touched")
+        );
+        assert!(first.derived_lines.iter().any(|l| l.contains("public API")));
+        assert!(!first.derived_lines.iter().any(|l| l == "roles: 1 tests"));
+
+        let second = chapter(&zen, 2);
+        assert!(second.derived_lines.iter().any(|l| l == "roles: 1 tests"));
+        assert!(
+            second
+                .derived_lines
+                .iter()
+                .any(|l| l == "churn: +2 −1 · tests touched")
+        );
+        assert!(
+            !second
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("public API"))
+        );
+    }
+
+    #[test]
+    fn multi_change_chapters_omit_derived_lines_when_files_are_unattributable() {
+        let mut session = snapshot_session(two_file_diff());
+        let mut first = spotlight("s1", "first", Some("aaabbbcc"), "a.rs");
+        first.parts.clear();
+        session.apply_agent_overlay(&AgentOverlay {
+            chunks: vec![first, spotlight("s2", "second", Some("dddeeeff"), "b.rs")],
+            ..Default::default()
+        });
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        assert!(chapter(&zen, 0).derived_lines.is_empty());
+        assert!(!chapter(&zen, 2).derived_lines.is_empty());
+    }
+
+    #[test]
+    fn single_chapter_keeps_session_scoped_derived_lines() {
+        let session = snapshot_session(two_file_diff());
+        let zen = ZenState::new(&session, &[]).unwrap();
+
+        let opener = chapter(&zen, 0);
+        assert!(opener.derived_lines.iter().any(|l| l == "roles: 2 source"));
+        assert!(
+            opener
+                .derived_lines
+                .iter()
+                .any(|l| l == "churn: +2 −2 · no tests touched")
+        );
     }
 
     #[test]
