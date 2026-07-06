@@ -789,14 +789,23 @@ fn refresh_current_target(
     reapply_agent_overlay(session, tui_state);
     let mut events = fingerprint_events(previous_fingerprint, fingerprint);
     let mut file_events = session
-        .files
+        .last_refresh_changes
         .iter()
-        .filter(|file| file.changed_since_look)
-        .map(|file| {
-            format!(
-                "{} updated (+{} −{})",
-                file.path, file.diff.additions, file.diff.deletions
-            )
+        .map(|change| {
+            // Diff-churn growth from this refresh; shrinking diffs (undo,
+            // abandon) just say "updated" rather than negative churn.
+            let added = change.additions_delta.max(0);
+            let removed = change.deletions_delta.max(0);
+            let churn = if added == 0 && removed == 0 {
+                String::new()
+            } else {
+                format!(" (+{added} −{removed})")
+            };
+            if change.is_new {
+                format!("{} appeared{churn}", change.path)
+            } else {
+                format!("{} updated{churn}", change.path)
+            }
         })
         .collect::<Vec<_>>();
     events.append(&mut file_events);
@@ -5150,11 +5159,19 @@ diff --git a/c.rs b/c.rs
                 .iter()
                 .any(|event| event.message == "@ moved to new")
         );
+        // Only the file that actually changed in this refresh is named:
+        // c.rs is new; a.rs/b.rs carried identical content and stay quiet.
         assert!(
             tui_state
                 .activity
                 .iter()
-                .any(|event| { event.message.contains(" updated (+") })
+                .any(|event| event.message == "c.rs appeared (+1 −1)")
+        );
+        assert!(
+            !tui_state
+                .activity
+                .iter()
+                .any(|event| event.message.starts_with("a.rs"))
         );
     }
 

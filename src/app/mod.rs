@@ -124,6 +124,20 @@ pub struct ReviewSession {
     rows_cache: RefCell<DiffRowsCache>,
     viewport_by_path: BTreeMap<String, FileViewport>,
     tree_cursor: Option<TreeRowId>,
+    /// Files whose content changed in the most recent in-place refresh —
+    /// this refresh only, unlike the accumulated `changed_since_look`
+    /// marks. Session-only; feeds the watch activity events.
+    pub last_refresh_changes: Vec<RefreshedFileChange>,
+}
+
+/// One file's content change detected by the most recent in-place refresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshedFileChange {
+    pub path: String,
+    /// The path was not present before this refresh.
+    pub is_new: bool,
+    pub additions_delta: i64,
+    pub deletions_delta: i64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -331,6 +345,7 @@ impl ReviewSession {
             rows_cache: RefCell::new(BTreeMap::new()),
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
+            last_refresh_changes: Vec::new(),
         };
         session.apply_state_files();
         session
@@ -370,28 +385,40 @@ impl ReviewSession {
         let viewports = std::mem::take(&mut self.viewport_by_path);
         let zen_focus = self.zen_focus.take();
         let selected_path = self.selected_file().map(|file| file.path.clone());
-        let old_files: BTreeMap<String, (String, bool, BTreeSet<usize>, Vec<String>)> = self
+        struct PreviousFile {
+            fingerprint: String,
+            changed_since_look: bool,
+            changed_hunks: BTreeSet<usize>,
+            hunk_fingerprints: Vec<String>,
+            additions: usize,
+            deletions: usize,
+        }
+        let old_files: BTreeMap<String, PreviousFile> = self
             .files
             .iter()
             .map(|file| {
                 (
                     file.path.clone(),
-                    (
-                        file.fingerprint.clone(),
-                        file.changed_since_look,
-                        file.changed_hunks.clone(),
-                        file.diff
+                    PreviousFile {
+                        fingerprint: file.fingerprint.clone(),
+                        changed_since_look: file.changed_since_look,
+                        changed_hunks: file.changed_hunks.clone(),
+                        hunk_fingerprints: file
+                            .diff
                             .hunks
                             .iter()
                             .map(|hunk| hunk.content_fingerprint())
                             .collect(),
-                    ),
+                        additions: file.diff.additions,
+                        deletions: file.diff.deletions,
+                    },
                 )
             })
             .collect();
 
         self.replace_diff(target, diff);
 
+        let mut refresh_changes = Vec::new();
         for file in &mut self.files {
             let new_hunks: Vec<String> = file
                 .diff
@@ -399,17 +426,25 @@ impl ReviewSession {
                 .iter()
                 .map(|hunk| hunk.content_fingerprint())
                 .collect();
-            let (file_changed, carried_file, carried_hunks, old_hunks) = old_files
-                .get(&file.path)
-                .map(|(fingerprint, changed, hunks, old_hunks)| {
-                    (
-                        fingerprint != &file.fingerprint,
-                        *changed,
-                        hunks.clone(),
-                        old_hunks.clone(),
-                    )
-                })
-                .unwrap_or((true, false, BTreeSet::new(), Vec::new()));
+            let previous = old_files.get(&file.path);
+            let file_changed = previous.is_none_or(|old| old.fingerprint != file.fingerprint);
+            let carried_file = previous.is_some_and(|old| old.changed_since_look);
+            let carried_hunks = previous
+                .map(|old| old.changed_hunks.clone())
+                .unwrap_or_default();
+            let old_hunks = previous
+                .map(|old| old.hunk_fingerprints.clone())
+                .unwrap_or_default();
+            if file_changed {
+                refresh_changes.push(RefreshedFileChange {
+                    path: file.path.clone(),
+                    is_new: previous.is_none(),
+                    additions_delta: file.diff.additions as i64
+                        - previous.map_or(0, |old| old.additions as i64),
+                    deletions_delta: file.diff.deletions as i64
+                        - previous.map_or(0, |old| old.deletions as i64),
+                });
+            }
             file.changed_since_look = carried_file || file_changed;
             file.changed_hunks = carried_hunks;
             for (index, fingerprint) in new_hunks.iter().enumerate() {
@@ -418,6 +453,7 @@ impl ReviewSession {
                 }
             }
         }
+        self.last_refresh_changes = refresh_changes;
 
         self.file_pane_visible = file_pane_visible;
         self.hide_generated = hide_generated;
