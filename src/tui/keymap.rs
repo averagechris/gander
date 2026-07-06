@@ -88,6 +88,7 @@ pub(super) enum Action {
     MarkWalkthrough,
     CancelRangeComment,
     Comment,
+    CycleCommentState,
     EditComment,
     DeleteComment,
     CommentList,
@@ -260,6 +261,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &config.cancel_range_comment,
         )?;
         add_bindings(&mut bindings, Action::Comment, &config.comment)?;
+        add_bindings(
+            &mut bindings,
+            Action::CycleCommentState,
+            &config.cycle_comment_state,
+        )?;
         add_bindings(&mut bindings, Action::EditComment, &config.edit_comment)?;
         add_bindings(&mut bindings, Action::DeleteComment, &config.delete_comment)?;
         add_bindings(&mut bindings, Action::CommentList, &config.comment_list)?;

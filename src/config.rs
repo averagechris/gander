@@ -243,6 +243,7 @@ pub struct KeybindingsConfig {
     pub mark_walkthrough: Vec<String>,
     pub cancel_range_comment: Vec<String>,
     pub comment: Vec<String>,
+    pub cycle_comment_state: Vec<String>,
     pub edit_comment: Vec<String>,
     pub delete_comment: Vec<String>,
     pub comment_list: Vec<String>,
@@ -425,6 +426,7 @@ struct KeybindingsConfigPatch {
     mark_walkthrough: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
     comment: Option<Vec<String>>,
+    cycle_comment_state: Option<Vec<String>>,
     edit_comment: Option<Vec<String>>,
     delete_comment: Option<Vec<String>>,
     comment_list: Option<Vec<String>>,
@@ -529,6 +531,7 @@ impl Default for KeybindingsConfig {
             mark_walkthrough: keys(["Y"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
             comment: keys(["c"]),
+            cycle_comment_state: keys(["s"]),
             edit_comment: keys(["e"]),
             delete_comment: keys(["x"]),
             comment_list: keys(["C"]),
@@ -768,6 +771,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.mark_walkthrough, patch.mark_walkthrough);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
         apply_optional(&mut self.comment, patch.comment);
+        apply_optional(&mut self.cycle_comment_state, patch.cycle_comment_state);
         apply_optional(&mut self.edit_comment, patch.edit_comment);
         apply_optional(&mut self.delete_comment, patch.delete_comment);
         apply_optional(&mut self.comment_list, patch.comment_list);

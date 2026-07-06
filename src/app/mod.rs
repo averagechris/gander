@@ -581,6 +581,10 @@ impl ReviewSession {
             if let Some(saved) = self.persisted_files.get(&file.path) {
                 file.viewed = saved.is_viewed_fingerprint(&file.fingerprint);
                 file.caught_up = !file.viewed && saved.is_caught_up_fingerprint(&file.fingerprint);
+                if file.caught_up {
+                    file.changed_since_look = false;
+                    file.changed_since_look_baseline = None;
+                }
                 file.viewed_stale =
                     !file.viewed && !file.caught_up && saved.has_any_viewed_fingerprint();
             }

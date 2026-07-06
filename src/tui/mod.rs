@@ -166,6 +166,7 @@ struct TuiState {
     /// fingerprint change for the same target means new work landed and the
     /// review should refresh in place.
     repo_fingerprint: Option<(String, String)>,
+    current_identity_chip: Option<String>,
     activity: VecDeque<ActivityEvent>,
     /// Consecutive fingerprint-poll failures; surfaces a footer warning at
     /// [`FINGERPRINT_FAILURE_NOTICE_THRESHOLD`] so a broken watcher cannot
@@ -774,7 +775,7 @@ fn maybe_refresh_review(
         .map(|(_, fingerprint)| fingerprint.clone());
     tui_state.repo_fingerprint = Some((target_key, fingerprint.clone()));
     match baseline {
-        None => {}
+        None => refresh_identity_chip(review_loader, session, tui_state),
         Some(previous) if previous == fingerprint => {}
         Some(previous) => {
             refresh_current_target(review_loader, session, tui_state, &previous, &fingerprint)
@@ -806,8 +807,14 @@ fn refresh_current_target(
         });
         return;
     }
+    refresh_identity_chip(review_loader, session, tui_state);
     reapply_agent_overlay(session, tui_state);
     let mut events = fingerprint_events(previous_fingerprint, fingerprint);
+    if let Some(op) = latest_operation_description(review_loader, &session.repo) {
+        for event in &mut events {
+            event.push_str(&format!(" · op: {op}"));
+        }
+    }
     let mut file_events = session
         .last_refresh_changes
         .iter()
@@ -865,6 +872,47 @@ fn refresh_current_target(
         level: UiNoticeLevel::Info,
         message,
     });
+}
+
+fn refresh_identity_chip(
+    review_loader: &ReviewLoader<'_>,
+    session: &ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    tui_state.current_identity_chip = review_loader
+        .jj
+        .stack_changes(&session.repo, &session.target)
+        .ok()
+        .and_then(|changes| changes.last().cloned())
+        .map(|change| {
+            let title = change.title().trim();
+            format!(
+                "@ {} {}",
+                short_change_id(&change.change_id),
+                if title.is_empty() {
+                    "(no description)"
+                } else {
+                    title
+                }
+            )
+        });
+}
+
+fn short_change_id(change_id: &str) -> &str {
+    change_id.get(..8).unwrap_or(change_id)
+}
+
+fn latest_operation_description(
+    review_loader: &ReviewLoader<'_>,
+    repo: &std::path::Path,
+) -> Option<String> {
+    review_loader
+        .jj
+        .operations(repo)
+        .ok()
+        .and_then(|ops| ops.into_iter().next())
+        .map(|op| op.description)
+        .filter(|description| !description.trim().is_empty())
 }
 
 fn refresh_file_event(change: &crate::app::RefreshedFileChange) -> String {
@@ -1156,7 +1204,7 @@ fn handle_key_event(
             }
         }
         Mode::Activity(list) => {
-            if handle_activity_key(key, list, keymap, tui_state.activity.len()) {
+            if handle_activity_key(key, list, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1529,6 +1577,21 @@ fn handle_normal_action(
                 editor: CommentEditor::default(),
                 target: CommentInputTarget::New,
             };
+        }
+        Action::CycleCommentState => {
+            if let Some(id) = session.selected_comment().map(|comment| comment.id.clone()) {
+                if let Some(state) = session.cycle_comment_state(&id) {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: format!("comment state: {}", state.label()),
+                    });
+                }
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no comment selected to update".to_owned(),
+                });
+            }
         }
         Action::EditComment => {
             if let Some(comment) = session.selected_comment() {
@@ -2941,9 +3004,11 @@ fn handle_task_list_key(
 fn handle_activity_key(
     key: KeyEvent,
     list: &mut ActivityListState,
+    session: &mut ReviewSession,
     keymap: &KeyMap,
-    len: usize,
+    tui_state: &TuiState,
 ) -> bool {
+    let len = tui_state.activity.len();
     if let Some(action) = keymap.target_picker_action_for(&key) {
         match action {
             Action::TargetPickerMoveDown => list.move_selection(1, len),
@@ -2952,7 +3017,21 @@ fn handle_activity_key(
         }
         return false;
     }
-    matches!(key.code, KeyCode::Esc)
+    match key.code {
+        KeyCode::Esc => true,
+        KeyCode::Enter => {
+            if let Some(event) = tui_state.activity.iter().rev().nth(list.selected)
+                && let Some(index) = session
+                    .files
+                    .iter()
+                    .position(|file| event.message.starts_with(&file.path))
+            {
+                session.select_file_index(index);
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 fn handle_walkthrough_list_key(
@@ -3470,6 +3549,69 @@ mod tests {
                 level: UiNoticeLevel::Info,
                 message: "handoff copied via OSC52 (/dev/tty) (2 action items)".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn inline_comment_state_cycles_from_diff_key() {
+        let mut session =
+            snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n");
+        session.add_comment("draft note".to_owned());
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::CycleCommentState,
+            &mut session,
+            &mut mode,
+            &ReviewLoader {
+                ignore_globs: Vec::new(),
+                generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+                jj: &MockJjBackend::with_diff(Ok(String::new())),
+            },
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(session.comments[0].state, CommentState::Todo);
+        assert_eq!(
+            tui_state.notice.map(|notice| notice.message),
+            Some("comment state: todo".to_owned())
+        );
+    }
+
+    #[test]
+    fn refresh_events_include_latest_operation_description() {
+        let mut session =
+            snapshot_session("diff --git a/queue.rs b/queue.rs\n@@ -1 +1 @@\n-old\n+new\n");
+        let mut backend = MockJjBackend::with_diff(Ok(
+            "diff --git a/queue.rs b/queue.rs\n@@ -1 +1 @@\n-old\n+newer\n".to_owned(),
+        ));
+        backend.operations = vec![crate::jj::JjOperationSummary {
+            operation_id: "abc".to_owned(),
+            time: "now".to_owned(),
+            description: "snapshot working copy".to_owned(),
+        }];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+
+        refresh_current_target(
+            &loader,
+            &mut session,
+            &mut tui_state,
+            "@ old old",
+            "@ new new",
+        );
+
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message.contains("op: snapshot working copy"))
         );
     }
 

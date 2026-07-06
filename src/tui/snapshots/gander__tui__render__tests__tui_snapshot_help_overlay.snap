@@ -20,17 +20,17 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │           ?  this help                          comments                                        │    │
 │     │      ctrl-a  activity feed (live refresh while             c  comment at cursor                 │    │
 │     │open)                                                       r  start/finish range comment        │    │
-│     │      ctrl-g  dismiss range/notice                          e  edit comment                      │    │
-│     │           q  quit (writes artifact)                        x  delete comment                    │    │
-│     │files                                                       C  comment list                      │    │
-│     │         j/k  move in tree                                  X  review tasks                      │    │
-│     │       space  fold/unfold directory                         W  walkthrough panel                 │    │
-│     │  left/right  collapse/expand directory                     Y  mark for walkthrough              │    │
-│     │           /  fuzzy file search                           m/M  next/previous comment             │    │
-│     │           h  hide/show noisy files              targets & jj                                    │    │
-│     │           f  cycle viewed filter                           t  return to launch target           │    │
-│     │         n/N  next/previous unviewed file                   p  compare @-..@                     │    │
-│     │       enter  mark viewed and advance                       b  base/tip chooser                  │    │
+│     │      ctrl-g  dismiss range/notice                          s  cycle comment state               │    │
+│     │           q  quit (writes artifact)                        e  edit comment                      │    │
+│     │files                                                       x  delete comment                    │    │
+│     │         j/k  move in tree                                  C  comment list                      │    │
+│     │       space  fold/unfold directory                         X  review tasks                      │    │
+│     │  left/right  collapse/expand directory                     W  walkthrough panel                 │    │
+│     │           /  fuzzy file search                             Y  mark for walkthrough              │    │
+│     │           h  hide/show noisy files                       m/M  next/previous comment             │    │
+│     │           f  cycle viewed filter                targets & jj                                    │    │
+│     │         n/N  next/previous unviewed file                   t  return to launch target           │    │
+│     │       enter  mark viewed and advance                       p  compare @-..@                     │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @

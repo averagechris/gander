@@ -49,6 +49,30 @@ pub(super) struct UiLayout {
     pub(super) footer: Rect,
 }
 
+struct FooterContext<'a> {
+    mode: &'a Mode,
+    keymap: &'a KeyMap,
+    identity_chip: Option<&'a str>,
+    notice: Option<&'a UiNotice>,
+    zen: Option<&'a ZenState>,
+}
+
+fn footer_context<'a>(
+    mode: &'a Mode,
+    keymap: &'a KeyMap,
+    tui_state: &'a TuiState,
+    notice: Option<&'a UiNotice>,
+    zen: Option<&'a ZenState>,
+) -> FooterContext<'a> {
+    FooterContext {
+        mode,
+        keymap,
+        identity_chip: tui_state.current_identity_chip.as_deref(),
+        notice,
+        zen,
+    }
+}
+
 pub(super) fn draw(
     frame: &mut ratatui::Frame<'_>,
     session: &ReviewSession,
@@ -67,7 +91,12 @@ pub(super) fn draw(
         Some(ZenPhase::Focus) => {
             let body = body_area(frame.area());
             draw_zen_focus(frame, body, session, zen.expect("checked above"));
-            draw_footer(frame, layout.footer, session, mode, keymap, notice, zen);
+            draw_footer(
+                frame,
+                layout.footer,
+                session,
+                &footer_context(mode, keymap, tui_state, notice, zen),
+            );
         }
         Some(ZenPhase::Artifact { index, scroll }) => {
             let body = body_area(frame.area());
@@ -78,23 +107,30 @@ pub(super) fn draw(
                 frame,
                 layout.footer,
                 session,
-                mode,
-                keymap,
-                notice,
-                Some(zen),
+                &footer_context(mode, keymap, tui_state, notice, Some(zen)),
             );
         }
         Some(ZenPhase::Glance) => {
             let body = body_area(frame.area());
             draw_zen_glance(frame, body, session, zen.expect("checked above"));
-            draw_footer(frame, layout.footer, session, mode, keymap, notice, zen);
+            draw_footer(
+                frame,
+                layout.footer,
+                session,
+                &footer_context(mode, keymap, tui_state, notice, zen),
+            );
         }
         _ => {
             if session.file_pane_visible {
                 draw_files(frame, layout.files, session);
             }
             draw_diff(frame, layout.diff, session);
-            draw_footer(frame, layout.footer, session, mode, keymap, notice, zen);
+            draw_footer(
+                frame,
+                layout.footer,
+                session,
+                &footer_context(mode, keymap, tui_state, notice, zen),
+            );
 
             // The zen reading panel is a layer under any popup: progress and
             // rationale stay visible while e.g. a comment is being written.
@@ -238,7 +274,10 @@ fn render_file_row(
     file_index: usize,
 ) -> ListItem<'static> {
     let file = &session.files[file_index];
-    let (mark, mark_style) = if file.changed_since_look {
+    let reviewed = file.viewed || file.caught_up;
+    let (mark, mark_style) = if file.changed_since_look && reviewed {
+        ("~", Style::default().fg(Color::Yellow))
+    } else if file.changed_since_look {
         (
             "±",
             Style::default()
@@ -254,7 +293,7 @@ fn render_file_row(
     } else {
         ("•", Style::default().fg(Color::Green))
     };
-    let style = if file.viewed || file.caught_up {
+    let style = if reviewed {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default().fg(Color::White)
@@ -1115,11 +1154,11 @@ fn draw_footer(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     session: &ReviewSession,
-    mode: &Mode,
-    keymap: &KeyMap,
-    notice: Option<&UiNotice>,
-    zen: Option<&ZenState>,
+    context: &FooterContext<'_>,
 ) {
+    let mode = context.mode;
+    let keymap = context.keymap;
+    let zen = context.zen;
     let mode_text = match mode {
         Mode::Normal if zen.is_some() => {
             let zen = zen.expect("checked above");
@@ -1198,10 +1237,11 @@ fn draw_footer(
                 },
             ),
         )),
-        Mode::Normal => footer_line(diff_footer_segments(
-            session,
-            keymap,
-            &format!(
+        Mode::Normal => {
+            let mut text = footer_line(diff_footer_segments(
+                session,
+                keymap,
+                &format!(
                 "focus diff{}{}{}",
                 if session.has_active_diff_range() {
                     " (range active)"
@@ -1215,7 +1255,17 @@ fn draw_footer(
                 },
                 viewed_filter_label(session),
             ),
-        )),
+            ));
+            if session.selected_comment().is_some() {
+                text.push_str(&format!(
+                    " · {} state · {} edit · {} delete",
+                    keymap.hint(Action::CycleCommentState),
+                    keymap.hint(Action::EditComment),
+                    keymap.hint(Action::DeleteComment)
+                ));
+            }
+            text
+        }
         Mode::CommentInput { target, .. } => format!(
             "{kind} comment · refresh paused · {newline} newline · {submit} save · {cancel} cancel",
             kind = match target {
@@ -1253,7 +1303,7 @@ fn draw_footer(
         Mode::TaskList(_) => {
             "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
         }
-        Mode::Activity(_) => "activity · j/k move · esc close".to_owned(),
+        Mode::Activity(_) => "activity · j/k move · enter jump · esc close".to_owned(),
         Mode::WalkthroughList(_) => {
             "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
         }
@@ -1282,8 +1332,17 @@ fn draw_footer(
     if session.target.is_symbolic() {
         summary.push_str(&format!(" · following {}", session.target.rev));
     }
+    if let Some(identity) = context.identity_chip {
+        let prefix_width = summary.width() + " · ".width();
+        let chip_width = area.width as usize;
+        let chip_width = chip_width.saturating_sub(prefix_width);
+        if chip_width > 0 {
+            summary.push_str(" · ");
+            summary.push_str(&truncate_tail(identity, chip_width));
+        }
+    }
     let mut lines = vec![Line::from(summary), Line::from(mode_text)];
-    if let Some(notice) = notice {
+    if let Some(notice) = context.notice {
         let (label, style) = match notice.level {
             UiNoticeLevel::Info => ("info", Style::default().fg(Color::Blue)),
             UiNoticeLevel::Error => ("error", Style::default().fg(Color::Red)),
@@ -1500,6 +1559,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         section("comments"),
         entry(&[Action::Comment], "comment at cursor"),
         entry(&[Action::RangeComment], "start/finish range comment"),
+        entry(&[Action::CycleCommentState], "cycle comment state"),
         entry(&[Action::EditComment], "edit comment"),
         entry(&[Action::DeleteComment], "delete comment"),
         entry(&[Action::CommentList], "comment list"),
