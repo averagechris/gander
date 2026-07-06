@@ -1033,7 +1033,7 @@ fn run() -> color_eyre::Result<()> {
                 println!(
                     "{mark} {status:>7} {generated:>5} {path} (+{additions}/-{deletions})",
                     mark = if file.viewed { "✓" } else { "•" },
-                    status = file.status,
+                    status = file.status.to_string(),
                     generated = if file.generated { "gen" } else { "" },
                     path = file.path,
                     additions = file.additions,
@@ -1634,7 +1634,140 @@ fn handle_chunks_command(
 }
 
 fn read_chunks_spec(file: Option<&PathBuf>) -> color_eyre::Result<ChunksSpec> {
-    read_json_spec(file, "chunk")
+    let contents = read_spec_contents(file, "chunk")?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+        for warning in chunks_spec_unknown_fields(&value) {
+            eprintln!("warning: {warning}");
+        }
+    }
+    serde_json::from_str(&contents)
+        .map_err(|error| user_error(format!("failed to parse chunk spec JSON: {error}")))
+}
+
+const CHUNK_SPEC_KEYS: &[&str] = &[
+    "id",
+    "title",
+    "importance",
+    "change_id",
+    "rationale",
+    "explanation",
+    "artifacts",
+    "parts",
+];
+const CHUNK_PART_KEYS: &[&str] = &["path", "start_line", "end_line"];
+const ARTIFACT_KEYS: &[&str] = &["title", "kind", "body"];
+const BRIEF_KEYS: &[&str] = &["change_id", "summary", "artifacts"];
+const DRAFT_KEYS: &[&str] = &["path", "line", "body"];
+
+fn push_unknown_field_warnings(
+    warnings: &mut Vec<String>,
+    value: &serde_json::Value,
+    at: &str,
+    allowed: &[&str],
+) {
+    if let Some(map) = value.as_object() {
+        for key in map.keys() {
+            if !allowed.contains(&key.as_str()) {
+                warnings.push(format!(
+                    "unknown field '{key}' at {at} is ignored — allowed fields: {}",
+                    allowed.join(", ")
+                ));
+            }
+        }
+    }
+}
+
+fn artifact_unknown_field_warnings(
+    warnings: &mut Vec<String>,
+    value: &serde_json::Value,
+    at: &str,
+) {
+    for (index, artifact) in value
+        .get("artifacts")
+        .and_then(|artifacts| artifacts.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        push_unknown_field_warnings(
+            warnings,
+            artifact,
+            &format!("{at}.artifacts[{index}]"),
+            ARTIFACT_KEYS,
+        );
+    }
+}
+
+fn chunks_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    push_unknown_field_warnings(&mut warnings, value, "spec root", &["chunks"]);
+    for (index, chunk) in value
+        .get("chunks")
+        .and_then(|chunks| chunks.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("chunks[{index}]");
+        push_unknown_field_warnings(&mut warnings, chunk, &at, CHUNK_SPEC_KEYS);
+        artifact_unknown_field_warnings(&mut warnings, chunk, &at);
+        for (part_index, part) in chunk
+            .get("parts")
+            .and_then(|parts| parts.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            push_unknown_field_warnings(
+                &mut warnings,
+                part,
+                &format!("{at}.parts[{part_index}]"),
+                CHUNK_PART_KEYS,
+            );
+        }
+    }
+    warnings
+}
+
+fn briefs_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    push_unknown_field_warnings(&mut warnings, value, "spec root", &["briefs"]);
+    for (index, brief) in value
+        .get("briefs")
+        .and_then(|briefs| briefs.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("briefs[{index}]");
+        push_unknown_field_warnings(&mut warnings, brief, &at, BRIEF_KEYS);
+        artifact_unknown_field_warnings(&mut warnings, brief, &at);
+    }
+    warnings
+}
+
+fn drafts_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if value.get("drafts").is_some() {
+        push_unknown_field_warnings(&mut warnings, value, "spec root", &["drafts"]);
+        for (index, draft) in value
+            .get("drafts")
+            .and_then(|drafts| drafts.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            push_unknown_field_warnings(
+                &mut warnings,
+                draft,
+                &format!("drafts[{index}]"),
+                DRAFT_KEYS,
+            );
+        }
+    } else {
+        push_unknown_field_warnings(&mut warnings, value, "spec root", DRAFT_KEYS);
+    }
+    warnings
 }
 
 fn handle_briefs_command(
@@ -1722,10 +1855,7 @@ fn handle_drafts_command(
     Ok(())
 }
 
-fn read_json_spec<T: for<'de> Deserialize<'de>>(
-    file: Option<&PathBuf>,
-    spec_name: &str,
-) -> color_eyre::Result<T> {
+fn read_spec_contents(file: Option<&PathBuf>, spec_name: &str) -> color_eyre::Result<String> {
     let mut contents = String::new();
     match file {
         Some(path) if path != std::path::Path::new("-") => {
@@ -1738,6 +1868,24 @@ fn read_json_spec<T: for<'de> Deserialize<'de>>(
         }
         _ => {
             std::io::stdin().read_to_string(&mut contents)?;
+        }
+    }
+    Ok(contents)
+}
+
+fn read_json_spec<T: for<'de> Deserialize<'de>>(
+    file: Option<&PathBuf>,
+    spec_name: &str,
+) -> color_eyre::Result<T> {
+    let contents = read_spec_contents(file, spec_name)?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+        let warnings = match spec_name {
+            "brief" => briefs_spec_unknown_fields(&value),
+            "draft" => drafts_spec_unknown_fields(&value),
+            _ => Vec::new(),
+        };
+        for warning in warnings {
+            eprintln!("warning: {warning}");
         }
     }
     serde_json::from_str(&contents)
@@ -2111,21 +2259,21 @@ fn task_echo_text(t: &crate::state::ReviewTask) -> String {
         .as_ref()
         .and_then(|x| x.file.as_ref().map(|p| loc(p, x.line, x.end_line)))
         .unwrap_or_else(|| "(no anchor)".to_owned());
-    let body = t
+    let body_line = t
         .body
         .as_deref()
-        .unwrap_or(&t.title)
-        .lines()
-        .next()
-        .unwrap_or("");
+        .and_then(|body| body.lines().next())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| format!("body: {}\n", ellipsize(line, 100)))
+        .unwrap_or_default();
     format!(
-        "id: {}\nstatus/action: {}/{}\ntitle: {} ({})\n{}\n",
+        "id: {}\nstatus/action: {}/{}\ntitle: {} ({})\n{}",
         t.id,
         task_status_label(t.status),
         action_label_opt(Some(t.action)),
         t.title,
         location,
-        ellipsize(body, 100)
+        body_line
     )
 }
 
@@ -2436,6 +2584,97 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use clap::CommandFactory;
+
+    #[test]
+    fn chunk_spec_allowed_keys_match_struct_serialization() {
+        let chunk = ReviewChunk {
+            id: "c1".into(),
+            title: "t".into(),
+            importance: crate::agent::ChunkImportance::Glance,
+            change_id: Some("abc".into()),
+            rationale: Some("r".into()),
+            explanation: Some("e".into()),
+            artifacts: vec![crate::agent::Artifact {
+                title: "a".into(),
+                kind: Default::default(),
+                body: "b".into(),
+            }],
+            parts: vec![crate::agent::ChunkPart {
+                path: "src/lib.rs".into(),
+                start_line: Some(1),
+                end_line: Some(2),
+            }],
+        };
+        let value = serde_json::to_value(&chunk).unwrap();
+        for key in value.as_object().unwrap().keys() {
+            assert!(
+                CHUNK_SPEC_KEYS.contains(&key.as_str()),
+                "ReviewChunk gained field '{key}' — update CHUNK_SPEC_KEYS"
+            );
+        }
+        let part = serde_json::to_value(&chunk.parts[0]).unwrap();
+        for key in part.as_object().unwrap().keys() {
+            assert!(
+                CHUNK_PART_KEYS.contains(&key.as_str()),
+                "ChunkPart gained field '{key}' — update CHUNK_PART_KEYS"
+            );
+        }
+        let artifact = serde_json::to_value(&chunk.artifacts[0]).unwrap();
+        for key in artifact.as_object().unwrap().keys() {
+            assert!(
+                ARTIFACT_KEYS.contains(&key.as_str()),
+                "Artifact gained field '{key}' — update ARTIFACT_KEYS"
+            );
+        }
+        let brief = serde_json::to_value(crate::agent::ChangeBrief {
+            change_id: "abc".into(),
+            summary: "s".into(),
+            artifacts: vec![chunk.artifacts[0].clone()],
+        })
+        .unwrap();
+        for key in brief.as_object().unwrap().keys() {
+            assert!(
+                BRIEF_KEYS.contains(&key.as_str()),
+                "ChangeBrief gained field '{key}' — update BRIEF_KEYS"
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_spec_typo_field_is_warned_not_silent() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"chunks":[{"id":"c1","title":"t","role":"glance","parts":[{"path":"src/lib.rs","start_line":1,"end_line":2}]}]}"#,
+        )
+        .unwrap();
+        let warnings = chunks_spec_unknown_fields(&value);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown field 'role' at chunks[0]"));
+        assert!(warnings[0].contains("importance"));
+    }
+
+    #[test]
+    fn brief_and_draft_spec_unknown_fields_are_warned() {
+        let brief_value: serde_json::Value =
+            serde_json::from_str(r#"{"briefs":[{"change_id":"x","summary":"s","risk":"high"}]}"#)
+                .unwrap();
+        let warnings = briefs_spec_unknown_fields(&brief_value);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown field 'risk' at briefs[0]"));
+
+        let draft_value: serde_json::Value = serde_json::from_str(
+            r#"{"drafts":[{"path":"src/lib.rs","line":3,"body":"b","severity":"major"}]}"#,
+        )
+        .unwrap();
+        let warnings = drafts_spec_unknown_fields(&draft_value);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("unknown field 'severity' at drafts[0]"));
+
+        let valid: serde_json::Value = serde_json::from_str(
+            r#"{"chunks":[{"title":"t","importance":"spotlight","parts":[{"path":"a","start_line":1,"end_line":2}]}]}"#,
+        )
+        .unwrap();
+        assert!(chunks_spec_unknown_fields(&valid).is_empty());
+    }
 
     struct BriefsTestJj;
 
