@@ -56,6 +56,7 @@ pub struct ReviewSession {
     pub repo: PathBuf,
     pub target: ReviewTarget,
     pub files: Vec<ReviewFile>,
+    persisted_files: BTreeMap<String, FileState>,
     pub comments: Vec<Comment>,
     pub sessions: Vec<crate::state::ReviewSession>,
     pub selected: usize,
@@ -269,18 +270,10 @@ impl ReviewSession {
     ) -> Self {
         let ReviewState {
             files,
-            mut comments,
+            comments,
             sessions,
             ..
         } = state;
-        let diff_is_empty = diff.files.is_empty();
-        // A workspace's default target (`trunk()..@`) becomes empty after the
-        // reviewed changes are shipped. Persisted comments/viewed marks belong
-        // to the old review at that point; carrying them forward makes a fresh
-        // TUI/zen session look like it is still reviewing the shipped content.
-        if diff_is_empty {
-            comments.clear();
-        }
         let mut session = Self {
             repo,
             target,
@@ -302,6 +295,7 @@ impl ReviewSession {
                     diff: file,
                 })
                 .collect(),
+            persisted_files: files,
             comments,
             sessions,
             selected: 0,
@@ -336,29 +330,13 @@ impl ReviewSession {
             viewport_by_path: BTreeMap::new(),
             tree_cursor: None,
         };
-        session.apply_state_files(&files);
+        session.apply_state_files();
         session
     }
 
     pub fn replace_diff(&mut self, target: ReviewTarget, diff: DiffSet) {
-        let state = ReviewState {
-            meta: ReviewStateMeta::default(),
-            files: self
-                .files
-                .iter()
-                .map(|file| {
-                    (
-                        file.path.clone(),
-                        FileState {
-                            fingerprint: file.fingerprint.clone(),
-                            viewed: file.viewed,
-                        },
-                    )
-                })
-                .collect(),
-            comments: self.comments.clone(),
-            sessions: self.sessions.clone(),
-        };
+        let mut state = self.to_state();
+        state.meta = ReviewStateMeta::default();
         *self = Self::new_with_options(
             self.repo.clone(),
             target,
@@ -484,14 +462,18 @@ impl ReviewSession {
         self.ensure_diff_cursor_commentable();
     }
 
-    fn apply_state_files(&mut self, files: &BTreeMap<String, FileState>) {
+    fn apply_state_files(&mut self) {
         for file in &mut self.files {
-            if let Some(saved) = files.get(&file.path) {
+            if let Some(saved) = self.persisted_files.get(&file.path) {
                 let stale = saved.viewed && saved.fingerprint != file.fingerprint;
                 file.viewed = saved.viewed && !stale;
                 file.viewed_stale = stale;
             }
         }
+    }
+
+    pub fn current_diff_paths(&self) -> BTreeSet<&str> {
+        self.files.iter().map(|file| file.path.as_str()).collect()
     }
 
     pub fn selected_file(&self) -> Option<&ReviewFile> {
@@ -1734,19 +1716,19 @@ impl ReviewSession {
                 repo: Some(self.repo.display().to_string()),
                 saved_at: Some(Utc::now()),
             },
-            files: self
-                .files
-                .iter()
-                .map(|file| {
-                    (
+            files: {
+                let mut files = self.persisted_files.clone();
+                for file in &self.files {
+                    files.insert(
                         file.path.clone(),
                         FileState {
                             fingerprint: file.fingerprint.clone(),
                             viewed: file.viewed,
                         },
-                    )
-                })
-                .collect(),
+                    );
+                }
+                files
+            },
             comments: self.comments.clone(),
             sessions: self.sessions.clone(),
         }
@@ -2177,21 +2159,32 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(session.selected_file().unwrap().viewed);
     }
 
+    fn comment(id: &str, path: &str) -> Comment {
+        Comment {
+            id: id.to_owned(),
+            path: path.to_owned(),
+            line: Some(1),
+            end_line: None,
+            anchor: None,
+            body: "review note".to_owned(),
+            kind: None,
+            action: None,
+            state: CommentState::Draft,
+            created_at: Utc::now(),
+        }
+    }
+
     #[test]
-    fn empty_diff_drops_persisted_comments_from_shipped_review() {
+    fn empty_diff_preserves_persisted_comments_and_viewed_files() {
         let state = ReviewState {
-            comments: vec![Comment {
-                id: "old".to_owned(),
-                path: "src/app.rs".to_owned(),
-                line: Some(1),
-                end_line: None,
-                anchor: None,
-                body: "old review".to_owned(),
-                kind: None,
-                action: None,
-                state: CommentState::Draft,
-                created_at: Utc::now(),
-            }],
+            files: BTreeMap::from([(
+                "src/app.rs".to_owned(),
+                FileState {
+                    fingerprint: "abc".to_owned(),
+                    viewed: true,
+                },
+            )]),
+            comments: vec![comment("old", "src/app.rs")],
             ..Default::default()
         };
 
@@ -2203,7 +2196,89 @@ diff --git a/src/c.rs b/src/c.rs
         );
 
         assert!(session.files.is_empty());
-        assert!(session.comments.is_empty());
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.to_state().files["src/app.rs"].fingerprint, "abc");
+    }
+
+    #[test]
+    fn retarget_to_empty_diff_does_not_erase_unseen_state() {
+        let mut session = session();
+        session.files[0].viewed = true;
+        session.comments.push(comment("a", "src/tui.rs"));
+
+        session.replace_diff(
+            ReviewTarget::new("change-1-", "change-1"),
+            DiffSet::parse("").unwrap(),
+        );
+        let saved = session.to_state();
+
+        assert_eq!(
+            saved
+                .comments
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        assert!(saved.files["src/tui.rs"].viewed);
+
+        session.replace_diff(
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+            )
+            .unwrap(),
+        );
+
+        assert!(session.files[0].viewed);
+        assert_eq!(session.comments.len(), 1);
+    }
+
+    #[test]
+    fn comments_added_on_different_targets_survive_each_other_saves() {
+        let diff_a = DiffSet::parse(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let diff_b = DiffSet::parse(
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff_a.clone(),
+            ReviewState::default(),
+        );
+        session.comments.push(comment("a", "a.rs"));
+        session.replace_diff(ReviewTarget::new("b-", "b"), diff_b);
+        session.comments.push(comment("b", "b.rs"));
+        let saved_from_b = session.to_state();
+
+        assert_eq!(saved_from_b.comments.len(), 2);
+
+        session.replace_diff(ReviewTarget::trunk_to_current(), diff_a);
+        let saved_from_a = session.to_state();
+
+        assert_eq!(saved_from_a.comments.len(), 2);
+        assert!(
+            saved_from_a
+                .comments
+                .iter()
+                .any(|comment| comment.id == "a")
+        );
+        assert!(
+            saved_from_a
+                .comments
+                .iter()
+                .any(|comment| comment.id == "b")
+        );
     }
 
     #[test]

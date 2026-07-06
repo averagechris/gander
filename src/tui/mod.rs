@@ -940,7 +940,29 @@ fn autosave_state(session: &ReviewSession, state_path: &Path, tui_state: &mut Tu
     if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str()) {
         return;
     }
-    match session.to_state().save(state_path) {
+    let mut state = session.to_state();
+    if let Ok(on_disk) = crate::state::ReviewState::load_or_default(state_path) {
+        let current_paths = session.current_diff_paths();
+        for (path, file_state) in on_disk.files {
+            if !current_paths.contains(path.as_str()) {
+                state.files.insert(path, file_state);
+            }
+        }
+        let mut comment_ids: std::collections::BTreeSet<String> = state
+            .comments
+            .iter()
+            .map(|comment| comment.id.clone())
+            .collect();
+        for comment in on_disk.comments {
+            if comment_ids.insert(comment.id.clone()) {
+                state.comments.push(comment);
+            }
+        }
+        if state.sessions.is_empty() {
+            state.sessions = on_disk.sessions;
+        }
+    }
+    match state.save(state_path) {
         Ok(()) => tui_state.last_autosave = Some(fingerprint),
         Err(error) => {
             tui_state.notice = Some(UiNotice {
@@ -3335,6 +3357,62 @@ mod tests {
         autosave_state(&session, &state_path, &mut tui_state);
         let modified_after = std::fs::metadata(&state_path).unwrap().modified().unwrap();
         assert_eq!(modified_before, modified_after);
+    }
+
+    #[test]
+    fn autosave_merges_unseen_disk_state_from_other_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut on_disk = crate::state::ReviewState::default();
+        on_disk.files.insert(
+            "b.txt".to_owned(),
+            crate::state::FileState {
+                fingerprint: "b-fp".to_owned(),
+                viewed: true,
+            },
+        );
+        on_disk.comments.push(Comment {
+            id: "b-comment".to_owned(),
+            path: "b.txt".to_owned(),
+            line: Some(1),
+            end_line: None,
+            anchor: None,
+            body: "from another target".to_owned(),
+            kind: None,
+            action: None,
+            state: CommentState::Draft,
+            created_at: chrono::Utc::now(),
+        });
+        on_disk.save(&state_path).unwrap();
+
+        let mut session = snapshot_session(
+            r#"diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let mut tui_state = TuiState {
+            last_autosave: Some(state_fingerprint(&session)),
+            ..TuiState::default()
+        };
+        session.toggle_viewed();
+        session.add_comment("from current target".into());
+
+        autosave_state(&session, &state_path, &mut tui_state);
+
+        let saved = crate::state::ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.files["a.txt"].viewed);
+        assert_eq!(saved.files["b.txt"].fingerprint, "b-fp");
+        assert!(
+            saved
+                .comments
+                .iter()
+                .any(|comment| comment.id == "b-comment")
+        );
+        assert!(saved.comments.iter().any(|comment| comment.path == "a.txt"));
     }
 
     #[test]
