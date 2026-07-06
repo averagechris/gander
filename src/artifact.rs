@@ -286,50 +286,35 @@ pub fn render_handoff_json(
     options.only_open = true;
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
     let mut items = Vec::new();
-    for task in &artifact.tasks {
-        let linked = task.linked_comment_ids.clone();
-        items.push(serde_json::json!({
-            "id": task.id,
-            "source": "task",
-            "kind": null,
-            "action": task.action,
-            "path": task.target.as_ref().and_then(|t| t.file),
-            "line": task.target.as_ref().and_then(|t| t.line),
-            "excerpt": null,
-            "body": task.body.unwrap_or(task.title),
-            "title": task.title,
-            "state": task.status,
-            "linked_comment_ids": linked,
-            "linked_task_ids": Vec::<&str>::new(),
-        }));
-    }
-    for comment in &artifact.comments {
-        if comment.comment.state == CommentState::Resolved {
-            continue;
-        }
-        let linked_tasks = artifact
-            .tasks
-            .iter()
-            .filter(|task| {
-                task.linked_comment_ids
+    for item in ordered_action_items(&artifact) {
+        match item {
+            OrderedActionItem::Task(task) => {
+                let linked = task.linked_comment_ids.clone();
+                items.push(serde_json::json!({
+                    "id": task.id, "source": "task", "kind": null, "action": task.action,
+                    "path": task.target.as_ref().and_then(|t| t.file), "line": task.target.as_ref().and_then(|t| t.line),
+                    "excerpt": null, "body": task.body.unwrap_or(task.title), "title": task.title,
+                    "state": task.status, "linked_comment_ids": linked, "linked_task_ids": Vec::<&str>::new(),
+                }));
+            }
+            OrderedActionItem::Comment(comment) => {
+                let linked_tasks = artifact
+                    .tasks
                     .iter()
-                    .any(|id| *id == comment.comment.id)
-            })
-            .map(|task| task.id)
-            .collect::<Vec<_>>();
-        items.push(serde_json::json!({
-            "id": comment.comment.id,
-            "source": "comment",
-            "kind": comment.comment.kind,
-            "action": comment.comment.action,
-            "path": comment.comment.path,
-            "line": comment.comment.line,
-            "excerpt": comment.excerpt,
-            "body": comment.comment.body,
-            "state": comment.comment.state,
-            "linked_comment_ids": Vec::<&str>::new(),
-            "linked_task_ids": linked_tasks,
-        }));
+                    .filter(|task| {
+                        task.linked_comment_ids
+                            .iter()
+                            .any(|id| *id == comment.comment.id)
+                    })
+                    .map(|task| task.id)
+                    .collect::<Vec<_>>();
+                items.push(serde_json::json!({
+                    "id": comment.comment.id, "source": "comment", "kind": comment.comment.kind, "action": comment.comment.action,
+                    "path": comment.comment.path, "line": comment.comment.line, "excerpt": comment.excerpt, "body": comment.comment.body,
+                    "state": comment.comment.state, "linked_comment_ids": Vec::<&str>::new(), "linked_task_ids": linked_tasks,
+                }));
+            }
+        }
     }
     let walkthrough = artifact
         .walkthroughs
@@ -675,7 +660,7 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
 
 fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
-    out.push_str("# Human review handoff for a coding agent\n\n");
+    out.push_str("# Review session export (agent profile)\n\n");
     out.push_str("**Export artifact (agent profile).**\n\n");
     out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks (open items first, resolved/done items below) plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
     write_agent_header(artifact, &mut out);
@@ -1378,6 +1363,85 @@ mod tests {
     }
 
     #[test]
+    fn handoff_json_and_markdown_share_action_item_order() {
+        let mut session = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::new("main", "@"),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.sessions.push(crate::state::ReviewSession {
+            id: "s".into(),
+            target: crate::state::ReviewTarget {
+                base: Some("main".into()),
+                revision: Some("@".into()),
+                ..Default::default()
+            },
+            tasks: vec![
+                crate::state::ReviewTask {
+                    id: "follow".into(),
+                    title: "follow task".into(),
+                    action: ActionIntent::FollowUp,
+                    target: Some(crate::state::ReviewTarget {
+                        file: Some("b.rs".into()),
+                        line: Some(9),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                crate::state::ReviewTask {
+                    id: "fix".into(),
+                    title: "fix task".into(),
+                    action: ActionIntent::Fix,
+                    target: Some(crate::state::ReviewTarget {
+                        file: Some("z.rs".into()),
+                        line: Some(1),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                crate::state::ReviewTask {
+                    id: "test".into(),
+                    title: "test task".into(),
+                    action: ActionIntent::Test,
+                    target: Some(crate::state::ReviewTarget {
+                        file: Some("a.rs".into()),
+                        line: Some(5),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        session.add_comment("other comment".into());
+        session.comments[0].action = Some(ActionIntent::None);
+        session.comments[0].path = "a.rs".into();
+        session.comments[0].line = Some(1);
+
+        let json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let ids = value["action_items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec!["fix", "test", "follow", session.comments[0].id.as_str()]
+        );
+
+        let markdown = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
+        assert!(markdown.find("fix task").unwrap() < markdown.find("test task").unwrap());
+        assert!(markdown.find("test task").unwrap() < markdown.find("follow task").unwrap());
+        assert!(markdown.find("follow task").unwrap() < markdown.find("other comment").unwrap());
+    }
+
+    #[test]
     fn only_open_excludes_resolved_comments_and_done_tasks() {
         let mut state = ReviewState::default();
         state.sessions.push(crate::state::ReviewSession {
@@ -1642,7 +1706,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let markdown = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
-        assert_eq!(ids, vec!["task-1", "task-2", "issue", "question", "note"]);
+        assert_eq!(ids, vec!["issue", "note", "task-2", "question", "task-1"]);
         assert!(
             markdown
                 .contains("- Action items: 5 item(s) (2 open task(s), 3 unresolved comment(s))")

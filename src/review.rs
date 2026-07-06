@@ -531,6 +531,61 @@ mod tests {
     }
 
     #[test]
+    fn comment_backed_task_titles_are_synthesized() {
+        fn comment(id: &str, body: &str) -> Comment {
+            Comment {
+                id: id.into(),
+                path: "a.rs".into(),
+                line: Some(1),
+                end_line: None,
+                anchor: None,
+                body: body.into(),
+                kind: None,
+                action: None,
+                state: CommentState::Todo,
+                created_at: chrono::Utc::now(),
+            }
+        }
+        let session = ReviewSession::default();
+        let long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+        let comments = vec![
+            comment("abcdef00-0000", "first line\nsecond"),
+            comment("bbbbbbbb-0000", long),
+            comment("cccccccc-0000", "   "),
+        ];
+        let tasks = list_tasks(&session, &comments);
+        assert_eq!(tasks[0].title, "first line");
+        assert!(tasks[1].title.ends_with('…'));
+        assert!(tasks[1].title.chars().count() <= 72);
+        assert_eq!(tasks[2].title, "comment cccccccc");
+    }
+
+    #[test]
+    fn resolve_task_id_rejects_ambiguous_prefixes() {
+        let session = ReviewSession {
+            tasks: vec![
+                ReviewTask {
+                    id: "abcdef00-0000".into(),
+                    ..Default::default()
+                },
+                ReviewTask {
+                    id: "abc12300-0000".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_task_id(&session, "abcdef").unwrap(),
+            "abcdef00-0000"
+        );
+        assert_eq!(
+            resolve_task_id(&session, "abc").unwrap_err().to_string(),
+            "ambiguous task id prefix `abc`"
+        );
+    }
+
+    #[test]
     fn resolve_comment_id_canonicalizes_prefix_and_rejects_bad_links() {
         fn comment(id: &str) -> Comment {
             Comment {

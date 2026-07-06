@@ -40,7 +40,10 @@ Two ways to reach it:
 - run `gander acp` as usual: it looks up the registry for a live instance
   reviewing the current workspace (most recently touched first) and
   transparently bridges stdio to it, so agent clients that spawn
-  `gander acp` as a subprocess get the live session for free. Without a
+  `gander acp` as a subprocess get the live session for free. Before serving,
+  `gander acp` writes a one-line stderr notice saying either
+  `gander acp: bridged to live TUI session (target <revset>)` or
+  `gander acp: serving snapshot (no live TUI for this workspace)`. Without a
   running TUI it falls back to serving a snapshot loaded at startup.
 
 If the socket cannot be bound (say, a second gander TUI on the same
@@ -77,7 +80,7 @@ prompt and run a subprocess works.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `initialize` | – | protocol name, version, capability list |
+| `initialize` | – | protocol name, version, `mode` (`"live-bridge"` or `"snapshot"`), capability list |
 | `review/summary` | – | repo, base, revision, summary line |
 | `review/files` | – | array of `{path, old_path, status, additions, deletions, viewed, generated, fingerprint}` |
 | `review/file_diff` | `{path}` | `{path, fingerprint, raw}` (raw git-style diff) |

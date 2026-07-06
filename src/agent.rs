@@ -647,6 +647,8 @@ mod validation_tests {
             },
         );
         assert!(invalid[0].reason.contains("outside diff line space"));
+        assert!(invalid[0].reason.contains("valid ranges for a.rs: 1-1"));
+        assert!(invalid_chunk_parts_message(&invalid).contains("gander chunks lines"));
     }
 
     #[test]

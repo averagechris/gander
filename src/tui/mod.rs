@@ -48,8 +48,8 @@ use crate::{
     agent::AgentProcess,
     app::{Focus, ReviewSession},
     artifact::{
-        ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, ReviewArtifact, action_item_count,
-        render_artifact_with_options,
+        ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
+        render_handoff_markdown,
     },
     clipboard::{ClipboardMethod, copy_to_clipboard},
     config::{AgentConfig, KeybindingsConfig},
@@ -549,14 +549,7 @@ fn yank_handoff_with(
     let options = ArtifactBuildOptions { only_open: false };
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
     let count = action_item_count(&artifact);
-    match render_artifact_with_options(
-        session,
-        ArtifactFormat::Markdown,
-        ArtifactProfile::Agent,
-        options,
-    )
-    .and_then(|body| copy(&body))
-    {
+    match render_handoff_markdown(session, options).and_then(|body| copy(&body)) {
         Ok(method) => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
