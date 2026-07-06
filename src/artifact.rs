@@ -102,6 +102,7 @@ pub struct ExcerptLine<'a> {
 pub struct CommentArtifact<'a> {
     #[serde(flatten)]
     pub comment: &'a Comment,
+    pub linked_task_ids: Vec<&'a str>,
     /// Raw diff lines around the comment anchor, agent profile only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excerpt: Option<Vec<ExcerptLine<'a>>>,
@@ -239,6 +240,7 @@ impl<'a> ReviewArtifact<'a> {
                 .filter(|comment| !options.only_open || comment.state != CommentState::Resolved)
                 .map(|comment| CommentArtifact {
                     comment,
+                    linked_task_ids: linked_task_ids_for_comment(session, &comment.id),
                     excerpt: agent.then(|| comment_excerpt(session, comment)).flatten(),
                 })
                 .collect(),
@@ -292,7 +294,7 @@ pub fn render_handoff_json(
                 let linked = task.linked_comment_ids.clone();
                 items.push(serde_json::json!({
                     "id": task.id, "source": "task", "kind": null, "action": task.action,
-                    "path": task.target.as_ref().and_then(|t| t.file), "line": task.target.as_ref().and_then(|t| t.line),
+                    "path": task.target.as_ref().and_then(|t| t.file), "line": task.target.as_ref().and_then(|t| t.line), "end_line": task.target.as_ref().and_then(|t| t.end_line),
                     "excerpt": null, "body": task.body.unwrap_or(task.title), "title": task.title,
                     "state": task.status, "linked_comment_ids": linked, "linked_task_ids": Vec::<&str>::new(),
                 }));
@@ -310,7 +312,7 @@ pub fn render_handoff_json(
                     .collect::<Vec<_>>();
                 items.push(serde_json::json!({
                     "id": comment.comment.id, "source": "comment", "kind": comment.comment.kind, "action": comment.comment.action,
-                    "path": comment.comment.path, "line": comment.comment.line, "excerpt": comment.excerpt, "body": comment.comment.body,
+                    "path": comment.comment.path, "line": comment.comment.line, "end_line": comment.comment.end_line, "excerpt": comment.excerpt, "body": comment.comment.body,
                     "state": comment.comment.state, "linked_comment_ids": Vec::<&str>::new(), "linked_task_ids": linked_tasks,
                 }));
             }
@@ -383,6 +385,15 @@ fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::Revi
             && durable.target.base.as_deref() == Some(session.target.base.as_str())
             && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
     })
+}
+
+fn linked_task_ids_for_comment<'a>(session: &'a ReviewSession, comment_id: &str) -> Vec<&'a str> {
+    active_durable_session(session)
+        .into_iter()
+        .flat_map(|durable| durable.tasks.iter())
+        .filter(|task| task.source_comment_id.as_deref() == Some(comment_id))
+        .map(|task| task.id.as_str())
+        .collect()
 }
 
 fn target_artifact(target: &ReviewTarget) -> TargetArtifact<'_> {

@@ -103,7 +103,7 @@ within one poll tick.
 | `review/update_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | upsert reviewable units. Chunks whose `id` matches an existing overlay chunk replace it in place; chunks with new/generated ids append. Response: `{chunks, updated, added}` |
 | `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
 | `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's spotlight stops. Response: `{briefs, warnings}`; warnings are advisory |
-| `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; returns `{id}` |
+| `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; `line` is new-side, 1-indexed post-image line space for the current session diff; returns `{id}` |
 
 `artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
 one of `example` (default), `output`, `diagram`, or `note`: exhibits that
@@ -167,7 +167,8 @@ advisory warning: `brief for change <id> has no spotlight chunk yet and will not
 render on a curated zen chapter right now`. This does not reject the write;
 briefs are often authored before chunks. Use `gander drafts list`,
 `add --file spec.json`, or `remove --id <id>...` with the ACP
-`review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`)
+`review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`;
+`line` is the new-side, 1-indexed post-image line in the current session diff)
 or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append pending drafts and
 print the generated ids; remove is strict and rejects unknown ids without
 mutating the overlay. For all three groups, `--file -` or an omitted `--file`

@@ -379,6 +379,7 @@ enum HunksCommand {
     Show {
         /// Hunk id (`<path>:<index>`) to show.
         id: String,
+        /// Output format for the hunk (json or diff; text is an alias for diff).
         #[arg(long, value_enum, default_value_t = HunkShowFormat::Json)]
         format: HunkShowFormat,
     },
@@ -420,6 +421,9 @@ enum CommentsCommand {
     Resolve {
         /// Comment id or unique id prefix.
         id: String,
+        /// Echo format for the resolved comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Change a comment lifecycle state by id or unique id prefix.
     SetState {
@@ -428,6 +432,9 @@ enum CommentsCommand {
         /// New comment state. Values: draft, todo, resolved.
         #[arg(long, value_enum, id = "comment-state")]
         state: CommentStateArg,
+        /// Echo format for the updated comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Edit a durable comment's anchor and/or body.
     Edit {
@@ -456,6 +463,9 @@ enum CommentsCommand {
     Delete {
         /// Comment id or unique id prefix.
         id: String,
+        /// Echo format for the deleted comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
 }
 
@@ -508,6 +518,9 @@ enum TasksCommand {
         /// 1-indexed new-side (post-image) line number this task targets.
         #[arg(long)]
         line: Option<usize>,
+        /// Echo format for the added task.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Mark a task done by id or unique id prefix.
     Complete {
@@ -516,11 +529,17 @@ enum TasksCommand {
         /// Optional completion summary.
         #[arg(long)]
         summary: Option<String>,
+        /// Echo format for the completed task.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Reopen a done task by id or unique id prefix.
     Reopen {
         /// Task id or unique id prefix.
         id: String,
+        /// Echo format for the reopened task.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Edit a durable review task by id or unique id prefix.
     Edit {
@@ -544,11 +563,17 @@ enum TasksCommand {
         /// Replacement linked comment id or unique prefix.
         #[arg(long = "comment")]
         comment: Option<String>,
+        /// Echo format for the edited task.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
     /// Permanently delete a durable review task by id or unique id prefix.
     Delete {
         /// Task id or unique id prefix.
         id: String,
+        /// Echo format for the deleted task.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
 }
 
@@ -635,6 +660,7 @@ enum HandoffFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum HunkShowFormat {
     Json,
+    #[value(alias = "text")]
     Diff,
 }
 
@@ -846,6 +872,9 @@ fn run() -> color_eyre::Result<()> {
         } => {
             let (format, destination, profile) =
                 resolve_export_options(&repo, &config, format, output, profile);
+            let spec = session_target_spec(&repo, &session.target);
+            warn_session_target_mismatch(&state, &spec);
+            note_if_no_session_for_artifact(&state, &spec);
             if format == OutputFormat::Html {
                 let html = web_export::render_html(&session, &state);
                 match destination {
@@ -877,6 +906,9 @@ fn run() -> color_eyre::Result<()> {
             output,
             copy,
         } => {
+            let spec = session_target_spec(&repo, &session.target);
+            warn_session_target_mismatch(&state, &spec);
+            note_if_no_session_for_artifact(&state, &spec);
             let body = match format {
                 HandoffFormat::Json => {
                     render_handoff_json(&session, ArtifactBuildOptions { only_open })?
@@ -1053,10 +1085,14 @@ fn run() -> color_eyre::Result<()> {
             },
         },
         Command::Comments { command } => match command {
-            CommentsCommand::List { format } => match format {
-                ListFormat::Json => print_json(&session_comments_json(&session))?,
-                ListFormat::Text => print!("{}", session_comments_text(&session)),
-            },
+            CommentsCommand::List { format } => {
+                let spec = session_target_spec(&repo, &session.target);
+                warn_session_target_mismatch(&state, &spec);
+                match format {
+                    ListFormat::Json => print_json(&session_comments_json(&session))?,
+                    ListFormat::Text => print!("{}", session_comments_text(&session)),
+                }
+            }
             CommentsCommand::Add {
                 path,
                 line,
@@ -1074,6 +1110,7 @@ fn run() -> color_eyre::Result<()> {
                     .and_then(|file| comment_anchor_for_file_lines(file, line, end_line));
                 warn_if_anchorless_line(&path, line, anchor.is_some());
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
                 let comment = review::add_comment(
@@ -1095,21 +1132,27 @@ fn run() -> color_eyre::Result<()> {
                     ListFormat::Text => print!("{}", comment_echo_text(&comment)),
                 }
             }
-            CommentsCommand::Resolve { id } => {
+            CommentsCommand::Resolve { id, format } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment =
                     review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)
                         .map_err(|error| user_error(error.to_string()))?;
                 state.save(&state_path)?;
-                print_json(&comment)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
             }
             CommentsCommand::SetState {
                 id,
                 state: new_state,
+                format,
             } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment = review::set_comment_state(
@@ -1120,7 +1163,10 @@ fn run() -> color_eyre::Result<()> {
                 )
                 .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&comment)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
             }
             CommentsCommand::Edit {
                 id,
@@ -1167,6 +1213,7 @@ fn run() -> color_eyre::Result<()> {
                     );
                 }
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment = review::edit_comment(
@@ -1188,20 +1235,25 @@ fn run() -> color_eyre::Result<()> {
                     ListFormat::Text => print!("{}", comment_echo_text(&comment)),
                 }
             }
-            CommentsCommand::Delete { id } => {
+            CommentsCommand::Delete { id, format } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment =
                     review::delete_comment(&mut state.sessions[idx], &mut state.comments, &id)
                         .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&comment)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
             }
         },
         Command::Reviews { command } => match command {
             ReviewsCommand::Create { title } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let review_session =
                     review::ensure_session(&mut state, &spec, title.as_deref()).clone();
                 state.save(&state_path)?;
@@ -1220,8 +1272,10 @@ fn run() -> color_eyre::Result<()> {
         Command::Tasks { command } => match command {
             TasksCommand::List { format } => {
                 let spec = session_target_spec(&repo, &session.target);
-                let rs = review::ensure_session(&mut state, &spec, None).clone();
-                let tasks = review::list_tasks(&rs, &state.comments);
+                warn_session_target_mismatch(&state, &spec);
+                let tasks = review::find_session_for_target(&state, &spec)
+                    .map(|rs| review::list_tasks(rs, &state.comments))
+                    .unwrap_or_default();
                 match format {
                     ListFormat::Json => print_json(&serde_json::json!({ "tasks": tasks }))?,
                     ListFormat::Text => print!("{}", tasks_text(&tasks)),
@@ -1234,6 +1288,7 @@ fn run() -> color_eyre::Result<()> {
                 comment,
                 path,
                 line,
+                format,
             } => {
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
@@ -1244,6 +1299,7 @@ fn run() -> color_eyre::Result<()> {
                     .transpose()
                     .map_err(into_user_error)?;
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let target = path.map(|file| StateReviewTarget {
                     file: Some(file),
@@ -1259,21 +1315,36 @@ fn run() -> color_eyre::Result<()> {
                     target,
                 );
                 state.save(&state_path)?;
-                print_json(&task)?;
+                match format {
+                    ListFormat::Json => print_json(&task)?,
+                    ListFormat::Text => print!("{}", task_echo_text(&task)),
+                }
             }
-            TasksCommand::Complete { id, summary } => {
+            TasksCommand::Complete {
+                id,
+                summary,
+                format,
+            } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let task = review::complete_task(rs, &id, summary).map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&task)?;
+                match format {
+                    ListFormat::Json => print_json(&task)?,
+                    ListFormat::Text => print!("{}", task_echo_text(&task)),
+                }
             }
-            TasksCommand::Reopen { id } => {
+            TasksCommand::Reopen { id, format } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let task = review::reopen_task(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&task)?;
+                match format {
+                    ListFormat::Json => print_json(&task)?,
+                    ListFormat::Text => print!("{}", task_echo_text(&task)),
+                }
             }
             TasksCommand::Edit {
                 id,
@@ -1283,6 +1354,7 @@ fn run() -> color_eyre::Result<()> {
                 path,
                 line,
                 comment,
+                format,
             } => {
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
@@ -1293,6 +1365,7 @@ fn run() -> color_eyre::Result<()> {
                     .transpose()
                     .map_err(into_user_error)?;
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let target = (path.is_some() || line.is_some()).then(|| StateReviewTarget {
                     file: path,
@@ -1312,19 +1385,33 @@ fn run() -> color_eyre::Result<()> {
                 )
                 .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&task)?;
+                match format {
+                    ListFormat::Json => print_json(&task)?,
+                    ListFormat::Text => print!("{}", task_echo_text(&task)),
+                }
             }
-            TasksCommand::Delete { id } => {
+            TasksCommand::Delete { id, format } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let task = review::delete_task(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
-                print_json(&task)?;
+                match format {
+                    ListFormat::Json => print_json(&task)?,
+                    ListFormat::Text => print!("{}", task_echo_text(&task)),
+                }
             }
         },
         Command::Walkthrough { command } => match command {
             WalkthroughCommand::Export => {
-                print!("{}", walkthrough::render_walkthroughs_markdown(&state));
+                let spec = session_target_spec(&repo, &session.target);
+                warn_session_target_mismatch(&state, &spec);
+                let mut scoped = state.clone();
+                scoped.sessions = review::find_session_for_target(&state, &spec)
+                    .cloned()
+                    .into_iter()
+                    .collect();
+                print!("{}", walkthrough::render_walkthroughs_markdown(&scoped));
             }
             WalkthroughCommand::AddStep {
                 title,
@@ -1339,6 +1426,7 @@ fn run() -> color_eyre::Result<()> {
                     ensure_diff_file(&session, file)?;
                 }
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let step = review::add_walkthrough_step(
                     rs,
@@ -1361,6 +1449,7 @@ fn run() -> color_eyre::Result<()> {
             }
             WalkthroughCommand::RemoveStep { id } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let step = review::remove_walkthrough_step(rs, &id).map_err(into_user_error)?;
                 state.save(&state_path)?;
@@ -1368,6 +1457,7 @@ fn run() -> color_eyre::Result<()> {
             }
             WalkthroughCommand::MoveStep { id, to } => {
                 let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let step = review::move_walkthrough_step(rs, &id, to).map_err(into_user_error)?;
                 state.save(&state_path)?;
@@ -1375,8 +1465,11 @@ fn run() -> color_eyre::Result<()> {
             }
             WalkthroughCommand::Show => {
                 let spec = session_target_spec(&repo, &session.target);
-                let rs = review::ensure_session(&mut state, &spec, None).clone();
-                print_json(&serde_json::json!({ "walkthroughs": rs.walkthroughs }))?;
+                warn_session_target_mismatch(&state, &spec);
+                let walkthroughs = review::find_session_for_target(&state, &spec)
+                    .map(|rs| rs.walkthroughs.clone())
+                    .unwrap_or_default();
+                print_json(&serde_json::json!({ "walkthroughs": walkthroughs }))?;
             }
         },
     }
@@ -1398,6 +1491,63 @@ fn warn_if_live_session_target_differs(paths: &WorkspacePaths, session: &ReviewS
 
     #[cfg(not(unix))]
     let _ = (paths, session);
+}
+
+fn durable_target_label(target: &StateReviewTarget) -> String {
+    match (target.base.as_deref(), target.revision.as_deref()) {
+        (Some(base), Some(rev)) => format!("{base}..{rev}"),
+        _ => target
+            .revset
+            .as_deref()
+            .unwrap_or("(unspecified)")
+            .to_owned(),
+    }
+}
+
+fn target_spec_label(spec: &review::SessionTargetSpec) -> String {
+    match (spec.base.as_deref(), spec.revision.as_deref()) {
+        (Some(base), Some(rev)) => format!("{base}..{rev}"),
+        _ => spec.revset.as_deref().unwrap_or("(unspecified)").to_owned(),
+    }
+}
+
+fn warn_session_target_mismatch(state: &ReviewState, spec: &review::SessionTargetSpec) {
+    if review::find_session_for_target(state, spec).is_some() {
+        return;
+    }
+    if let Some(other) = review::open_session_for_other_target(state, spec) {
+        eprintln!(
+            "warning: no open review session matches '{}'; open session \"{}\" targets '{}' (pass -b {} -r {} or gander reviews …)",
+            target_spec_label(spec),
+            other.title.as_deref().unwrap_or("(untitled)"),
+            durable_target_label(&other.target),
+            other.target.base.as_deref().unwrap_or("<base>"),
+            other.target.revision.as_deref().unwrap_or("<rev>")
+        );
+    }
+}
+
+fn note_if_creating_mismatched_session(state: &ReviewState, spec: &review::SessionTargetSpec) {
+    if review::find_session_for_target(state, spec).is_none()
+        && let Some(other) = review::open_session_for_other_target(state, spec)
+    {
+        eprintln!(
+            "note: created new session for '{}'; another open session targets '{}'",
+            target_spec_label(spec),
+            durable_target_label(&other.target)
+        );
+    }
+}
+
+fn note_if_no_session_for_artifact(state: &ReviewState, spec: &review::SessionTargetSpec) {
+    if review::find_session_for_target(state, spec).is_none()
+        && review::open_session_for_other_target(state, spec).is_none()
+    {
+        eprintln!(
+            "note: no review session for '{}' — tasks/walkthrough sections will be empty",
+            target_spec_label(spec)
+        );
+    }
 }
 
 fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {
@@ -1952,6 +2102,30 @@ fn comment_echo_text(c: &crate::state::Comment) -> String {
         action_label_opt(c.action),
         loc(&c.path, c.line, c.end_line),
         anchored
+    )
+}
+
+fn task_echo_text(t: &crate::state::ReviewTask) -> String {
+    let location = t
+        .target
+        .as_ref()
+        .and_then(|x| x.file.as_ref().map(|p| loc(p, x.line, x.end_line)))
+        .unwrap_or_else(|| "(no anchor)".to_owned());
+    let body = t
+        .body
+        .as_deref()
+        .unwrap_or(&t.title)
+        .lines()
+        .next()
+        .unwrap_or("");
+    format!(
+        "id: {}\nstatus/action: {}/{}\ntitle: {} ({})\n{}\n",
+        t.id,
+        task_status_label(t.status),
+        action_label_opt(Some(t.action)),
+        t.title,
+        location,
+        ellipsize(body, 100)
     )
 }
 

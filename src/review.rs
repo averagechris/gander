@@ -73,6 +73,24 @@ pub fn ensure_session<'a>(
     state.sessions.last_mut().unwrap()
 }
 
+pub fn find_session_for_target<'a>(
+    state: &'a ReviewState,
+    target: &SessionTargetSpec,
+) -> Option<&'a ReviewSession> {
+    state.sessions.iter().find(|session| {
+        session.status == ReviewSessionStatus::Open && target_matches(&session.target, target)
+    })
+}
+
+pub fn open_session_for_other_target<'a>(
+    state: &'a ReviewState,
+    target: &SessionTargetSpec,
+) -> Option<&'a ReviewSession> {
+    state.sessions.iter().find(|session| {
+        session.status == ReviewSessionStatus::Open && !target_matches(&session.target, target)
+    })
+}
+
 fn target_matches(actual: &ReviewTarget, spec: &SessionTargetSpec) -> bool {
     actual.repo == spec.repo && actual.base == spec.base && actual.revision == spec.revision
 }
@@ -508,6 +526,27 @@ mod tests {
         assert_eq!(ensure_session(&mut state, &spec(), None).id, id);
         assert_eq!(list_sessions(&state)[0].title.as_deref(), Some("Review"));
         assert_eq!(find_session(&state, &id[..8]).unwrap().id, id);
+    }
+
+    #[test]
+    fn find_session_for_target_is_non_creating() {
+        let mut state = ReviewState::default();
+        assert!(find_session_for_target(&state, &spec()).is_none());
+        assert!(state.sessions.is_empty());
+
+        let id = ensure_session(&mut state, &spec(), Some("Review"))
+            .id
+            .clone();
+        assert_eq!(find_session_for_target(&state, &spec()).unwrap().id, id);
+
+        let mut other = spec();
+        other.base = Some("main".into());
+        assert!(find_session_for_target(&state, &other).is_none());
+        assert_eq!(
+            open_session_for_other_target(&state, &other).unwrap().id,
+            id
+        );
+        assert_eq!(state.sessions.len(), 1);
     }
 
     #[test]

@@ -93,6 +93,7 @@ config.
       },
       "body": "Comment body",
       "state": "draft",
+      "linked_task_ids": ["task-id"],
       "created_at": "2026-06-30T00:00:00Z",
       "excerpt": [
         { "kind": "context", "old_line": 40, "new_line": 40, "text": "    before();" },
@@ -108,7 +109,7 @@ config.
       "status": "open",
       "action": "fix",
       "linked_comment_ids": ["stable-ish-id"],
-      "target": { "file": "src/main.rs", "line": 42 }
+      "target": { "file": "src/main.rs", "line": 42, "end_line": null }
     }
   ],
   "walkthroughs": [
