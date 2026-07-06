@@ -1,7 +1,10 @@
 image: nixos/unstable
 arch: x86_64
-oauth: git.sr.ht/OBJECTS:RW git.sr.ht/PROFILE:RO git.sr.ht/REPOSITORIES:RO builds.sr.ht/JOBS:RW builds.sr.ht/SECRETS:RO
+oauth: git.sr.ht/OBJECTS:RW git.sr.ht/REPOSITORIES:RO git.sr.ht/PROFILE:RO builds.sr.ht/JOBS:RW builds.sr.ht/SECRETS:RO meta.sr.ht/PROFILE:RO
 environment:
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: http.userAgent
+  GIT_CONFIG_VALUE_0: "averagechris-fleet-pages (+https://averagechris.srht.site)"
   NIX_CONFIG: |
     experimental-features = nix-command flakes
     extra-substituters = https://averagechris-dotfiles.cachix.org
@@ -10,20 +13,22 @@ sources:
   - https://git.sr.ht/~averagechris/gander
 tasks:
   - release-artifact: |
+      set -eu
       cd gander
       nix build .#release-artifact --out-link result-release-artifact
       mkdir -p ~/artifacts
       cp -p result-release-artifact/* ~/artifacts/
   - upload-and-refresh: |
+      set -eu
       cd gander
-      hut() { nix shell nixpkgs#hut --command hut "$@"; }
+      hut() { nix shell --inputs-from . nixpkgs#hut --command hut "$@"; }
       version="$(awk '/^\[package\]/{s=1} s && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
       tag="v${version#v}"
       commit="$(git rev-parse HEAD)"
 
-      # jobs with an oauth grant get ~/.config/hut/config pre-provisioned
-
-      for artifact in result-release-artifact/*.tar.gz; do
+      set -- result-release-artifact/*.tar.gz
+      [ -e "$1" ] || { printf '%s\n' 'no release artifacts found' >&2; exit 1; }
+      for artifact do
         hut git artifact upload -r gander --rev "$tag" "$artifact" "$artifact.sha256"
       done
 
@@ -33,6 +38,9 @@ tasks:
       arch: x86_64
       oauth: pages.sr.ht/PAGES:RW
       environment:
+        GIT_CONFIG_COUNT: "1"
+        GIT_CONFIG_KEY_0: http.userAgent
+        GIT_CONFIG_VALUE_0: "averagechris-fleet-pages (+https://averagechris.srht.site)"
         NIX_CONFIG: |
           experimental-features = nix-command flakes
           extra-substituters = https://averagechris-dotfiles.cachix.org
