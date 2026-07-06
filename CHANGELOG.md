@@ -65,6 +65,27 @@
 
 ### Fixed
 
+- **Data loss:** retargeting the TUI to a narrow or empty diff (e.g.
+  stack-stepping onto an empty working-copy change) no longer rewrites
+  the workspace review state with only what that target can see —
+  viewed-state entries and comments outside the current diff now
+  survive every save.
+- Live watch actually refreshes again: the repo-poll fingerprint
+  template used `if(self, …)`, which real jj rejects, so the 2s poll
+  failed silently on every tick. Persistent poll failures now surface
+  a footer error (and a recovery notice) instead of freezing behind
+  the `following @` indicator.
+- Zen chapter cards no longer repeat session-global stats on every
+  chapter: derived facts are scoped to the chapter's own files, or
+  omitted when they cannot be honestly attributed.
+- `t` returns to the target the TUI was launched with (e.g. `-b main`)
+  instead of hard-coded `trunk()..@`, so stack stepping always has a
+  way home.
+- The target chooser ranks exact bookmark matches (then prefix
+  matches) above fuzzy matches, so typing `main` selects `main`.
+- The prior-operation catch-up flow (`I`) refreshes the diff before
+  comparing, and its notice states exactly how many unchanged files
+  were marked viewed vs changed files needing re-review.
 - CLI commands exit quietly on broken pipes (e.g. `gander hunks list |
   head`) instead of printing an error and backtrace.
 - Comments added via `gander comments add` now carry stable line/range

@@ -165,6 +165,9 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       diff context), so MCP-created comments lack excerpts in agent
       exports. Derive anchors once MCP loads diff context (M14 parity;
       `TODO(M14)` marker in `src/mcp.rs`).
+- [ ] Round-2 recheck gap: change briefs and comment drafts still
+      require raw JSON-RPC — extend the `gander chunks` spec-file
+      pattern to briefs (and consider drafts) for full CLI parity.
 
 ### W4 — Watch / ambient pane legibility
 
@@ -180,6 +183,31 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       (`following @` in the footer). *(2026-07-05)*
 - [x] Navigation keys for next/previous changed-since-last-look hunk
       (`}`/`{`, cross-file). *(2026-07-05)*
+- [x] Round-2 blocker: the fingerprint poll template used `if(self, …)`,
+      which real jj rejects — live refresh never fired (mock-backed
+      tests could not catch it). Fixed with `current_working_copy`;
+      persistent poll failures now surface a footer error and a
+      recovery notice instead of freezing silently. *(2026-07-05)*
+- [ ] Round-2 gap: popups block polling by design, so leaving the
+      activity feed (`ctrl-a`) open freezes the very updates it shows.
+      Consider allowing refresh under read-only popups.
+- [ ] Round-2 gap: `I` catch-up marks never-viewed files as viewed when
+      unchanged since the op — the notice copy is now honest, but
+      consider distinguishing "unchanged since op" from "reviewed".
+
+### W6 — Round-2 trust fixes (from the second eval round)
+
+- [x] **Data-loss blocker:** retargeting to a narrow/empty diff (stack
+      stepping onto an empty change) rewrote state.json with only what
+      that target could see — wiping all viewed-state and comments.
+      Saves now preserve entries outside the current diff. *(2026-07-05)*
+- [x] Zen chapter cards repeated session-global stats on every chapter,
+      contradicting per-change summaries; derived facts are now scoped
+      to the chapter's own files or omitted. *(2026-07-05)*
+- [x] `t` returns to the launch target (honoring `-b`/`-r`) instead of
+      hard-coded `trunk()..@`; chooser ranks exact bookmark matches
+      first; `I` op-compare refreshes the diff before comparing and
+      reports accurate counts. *(2026-07-05)*
 
 ### W5 — Web (parked)
 
@@ -214,3 +242,13 @@ export should inherit W2's tour content. Revisit after W4.
   legibility (freshness badges, viewed-stale state, activity feed with
   `@ moved`/entered/left events, follow-mode indicator, `}`/`{`
   changed-hunk navigation) landed.
+- **2026-07-05** — Round-2 re-runs (reports in
+  `eval/reports/2026-07-05-w2w3b-w4-recheck/`) surfaced two blockers the
+  unit suite could not see: state erasure on narrow retargets (data
+  loss) and a jj-rejected fingerprint template that silently disabled
+  live refresh entirely (scenario 3 scored 1/1/1.5 against that build).
+  Scenario 2 scored TUI 2 (erasure-driven), zen uncurated 3, curated
+  3.5, curation ergonomics 3.5 — evaluator called the chunks CLI +
+  incremental updates "genuinely good". All four blockers/majors fixed
+  same day (W6 above); scenario 3 re-run pending against the fixed
+  build.

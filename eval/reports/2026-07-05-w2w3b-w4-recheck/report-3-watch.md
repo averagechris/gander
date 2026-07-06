@@ -48,7 +48,7 @@ Quit with `q`; killed tmux session `geval` (left the unrelated parallel session 
 2. **[major] Persistent watcher failure is silent; footer keeps claiming "following @".**
    Repro: with the broken template (or any persistently failing jj invocation), the pane shows `following @` and stale stats indefinitely; the error-skip in `src/tui/mod.rs:709-716` treats permanent failures as transient. There is no last-refreshed timestamp, no "watch degraded" state, no error after N consecutive failures. For an all-day pane beside an autonomous agent this is the worst failure mode: confidently wrong.
 
-3. **[major] `I` compare-against-operation computes on a stale diff and mis-marks changed files as viewed.**
+3. **[major] `I` compare-against-operation computes on a stale diff and wrongly marks changed files as viewed.**
    Repro: with the pane stale (here: `tests/basic.rs` edited after last load), press `I` and pick an op older than the edit. `basic.rs` is marked viewed as "unchanged" because the comparison uses the in-memory diff instead of reloading current state first. Even with the poll fixed, a race window exists; the flow should refresh the target before comparing.
 
 4. **[major] No real-jj integration test for the fingerprint/poll path.**
@@ -75,7 +75,7 @@ Quit with `q`; killed tmux session `geval` (left the unrelated parallel session 
 # Scores
 
 - **Watch freshness/follows-@: 1/5.** The pane went stale immediately and stayed stale across every mutation class in the scenario (plain edit, rapid edits, viewed-file edit, describe/new/@-move, abandon, undo) for the entire session. Follow-mode labeling is present but false in practice. This is the rubric's "pane often goes stale... " anchor exactly, with the aggravator that it *advertises* following.
-- **Watch change awareness: 1/5.** All change-awareness machinery (notices, `±` badges, changed-hunk suffixes, activity feed) is gated behind the broken refresh, so changes were 100% silent; the activity feed stayed empty all session. The `I` op-comparison is a genuinely promising catch-up affordance but it mis-marked a changed file as viewed on stale data, so it can't rescue the score.
+- **Watch change awareness: 1/5.** All change-awareness machinery (notices, `±` badges, changed-hunk suffixes, activity feed) is gated behind the broken refresh, so changes were 100% silent; the activity feed stayed empty all session. The `I` op-comparison is a genuinely promising catch-up affordance but it wrongly marked a changed file as viewed on stale data, so it can't rescue the score.
 - **Pane-worthiness: 1.5/5 (report as 1–2).** As shipped against jj 0.42.0, the pane cannot be trusted without manual retarget-to-refresh, and worse, it looks trustworthy while wrong. The half point is for what works: state durability (comments/viewed survived reloads), graceful revset error handling, and manual reload paths that preserve review state — the skeleton of a good pane is visibly there.
 
 # Top proposals
