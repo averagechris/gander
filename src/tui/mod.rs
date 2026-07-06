@@ -136,6 +136,7 @@ enum CommentInputTarget {
 
 #[derive(Debug, Default)]
 struct TuiState {
+    launch_target: Option<ReviewTarget>,
     diff_drag: Option<DiffDrag>,
     notice: Option<UiNotice>,
     /// Fingerprint of the last autosaved files/comments payload, used to skip
@@ -318,6 +319,7 @@ pub fn run(
     // Seed the autosave fingerprint so an unchanged session does not trigger
     // a write on the first event.
     let mut tui_state = TuiState {
+        launch_target: Some(session.target.clone()),
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
         agent_log_path,
@@ -1145,7 +1147,10 @@ fn handle_normal_action(
         Action::CompareTrunk => load_review_target(
             review_loader,
             session,
-            ReviewTarget::trunk_to_current(),
+            tui_state
+                .launch_target
+                .clone()
+                .unwrap_or_else(ReviewTarget::trunk_to_current),
             tui_state,
         ),
         Action::CompareParent => load_review_target(
@@ -1790,9 +1795,19 @@ fn apply_incremental_review(
     operation: &crate::jj::JjOperationSummary,
     tui_state: &mut TuiState,
 ) {
+    let target = session.target.clone();
+    if let Err(error) = review_loader.load_in_place(session, target.clone()) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Error,
+            message: format!(
+                "failed to refresh {target} before prior-operation compare: {error:?}"
+            ),
+        });
+        return;
+    }
     let prior = review_loader
         .jj
-        .diff_at_operation(&session.repo, &session.target, &operation.operation_id)
+        .diff_at_operation(&session.repo, &target, &operation.operation_id)
         .and_then(|diff_text| DiffSet::parse(&diff_text));
     let prior = match prior {
         Ok(prior) => prior,
@@ -1816,7 +1831,7 @@ fn apply_incremental_review(
     tui_state.notice = Some(UiNotice {
         level: UiNoticeLevel::Info,
         message: format!(
-            "since op {}: {unchanged} unchanged file(s) marked viewed, {changed} need re-review",
+            "mark {unchanged} file(s) unchanged since {} as viewed; {changed} changed/new file(s) need re-review",
             operation.operation_id
         ),
     });
@@ -3197,6 +3212,7 @@ mod tests {
     struct MockJjBackend {
         calls: RefCell<Vec<ReviewTarget>>,
         diff_text: Result<String, String>,
+        diff_queue: RefCell<Vec<Result<String, String>>>,
         summaries: Vec<JjChangeSummary>,
         stack: Vec<JjChangeSummary>,
         operations: Vec<crate::jj::JjOperationSummary>,
@@ -3212,6 +3228,7 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 diff_text,
+                diff_queue: RefCell::new(Vec::new()),
                 summaries: Vec::new(),
                 stack: Vec::new(),
                 operations: Vec::new(),
@@ -3268,6 +3285,12 @@ mod tests {
     impl JjBackend for MockJjBackend {
         fn diff(&self, _repo: &Path, target: &ReviewTarget) -> Result<String> {
             self.calls.borrow_mut().push(target.clone());
+            if !self.diff_queue.borrow().is_empty() {
+                return match self.diff_queue.borrow_mut().remove(0) {
+                    Ok(diff_text) => Ok(diff_text),
+                    Err(error) => bail!(error),
+                };
+            }
             match &self.diff_text {
                 Ok(diff_text) => Ok(diff_text.clone()),
                 Err(error) => bail!(error.clone()),
@@ -3611,6 +3634,44 @@ mod tests {
     }
 
     #[test]
+    fn compare_launch_target_restores_custom_launch_after_stack_step() {
+        let mut session = snapshot_session("diff --git a/main.rs b/main.rs\n");
+        session.target = ReviewTarget::new("main", "@");
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.stack = vec![stack_change("aaa", "feat: first"), stack_change("bbb", "")];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            launch_target: Some(session.target.clone()),
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+
+        step_stack(&loader, &mut session, -1, &mut tui_state);
+        assert_ne!(session.target, ReviewTarget::new("main", "@"));
+
+        handle_normal_action(
+            Action::CompareTrunk,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(session.target, ReviewTarget::new("main", "@"));
+        assert!(
+            backend
+                .calls
+                .borrow()
+                .contains(&ReviewTarget::new("main", "@"))
+        );
+    }
+
+    #[test]
     fn stack_next_moves_forward_and_stops_at_top() {
         let mut session = snapshot_session("");
         let mut backend = MockJjBackend::with_diff(Ok(String::new()));
@@ -3666,8 +3727,7 @@ mod tests {
 
     #[test]
     fn operation_picker_enter_applies_incremental_review() {
-        let mut session = snapshot_session(
-            r#"diff --git a/same.rs b/same.rs
+        let current_diff = r#"diff --git a/same.rs b/same.rs
 --- a/same.rs
 +++ b/same.rs
 @@ -1 +1 @@
@@ -3679,8 +3739,8 @@ diff --git a/changed.rs b/changed.rs
 @@ -1 +1 @@
 -old
 +other
-"#,
-        );
+"#;
+        let mut session = snapshot_session(current_diff);
         let same_file_diff = session
             .files
             .iter()
@@ -3689,7 +3749,7 @@ diff --git a/changed.rs b/changed.rs
             .diff
             .raw
             .clone();
-        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut backend = MockJjBackend::with_diff(Ok(current_diff.to_owned()));
         backend.diff_at_op = Some(format!("{same_file_diff}\n"));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -3726,9 +3786,60 @@ diff --git a/changed.rs b/changed.rs
         assert!(same.viewed);
         assert!(!changed.viewed);
         let notice = tui_state.notice.unwrap();
-        assert!(notice.message.contains("since op op123"));
-        assert!(notice.message.contains("1 unchanged"));
-        assert!(notice.message.contains("1 need re-review"));
+        assert!(
+            notice
+                .message
+                .contains("mark 1 file(s) unchanged since op123 as viewed")
+        );
+        assert!(notice.message.contains("1 changed/new"));
+    }
+
+    #[test]
+    fn operation_compare_refreshes_current_diff_before_marking_viewed() {
+        let initial = r#"diff --git a/file.rs b/file.rs
+--- a/file.rs
++++ b/file.rs
+@@ -1 +1 @@
+-old
++new
+"#;
+        let refreshed = r#"diff --git a/file.rs b/file.rs
+--- a/file.rs
++++ b/file.rs
+@@ -1 +1 @@
+-old
++newer
+"#;
+        let mut session = snapshot_session(initial);
+        let mut backend = MockJjBackend::with_diff(Ok(initial.to_owned()));
+        backend
+            .diff_queue
+            .borrow_mut()
+            .push(Ok(refreshed.to_owned()));
+        backend.diff_at_op = Some(initial.to_owned());
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let operation = crate::jj::JjOperationSummary {
+            operation_id: "op123".to_owned(),
+            time: String::new(),
+            description: String::new(),
+        };
+
+        apply_incremental_review(&loader, &mut session, &operation, &mut tui_state);
+
+        assert!(!session.files[0].viewed);
+        assert_eq!(session.files[0].diff.raw, refreshed.trim_end());
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("mark 0 file(s) unchanged since op123 as viewed; 1 changed/new")
+        );
     }
 
     #[test]

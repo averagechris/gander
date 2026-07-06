@@ -299,7 +299,7 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
                 Line::from(format!("Current target: {}", session.target)),
                 Line::from(""),
                 Line::from(
-                    "Use t for trunk()..@, p for @-..@, b for chooser, or pass --base/--rev.",
+                    "Use t for launch target, p for @-..@, b for chooser, or pass --base/--rev.",
                 ),
                 Line::from(generated_hint),
             ])
@@ -1492,7 +1492,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
             "next/previous comment",
         ),
         section("targets & jj"),
-        entry(&[Action::CompareTrunk], "compare trunk()..@"),
+        entry(&[Action::CompareTrunk], "return to launch target"),
         entry(&[Action::CompareParent], "compare @-..@"),
         entry(&[Action::TargetChooser], "base/tip chooser"),
         entry(&[Action::RevsetInput], "revset input"),

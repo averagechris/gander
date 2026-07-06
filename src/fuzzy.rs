@@ -18,6 +18,31 @@ pub fn fuzzy_matches(haystack: &str, needle: &str) -> bool {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FuzzyRank {
+    Exact,
+    Prefix,
+    Fuzzy,
+}
+
+pub fn fuzzy_rank(haystack: &str, needle: &str) -> Option<FuzzyRank> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Some(FuzzyRank::Fuzzy);
+    }
+    let haystack_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    if haystack_lower == needle_lower {
+        Some(FuzzyRank::Exact)
+    } else if haystack_lower.starts_with(&needle_lower) {
+        Some(FuzzyRank::Prefix)
+    } else if fuzzy_matches(&haystack_lower, &needle_lower) {
+        Some(FuzzyRank::Fuzzy)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,5 +64,17 @@ mod tests {
     fn rejects_out_of_order_or_missing_characters() {
         assert!(!fuzzy_matches("src/app.rs", "ppa"));
         assert!(!fuzzy_matches("src/app.rs", "xyz"));
+    }
+
+    #[test]
+    fn ranks_exact_before_prefix_before_fuzzy() {
+        assert_eq!(fuzzy_rank("main", "main"), Some(FuzzyRank::Exact));
+        assert_eq!(fuzzy_rank("mainline", "main"), Some(FuzzyRank::Prefix));
+        assert_eq!(
+            fuzzy_rank("my-awesome-index", "main"),
+            Some(FuzzyRank::Fuzzy)
+        );
+        assert!(FuzzyRank::Exact < FuzzyRank::Prefix);
+        assert!(FuzzyRank::Prefix < FuzzyRank::Fuzzy);
     }
 }

@@ -1,7 +1,7 @@
 //! Base/tip target picker: jj change list, fuzzy filtering, and selection state.
 
 use crate::{
-    fuzzy::fuzzy_matches as fuzzy_matches_text,
+    fuzzy::{FuzzyRank, fuzzy_rank},
     jj::{JjChangeSummary, ReviewTarget},
 };
 
@@ -111,12 +111,14 @@ impl TargetChooserState {
     }
 
     fn apply_filter(&mut self) {
-        self.filtered = self
+        let mut ranked = self
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| fuzzy_matches(row, &self.query).then_some(index))
-            .collect();
+            .filter_map(|(index, row)| fuzzy_match_rank(row, &self.query).map(|rank| (rank, index)))
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(rank, index)| (*rank, *index));
+        self.filtered = ranked.iter().map(|(_, index)| *index).collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
     }
 }
@@ -140,9 +142,23 @@ impl JjChangeSummary {
     }
 }
 
-fn fuzzy_matches(row: &JjChangeSummary, query: &str) -> bool {
-    let haystack = format!("{} {} {}", row.change_id, row.bookmarks, row.description);
-    fuzzy_matches_text(&haystack, query)
+fn fuzzy_match_rank(row: &JjChangeSummary, query: &str) -> Option<FuzzyRank> {
+    row.change_id
+        .split_whitespace()
+        .chain(
+            row.bookmarks
+                .split_whitespace()
+                .map(|bookmark| bookmark.trim_end_matches('*')),
+        )
+        .chain(row.description.split_whitespace())
+        .filter_map(|token| fuzzy_rank(token, query))
+        .min()
+        .or_else(|| {
+            fuzzy_rank(
+                &format!("{} {} {}", row.change_id, row.bookmarks, row.description),
+                query,
+            )
+        })
 }
 
 #[cfg(test)]
@@ -223,5 +239,37 @@ mod tests {
 
         assert_eq!(chooser.filtered, vec![1]);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("def", "@")));
+    }
+
+    #[test]
+    fn target_chooser_ranks_exact_bookmark_before_prefix_and_fuzzy() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "fuzzy".to_owned(),
+                    bookmarks: "my-awesome-index".to_owned(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "prefix".to_owned(),
+                    bookmarks: "mainline".to_owned(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "exact".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "fuzzy",
+            "@",
+        );
+
+        for ch in "main".chars() {
+            chooser.push_query_char(ch);
+        }
+
+        assert_eq!(chooser.filtered, vec![2, 1, 0]);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("exact", "@")));
     }
 }

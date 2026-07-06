@@ -1,5 +1,6 @@
 ---
 source: src/tui/render.rs
+assertion_line: 4218
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -7,8 +8,8 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 │Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
 │target chooser, or adjust                 ││                                                      │
-│--base/--rev/--ignore.                    ││Use t for trunk()..@, p for @-..@, b for chooser, or  │
-│                                          ││pass --base/--rev.                                    │
+│--base/--rev/--ignore.                    ││Use t for launch target, p for @-..@, b for chooser,  │
+│                                          ││or pass --base/--rev.                                 │
 │                                          ││If files disappeared unexpectedly, check --ignore     │
 │              ┌revsets─────────────────────────────────────────────────────────────┐              │
 │              │Review an arbitrary revset range (jj revset syntax)                 │              │

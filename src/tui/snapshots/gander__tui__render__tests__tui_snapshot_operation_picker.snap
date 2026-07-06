@@ -1,5 +1,6 @@
 ---
 source: src/tui/render.rs
+assertion_line: 4237
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -7,7 +8,7 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 │Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
 │target chooser, or adjust                 ││                                                      │
-│--base/--┌prior operations──────────────────────────────────────────────────────────────┐ser, or  │
+│--base/--┌prior operations──────────────────────────────────────────────────────────────┐hooser,  │
 │         │Compare against a prior operation: unchanged files are marked viewed          │         │
 │         │› abc123def     5 minutes ago     snapshot working copy                       │nore     │
 │         │  456fed789     2 hours ago       commit working copy                         │         │
