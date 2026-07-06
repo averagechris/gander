@@ -1207,7 +1207,7 @@ fn draw_footer(
             ),
         )),
         Mode::CommentInput { target, .. } => format!(
-            "{kind} comment · {newline} newline · {submit} save · {cancel} cancel",
+            "{kind} comment · refresh paused · {newline} newline · {submit} save · {cancel} cancel",
             kind = match target {
                 CommentInputTarget::New => "new",
                 CommentInputTarget::Edit { .. } => "edit",
@@ -1219,18 +1219,18 @@ fn draw_footer(
         ),
         Mode::TargetChooser(_) => {
             format!(
-                "choose base/tip · type filter · tab side · {down}/{up} move · enter load · esc cancel",
+                "choose base/tip · refresh paused · type filter · tab side · {down}/{up} move · enter load · esc cancel",
                 down = keymap.hint(Action::TargetPickerMoveDown),
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
         }
         Mode::RevsetInput(_) => {
-            "revset target · type revset · tab/↑/↓ switch field · enter load · esc cancel"
+            "revset target · refresh paused · type revset · tab/↑/↓ switch field · enter load · esc cancel"
                 .to_owned()
         }
         Mode::OperationPicker(_) => {
             format!(
-                "prior operation · {down}/{up} or j/k move · enter compare · esc cancel",
+                "prior operation · refresh paused · {down}/{up} or j/k move · enter compare · esc cancel",
                 down = keymap.hint(Action::TargetPickerMoveDown),
                 up = keymap.hint(Action::TargetPickerMoveUp),
             )
@@ -1427,6 +1427,10 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         ),
         entry(&[Action::ToggleFilePane], "hide/show file pane"),
         entry(&[Action::Help], "this help"),
+        entry(
+            &[Action::Activity],
+            "activity feed (live refresh while open)",
+        ),
         entry(&[Action::CancelRangeComment], "dismiss range/notice"),
         entry(&[Action::Quit], "quit (writes artifact)"),
         section("files"),
@@ -1453,6 +1457,10 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(
             &[Action::NextSymbol, Action::PreviousSymbol],
             "next/previous changed symbol",
+        ),
+        entry(
+            &[Action::NextChangedHunk, Action::PreviousChangedHunk],
+            "next/previous changed hunk",
         ),
         entry(&[Action::SymbolOutline], "changed symbol outline"),
         entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
@@ -1513,6 +1521,8 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::ChunkList], "agent review chunks"),
         entry(&[Action::Zen], "zen briefing (focus stops + glance)"),
         entry(&[Action::DraftList], "agent draft comments"),
+        section("badges"),
+        literal("±", "changed since look · ~ viewed, changed since"),
     ];
 
     frame.render_widget(Block::default().borders(Borders::ALL).title("help"), popup);
@@ -3457,7 +3467,11 @@ fn draw_activity_popup(
         .iter()
         .rev()
         .map(|event| {
-            let time = event.timestamp.format("%H:%M:%S").to_string();
+            let time = event
+                .timestamp
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string();
             let message = if event.count > 1 {
                 format!("{} {}×", event.message, event.count)
             } else {

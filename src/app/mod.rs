@@ -548,6 +548,7 @@ impl ReviewSession {
         self.file_pane_visible = !self.file_pane_visible;
         if !self.file_pane_visible && self.focus == Focus::Files {
             self.focus = Focus::Diff;
+            self.clear_selected_freshness_marks();
             self.ensure_diff_cursor_commentable();
         }
     }
@@ -615,10 +616,6 @@ impl ReviewSession {
         if index >= self.files.len() {
             return;
         }
-        if let Some(file) = self.files.get_mut(index) {
-            file.changed_since_look = false;
-            file.changed_hunks.clear();
-        }
         self.reveal_file_in_tree(index);
         self.tree_cursor = Some(TreeRowId::File { file_index: index });
         if index == self.selected {
@@ -669,6 +666,7 @@ impl ReviewSession {
             return;
         }
         self.focus = Focus::Diff;
+        self.clear_selected_freshness_marks();
         let row_index = row_index.min(rows.len() - 1);
         if rows[row_index].anchor.is_some() {
             self.diff_cursor = row_index;
@@ -1144,11 +1142,21 @@ impl ReviewSession {
             Focus::Files => Focus::Diff,
             Focus::Diff => Focus::Files,
         };
+        if self.focus == Focus::Diff {
+            self.clear_selected_freshness_marks();
+        }
         // Never trap: focusing the files pane while it is hidden re-shows it.
         if self.focus == Focus::Files {
             self.file_pane_visible = true;
         }
         self.ensure_diff_cursor_commentable();
+    }
+
+    fn clear_selected_freshness_marks(&mut self) {
+        if let Some(file) = self.selected_file_mut() {
+            file.changed_since_look = false;
+            file.changed_hunks.clear();
+        }
     }
 
     pub fn move_diff_cursor(&mut self, delta: isize) {
@@ -1348,24 +1356,38 @@ impl ReviewSession {
                         .iter()
                         .copied()
                         .find(|row| *row > self.diff_cursor)
-                        .unwrap_or(targets[0])
+                        .or_else(|| {
+                            if self.files.len() == 1 {
+                                Some(targets[0])
+                            } else {
+                                None
+                            }
+                        })
                 } else {
                     targets
                         .iter()
                         .rev()
                         .copied()
                         .find(|row| *row < self.diff_cursor)
-                        .unwrap_or(*targets.last().unwrap())
+                        .or_else(|| {
+                            if self.files.len() == 1 {
+                                Some(*targets.last().unwrap())
+                            } else {
+                                None
+                            }
+                        })
                 }
             } else if direction > 0 {
-                targets[0]
+                Some(targets[0])
             } else {
-                *targets.last().unwrap()
+                Some(*targets.last().unwrap())
             };
-            self.focus = Focus::Diff;
-            self.diff_cursor = target;
-            self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
-            return;
+            if let Some(target) = target {
+                self.focus = Focus::Diff;
+                self.diff_cursor = target;
+                self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                return;
+            }
         }
     }
 
@@ -1955,6 +1977,8 @@ diff --git a/new.rs b/new.rs
         assert!(session.files[2].changed_since_look);
 
         session.select_file_index(2);
+        assert!(session.files[2].changed_since_look);
+        session.toggle_focus();
         assert!(!session.files[2].changed_since_look);
         session.select_file_index(0);
         session.mark_selected_viewed();
@@ -3147,14 +3171,40 @@ diff --git a/src/c.rs b/src/c.rs
 
     #[test]
     fn jump_to_changed_hunk_continues_across_files() {
-        let mut session = session();
+        let mut session = ReviewSession::new(
+            ".".into(), ReviewTarget::trunk_to_current(),
+            DiffSet::parse("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-c\n+d\n").unwrap(),
+            ReviewState::default());
+        session.files[0].changed_hunks = [0, 1].into_iter().collect();
         session.files[1].changed_hunks.insert(0);
+
         session.jump_to_changed_hunk(1);
-        assert_eq!(session.selected_file().unwrap().path, "README.md");
-        assert!(matches!(
-            session.diff_rows_for_selected_file()[session.diff_cursor].kind,
-            DiffRowKind::HunkHeader
-        ));
+        assert_eq!(session.selected, 0);
+        let first = session.diff_cursor;
+        session.jump_to_changed_hunk(1);
+        assert_eq!(session.selected, 0);
+        assert!(session.diff_cursor > first);
+        session.jump_to_changed_hunk(1);
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        session.jump_to_changed_hunk(1);
+        assert_eq!(session.selected_file().unwrap().path.as_str(), "a.rs");
+        assert_eq!(session.diff_cursor, first);
+    }
+
+    #[test]
+    fn selecting_file_does_not_clear_freshness_until_diff_is_focused() {
+        let mut session = session();
+        session.files[1].changed_since_look = true;
+        session.files[1].changed_hunks.insert(0);
+
+        session.select_file_index(1);
+        assert!(session.files[1].changed_since_look);
+        assert!(session.files[1].changed_hunks.contains(&0));
+
+        session.toggle_focus();
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(!session.files[1].changed_since_look);
+        assert!(session.files[1].changed_hunks.is_empty());
     }
 
     #[test]

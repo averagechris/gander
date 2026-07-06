@@ -443,7 +443,7 @@ fn run_loop(
             // Live refresh: pick up new/rewritten changes while nothing
             // modal is open (a reload underneath a popup or comment editor
             // could misanchor what the human is doing).
-            if matches!(mode, Mode::Normal) {
+            if mode_allows_live_refresh(mode) {
                 maybe_refresh_review(review_loader, session, tui_state);
             }
             continue;
@@ -765,6 +765,10 @@ fn maybe_refresh_review(
     }
 }
 
+fn mode_allows_live_refresh(mode: &Mode) -> bool {
+    matches!(mode, Mode::Normal | Mode::Activity(_) | Mode::Help)
+}
+
 /// Reload the current target in place: view state survives, agent
 /// suggestions are reapplied, and an active zen walkthrough rebuilds its
 /// stops instead of going stale.
@@ -784,6 +788,18 @@ fn refresh_current_target(
     }
     reapply_agent_overlay(session, tui_state);
     let mut events = fingerprint_events(previous_fingerprint, fingerprint);
+    let mut file_events = session
+        .files
+        .iter()
+        .filter(|file| file.changed_since_look)
+        .map(|file| {
+            format!(
+                "{} updated (+{} −{})",
+                file.path, file.diff.additions, file.diff.deletions
+            )
+        })
+        .collect::<Vec<_>>();
+    events.append(&mut file_events);
     let mut message = if events.is_empty() {
         format!("repository changed — refreshed {}", session.target)
     } else {
@@ -5134,6 +5150,21 @@ diff --git a/c.rs b/c.rs
                 .iter()
                 .any(|event| event.message == "@ moved to new")
         );
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| { event.message.contains(" updated (+") })
+        );
+    }
+
+    #[test]
+    fn live_refresh_runs_under_read_only_popups() {
+        assert!(mode_allows_live_refresh(&Mode::Normal));
+        assert!(mode_allows_live_refresh(&Mode::Activity(
+            ActivityListState::new()
+        )));
+        assert!(mode_allows_live_refresh(&Mode::Help));
     }
 
     #[test]

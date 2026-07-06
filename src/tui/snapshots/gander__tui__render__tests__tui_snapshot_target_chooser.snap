@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4072
+assertion_line: 4086
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -26,4 +26,4 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
-choose base/tip · type filter · tab side · down/up move · enter load · esc cancel
+choose base/tip · refresh paused · type filter · tab side · down/up move · enter load · esc cancel

@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-assertion_line: 3976
+assertion_line: 3990
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
 ┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
@@ -18,19 +18,19 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │         tab  switch focus between files and diff         esc  leave zen / close artifact        │    │
 │     │           w  hide/show file pane                comments                                        │    │
 │     │           ?  this help                                     c  comment at cursor                 │    │
-│     │      ctrl-g  dismiss range/notice                          r  start/finish range comment        │    │
-│     │           q  quit (writes artifact)                        e  edit comment                      │    │
-│     │files                                                       x  delete comment                    │    │
-│     │         j/k  move in tree                                  C  comment list                      │    │
-│     │       space  fold/unfold directory                         X  review tasks                      │    │
-│     │  left/right  collapse/expand directory                     W  walkthrough panel                 │    │
-│     │           /  fuzzy file search                             Y  mark for walkthrough              │    │
-│     │           h  hide/show noisy files                       m/M  next/previous comment             │    │
-│     │           f  cycle viewed filter                targets & jj                                    │    │
-│     │         n/N  next/previous unviewed file                   t  return to launch target           │    │
-│     │       enter  mark viewed and advance                       p  compare @-..@                     │    │
-│     │           v  toggle viewed                                 b  base/tip chooser                  │    │
-│     │           a  mark all viewed                               R  revset input                      │    │
+│     │      ctrl-a  activity feed (live refresh while             r  start/finish range comment        │    │
+│     │open)                                                       e  edit comment                      │    │
+│     │      ctrl-g  dismiss range/notice                          x  delete comment                    │    │
+│     │           q  quit (writes artifact)                        C  comment list                      │    │
+│     │files                                                       X  review tasks                      │    │
+│     │         j/k  move in tree                                  W  walkthrough panel                 │    │
+│     │       space  fold/unfold directory                         Y  mark for walkthrough              │    │
+│     │  left/right  collapse/expand directory                   m/M  next/previous comment             │    │
+│     │           /  fuzzy file search                  targets & jj                                    │    │
+│     │           h  hide/show noisy files                         t  return to launch target           │    │
+│     │           f  cycle viewed filter                           p  compare @-..@                     │    │
+│     │         n/N  next/previous unviewed file                   b  base/tip chooser                  │    │
+│     │       enter  mark viewed and advance                       R  revset input                      │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
