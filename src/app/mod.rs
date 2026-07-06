@@ -268,6 +268,8 @@ impl ReviewSession {
         limits: LimitsConfig,
         diff_cues: DiffConfig,
     ) -> Self {
+        let mut state = state;
+        state.normalize_legacy_file_state();
         let ReviewState {
             files,
             comments,
@@ -465,9 +467,8 @@ impl ReviewSession {
     fn apply_state_files(&mut self) {
         for file in &mut self.files {
             if let Some(saved) = self.persisted_files.get(&file.path) {
-                let stale = saved.viewed && saved.fingerprint != file.fingerprint;
-                file.viewed = saved.viewed && !stale;
-                file.viewed_stale = stale;
+                file.viewed = saved.is_viewed_fingerprint(&file.fingerprint);
+                file.viewed_stale = !file.viewed && saved.has_any_viewed_fingerprint();
             }
         }
     }
@@ -1719,13 +1720,18 @@ impl ReviewSession {
             files: {
                 let mut files = self.persisted_files.clone();
                 for file in &self.files {
-                    files.insert(
-                        file.path.clone(),
-                        FileState {
-                            fingerprint: file.fingerprint.clone(),
-                            viewed: file.viewed,
-                        },
-                    );
+                    let mut state = files.remove(&file.path).unwrap_or_default();
+                    state.normalize_legacy();
+                    if file.viewed {
+                        state.viewed_fingerprints.insert(file.fingerprint.clone());
+                    } else {
+                        // Unmarking a file only removes the current content version;
+                        // marks for other fingerprints remain valid when switching targets.
+                        state.viewed_fingerprints.remove(&file.fingerprint);
+                    }
+                    state.fingerprint = file.fingerprint.clone();
+                    state.viewed = state.is_viewed_fingerprint(&file.fingerprint);
+                    files.insert(file.path.clone(), state);
                 }
                 files
             },
@@ -1963,6 +1969,7 @@ diff --git a/new.rs b/new.rs
             FileState {
                 fingerprint: "old".to_owned(),
                 viewed: true,
+                ..Default::default()
             },
         );
         let session = ReviewSession::new(
@@ -1973,6 +1980,100 @@ diff --git a/new.rs b/new.rs
         );
         assert!(!session.files[0].viewed);
         assert!(session.files[0].viewed_stale);
+    }
+
+    #[test]
+    fn viewed_marks_survive_saving_other_fingerprints_for_same_path() {
+        let wide = DiffSet::parse("diff --git a/src/config.rs b/src/config.rs\n--- a/src/config.rs\n+++ b/src/config.rs\n@@ -1 +1 @@\n-old\n+wide\n").unwrap();
+        let narrow = DiffSet::parse("diff --git a/src/config.rs b/src/config.rs\n--- a/src/config.rs\n+++ b/src/config.rs\n@@ -1 +1 @@\n-old\n+narrow\n").unwrap();
+        let mut wide_session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            wide.clone(),
+            ReviewState::default(),
+        );
+        wide_session.mark_selected_viewed();
+        let saved_wide = wide_session.to_state();
+        let wide_fingerprint = wide_session.files[0].fingerprint.clone();
+
+        let narrow_session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::new("change-", "change"),
+            narrow,
+            saved_wide,
+        );
+        assert_ne!(wide_fingerprint, narrow_session.files[0].fingerprint);
+        assert!(!narrow_session.files[0].viewed);
+        assert!(narrow_session.files[0].viewed_stale);
+        let saved_narrow = narrow_session.to_state();
+
+        let wide_again = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            wide,
+            saved_narrow,
+        );
+        assert!(wide_again.files[0].viewed);
+        assert!(!wide_again.files[0].viewed_stale);
+    }
+
+    #[test]
+    fn viewed_stale_survives_save_and_refresh_until_current_fingerprint_is_viewed() {
+        let original = DiffSet::parse("diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\n").unwrap();
+        let refreshed = DiffSet::parse("diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+newer\n").unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        session.mark_selected_viewed();
+        let saved = session.to_state();
+
+        let stale = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            refreshed.clone(),
+            saved,
+        );
+        assert!(!stale.files[0].viewed);
+        assert!(stale.files[0].viewed_stale);
+
+        let saved_stale = stale.to_state();
+        let mut stale_again = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            refreshed,
+            saved_stale,
+        );
+        assert!(!stale_again.files[0].viewed);
+        assert!(stale_again.files[0].viewed_stale);
+
+        stale_again.mark_selected_viewed();
+        assert!(stale_again.files[0].viewed);
+        assert!(!stale_again.files[0].viewed_stale);
+    }
+
+    #[test]
+    fn toggle_unmark_removes_only_current_fingerprint() {
+        let mut session = session();
+        let current = session.files[0].fingerprint.clone();
+        let other = "other-version".to_owned();
+        session.persisted_files.insert(
+            "src/tui.rs".to_owned(),
+            FileState {
+                fingerprint: current.clone(),
+                viewed: true,
+                viewed_fingerprints: BTreeSet::from([current.clone(), other.clone()]),
+            },
+        );
+        session.apply_state_files();
+
+        session.toggle_viewed();
+        let saved = session.to_state();
+        let file = &saved.files["src/tui.rs"];
+        assert!(!file.viewed_fingerprints.contains(&current));
+        assert!(file.viewed_fingerprints.contains(&other));
     }
 
     #[test]
@@ -2182,6 +2283,7 @@ diff --git a/src/c.rs b/src/c.rs
                 FileState {
                     fingerprint: "abc".to_owned(),
                     viewed: true,
+                    ..Default::default()
                 },
             )]),
             comments: vec![comment("old", "src/app.rs")],

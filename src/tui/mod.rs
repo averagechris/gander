@@ -3392,6 +3392,7 @@ mod tests {
             crate::state::FileState {
                 fingerprint: "b-fp".to_owned(),
                 viewed: true,
+                ..Default::default()
             },
         );
         on_disk.comments.push(Comment {

@@ -1289,6 +1289,7 @@ mod tests {
             FileState {
                 fingerprint: "abc".to_owned(),
                 viewed: false,
+                ..Default::default()
             },
         );
         let artifact: OwnedReviewArtifact = serde_json::from_str(
@@ -1452,6 +1453,7 @@ mod tests {
             FileState {
                 fingerprint: "abc".to_owned(),
                 viewed: false,
+                ..Default::default()
             },
         );
         state.files.insert(
@@ -1459,6 +1461,7 @@ mod tests {
             FileState {
                 fingerprint: "current".to_owned(),
                 viewed: false,
+                ..Default::default()
             },
         );
         state.comments.push(crate::state::Comment {

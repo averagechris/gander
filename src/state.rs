@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use color_eyre::eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -24,10 +28,28 @@ pub struct ReviewStateMeta {
     pub saved_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FileState {
     pub fingerprint: String,
     pub viewed: bool,
+    pub viewed_fingerprints: BTreeSet<String>,
+}
+
+impl FileState {
+    pub fn normalize_legacy(&mut self) {
+        if self.viewed && !self.fingerprint.is_empty() {
+            self.viewed_fingerprints.insert(self.fingerprint.clone());
+        }
+    }
+
+    pub fn is_viewed_fingerprint(&self, fingerprint: &str) -> bool {
+        self.viewed_fingerprints.contains(fingerprint)
+    }
+
+    pub fn has_any_viewed_fingerprint(&self) -> bool {
+        !self.viewed_fingerprints.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +210,9 @@ impl ReviewState {
             return Ok(Self::default());
         }
         let contents = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&contents)?)
+        let mut state: Self = serde_json::from_str(&contents)?;
+        state.normalize_legacy_file_state();
+        Ok(state)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -202,6 +226,14 @@ impl ReviewState {
         fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+impl ReviewState {
+    pub fn normalize_legacy_file_state(&mut self) {
+        for file in self.files.values_mut() {
+            file.normalize_legacy();
+        }
     }
 }
 
@@ -219,6 +251,7 @@ mod tests {
             FileState {
                 fingerprint: "abc".to_owned(),
                 viewed: true,
+                ..Default::default()
             },
         );
 
@@ -227,6 +260,24 @@ mod tests {
         let loaded = ReviewState::load_or_default(&path).unwrap();
         assert!(loaded.files["src/main.rs"].viewed);
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn legacy_viewed_file_state_seeds_viewed_fingerprints() {
+        let mut state: ReviewState = serde_json::from_str(
+            r#"{
+  "files": {
+    "src/main.rs": { "fingerprint": "abc", "viewed": true }
+  }
+}"#,
+        )
+        .unwrap();
+
+        state.normalize_legacy_file_state();
+
+        let file = &state.files["src/main.rs"];
+        assert!(file.viewed);
+        assert!(file.viewed_fingerprints.contains("abc"));
     }
 
     #[test]
