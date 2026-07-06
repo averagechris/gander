@@ -127,6 +127,25 @@ impl DiffSet {
     }
 }
 
+impl Hunk {
+    pub fn content_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.header.as_bytes());
+        hasher.update(b"\n");
+        for line in &self.lines {
+            hasher.update(match line.kind {
+                DiffLineKind::Context => b" " as &[u8],
+                DiffLineKind::Added => b"+" as &[u8],
+                DiffLineKind::Removed => b"-" as &[u8],
+                DiffLineKind::Meta => b"\\" as &[u8],
+            });
+            hasher.update(line.text.as_bytes());
+            hasher.update(b"\n");
+        }
+        format!("{:x}", hasher.finalize())
+    }
+}
+
 /// Incremental single-file parser fed one line at a time, so callers can
 /// stream arbitrarily large diffs without buffering per-file line vectors.
 #[derive(Debug, Default)]

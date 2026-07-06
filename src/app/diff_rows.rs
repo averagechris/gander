@@ -33,6 +33,7 @@ pub struct DiffRow {
     /// off or the line has no counterpart.
     pub emphasis: Vec<Range<usize>>,
     pub kind: DiffRowKind,
+    pub hunk_index: Option<usize>,
     pub anchor: Option<CommentAnchor>,
     /// The context-expansion gap this row belongs to: set on
     /// [`DiffRowKind::ExpandGap`] rows and on the synthetic context rows an
@@ -94,6 +95,7 @@ impl ReviewSession {
             syntax: Vec::new(),
             emphasis: Vec::new(),
             kind: DiffRowKind::FileHeader,
+            hunk_index: None,
             anchor: None,
             gap: None,
         }];
@@ -135,6 +137,7 @@ impl ReviewSession {
                 syntax: Vec::new(),
                 emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
+                hunk_index: None,
                 anchor: None,
                 gap: None,
             });
@@ -150,6 +153,7 @@ impl ReviewSession {
                 syntax: Vec::new(),
                 emphasis: Vec::new(),
                 kind: DiffRowKind::SyntaxSummary,
+                hunk_index: None,
                 anchor: None,
                 gap: None,
             });
@@ -191,6 +195,7 @@ impl ReviewSession {
                     syntax: Vec::new(),
                     emphasis: Vec::new(),
                     kind: DiffRowKind::HunkHeader,
+                    hunk_index: Some(hunk_index),
                     anchor: None,
                     gap: None,
                 });
@@ -225,6 +230,7 @@ impl ReviewSession {
                         syntax: Vec::new(),
                         emphasis: Vec::new(),
                         kind: DiffRowKind::ContextFold,
+                        hunk_index: Some(hunk_index),
                         anchor: None,
                         gap: None,
                     });
@@ -260,6 +266,7 @@ impl ReviewSession {
                     syntax,
                     emphasis: emphasis.get(&line_index).cloned().unwrap_or_default(),
                     kind: DiffRowKind::DiffLine(line.kind),
+                    hunk_index: Some(hunk_index),
                     anchor: self.line_anchor(file, hunk_index, line_index),
                     gap: None,
                 });
@@ -280,6 +287,7 @@ impl ReviewSession {
                 syntax: Vec::new(),
                 emphasis: Vec::new(),
                 kind: DiffRowKind::Raw,
+                hunk_index: None,
                 anchor: None,
                 gap: None,
             });
@@ -331,6 +339,7 @@ impl ReviewSession {
                     gap_id: spec.gap_id,
                     hidden: view.hidden,
                 },
+                hunk_index: None,
                 anchor: None,
                 gap: Some(spec.gap_id),
             });
@@ -362,6 +371,7 @@ fn placeholder_row(text: &str) -> DiffRow {
         syntax: Vec::new(),
         emphasis: Vec::new(),
         kind: DiffRowKind::Placeholder,
+        hunk_index: None,
         anchor: None,
         gap: None,
     }
@@ -380,6 +390,7 @@ fn expanded_context_row(lines: &[String], new_lineno: usize, spec: &GapSpec) -> 
         syntax: Vec::new(),
         emphasis: Vec::new(),
         kind: DiffRowKind::DiffLine(DiffLineKind::Context),
+        hunk_index: None,
         anchor: None,
         gap: Some(spec.gap_id),
     }

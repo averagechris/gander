@@ -234,7 +234,20 @@ fn render_file_row(
     file_index: usize,
 ) -> ListItem<'static> {
     let file = &session.files[file_index];
-    let mark = if file.viewed { "✓" } else { "•" };
+    let (mark, mark_style) = if file.changed_since_look {
+        (
+            "±",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if file.viewed_stale {
+        ("~", Style::default().fg(Color::Yellow))
+    } else if file.viewed {
+        ("✓", Style::default().fg(Color::Green))
+    } else {
+        ("•", Style::default().fg(Color::Green))
+    };
     let style = if file.viewed {
         Style::default().fg(Color::DarkGray)
     } else {
@@ -250,7 +263,7 @@ fn render_file_row(
     };
     ListItem::new(Line::from(vec![
         Span::raw("  ".repeat(row.depth.min(8))),
-        Span::styled(mark, Style::default().fg(Color::Green)),
+        Span::styled(mark, mark_style),
         flag_span,
         Span::styled(
             format!("{:>7}", file.status),
@@ -535,7 +548,15 @@ fn unified_row_line(
             Style::default().fg(Color::Magenta),
         )),
         DiffRowKind::HunkHeader => Line::from(Span::styled(
-            row.text.clone(),
+            if row.hunk_index.is_some_and(|hunk| {
+                session
+                    .selected_file()
+                    .is_some_and(|file| file.changed_hunks.contains(&hunk))
+            }) {
+                format!("{}  changed", row.text)
+            } else {
+                row.text.clone()
+            },
             Style::default()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
@@ -1247,7 +1268,15 @@ fn draw_footer(
         }
         Mode::Help => "help · any key to close".to_owned(),
     };
-    let mut lines = vec![Line::from(session.summary_line()), Line::from(mode_text)];
+    #[cfg(not(test))]
+    let mut summary = session.summary_line();
+    #[cfg(test)]
+    let summary = session.summary_line();
+    #[cfg(not(test))]
+    if session.target.is_symbolic() {
+        summary.push_str(&format!(" · following {}", session.target.rev));
+    }
+    let mut lines = vec![Line::from(summary), Line::from(mode_text)];
     if let Some(notice) = notice {
         let (label, style) = match notice.level {
             UiNoticeLevel::Info => ("info", Style::default().fg(Color::Blue)),

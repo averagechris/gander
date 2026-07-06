@@ -216,6 +216,8 @@ pub struct KeybindingsConfig {
     pub symbol_outline: Vec<String>,
     pub next_symbol: Vec<String>,
     pub previous_symbol: Vec<String>,
+    pub next_changed_hunk: Vec<String>,
+    pub previous_changed_hunk: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub mark_viewed: Vec<String>,
@@ -395,6 +397,8 @@ struct KeybindingsConfigPatch {
     symbol_outline: Option<Vec<String>>,
     next_symbol: Option<Vec<String>>,
     previous_symbol: Option<Vec<String>>,
+    next_changed_hunk: Option<Vec<String>>,
+    previous_changed_hunk: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     mark_viewed: Option<Vec<String>>,
@@ -494,6 +498,8 @@ impl Default for KeybindingsConfig {
             symbol_outline: keys(["o"]),
             next_symbol: keys(["]"]),
             previous_symbol: keys(["["]),
+            next_changed_hunk: keys(["}"]),
+            previous_changed_hunk: keys(["{"]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             mark_viewed: keys(["enter"]),
@@ -729,6 +735,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.symbol_outline, patch.symbol_outline);
         apply_optional(&mut self.next_symbol, patch.next_symbol);
         apply_optional(&mut self.previous_symbol, patch.previous_symbol);
+        apply_optional(&mut self.next_changed_hunk, patch.next_changed_hunk);
+        apply_optional(&mut self.previous_changed_hunk, patch.previous_changed_hunk);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);

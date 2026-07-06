@@ -61,6 +61,8 @@ pub(super) enum Action {
     SymbolOutline,
     NextSymbol,
     PreviousSymbol,
+    NextChangedHunk,
+    PreviousChangedHunk,
     ScrollDown,
     ScrollUp,
     MarkViewed,
@@ -164,6 +166,16 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::PreviousSymbol,
             &config.previous_symbol,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::NextChangedHunk,
+            &config.next_changed_hunk,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::PreviousChangedHunk,
+            &config.previous_changed_hunk,
         )?;
         add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
         add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;

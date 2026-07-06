@@ -27,6 +27,7 @@ mod walkthroughs;
 mod zen;
 
 use std::{
+    collections::{BTreeMap, VecDeque},
     io,
     path::{Path, PathBuf},
     time::Duration,
@@ -145,6 +146,12 @@ struct TuiState {
     /// fingerprint change for the same target means new work landed and the
     /// review should refresh in place.
     repo_fingerprint: Option<(String, String)>,
+    activity: VecDeque<ActivityEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActivityEvent {
+    message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -694,7 +701,9 @@ fn maybe_refresh_review(
     match baseline {
         None => {}
         Some(previous) if previous == fingerprint => {}
-        Some(_) => refresh_current_target(review_loader, session, tui_state),
+        Some(previous) => {
+            refresh_current_target(review_loader, session, tui_state, &previous, &fingerprint)
+        }
     }
 }
 
@@ -705,6 +714,8 @@ fn refresh_current_target(
     review_loader: &ReviewLoader<'_>,
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
+    previous_fingerprint: &str,
+    fingerprint: &str,
 ) {
     if let Err(error) = review_loader.load_in_place(session, session.target.clone()) {
         tui_state.notice = Some(UiNotice {
@@ -714,7 +725,12 @@ fn refresh_current_target(
         return;
     }
     reapply_agent_overlay(session, tui_state);
-    let mut message = format!("repository changed — refreshed {}", session.target);
+    let mut events = fingerprint_events(previous_fingerprint, fingerprint);
+    let mut message = if events.is_empty() {
+        format!("repository changed — refreshed {}", session.target)
+    } else {
+        format!("repository changed — {}", events.join(" · "))
+    };
     if let Some(mut zen) = tui_state.zen.take() {
         let stack = review_loader
             .jj
@@ -732,10 +748,54 @@ fn refresh_current_target(
             message.push_str(" · zen ended (nothing left to walk through)");
         }
     }
+    events.push(message.clone());
+    for event in events {
+        tui_state
+            .activity
+            .push_back(ActivityEvent { message: event });
+    }
+    while tui_state.activity.len() > 100 {
+        tui_state.activity.pop_front();
+    }
     tui_state.notice = Some(UiNotice {
         level: UiNoticeLevel::Info,
         message,
     });
+}
+
+fn fingerprint_events(previous: &str, current: &str) -> Vec<String> {
+    fn parse(input: &str) -> BTreeMap<String, String> {
+        input
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let first = parts.next()?;
+                let second = parts.next();
+                match second {
+                    Some(commit) => Some((first.to_owned(), commit.to_owned())),
+                    None => Some((first.to_owned(), first.to_owned())),
+                }
+            })
+            .collect()
+    }
+    let old = parse(previous);
+    let new = parse(current);
+    let mut events = Vec::new();
+    for (change, commit) in &new {
+        match old.get(change) {
+            None => events.push(format!("change {change} entered range")),
+            Some(old_commit) if old_commit != commit => {
+                events.push(format!("change {change} updated"))
+            }
+            _ => {}
+        }
+    }
+    for change in old.keys() {
+        if !new.contains_key(change) {
+            events.push(format!("change {change} left range"));
+        }
+    }
+    events
 }
 
 /// Re-apply the on-disk agent overlay to the session. Reloads (`replace_diff`)
@@ -1138,6 +1198,8 @@ fn handle_normal_action(
         }
         Action::NextSymbol => session.jump_to_changed_symbol(1),
         Action::PreviousSymbol => session.jump_to_changed_symbol(-1),
+        Action::NextChangedHunk => session.jump_to_changed_hunk(1),
+        Action::PreviousChangedHunk => session.jump_to_changed_hunk(-1),
         Action::CommentList => {
             if session.comments.is_empty() {
                 tui_state.notice = Some(UiNotice {

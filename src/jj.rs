@@ -90,6 +90,14 @@ impl ReviewTarget {
     pub fn parent_to_current() -> Self {
         Self::new("@-", "@")
     }
+
+    #[allow(dead_code)]
+    pub fn is_symbolic(&self) -> bool {
+        fn symbolic(revset: &str) -> bool {
+            matches!(revset, "@" | "@-") || revset.contains('@') || revset.contains("trunk()")
+        }
+        symbolic(&self.base) || symbolic(&self.rev)
+    }
 }
 
 impl fmt::Display for ReviewTarget {
@@ -218,7 +226,7 @@ impl JjCommand {
             .arg("--color=never")
             .arg("--no-pager")
             .arg("--template")
-            .arg("commit_id ++ \"\\n\"")
+            .arg("change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"")
             .stdin(Stdio::null())
             .current_dir(repo)
             .output()?;

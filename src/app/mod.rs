@@ -205,6 +205,12 @@ pub struct ReviewFile {
     #[serde(default)]
     pub generated: bool,
     pub viewed: bool,
+    #[serde(default)]
+    pub changed_since_look: bool,
+    #[serde(default)]
+    pub viewed_stale: bool,
+    #[serde(default)]
+    pub changed_hunks: BTreeSet<usize>,
     pub fingerprint: String,
     pub diff: FileDiff,
 }
@@ -289,6 +295,9 @@ impl ReviewSession {
                     deletions: file.deletions,
                     generated: false,
                     viewed: false,
+                    changed_since_look: false,
+                    viewed_stale: false,
+                    changed_hunks: BTreeSet::new(),
                     fingerprint: file.fingerprint.clone(),
                     diff: file,
                 })
@@ -381,8 +390,54 @@ impl ReviewSession {
         let viewports = std::mem::take(&mut self.viewport_by_path);
         let zen_focus = self.zen_focus.take();
         let selected_path = self.selected_file().map(|file| file.path.clone());
+        let old_files: BTreeMap<String, (String, bool, BTreeSet<usize>, Vec<String>)> = self
+            .files
+            .iter()
+            .map(|file| {
+                (
+                    file.path.clone(),
+                    (
+                        file.fingerprint.clone(),
+                        file.changed_since_look,
+                        file.changed_hunks.clone(),
+                        file.diff
+                            .hunks
+                            .iter()
+                            .map(|hunk| hunk.content_fingerprint())
+                            .collect(),
+                    ),
+                )
+            })
+            .collect();
 
         self.replace_diff(target, diff);
+
+        for file in &mut self.files {
+            let new_hunks: Vec<String> = file
+                .diff
+                .hunks
+                .iter()
+                .map(|hunk| hunk.content_fingerprint())
+                .collect();
+            let (file_changed, carried_file, carried_hunks, old_hunks) = old_files
+                .get(&file.path)
+                .map(|(fingerprint, changed, hunks, old_hunks)| {
+                    (
+                        fingerprint != &file.fingerprint,
+                        *changed,
+                        hunks.clone(),
+                        old_hunks.clone(),
+                    )
+                })
+                .unwrap_or((true, false, BTreeSet::new(), Vec::new()));
+            file.changed_since_look = carried_file || file_changed;
+            file.changed_hunks = carried_hunks;
+            for (index, fingerprint) in new_hunks.iter().enumerate() {
+                if !old_hunks.iter().any(|old| old == fingerprint) {
+                    file.changed_hunks.insert(index);
+                }
+            }
+        }
 
         self.file_pane_visible = file_pane_visible;
         self.hide_generated = hide_generated;
@@ -430,7 +485,9 @@ impl ReviewSession {
     fn apply_state_files(&mut self, files: &BTreeMap<String, FileState>) {
         for file in &mut self.files {
             if let Some(saved) = files.get(&file.path) {
-                file.viewed = saved.viewed && saved.fingerprint == file.fingerprint;
+                let stale = saved.viewed && saved.fingerprint != file.fingerprint;
+                file.viewed = saved.viewed && !stale;
+                file.viewed_stale = stale;
             }
         }
     }
@@ -572,6 +629,10 @@ impl ReviewSession {
     pub(crate) fn select_file_index(&mut self, index: usize) {
         if index >= self.files.len() {
             return;
+        }
+        if let Some(file) = self.files.get_mut(index) {
+            file.changed_since_look = false;
+            file.changed_hunks.clear();
         }
         self.reveal_file_in_tree(index);
         self.tree_cursor = Some(TreeRowId::File { file_index: index });
@@ -970,6 +1031,9 @@ impl ReviewSession {
     pub fn toggle_viewed(&mut self) {
         if let Some(file) = self.selected_file_mut() {
             file.viewed = !file.viewed;
+            file.changed_since_look = false;
+            file.changed_hunks.clear();
+            file.viewed_stale = false;
         }
         self.ensure_selected_file_visible();
     }
@@ -979,6 +1043,9 @@ impl ReviewSession {
         let next = self.next_unviewed_index(1, Some(selected));
         if let Some(file) = self.selected_file_mut() {
             file.viewed = true;
+            file.changed_since_look = false;
+            file.changed_hunks.clear();
+            file.viewed_stale = false;
         }
         if let Some(next) = next {
             self.select_file_index(next);
@@ -989,6 +1056,9 @@ impl ReviewSession {
     pub fn mark_all_viewed(&mut self) {
         for file in &mut self.files {
             file.viewed = true;
+            file.changed_since_look = false;
+            file.changed_hunks.clear();
+            file.viewed_stale = false;
         }
         self.ensure_selected_file_visible();
     }
@@ -997,6 +1067,9 @@ impl ReviewSession {
         for file in &mut self.files {
             if predicate(file) {
                 file.viewed = true;
+                file.changed_since_look = false;
+                file.changed_hunks.clear();
+                file.viewed_stale = false;
             }
         }
     }
@@ -1237,6 +1310,70 @@ impl ReviewSession {
         };
         if let Some(target) = next {
             self.jump_to_diff_row(target.row_index);
+        }
+    }
+
+    pub fn jump_to_changed_hunk(&mut self, delta: isize) {
+        if self.files.is_empty() {
+            return;
+        }
+        let direction = if delta.is_negative() { -1 } else { 1 };
+        let start_file = self.selected;
+        for file_step in 0..self.files.len() {
+            let file_index = if direction > 0 {
+                (start_file + file_step) % self.files.len()
+            } else {
+                (start_file + self.files.len() - (file_step % self.files.len())) % self.files.len()
+            };
+            if self.files[file_index].changed_hunks.is_empty()
+                || !self.file_visible(&self.files[file_index])
+            {
+                continue;
+            }
+            if file_index != self.selected {
+                self.select_file_index(file_index);
+            }
+            let rows = self.diff_rows_for_selected_file();
+            let mut targets: Vec<usize> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(row_index, row)| match row.kind {
+                    DiffRowKind::HunkHeader
+                        if row
+                            .hunk_index
+                            .is_some_and(|h| self.files[file_index].changed_hunks.contains(&h)) =>
+                    {
+                        Some(row_index)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if targets.is_empty() {
+                continue;
+            }
+            targets.sort_unstable();
+            let target = if file_index == start_file && self.focus == Focus::Diff {
+                if direction > 0 {
+                    targets
+                        .iter()
+                        .copied()
+                        .find(|row| *row > self.diff_cursor)
+                        .unwrap_or(targets[0])
+                } else {
+                    targets
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|row| *row < self.diff_cursor)
+                        .unwrap_or(*targets.last().unwrap())
+                }
+            } else if direction > 0 {
+                targets[0]
+            } else {
+                *targets.last().unwrap()
+            };
+            self.jump_to_diff_row(target);
+            return;
         }
     }
 
