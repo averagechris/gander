@@ -4,6 +4,62 @@
 
 ### Added
 
+- `--format text` on `files`/`hunks`/`comments`/`tasks`/`reviews
+  list`: compact, aligned, one-row-per-item output for humans (JSON
+  stays the default). `comments add`/`edit` accept the same flag for
+  a 3-line echo instead of the full anchor JSON dump.
+- `gander tasks edit` and `gander tasks delete`, with
+  ambiguity-guarded id-prefix resolution shared by
+  `complete`/`reopen` (unknown and ambiguous prefixes are clean
+  errors).
+- `hunks list` accepts a positional file (`gander hunks list
+  src/queue.rs`), and every subcommand's `--help` separates command
+  flags from the global plumbing under a "Target & state (global)"
+  heading; the remaining blank help strings are filled.
+- Handoff action items are deterministically ordered — action
+  priority (fix > test > follow-up), then path, then line —
+  identically in markdown and JSON.
+- The TUI footer shows a persistent `@`-identity chip
+  (`@ <short-id> <description>`, width-aware, refreshed only when
+  the repo fingerprint changes).
+- The diff pane cycles the selected comment's state
+  (draft → todo → resolved) with `s`, with a
+  `s state · e edit · x delete` hint while a comment is selected.
+- Activity-feed refresh events are labeled with the jj operation
+  that caused them (`· op: snapshot working copy`), fetched only
+  when a refresh fires; `enter` on a feed event that names a file
+  jumps to it.
+- `gander acp` announces on stderr whether it bridged to a live TUI
+  or is serving a snapshot, and the `initialize` response carries a
+  `mode: "live-bridge" | "snapshot"` field.
+- Uncurated zen glance rows dedupe across changes with `ch.N`
+  attribution, and auto-appended uncovered leftovers on curated
+  tours are labeled `· uncovered`.
+
+### Changed
+
+- Comment-backed tasks always carry a string `title` (synthesized
+  from the comment body's first line) in `tasks list`, handoff JSON,
+  and exports — no more `title: null`.
+- The agent-profile markdown export has its own H1
+  (`# Review session export (agent profile)`) so it is no longer
+  mistakable for the handoff prompt, and the TUI `ctrl-y` yank now
+  copies the actual handoff markdown.
+- Chunk validation errors echo the valid line ranges for the failing
+  path and point at `gander chunks lines`.
+- Zen "top changed symbols", per-stop symbol lists, and chapter
+  dependency evidence only count symbols overlapping lines the
+  change actually added — context-only symbols no longer leak in.
+- Zen chapter cards render one `derived facts` section instead of
+  repeated `stops:`-prefixed lines; curated cards put the brief
+  first and collapse derived facts to a dimmed summary line
+  (expandable with `d`).
+
+### Fixed
+
+- A file that counts as viewed (viewed or caught-up) can no longer
+  render a bare `±` badge: catch-up and state-restore clear the
+  changed-since-look flag, and the renderer falls back to `~`.
 - Zen chapter cards size to the terminal (up to ~100 cols instead of
   a fixed 72) and `d` expands a truncated curated brief in place,
   with an explicit `… d expands the brief` affordance when clipped.
