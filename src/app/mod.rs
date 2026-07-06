@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, DraftState, ReviewChunk},
-    anchor::{CommentAnchor, RangeLineAnchor, fingerprint_range},
+    anchor::{CommentAnchor, RangeLineAnchor, comment_anchor_for_file_lines, fingerprint_range},
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
@@ -370,6 +370,7 @@ impl ReviewSession {
             },
             self.diff_cues.clone(),
         );
+        self.refresh_comment_anchors_for_current_diff();
     }
 
     /// Like [`Self::replace_diff`], but for background refreshes of the
@@ -487,6 +488,23 @@ impl ReviewSession {
         // The zen frame only survives when its file is still in the diff.
         self.zen_focus =
             zen_focus.filter(|focus| self.files.iter().any(|file| file.path == focus.path));
+    }
+
+    fn refresh_comment_anchors_for_current_diff(&mut self) {
+        for comment in &mut self.comments {
+            let Some(file) = self.files.iter().find(|file| file.path == comment.path) else {
+                continue;
+            };
+            let Some(anchor) = comment_anchor_for_file_lines(file, comment.line, comment.end_line)
+            else {
+                continue;
+            };
+            comment.line = anchor.line();
+            comment.end_line = anchor
+                .end_line()
+                .filter(|end_line| Some(*end_line) != anchor.line());
+            comment.anchor = Some(anchor);
+        }
     }
 
     /// Toggle rendering the selected file even though its diff exceeds the
@@ -2006,6 +2024,48 @@ diff --git a/src/new.rs b/src/new.rs
                 .find(|file| file.path == "src/new.rs")
                 .unwrap()
                 .viewed
+        );
+    }
+
+    #[test]
+    fn replace_diff_preserving_view_reanchors_line_comments_for_rendering() {
+        let mut session = session();
+        session.toggle_focus();
+        let original_anchor = session.selected_line_anchor().unwrap();
+        session.add_comment("Line note".into());
+        assert_eq!(
+            session
+                .comments_for_diff_row_anchor_details(&original_anchor)
+                .len(),
+            1
+        );
+
+        let refreshed = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++newer
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        let refreshed_anchor = session.comments[0].anchor.clone().unwrap();
+        assert_ne!(original_anchor, refreshed_anchor);
+        assert_eq!(
+            session
+                .comments_for_diff_row_anchor_details(&refreshed_anchor)
+                .len(),
+            1,
+            "line comments must be attached to the refreshed diff row so the gutter marker and inline body render after watch refresh"
         );
     }
 
