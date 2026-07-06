@@ -58,5 +58,5 @@ tasks:
       EOF
       hut builds submit "$manifest" --note "site refresh: gander $tag" --visibility unlisted
 artifacts:
-  - artifacts/gander-v0.5.0-x86_64-linux.tar.gz
-  - artifacts/gander-v0.5.0-x86_64-linux.tar.gz.sha256
+  - artifacts/gander-v0.6.0-x86_64-linux.tar.gz
+  - artifacts/gander-v0.6.0-x86_64-linux.tar.gz.sha256

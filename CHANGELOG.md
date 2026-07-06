@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.6.0 - 2026-07-05
+
 ### Fixed
 
 - Live TUI sessions no longer silently drop curated chunks when the
@@ -388,7 +391,6 @@
 - File-anchor flags are consistent across command groups: `--path` and
   `--file` are both accepted everywhere a file anchor is taken; `--path`
   is canonical.
-
 ## v0.5.0 - 2026-07-04
 
 ### Added
