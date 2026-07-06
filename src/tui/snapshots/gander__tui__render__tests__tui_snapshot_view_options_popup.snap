@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 3124
 expression: "render_tui_style_runs(&session,\n&Mode::ViewOptions(ViewOptionsState::default()), 80, 18)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -27,5 +26,5 @@ y=07 x=21..53 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="gander.to
 y=09 x=21..54 fg=Some(Yellow) bg=Some(Reset) add=BOLD sub=NONE text="› [x] word-level change highlights"
 y=10 x=21..42 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  [x] line backgrounds"
 y=11 x=21..43 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  [ ] gutter change bar"
-y=16 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments                      "
+y=16 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @        "
 y=17 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="view options · j/k move · space/enter toggle · esc close                        "

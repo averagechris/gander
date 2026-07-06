@@ -1,15 +1,15 @@
 ---
 source: src/tui/render.rs
-expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
+expression: "render_tui_text_with_state(&session, &Mode::Normal, &tui_state, 100, 18)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
-│• ▾ src 0/1                               ││src/app.rs  +2 -1                                     │
-│  •!mod     app.rs                        ││@@ -1,4 +1,5 @@                                       │
-│                                          ││    1   fn main() {                                   │
-│                                          ││    2 -     old();                                    │
-│                                          ││!   2 +     new();                                    │
-│                                          ││    3 +     extra();                                  │
-│                                          ││    4   }                                             │
+│• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
+│  ± mod     app.rs                        ││@@ -1 +1 @@  changed                                  │
+│~ mod     README.md                       ││    1 - old                                           │
+│                                          ││    1 + new                                           │
+│                                          ││                                                      │
+│                                          ││                                                      │
+│                                          ││                                                      │
 │                                          ││                                                      │
 │                                          ││                                                      │
 │                                          ││                                                      │
@@ -18,5 +18,5 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
-1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments · following @
-trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed
+2 files (0/2 viewed, 0 generated/noisy), +2/-2, 0 comments · following @
+info: repository changed — @ moved to abcdef · change queue updated

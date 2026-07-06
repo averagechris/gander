@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 911
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -25,5 +24,5 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
-1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
 new comment · enter newline · ctrl-s save · esc cancel

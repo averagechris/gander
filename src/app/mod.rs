@@ -451,7 +451,9 @@ impl ReviewSession {
             .as_deref()
             .and_then(|path| self.files.iter().position(|file| file.path == path))
         {
-            self.select_file_index(index);
+            self.reveal_file_in_tree(index);
+            self.tree_cursor = Some(TreeRowId::File { file_index: index });
+            self.selected = index;
             self.restore_current_viewport();
         }
         self.focus = focus;
@@ -1331,7 +1333,12 @@ impl ReviewSession {
                 continue;
             }
             if file_index != self.selected {
-                self.select_file_index(file_index);
+                self.reveal_file_in_tree(file_index);
+                self.tree_cursor = Some(TreeRowId::File { file_index });
+                self.save_current_viewport();
+                self.clear_diff_range_selection();
+                self.selected = file_index;
+                self.restore_current_viewport();
             }
             let rows = self.diff_rows_for_selected_file();
             let mut targets: Vec<usize> = rows
@@ -1372,7 +1379,9 @@ impl ReviewSession {
             } else {
                 *targets.last().unwrap()
             };
-            self.jump_to_diff_row(target);
+            self.focus = Focus::Diff;
+            self.diff_cursor = target;
+            self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
             return;
         }
     }
@@ -1923,6 +1932,79 @@ diff --git a/src/new.rs b/src/new.rs
                 .unwrap()
                 .viewed
         );
+    }
+
+    #[test]
+    fn refresh_marks_changed_new_and_stale_files_and_clears_on_look() {
+        let mut session = session();
+        session.files[0].viewed = true;
+        let old_readme = session.files[1].fingerprint.clone();
+        let refreshed = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++newer
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+diff --git a/new.rs b/new.rs
+--- /dev/null
++++ b/new.rs
+@@ -0,0 +1 @@
++hi
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        assert!(session.files[0].changed_since_look);
+        assert!(!session.files[1].changed_since_look);
+        assert_eq!(session.files[1].fingerprint, old_readme);
+        assert!(session.files[2].changed_since_look);
+
+        session.select_file_index(2);
+        assert!(!session.files[2].changed_since_look);
+        session.select_file_index(0);
+        session.mark_selected_viewed();
+        assert!(!session.files[0].changed_since_look);
+    }
+
+    #[test]
+    fn apply_state_files_marks_viewed_mismatch_stale() {
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "src/tui.rs".to_owned(),
+            FileState {
+                fingerprint: "old".to_owned(),
+                viewed: true,
+            },
+        );
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse("diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\n").unwrap(),
+            state,
+        );
+        assert!(!session.files[0].viewed);
+        assert!(session.files[0].viewed_stale);
+    }
+
+    #[test]
+    fn refresh_marks_only_new_hunk_fingerprints() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\n").unwrap(),
+            ReviewState::default(),
+        );
+        let refreshed = DiffSet::parse("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+z\n").unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        assert!(!session.files[0].changed_hunks.contains(&0));
+        assert!(session.files[0].changed_hunks.contains(&1));
     }
 
     #[test]
@@ -2869,6 +2951,33 @@ diff --git a/src/c.rs b/src/c.rs
         session.jump_to_changed_symbol(-1);
         let rows = session.diff_rows_for_selected_file();
         assert_eq!(rows[session.diff_cursor].text.trim(), "new_beta();");
+    }
+
+    #[test]
+    fn jump_to_changed_hunk_wraps_within_file() {
+        let mut session = ReviewSession::new(
+            ".".into(), ReviewTarget::trunk_to_current(),
+            DiffSet::parse("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\n").unwrap(),
+            ReviewState::default());
+        session.files[0].changed_hunks = [0, 1].into_iter().collect();
+        session.jump_to_changed_hunk(1);
+        let first = session.diff_cursor;
+        session.jump_to_changed_hunk(1);
+        assert!(session.diff_cursor > first);
+        session.jump_to_changed_hunk(1);
+        assert_eq!(session.diff_cursor, first);
+    }
+
+    #[test]
+    fn jump_to_changed_hunk_continues_across_files() {
+        let mut session = session();
+        session.files[1].changed_hunks.insert(0);
+        session.jump_to_changed_hunk(1);
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+        assert!(matches!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].kind,
+            DiffRowKind::HunkHeader
+        ));
     }
 
     #[test]

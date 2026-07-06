@@ -30,5 +30,5 @@ y=06 x=47..60 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="+ 
 y=07 x=41..41 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=07 x=42..45 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   4"
 y=07 x=47..49 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"
-y=12 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments                      "
+y=12 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments · following @        "
 y=13 x=00..79 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="trunk()..@ · focus diff (range active) · j/k line · d/u scroll · r range · Y wal"

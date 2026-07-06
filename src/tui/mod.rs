@@ -81,6 +81,24 @@ use view_options::ViewOptionsState;
 use walkthroughs::WalkthroughListState;
 use zen::ZenState;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ActivityListState {
+    selected: usize,
+}
+
+impl ActivityListState {
+    fn new() -> Self {
+        Self { selected: 0 }
+    }
+    fn move_selection(&mut self, delta: isize, len: usize) {
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as isize + delta).clamp(0, len as isize - 1) as usize;
+    }
+}
+
 enum Mode {
     Normal,
     Help,
@@ -90,6 +108,7 @@ enum Mode {
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
     TaskList(TaskListState),
+    Activity(ActivityListState),
     ChunkList(ChunkListState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
@@ -151,7 +170,10 @@ struct TuiState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActivityEvent {
+    timestamp: chrono::DateTime<chrono::Utc>,
+    key: String,
     message: String,
+    count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,6 +421,7 @@ fn run_loop(
                 session,
                 mode,
                 keymap,
+                tui_state,
                 tui_state.notice.as_ref(),
                 tui_state.zen.as_ref(),
             )
@@ -750,9 +773,7 @@ fn refresh_current_target(
     }
     events.push(message.clone());
     for event in events {
-        tui_state
-            .activity
-            .push_back(ActivityEvent { message: event });
+        push_activity(tui_state, event_key(&event), event);
     }
     while tui_state.activity.len() > 100 {
         tui_state.activity.pop_front();
@@ -763,24 +784,68 @@ fn refresh_current_target(
     });
 }
 
+fn event_key(message: &str) -> String {
+    if let Some(rest) = message.strip_prefix("change ") {
+        rest.split_whitespace().next().unwrap_or(message).to_owned()
+    } else if message.starts_with("@ moved") {
+        "@".to_owned()
+    } else {
+        message
+            .split_whitespace()
+            .next()
+            .unwrap_or(message)
+            .to_owned()
+    }
+}
+
+fn push_activity(tui_state: &mut TuiState, key: String, message: String) {
+    if let Some(last) = tui_state.activity.back_mut()
+        && last.key == key
+        && last.message == message
+    {
+        last.count += 1;
+        last.timestamp = chrono::Utc::now();
+        return;
+    }
+    tui_state.activity.push_back(ActivityEvent {
+        timestamp: chrono::Utc::now(),
+        key,
+        message,
+        count: 1,
+    });
+}
+
 fn fingerprint_events(previous: &str, current: &str) -> Vec<String> {
-    fn parse(input: &str) -> BTreeMap<String, String> {
-        input
+    fn parse(input: &str) -> (Option<(String, String)>, BTreeMap<String, String>) {
+        let mut at = None;
+        let changes = input
             .lines()
             .filter_map(|line| {
                 let mut parts = line.split_whitespace();
                 let first = parts.next()?;
+                if first == "@" {
+                    let change = parts.next()?.to_owned();
+                    let commit = parts.next().unwrap_or(&change).to_owned();
+                    at = Some((change, commit));
+                    return None;
+                }
                 let second = parts.next();
                 match second {
                     Some(commit) => Some((first.to_owned(), commit.to_owned())),
                     None => Some((first.to_owned(), first.to_owned())),
                 }
             })
-            .collect()
+            .collect();
+        (at, changes)
     }
-    let old = parse(previous);
-    let new = parse(current);
+    let (old_at, old) = parse(previous);
+    let (new_at, new) = parse(current);
     let mut events = Vec::new();
+    if let (Some((old_change, _)), Some((new_change, _))) = (&old_at, &new_at)
+        && old_change != new_change
+    {
+        events.push(format!("@ moved to {new_change}"));
+    }
     for (change, commit) in &new {
         match old.get(change) {
             None => events.push(format!("change {change} entered range")),
@@ -943,6 +1008,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::Activity(list) => {
+            if handle_activity_key(key, list, keymap, tui_state.activity.len()) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::WalkthroughList(list) => {
             if handle_walkthrough_list_key(key, list, session, keymap, tui_state) {
                 *mode = Mode::Normal;
@@ -1098,6 +1168,9 @@ fn handle_normal_action(
             } else {
                 *mode = Mode::TaskList(tasks);
             }
+        }
+        Action::Activity => {
+            *mode = Mode::Activity(ActivityListState::new());
         }
         Action::WalkthroughList => {
             let walkthroughs = WalkthroughListState::new(session);
@@ -2604,6 +2677,23 @@ fn handle_task_list_key(
     }
 }
 
+fn handle_activity_key(
+    key: KeyEvent,
+    list: &mut ActivityListState,
+    keymap: &KeyMap,
+    len: usize,
+) -> bool {
+    if let Some(action) = keymap.target_picker_action_for(&key) {
+        match action {
+            Action::TargetPickerMoveDown => list.move_selection(1, len),
+            Action::TargetPickerMoveUp => list.move_selection(-1, len),
+            _ => {}
+        }
+        return false;
+    }
+    matches!(key.code, KeyCode::Esc)
+}
+
 fn handle_walkthrough_list_key(
     key: KeyEvent,
     list: &mut WalkthroughListState,
@@ -2848,6 +2938,7 @@ fn handle_mouse_event(
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
             | Mode::TaskList(_)
+            | Mode::Activity(_)
             | Mode::WalkthroughList(_)
             | Mode::ChunkList(_)
             | Mode::DraftList(_)
@@ -4780,6 +4871,45 @@ diff --git a/c.rs b/c.rs
                 .unwrap()
                 .message
                 .contains("repository changed")
+        );
+    }
+
+    #[test]
+    fn fingerprint_events_report_range_updates_and_at_moves() {
+        let events = fingerprint_events(
+            "@ old c0\nold c0\nstay c1\nrewrite c2\n",
+            "@ new c9\nstay c1\nrewrite c3\nnew c4\n",
+        );
+        assert!(events.iter().any(|event| event == "@ moved to new"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "change new entered range")
+        );
+        assert!(events.iter().any(|event| event == "change rewrite updated"));
+        assert!(events.iter().any(|event| event == "change old left range"));
+    }
+
+    #[test]
+    fn repo_polling_notice_and_activity_include_specific_events() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+        *backend.fingerprint.borrow_mut() = Ok("@ old c0\nold c0\n".to_owned());
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        *backend.fingerprint.borrow_mut() = Ok("@ new c1\nnew c1\n".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.unwrap().message;
+        assert!(notice.contains("@ moved to new"));
+        assert!(notice.contains("change new entered range"));
+        assert!(notice.contains("change old left range"));
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message == "@ moved to new")
         );
     }
 

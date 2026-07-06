@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 3108
 expression: "render_tui_style_runs(&session, &Mode::Normal, 100, 12)"
 ---
 y=01 x=01..01 fg=Some(Green) bg=Some(Reset) add=NONE sub=NONE text="•"
@@ -32,5 +31,5 @@ y=05 x=60..62 fg=Some(Green) bg=Some(Rgb(18, 38, 30)) add=NONE sub=NONE text="()
 y=06 x=45..45 fg=Some(Yellow) bg=Some(Reset) add=NONE sub=NONE text=" "
 y=06 x=46..49 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="   3"
 y=06 x=51..53 fg=Some(Gray) bg=Some(Reset) add=NONE sub=NONE text="  }"
-y=10 x=00..99 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments                                          "
+y=10 x=00..99 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @                            "
 y=11 x=00..99 fg=Some(DarkGray) bg=Some(Reset) add=NONE sub=NONE text="trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed"

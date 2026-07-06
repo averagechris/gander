@@ -24,5 +24,5 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
-3 files (0/3 viewed, 0 generated/noisy), +3/-3, 0 comments
+3 files (0/3 viewed, 0 generated/noisy), +3/-3, 0 comments · following @
 file search · type filter · down/up move · enter open · esc cancel

@@ -47,6 +47,7 @@ pub(super) enum Action {
     ToggleAgentOrder,
     FlagList,
     TaskList,
+    Activity,
     WalkthroughList,
     ChunkList,
     Zen,
@@ -134,6 +135,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         )?;
         add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
         add_bindings(&mut bindings, Action::TaskList, &config.task_list)?;
+        add_bindings(&mut bindings, Action::Activity, &config.activity)?;
         add_bindings(&mut bindings, Action::ChunkList, &config.chunk_list)?;
         add_bindings(&mut bindings, Action::Zen, &config.zen)?;
         add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
@@ -472,6 +474,10 @@ mod tests {
             Some(Action::TaskList)
         );
         assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            Some(Action::Activity)
+        );
+        assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('S'))),
             Some(Action::ChunkList)
         );
@@ -509,8 +515,22 @@ mod tests {
         );
         assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
         assert_eq!(keymap.hint(Action::TaskList), "X");
+        assert_eq!(keymap.hint(Action::Activity), "ctrl-a");
         assert_eq!(keymap.hint(Action::Help), "?");
         assert_eq!(keymap.hint(Action::YankHandoff), "ctrl-y");
+    }
+
+    #[test]
+    fn default_changed_hunk_keybindings_map_to_actions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('}'))),
+            Some(Action::NextChangedHunk)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('{'))),
+            Some(Action::PreviousChangedHunk)
+        );
     }
 
     #[test]

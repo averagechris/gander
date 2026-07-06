@@ -14,5 +14,5 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
 │                                          ││                                                      │
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
-0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments
+0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
 trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed

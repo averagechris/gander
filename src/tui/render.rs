@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    CommentInputTarget, Mode, UiNotice, UiNoticeLevel,
+    ActivityListState, CommentInputTarget, Mode, TuiState, UiNotice, UiNoticeLevel,
     chooser::TargetChooserState,
     chunks::ChunkListState,
     comments::CommentListState,
@@ -54,6 +54,7 @@ pub(super) fn draw(
     session: &ReviewSession,
     mode: &Mode,
     keymap: &KeyMap,
+    tui_state: &TuiState,
     notice: Option<&UiNotice>,
     zen: Option<&ZenState>,
 ) {
@@ -110,6 +111,7 @@ pub(super) fn draw(
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
         Mode::TaskList(list) => draw_task_list_popup(frame, frame.area(), session, list),
+        Mode::Activity(list) => draw_activity_popup(frame, frame.area(), tui_state, list),
         Mode::WalkthroughList(list) => {
             draw_walkthrough_list_popup(frame, frame.area(), session, list)
         }
@@ -1244,6 +1246,7 @@ fn draw_footer(
         Mode::TaskList(_) => {
             "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
         }
+        Mode::Activity(_) => "activity · j/k move · esc close".to_owned(),
         Mode::WalkthroughList(_) => {
             "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
         }
@@ -1268,11 +1271,7 @@ fn draw_footer(
         }
         Mode::Help => "help · any key to close".to_owned(),
     };
-    #[cfg(not(test))]
     let mut summary = session.summary_line();
-    #[cfg(test)]
-    let summary = session.summary_line();
-    #[cfg(not(test))]
     if session.target.is_symbolic() {
         summary.push_str(&format!(" · following {}", session.target.rev));
     }
@@ -3440,6 +3439,52 @@ fn draw_task_list_popup(
     frame.render_widget(paragraph, popup);
 }
 
+fn draw_activity_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    tui_state: &TuiState,
+    state: &ActivityListState,
+) {
+    let popup = centered_rect(72, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" activity ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1));
+    let items: Vec<ListItem<'static>> = tui_state
+        .activity
+        .iter()
+        .rev()
+        .map(|event| {
+            let time = event.timestamp.format("%H:%M:%S").to_string();
+            let message = if event.count > 1 {
+                format!("{} {}×", event.message, event.count)
+            } else {
+                event.message.clone()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(time, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::raw(message),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default();
+    if !items.is_empty() {
+        list_state.select(Some(state.selected.min(items.len() - 1)));
+    }
+    let list = List::new(items)
+        .block(block)
+        .highlight_symbol("› ")
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(list, popup, &mut list_state);
+}
+
 fn draw_walkthrough_list_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -3758,6 +3803,32 @@ mod tests {
         render_tui_text_with_zen(session, mode, None, width, height)
     }
 
+    fn render_tui_text_with_state(
+        session: &ReviewSession,
+        mode: &Mode,
+        tui_state: &TuiState,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    session,
+                    mode,
+                    &keymap,
+                    tui_state,
+                    tui_state.notice.as_ref(),
+                    None,
+                )
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    }
+
     fn render_tui_text_with_zen(
         session: &ReviewSession,
         mode: &Mode,
@@ -3770,7 +3841,17 @@ mod tests {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
         terminal
-            .draw(|frame| draw(frame, session, mode, &keymap, None, zen))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    session,
+                    mode,
+                    &keymap,
+                    &TuiState::default(),
+                    None,
+                    zen,
+                )
+            })
             .unwrap();
 
         buffer_text(terminal.backend().buffer())
@@ -3787,7 +3868,17 @@ mod tests {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
 
         terminal
-            .draw(|frame| draw(frame, session, mode, &keymap, None, None))
+            .draw(|frame| {
+                draw(
+                    frame,
+                    session,
+                    mode,
+                    &keymap,
+                    &TuiState::default(),
+                    None,
+                    None,
+                )
+            })
             .unwrap();
 
         buffer_style_runs(terminal.backend().buffer())
@@ -4059,6 +4150,62 @@ diff --git a/README.md b/README.md
         let mode = Mode::TaskList(TaskListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn tui_snapshot_activity_popup() {
+        let session = snapshot_session(
+            "diff --git a/src/app.rs b/src/app.rs\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mut tui_state = TuiState::default();
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-05T12:34:56Z")
+            .unwrap()
+            .to_utc();
+        tui_state.activity.push_back(super::super::ActivityEvent {
+            timestamp,
+            key: "queue.rs".to_owned(),
+            message: "queue.rs updated".to_owned(),
+            count: 3,
+        });
+        tui_state.activity.push_back(super::super::ActivityEvent {
+            timestamp,
+            key: "@".to_owned(),
+            message: "@ moved to abcdef".to_owned(),
+            count: 1,
+        });
+        insta::assert_snapshot!(render_tui_text_with_state(
+            &session,
+            &Mode::Activity(ActivityListState::new()),
+            &tui_state,
+            100,
+            20
+        ));
+    }
+
+    #[test]
+    fn tui_snapshot_freshness_badges_and_notice() {
+        let mut session = snapshot_session(
+            "diff --git a/src/app.rs b/src/app.rs\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.files[0].changed_since_look = true;
+        session.files[0].changed_hunks.insert(0);
+        if session.files.len() > 1 {
+            session.files[1].viewed_stale = true;
+        }
+        let tui_state = TuiState {
+            notice: Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "repository changed — @ moved to abcdef · change queue updated".to_owned(),
+            }),
+            ..TuiState::default()
+        };
+        insta::assert_snapshot!(render_tui_text_with_state(
+            &session,
+            &Mode::Normal,
+            &tui_state,
+            100,
+            18
+        ));
     }
 
     #[test]

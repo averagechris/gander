@@ -1,0 +1,24 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_state(&session,\n&Mode::Activity(ActivityListState::new()), &tui_state, 100, 20)"
+---
+┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
+│• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
+│  • mod     app.rs                        ││@@ -1 +1 @@                                           │
+│                                          ││    1 - old                                           │
+│             ╭ activity ────────────────────────────────────────────────────────────╮             │
+│             │ › 12:34:56  @ moved to abcdef                                        │             │
+│             │   12:34:56  queue.rs updated 3×                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             │                                                                      │             │
+│             ╰──────────────────────────────────────────────────────────────────────╯             │
+│                                          ││                                                      │
+└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+activity · j/k move · esc close

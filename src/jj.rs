@@ -91,7 +91,6 @@ impl ReviewTarget {
         Self::new("@-", "@")
     }
 
-    #[allow(dead_code)]
     pub fn is_symbolic(&self) -> bool {
         fn symbolic(revset: &str) -> bool {
             matches!(revset, "@" | "@-") || revset.contains('@') || revset.contains("trunk()")
@@ -226,7 +225,9 @@ impl JjCommand {
             .arg("--color=never")
             .arg("--no-pager")
             .arg("--template")
-            .arg("change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"")
+            .arg(
+                "if(self, \"@ \" ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\", \"\") ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"",
+            )
             .stdin(Stdio::null())
             .current_dir(repo)
             .output()?;
