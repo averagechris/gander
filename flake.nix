@@ -594,7 +594,16 @@
         build-pages = mkApp build-pages;
         publish-pages = mkApp publish-pages;
         render-demo = mkApp render-demo;
-        inherit (fleetApps.apps) prepare-release release-tag release ci-fmt ci-clippy ci-test;
+        inherit
+          (fleetApps.apps)
+          prepare-release
+          release-tag
+          release
+          ci-fmt
+          ci-clippy
+          ci-test
+          static-checks
+          ;
       };
 
       devShells.default = pkgs.mkShell {
