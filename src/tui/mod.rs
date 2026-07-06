@@ -698,8 +698,13 @@ const FINGERPRINT_FAILURE_NOTICE_THRESHOLD: u32 = 5;
 
 /// Poll the repo (throttled) and refresh the review in place when the
 /// reviewed range changed underneath it — new changes landing, rewrites,
-/// or working-copy edits (the fingerprint query snapshots the working copy
-/// like any jj command). The first poll for a target only records the
+/// or working-copy edits. The poll first performs one explicit jj snapshot;
+/// every follow-up query uses `--ignore-working-copy`, so live refresh has a
+/// single, intentional op-log write point instead of letting each read-only
+/// command implicitly snapshot. A dirty snapshot op can still be undone with
+/// `jj undo`, which reverts those disk edits; avoid adding extra read-side
+/// snapshots here unless jj gains a non-mutating dirty-tree fingerprint.
+/// The first poll for a target only records the
 /// baseline; view state is preserved across refreshes and comments/viewed
 /// marks carry over by fingerprint, so the reload does not yank the
 /// reviewer around.
@@ -716,6 +721,22 @@ fn maybe_refresh_review(
         return;
     }
     tui_state.last_repo_poll = Some(now);
+    if let Err(error) = review_loader.jj.snapshot_working_copy(&session.repo) {
+        tui_state.fingerprint_failures = tui_state.fingerprint_failures.saturating_add(1);
+        if tui_state.fingerprint_failures == FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
+            let reason = error
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("unknown error")
+                .to_string();
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: format!("live refresh is failing — {reason}"),
+            });
+        }
+        return;
+    }
     // Transient jj failures (locks, mid-operation states) must not spam the
     // footer: skip the tick and try again. But a *persistently* failing poll
     // means the pane is frozen while claiming to follow the repo, so after a
@@ -3309,6 +3330,10 @@ mod tests {
     }
 
     impl JjBackend for MockJjBackend {
+        fn snapshot_working_copy(&self, _repo: &Path) -> Result<()> {
+            Ok(())
+        }
+
         fn diff(&self, _repo: &Path, target: &ReviewTarget) -> Result<String> {
             self.calls.borrow_mut().push(target.clone());
             if !self.diff_queue.borrow().is_empty() {

@@ -331,12 +331,20 @@ session can start here without re-deriving them:
    holds state in memory and can autosave over those writes. Options: route
    mutations through the live instance socket (registry already exists), or
    make the TUI reload/merge state on external change (mtime watch). Caveat
-   is documented in docs/harness-setup.md until fixed.
-4. **Zen/focused modes over durable walkthroughs** (M13). Zen currently tours
+    is documented in docs/harness-setup.md until fixed.
+4. **Watch-mode jj snapshot footgun.** Live TUI refresh now runs read-only jj
+   commands with `--ignore-working-copy` and has one explicit `jj util
+   snapshot` point per poll, so gander does not fill the op log with
+   incidental `log`/`diff`/`op log` reads. Residual jj behavior remains: if
+   that deliberate snapshot records dirty working-copy edits, `jj undo` of the
+   snapshot operation can revert those edits on disk. A future non-mutating
+   working-copy fingerprint (or filesystem watcher that only snapshots after a
+   visible prompt) would be needed to remove the footgun entirely.
+5. **Zen/focused modes over durable walkthroughs** (M13). Zen currently tours
    agent-overlay chunks; teach it to also tour persisted
    `state.sessions[].walkthroughs` so authored walkthroughs (`Y`/`W`) get the
    same guided presentation.
-5. **TUI comment creation through the service layer** (M13). TUI comment adds
+6. **TUI comment creation through the service layer** (M13). TUI comment adds
    still go through `app::ReviewSession::add_comment`; unify with
    `review::add_comment` so kind/action can be set at creation time in the
    TUI.

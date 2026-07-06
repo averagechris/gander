@@ -19,11 +19,13 @@ pub trait JjBackend {
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the current stack (`trunk()..@`), oldest first.
     fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+    /// Deliberately snapshot the working copy so subsequent read-only queries
+    /// can observe disk edits without each query implicitly writing an op.
+    fn snapshot_working_copy(&self, repo: &Path) -> Result<()>;
     /// A cheap fingerprint of the reviewed range: the commit ids of every
-    /// change in `base..rev`. Running it snapshots the working copy (like
-    /// any jj command), so it changes whenever a change is added, rewritten,
-    /// abandoned, or the working copy content moves — the poll primitive
-    /// behind live review refresh.
+    /// change in `base..rev`. This is a read-only query; callers that need to
+    /// notice working-copy edits should call [`Self::snapshot_working_copy`]
+    /// first.
     fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
     /// Recent operations from `jj op log`, newest first.
     fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>>;
@@ -129,6 +131,7 @@ impl JjCommand {
         at_operation: Option<&str>,
     ) -> Result<String> {
         let mut command = Command::new(binary);
+        command.arg("--ignore-working-copy");
         if let Some(operation_id) = at_operation {
             command.arg("--at-operation").arg(operation_id);
         }
@@ -159,6 +162,7 @@ impl JjCommand {
 
     pub fn operations(binary: &Path, repo: &Path) -> Result<Vec<JjOperationSummary>> {
         let output = Command::new(binary)
+            .arg("--ignore-working-copy")
             .arg("op")
             .arg("log")
             .arg("--no-graph")
@@ -187,6 +191,7 @@ impl JjCommand {
 
     pub fn file_contents(binary: &Path, repo: &Path, rev: &str, path: &str) -> Result<String> {
         let output = Command::new(binary)
+            .arg("--ignore-working-copy")
             .arg("file")
             .arg("show")
             .arg("-r")
@@ -218,6 +223,7 @@ impl JjCommand {
     /// Commit ids of every change in the target range, one per line.
     pub fn change_fingerprint(binary: &Path, repo: &Path, target: &ReviewTarget) -> Result<String> {
         let output = Command::new(binary)
+            .arg("--ignore-working-copy")
             .arg("log")
             .arg("-r")
             .arg(format!("{}..{}", target.base, target.rev))
@@ -252,6 +258,7 @@ impl JjCommand {
     ) -> Result<Vec<JjChangeSummary>> {
         let mut command = Command::new(binary);
         command
+            .arg("--ignore-working-copy")
             .arg("log")
             .arg("-r")
             .arg(revset)
@@ -279,6 +286,27 @@ impl JjCommand {
     }
 }
 
+fn snapshot_working_copy(binary: &Path, repo: &Path) -> Result<()> {
+    let output = Command::new(binary)
+        .arg("util")
+        .arg("snapshot")
+        .arg("--color=never")
+        .arg("--no-pager")
+        .stdin(Stdio::null())
+        .current_dir(repo)
+        .output()?;
+
+    if !output.status.success() {
+        bail!(
+            "jj util snapshot failed with status {}:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 impl JjCliBackend {
     pub fn from_configured(configured: &Path) -> Result<Self> {
         Ok(Self {
@@ -288,6 +316,10 @@ impl JjCliBackend {
 }
 
 impl JjBackend for JjCliBackend {
+    fn snapshot_working_copy(&self, repo: &Path) -> Result<()> {
+        snapshot_working_copy(&self.binary, repo)
+    }
+
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
         JjCommand::new(self.binary.clone(), repo.to_path_buf(), target.clone()).diff()
     }
@@ -591,6 +623,61 @@ mod tests {
             ]
         );
         assert!(parse_operation_summaries("\tno id\n").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_commands_ignore_working_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let args_path = dir.path().join("args");
+        let script = dir.path().join("jj-fake");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncase \" $* \" in\n  *' op log '*) printf 'op123\\tnow\\toperation\\n' ;;\n  *' file show '*) printf 'contents' ;;\n  *' log '*) printf 'abc123\\t\\tdesc\\0' ;;\n  *' diff '*) printf 'diff --git a/a b/a\\n' ;;\nesac\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let target = ReviewTarget::trunk_to_current();
+        JjCommand::run_diff(&script, dir.path(), &target, None).unwrap();
+        assert!(
+            fs::read_to_string(&args_path)
+                .unwrap()
+                .contains("--ignore-working-copy\n")
+        );
+
+        JjCommand::operations(&script, dir.path()).unwrap();
+        assert!(
+            fs::read_to_string(&args_path)
+                .unwrap()
+                .starts_with("--ignore-working-copy\n")
+        );
+
+        JjCommand::file_contents(&script, dir.path(), "@", "a.txt").unwrap();
+        assert!(
+            fs::read_to_string(&args_path)
+                .unwrap()
+                .starts_with("--ignore-working-copy\n")
+        );
+
+        JjCommand::change_fingerprint(&script, dir.path(), &target).unwrap();
+        assert!(
+            fs::read_to_string(&args_path)
+                .unwrap()
+                .starts_with("--ignore-working-copy\n")
+        );
+
+        JjCommand::change_summaries(&script, dir.path()).unwrap();
+        assert!(
+            fs::read_to_string(&args_path)
+                .unwrap()
+                .starts_with("--ignore-working-copy\n")
+        );
     }
 
     #[cfg(unix)]

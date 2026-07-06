@@ -911,6 +911,10 @@ diff --git a/README.md b/README.md
     struct MockJj;
 
     impl crate::jj::JjBackend for MockJj {
+        fn snapshot_working_copy(&self, _repo: &std::path::Path) -> Result<()> {
+            Ok(())
+        }
+
         fn diff(&self, _repo: &std::path::Path, target: &ReviewTarget) -> Result<String> {
             assert_eq!(target, &ReviewTarget::new("abc-", "abc"));
             Ok(r#"diff --git a/src/app.rs b/src/app.rs

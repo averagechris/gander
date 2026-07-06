@@ -1591,6 +1591,10 @@ mod tests {
     struct BriefsTestJj;
 
     impl JjBackend for BriefsTestJj {
+        fn snapshot_working_copy(&self, _: &std::path::Path) -> color_eyre::Result<()> {
+            Ok(())
+        }
+
         fn diff(&self, _: &std::path::Path, _: &ReviewTarget) -> color_eyre::Result<String> {
             Ok(String::new())
         }
