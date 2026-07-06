@@ -1,7 +1,7 @@
 //! Base/tip target picker: jj change list, fuzzy filtering, and selection state.
 
 use crate::{
-    fuzzy::{FuzzyRank, fuzzy_rank},
+    fuzzy::{FuzzyRank, fuzzy_match_window, fuzzy_rank},
     jj::{JjChangeSummary, ReviewTarget},
 };
 
@@ -115,11 +115,17 @@ impl TargetChooserState {
             .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, row)| fuzzy_match_rank(row, &self.query).map(|rank| (rank, index)))
+            .filter_map(|(index, row)| fuzzy_match(row, &self.query).map(|rank| (rank, index)))
             .collect::<Vec<_>>();
+        let has_strong_match = ranked
+            .iter()
+            .any(|(rank, _)| matches!(rank.rank, FuzzyRank::Exact | FuzzyRank::Prefix));
+        if has_strong_match {
+            ranked.retain(|(rank, _)| rank.rank != FuzzyRank::Fuzzy || rank.is_tight(&self.query));
+        }
         ranked.sort_by_key(|(rank, index)| (*rank, *index));
         self.filtered = ranked.iter().map(|(_, index)| *index).collect();
-        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+        self.selected = 0;
     }
 }
 
@@ -142,7 +148,20 @@ impl JjChangeSummary {
     }
 }
 
-fn fuzzy_match_rank(row: &JjChangeSummary, query: &str) -> Option<FuzzyRank> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RankedFuzzyMatch {
+    rank: FuzzyRank,
+    window: usize,
+}
+
+impl RankedFuzzyMatch {
+    fn is_tight(self, query: &str) -> bool {
+        let query_len = query.trim().chars().count();
+        query_len == 0 || self.window <= query_len.saturating_mul(2).saturating_add(2)
+    }
+}
+
+fn fuzzy_match(row: &JjChangeSummary, query: &str) -> Option<RankedFuzzyMatch> {
     row.change_id
         .split_whitespace()
         .chain(
@@ -151,14 +170,23 @@ fn fuzzy_match_rank(row: &JjChangeSummary, query: &str) -> Option<FuzzyRank> {
                 .map(|bookmark| bookmark.trim_end_matches('*')),
         )
         .chain(row.description.split_whitespace())
-        .filter_map(|token| fuzzy_rank(token, query))
+        .filter_map(|token| ranked_fuzzy_match(token, query))
         .min()
         .or_else(|| {
-            fuzzy_rank(
+            ranked_fuzzy_match(
                 &format!("{} {} {}", row.change_id, row.bookmarks, row.description),
                 query,
             )
         })
+}
+
+fn ranked_fuzzy_match(text: &str, query: &str) -> Option<RankedFuzzyMatch> {
+    let rank = fuzzy_rank(text, query)?;
+    let window = match rank {
+        FuzzyRank::Exact | FuzzyRank::Prefix => query.trim().chars().count(),
+        FuzzyRank::Fuzzy => fuzzy_match_window(text, query)?,
+    };
+    Some(RankedFuzzyMatch { rank, window })
 }
 
 #[cfg(test)]
@@ -269,7 +297,108 @@ mod tests {
             chooser.push_query_char(ch);
         }
 
-        assert_eq!(chooser.filtered, vec![2, 1, 0]);
+        assert_eq!(chooser.filtered, vec![2, 1]);
         assert_eq!(chooser.target(), Some(ReviewTarget::new("exact", "@")));
+    }
+
+    #[test]
+    fn filter_change_resets_selection_to_top_ranked_match() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "stale".to_owned(),
+                    bookmarks: "topic".to_owned(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "exact".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "stale",
+            "@",
+        );
+        chooser.move_selection(1);
+
+        for ch in "main".chars() {
+            chooser.push_query_char(ch);
+        }
+
+        assert_eq!(chooser.filtered, vec![1]);
+        assert_eq!(chooser.selected, 0);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("exact", "@")));
+    }
+
+    #[test]
+    fn shrinking_filter_clamps_selection_to_visible_row() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "one".to_owned(),
+                    bookmarks: "alpha".to_owned(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "two".to_owned(),
+                    bookmarks: "beta".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "one",
+            "@",
+        );
+        chooser.select_last();
+
+        chooser.push_query_char('b');
+
+        assert_eq!(chooser.filtered, vec![1]);
+        assert_eq!(chooser.selected, 0);
+        assert_eq!(chooser.target(), Some(ReviewTarget::new("two", "@")));
+    }
+
+    #[test]
+    fn weak_scattered_match_drops_when_stronger_match_exists() {
+        let mut chooser = TargetChooserState::new(
+            vec![
+                JjChangeSummary {
+                    change_id: "fuzzy".to_owned(),
+                    bookmarks: "my-awesome-index".to_owned(),
+                    description: String::new(),
+                },
+                JjChangeSummary {
+                    change_id: "exact".to_owned(),
+                    bookmarks: "main".to_owned(),
+                    description: String::new(),
+                },
+            ],
+            "fuzzy",
+            "@",
+        );
+
+        for ch in "main".chars() {
+            chooser.push_query_char(ch);
+        }
+
+        assert_eq!(chooser.filtered, vec![1]);
+    }
+
+    #[test]
+    fn weak_scattered_match_stays_when_it_is_the_only_tier() {
+        let mut chooser = TargetChooserState::new(
+            vec![JjChangeSummary {
+                change_id: "fuzzy".to_owned(),
+                bookmarks: "my-awesome-index".to_owned(),
+                description: String::new(),
+            }],
+            "fuzzy",
+            "@",
+        );
+
+        for ch in "main".chars() {
+            chooser.push_query_char(ch);
+        }
+
+        assert_eq!(chooser.filtered, vec![0]);
     }
 }

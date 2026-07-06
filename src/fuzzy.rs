@@ -43,6 +43,33 @@ pub fn fuzzy_rank(haystack: &str, needle: &str) -> Option<FuzzyRank> {
     }
 }
 
+/// Width of the smallest left-to-right subsequence match, measured from the
+/// first matched char through the last matched char. Exact/prefix callers do
+/// not need this; it is a quality hint for scattered fuzzy matches.
+pub fn fuzzy_match_window(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    let needle = needle.to_ascii_lowercase();
+    let mut first = None;
+    let mut last;
+    let mut needle_chars = needle.chars();
+    let mut wanted = needle_chars.next()?;
+    for (index, haystack_char) in haystack.chars().enumerate() {
+        if haystack_char == wanted {
+            first.get_or_insert(index);
+            last = Some(index);
+            match needle_chars.next() {
+                Some(next) => wanted = next,
+                None => return Some(last? - first? + 1),
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +103,12 @@ mod tests {
         );
         assert!(FuzzyRank::Exact < FuzzyRank::Prefix);
         assert!(FuzzyRank::Prefix < FuzzyRank::Fuzzy);
+    }
+
+    #[test]
+    fn reports_subsequence_match_window() {
+        assert_eq!(fuzzy_match_window("my-awesome-index", "main"), Some(13));
+        assert_eq!(fuzzy_match_window("main", "main"), Some(4));
+        assert_eq!(fuzzy_match_window("topic", "main"), None);
     }
 }

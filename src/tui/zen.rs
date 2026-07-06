@@ -462,10 +462,10 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
     };
     let symbols = top_symbols(session, files).join(", ");
     let mut lines = vec![
-        format!("roles: {roles}"),
-        format!("churn: +{additions} −{deletions} · {tests}"),
+        format!("stops: roles: {roles}"),
+        format!("stops: churn: +{additions} −{deletions} · {tests}"),
         format!(
-            "top changed symbols: {}",
+            "stops: top changed symbols: {}",
             if symbols.is_empty() {
                 "none detected"
             } else {
@@ -476,7 +476,7 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
     let public_api_files = files.iter().filter(|file| public_api_change(file)).count();
     if public_api_files > 0 {
         lines.push(format!(
-            "public API: {public_api_files} file(s) change pub signatures"
+            "stops: public API: {public_api_files} file(s) change pub signatures"
         ));
     }
     let error_files = files
@@ -485,7 +485,7 @@ fn derived_chapter_lines(session: &ReviewSession, files: &[&FileDiff]) -> Vec<St
         .count();
     if error_files > 0 {
         lines.push(format!(
-            "error handling: {error_files} file(s) touch error handling"
+            "stops: error handling: {error_files} file(s) touch error handling"
         ));
     }
     lines
@@ -1200,23 +1200,38 @@ diff --git a/tests/beta.rs b/tests/beta.rs
         let zen = ZenState::new(&session, &stack()).unwrap();
 
         let first = chapter(&zen, 0);
-        assert!(first.derived_lines.iter().any(|l| l == "roles: 1 source"));
         assert!(
             first
                 .derived_lines
                 .iter()
-                .any(|l| l == "churn: +1 −1 · no tests touched")
+                .any(|l| l == "stops: roles: 1 source")
+        );
+        assert!(
+            first
+                .derived_lines
+                .iter()
+                .any(|l| l == "stops: churn: +1 −1 · no tests touched")
         );
         assert!(first.derived_lines.iter().any(|l| l.contains("public API")));
-        assert!(!first.derived_lines.iter().any(|l| l == "roles: 1 tests"));
+        assert!(
+            !first
+                .derived_lines
+                .iter()
+                .any(|l| l == "stops: roles: 1 tests")
+        );
 
         let second = chapter(&zen, 2);
-        assert!(second.derived_lines.iter().any(|l| l == "roles: 1 tests"));
         assert!(
             second
                 .derived_lines
                 .iter()
-                .any(|l| l == "churn: +2 −1 · tests touched")
+                .any(|l| l == "stops: roles: 1 tests")
+        );
+        assert!(
+            second
+                .derived_lines
+                .iter()
+                .any(|l| l == "stops: churn: +2 −1 · tests touched")
         );
         assert!(
             !second
@@ -1248,12 +1263,17 @@ diff --git a/tests/beta.rs b/tests/beta.rs
         let zen = ZenState::new(&session, &[]).unwrap();
 
         let opener = chapter(&zen, 0);
-        assert!(opener.derived_lines.iter().any(|l| l == "roles: 2 source"));
         assert!(
             opener
                 .derived_lines
                 .iter()
-                .any(|l| l == "churn: +2 −2 · no tests touched")
+                .any(|l| l == "stops: roles: 2 source")
+        );
+        assert!(
+            opener
+                .derived_lines
+                .iter()
+                .any(|l| l == "stops: churn: +2 −2 · no tests touched")
         );
     }
 
