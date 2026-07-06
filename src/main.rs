@@ -21,6 +21,8 @@ mod walkthrough;
 mod web_export;
 
 use std::{
+    error::Error,
+    fmt,
     io::{Read as _, Write as _},
     path::PathBuf,
 };
@@ -475,11 +477,42 @@ enum TuiArtifactDestination {
     Stdout,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserError(String);
+
+impl UserError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for UserError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Error for UserError {}
+
+fn user_error(message: impl Into<String>) -> color_eyre::Report {
+    eyre!(UserError::new(message))
+}
+
+fn format_user_error(error: &UserError) -> String {
+    format!("error: {}\n", error)
+}
+
 fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
+    color_eyre::config::HookBuilder::default()
+        .display_location_section(false)
+        .install()?;
     if let Err(error) = run() {
         if is_broken_pipe_report(&error) {
             return Ok(());
+        }
+        if let Some(user_error) = error.downcast_ref::<UserError>() {
+            eprint!("{}", format_user_error(user_error));
+            std::process::exit(1);
         }
         return Err(error);
     }
@@ -514,7 +547,7 @@ fn run() -> color_eyre::Result<()> {
 
     let diff_text = jj
         .diff(&repo, &target)
-        .with_context(|| format!("failed to read jj diff for {target}"))?;
+        .map_err(|error| user_error(format!("failed to read jj diff for {target}: {error}")))?;
     let mut diff = DiffSet::parse(&diff_text).wrap_err("failed to parse jj git diff")?;
     let ignore_globs = merge_ignores(&config, cli.ignore);
     if !matches!(command, Command::MarkGeneratedViewed) {
@@ -793,7 +826,7 @@ fn run() -> color_eyre::Result<()> {
             }
             HunksCommand::Show { id } => {
                 let hunk = session_hunk_json(&session, &id)
-                    .ok_or_else(|| eyre!("unknown hunk id `{id}`"))?;
+                    .ok_or_else(|| user_error(format!("unknown hunk id `{id}`")))?;
                 print_json(&hunk)?;
             }
         },
@@ -1007,10 +1040,10 @@ fn handle_chunks_command(
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
             replace_review_chunks(&mut overlay.chunks, spec.chunks, &context).map_err(
                 |invalid| {
-                    eyre!(
+                    user_error(format!(
                         "invalid chunk part(s): {}",
                         invalid_chunk_parts_message(&invalid)
-                    )
+                    ))
                 },
             )?;
             overlay.save(overlay_path)?;
@@ -1021,10 +1054,10 @@ fn handle_chunks_command(
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
             let summary = update_review_chunks(&mut overlay.chunks, spec.chunks, &context)
                 .map_err(|invalid| {
-                    eyre!(
+                    user_error(format!(
                         "invalid chunk part(s): {}",
                         invalid_chunk_parts_message(&invalid)
-                    )
+                    ))
                 })?;
             overlay.save(overlay_path)?;
             println!(
@@ -1033,8 +1066,9 @@ fn handle_chunks_command(
             );
         }
         ChunksCommand::Remove { ids } => {
-            let summary = remove_review_chunks(&mut overlay.chunks, &ids)
-                .map_err(|unknown| eyre!("unknown chunk id(s): {}", unknown.join(", ")))?;
+            let summary = remove_review_chunks(&mut overlay.chunks, &ids).map_err(|unknown| {
+                user_error(format!("unknown chunk id(s): {}", unknown.join(", ")))
+            })?;
             overlay.save(overlay_path)?;
             println!("Removed {}; remaining {}", summary.removed, summary.chunks);
         }
@@ -1092,10 +1126,10 @@ fn handle_drafts_command(
             let mut ids = Vec::new();
             for draft in drafts {
                 if draft.path.trim().is_empty() {
-                    return Err(eyre!("path must not be empty"));
+                    return Err(user_error("path must not be empty"));
                 }
                 if draft.body.trim().is_empty() {
-                    return Err(eyre!("body must not be empty"));
+                    return Err(user_error("body must not be empty"));
                 }
                 let id = uuid::Uuid::new_v4().to_string();
                 overlay.drafts.push(AgentDraft {
@@ -1119,7 +1153,10 @@ fn handle_drafts_command(
                 .cloned()
                 .collect::<Vec<_>>();
             if !unknown.is_empty() {
-                return Err(eyre!("unknown draft id(s): {}", unknown.join(", ")));
+                return Err(user_error(format!(
+                    "unknown draft id(s): {}",
+                    unknown.join(", ")
+                )));
             }
             overlay.drafts.retain(|draft| !ids.contains(&draft.id));
             overlay.save(overlay_path)?;
@@ -1136,14 +1173,19 @@ fn read_json_spec<T: for<'de> Deserialize<'de>>(
     let mut contents = String::new();
     match file {
         Some(path) if path != std::path::Path::new("-") => {
-            contents = std::fs::read_to_string(path)
-                .with_context(|| format!("failed to read {spec_name} spec {}", path.display()))?;
+            contents = std::fs::read_to_string(path).map_err(|error| {
+                user_error(format!(
+                    "failed to read {spec_name} spec {}: {error}",
+                    path.display()
+                ))
+            })?;
         }
         _ => {
             std::io::stdin().read_to_string(&mut contents)?;
         }
     }
-    serde_json::from_str(&contents).wrap_err(format!("failed to parse {spec_name} spec JSON"))
+    serde_json::from_str(&contents)
+        .map_err(|error| user_error(format!("failed to parse {spec_name} spec JSON: {error}")))
 }
 
 fn validate_briefs_for_cli(
@@ -1170,7 +1212,10 @@ fn validate_briefs_for_cli(
         })
         .collect::<Vec<_>>();
     if !invalid.is_empty() {
-        return Err(eyre!("invalid brief(s): {}", invalid.join("; ")));
+        return Err(user_error(format!(
+            "invalid brief(s): {}",
+            invalid.join("; ")
+        )));
     }
     Ok(())
 }
@@ -1252,7 +1297,9 @@ fn ensure_diff_file(session: &ReviewSession, path: &str) -> color_eyre::Result<(
     if session.files.iter().any(|file| file.path == path) {
         Ok(())
     } else {
-        Err(eyre!("`{path}` is not a file in the current diff"))
+        Err(user_error(format!(
+            "`{path}` is not a file in the current diff"
+        )))
     }
 }
 
@@ -1506,9 +1553,9 @@ fn resolve_tui_artifact_options(
             let output = cli_output
                 .or_else(|| config.artifact.output_path(repo, format.into()))
                 .ok_or_else(|| {
-                    eyre!(
+                    user_error(
                         "artifact on-tui-quit `write` needs a destination: \
-                         pass --artifact-output or set [artifact] output-dir"
+                         pass --artifact-output or set [artifact] output-dir",
                     )
                 })?;
             Some(TuiArtifactRequest {
@@ -1653,6 +1700,26 @@ mod tests {
         fn run_command(&self, _: &std::path::Path, _: &[String]) -> color_eyre::Result<String> {
             Ok(String::new())
         }
+    }
+
+    #[test]
+    fn user_error_formatting_is_plain_and_preserves_multiline_details() {
+        let error = UserError::new("invalid chunk part(s):\n- src/lib.rs:99-100 outside diff");
+
+        assert_eq!(
+            format_user_error(&error),
+            "error: invalid chunk part(s):\n- src/lib.rs:99-100 outside diff\n"
+        );
+    }
+
+    #[test]
+    fn user_error_reports_can_be_downcast_by_main() {
+        let report = user_error("unknown draft id(s): nope");
+
+        assert_eq!(
+            report.downcast_ref::<UserError>().map(ToString::to_string),
+            Some("unknown draft id(s): nope".to_owned())
+        );
     }
 
     #[test]
