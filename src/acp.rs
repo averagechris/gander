@@ -242,9 +242,10 @@ impl AcpHandler {
             // organize chunks change-by-change when several changes exist.
             "review/stack_changes" => {
                 let jj = self.require_jj()?;
-                let stack = jj
-                    .stack_changes(&session.repo)
+                let mut stack = jj
+                    .stack_changes(&session.repo, &session.target)
                     .map_err(|error| format!("failed to load jj stack: {error}"))?;
+                stack.retain(|change| !change.matches_rev(&session.target.base));
                 let current = stack
                     .iter()
                     .position(|change| change.matches_rev(&session.target.rev))
@@ -939,6 +940,7 @@ diff --git a/README.md b/README.md
         fn stack_changes(
             &self,
             _repo: &std::path::Path,
+            _target: &crate::jj::ReviewTarget,
         ) -> Result<Vec<crate::jj::JjChangeSummary>> {
             Ok(vec![
                 crate::jj::JjChangeSummary {

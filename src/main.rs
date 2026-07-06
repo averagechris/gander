@@ -1252,7 +1252,7 @@ fn validate_briefs_for_cli(
     jj: &dyn JjBackend,
     briefs: &[ChangeBrief],
 ) -> color_eyre::Result<()> {
-    let changes = jj.stack_changes(&session.repo)?;
+    let changes = jj.stack_changes(&session.repo, &session.target)?;
     let invalid = briefs
         .iter()
         .filter_map(|brief| {
@@ -1736,6 +1736,7 @@ mod tests {
         fn stack_changes(
             &self,
             _: &std::path::Path,
+            _: &crate::jj::ReviewTarget,
         ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
             Ok(vec![crate::jj::JjChangeSummary {
                 change_id: "abc".to_owned(),

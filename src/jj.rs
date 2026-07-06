@@ -17,8 +17,8 @@ pub struct JjCommand {
 pub trait JjBackend {
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
-    /// Changes in the current stack (`trunk()..@`), oldest first.
-    fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
+    /// Changes in the reviewed range (`base..rev`), oldest first.
+    fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>>;
     /// Deliberately snapshot the working copy so subsequent read-only queries
     /// can observe disk edits without each query implicitly writing an op.
     fn snapshot_working_copy(&self, repo: &Path) -> Result<()>;
@@ -214,10 +214,19 @@ impl JjCommand {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Changes between trunk and the working copy, oldest first, so callers
+    /// Changes between the review base and tip, oldest first, so callers
     /// can step through the stack change-by-change.
-    pub fn stack_changes(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
-        Self::log_summaries(binary, repo, "trunk()..@", true)
+    pub fn stack_changes(
+        binary: &Path,
+        repo: &Path,
+        target: &ReviewTarget,
+    ) -> Result<Vec<JjChangeSummary>> {
+        Self::log_summaries(
+            binary,
+            repo,
+            &format!("{}..{}", target.base, target.rev),
+            true,
+        )
     }
 
     /// Commit ids of every change in the target range, one per line.
@@ -328,8 +337,8 @@ impl JjBackend for JjCliBackend {
         JjCommand::change_summaries(&self.binary, repo)
     }
 
-    fn stack_changes(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
-        JjCommand::stack_changes(&self.binary, repo)
+    fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>> {
+        JjCommand::stack_changes(&self.binary, repo, target)
     }
 
     fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
@@ -678,6 +687,33 @@ mod tests {
                 .unwrap()
                 .starts_with("--ignore-working-copy\n")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stack_changes_uses_review_range_so_bookmark_base_is_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let args_path = dir.path().join("args");
+        let script = dir.path().join("jj-fake");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > '{}'\nprintf 'chg1\t\tfeat: one\\0'\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let target = ReviewTarget::new("main", "@");
+        let rows = JjCommand::stack_changes(&script, dir.path(), &target).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let args = fs::read_to_string(&args_path).unwrap();
+        assert!(args.contains("-r\nmain..@\n"), "args were {args:?}");
+        assert!(!args.contains("trunk()..@"), "args were {args:?}");
     }
 
     #[cfg(unix)]

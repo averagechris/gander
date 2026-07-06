@@ -55,7 +55,7 @@ use crate::{
     config::{AgentConfig, KeybindingsConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
-    jj::{JjBackend, ReviewTarget},
+    jj::{JjBackend, JjChangeSummary, ReviewTarget},
     review,
     state::{ReviewState, WalkthroughStep},
 };
@@ -846,10 +846,12 @@ fn refresh_current_target(
         format!("repository changed — {}", events.join(" · "))
     };
     if let Some(mut zen) = tui_state.zen.take() {
-        let stack = review_loader
+        let mut stack = review_loader
             .jj
-            .stack_changes(&session.repo)
+            .stack_changes(&session.repo, &session.target)
             .unwrap_or_default();
+        stack.retain(|change| !change.matches_rev(&session.target.base));
+        load_change_diffs_for_stack(review_loader, session, &stack);
         if zen.refresh(session, &stack) {
             if zen.phase != zen::ZenPhase::Glance
                 && let Some(stop) = zen.current().cloned()
@@ -1326,10 +1328,12 @@ fn handle_normal_action(
             // Chapter cards want the stack's metadata (descriptions,
             // bookmarks); zen still works with an empty stack when jj is
             // unavailable, the cards just carry less context.
-            let stack = review_loader
+            let mut stack = review_loader
                 .jj
-                .stack_changes(&session.repo)
+                .stack_changes(&session.repo, &session.target)
                 .unwrap_or_default();
+            stack.retain(|change| !change.matches_rev(&session.target.base));
+            load_change_diffs_for_stack(review_loader, session, &stack);
             match ZenState::new(session, &stack) {
                 Some(mut zen) => {
                     session.file_pane_visible = false;
@@ -1665,7 +1669,8 @@ fn step_stack(
     delta: isize,
     tui_state: &mut TuiState,
 ) {
-    let stack = match review_loader.jj.stack_changes(&session.repo) {
+    let stack_target = tui_state.launch_target.as_ref().unwrap_or(&session.target);
+    let mut stack = match review_loader.jj.stack_changes(&session.repo, stack_target) {
         Ok(stack) => stack,
         Err(error) => {
             tui_state.notice = Some(UiNotice {
@@ -1675,10 +1680,7 @@ fn step_stack(
             return;
         }
     };
-    let stack: Vec<_> = stack
-        .into_iter()
-        .filter(|change| !change.matches_rev(&session.target.base))
-        .collect();
+    stack.retain(|change| !change.matches_rev(&stack_target.base));
     if stack.is_empty() {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
@@ -1731,6 +1733,32 @@ fn step_stack(
             });
         }
     }
+}
+
+fn load_change_diffs_for_stack(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    stack: &[JjChangeSummary],
+) {
+    for change in stack {
+        if session
+            .change_diffs
+            .iter()
+            .any(|(id, _)| change_ids_match_for_tui(id, &change.change_id))
+        {
+            continue;
+        }
+        let target = ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone());
+        if let Ok(raw) = review_loader.jj.diff(&session.repo, &target)
+            && let Ok(diff) = DiffSet::parse(&raw)
+        {
+            session.change_diffs.push((change.change_id.clone(), diff));
+        }
+    }
+}
+
+fn change_ids_match_for_tui(a: &str, b: &str) -> bool {
+    !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
 }
 
 fn handle_target_chooser_key(
@@ -3376,7 +3404,11 @@ mod tests {
             Ok(self.summaries.clone())
         }
 
-        fn stack_changes(&self, _repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        fn stack_changes(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+        ) -> Result<Vec<JjChangeSummary>> {
             Ok(self.stack.clone())
         }
 

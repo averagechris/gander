@@ -421,6 +421,14 @@ fn chapter_file_scope<'a>(
     rows: &[ChunkRow],
     total_chapters: usize,
 ) -> Option<Vec<&'a FileDiff>> {
+    if let Some(change_id) = rows.iter().find_map(|row| row.change_id.as_deref())
+        && let Some((_, diff)) = session
+            .change_diffs
+            .iter()
+            .find(|(id, _)| change_ids_match(id, change_id))
+    {
+        return Some(diff.files.iter().collect());
+    }
     if total_chapters == 1 {
         return Some(session.files.iter().map(|file| &file.diff).collect());
     }
@@ -591,6 +599,51 @@ fn fallback_rows(
     } else {
         fallback_chapter_stack(stack)
     };
+    if fallback_stack.len() > 1 && !session.change_diffs.is_empty() {
+        let mut stops = Vec::new();
+        let mut glance = Vec::new();
+        for change in &fallback_stack {
+            if let Some((_, diff)) = session
+                .change_diffs
+                .iter()
+                .find(|(id, _)| change_ids_match(id, &change.change_id))
+            {
+                let mut files: Vec<_> = diff.files.iter().collect();
+                files.sort_by_key(|f| {
+                    (
+                        file_role(&f.path),
+                        std::cmp::Reverse(f.additions + f.deletions),
+                        f.path.clone(),
+                    )
+                });
+                let tests_are_subject = tests_are_review_subject(
+                    Some(change.description.as_str()),
+                    diff.files.iter().collect::<Vec<_>>().as_slice(),
+                );
+                for file in files {
+                    let role = file_role(&file.path);
+                    if (role != FileRole::Source && !(role == FileRole::Tests && tests_are_subject))
+                        || is_exports_only(file)
+                    {
+                        glance.push(whole_file_row(
+                            file.path.clone(),
+                            Some(role.label().to_owned()),
+                        ));
+                    } else {
+                        stops.push(fallback_file_row(
+                            session,
+                            file,
+                            Some(change.change_id.clone()),
+                            Some(change.description.as_str()),
+                        ));
+                    }
+                }
+            }
+        }
+        if !stops.is_empty() || !glance.is_empty() {
+            return (stops, glance);
+        }
+    }
     let mut files: Vec<_> = session.files.iter().collect();
     files.sort_by_key(|f| {
         (
@@ -606,9 +659,15 @@ fn fallback_rows(
         .filter(|file| file_role(&file.path) == FileRole::Source && !is_exports_only(&file.diff))
         .count();
     let mut source_index = 0usize;
+    let tests_are_subject = tests_are_review_subject(
+        None,
+        &files.iter().map(|file| &file.diff).collect::<Vec<_>>(),
+    );
     for file in files {
         let role = file_role(&file.path);
-        if role != FileRole::Source || is_exports_only(&file.diff) {
+        if (role != FileRole::Source && !(role == FileRole::Tests && tests_are_subject))
+            || is_exports_only(&file.diff)
+        {
             glance.push(whole_file_row(
                 file.path.clone(),
                 Some(
@@ -653,6 +712,25 @@ fn fallback_chapter_stack(stack: &[JjChangeSummary]) -> Vec<&JjChangeSummary> {
     } else {
         described
     }
+}
+
+fn tests_are_review_subject(description: Option<&str>, files: &[&FileDiff]) -> bool {
+    let described_as_tests = description
+        .and_then(first_meaningful_line)
+        .is_some_and(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("test:")
+                || lower.starts_with("tests:")
+                || lower.starts_with("test(")
+                || lower.starts_with("tests(")
+                || lower.contains(" test")
+                || lower.contains(" tests")
+        });
+    let test_files = files
+        .iter()
+        .filter(|file| file_role(&file.path) == FileRole::Tests)
+        .count();
+    described_as_tests || (test_files > 0 && test_files * 2 >= files.len())
 }
 
 fn change_bucket(index: usize, total_rows: usize, total_changes: usize) -> usize {
@@ -709,8 +787,13 @@ fn fallback_file_row(
     let end = hunk.map(|h| (h.new_start + h.new_len.saturating_sub(1)).max(h.new_start));
     let mut facts = Vec::new();
     if public_api_change(file) {
+        let new_api = public_api_is_new(file);
         facts.push(public_api_fact(file).unwrap_or_else(|| "public API change".to_owned()));
-        facts.push("review question: do callers handle the new signature?".to_owned());
+        facts.push(if new_api {
+            "review question: is this the right surface to expose?".to_owned()
+        } else {
+            "review question: do callers handle the new signature?".to_owned()
+        });
     }
     let error_count = error_handling_touches(file);
     if error_count >= 2 {
@@ -766,11 +849,21 @@ fn public_api_fact(file: &FileDiff) -> Option<String> {
     added_text_lines(file)
         .find(|line| is_public_api_line(line))
         .map(|line| {
-            format!(
-                "public API change: {} signature changed",
-                signature_summary(line)
-            )
+            let summary = signature_summary(line);
+            if public_api_is_new(file) {
+                return format!("new public API: {summary}");
+            }
+            format!("public API change: {} signature changed", summary)
         })
+}
+
+fn public_api_is_new(file: &FileDiff) -> bool {
+    file.additions > 0
+        && file
+            .hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .all(|line| line.kind != DiffLineKind::Removed)
 }
 
 fn is_public_api_line(line: &str) -> bool {
@@ -1035,6 +1128,7 @@ pub(super) fn end(session: &mut ReviewSession, zen: &ZenState) {
 mod tests {
     use super::*;
     use crate::agent::{AgentOverlay, ChangeBrief, ChunkPart, ReviewChunk};
+    use crate::diff::DiffSet;
     use crate::tui::test_support::snapshot_session;
 
     fn two_file_diff() -> &'static str {
@@ -1478,6 +1572,65 @@ diff --git a/src/render.rs b/src/render.rs
     }
 
     #[test]
+    fn fallback_names_brand_new_public_items_as_new_api() {
+        let session = snapshot_session(
+            r#"diff --git a/src/priority.rs b/src/priority.rs
+--- /dev/null
++++ b/src/priority.rs
+@@ -0,0 +1,4 @@
++pub enum Priority {
++    Low,
++    High,
++}
+"#,
+        );
+
+        let zen = ZenState::new(&session, &[]).unwrap();
+        let rationale = chunk_stop(&zen, 1).rationale.as_deref().unwrap();
+
+        assert!(rationale.contains("new public API: pub enum Priority"));
+        assert!(!rationale.contains("signature changed"));
+        assert!(rationale.contains("review question: is this the right surface to expose?"));
+    }
+
+    #[test]
+    fn test_titled_changes_spotlight_test_files_instead_of_glancing_them() {
+        let whole = r#"diff --git a/src/config.rs b/src/config.rs
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -1 +1,2 @@
+ fn helper() {}
++fn helper_two() {}
+diff --git a/tests/basic.rs b/tests/basic.rs
+--- a/tests/basic.rs
++++ b/tests/basic.rs
+@@ -1 +1,4 @@
+ fn smoke() {}
++#[test]
++fn priority_ordering() {}
++fn retry_drops() {}
+"#;
+        let mut session = snapshot_session(whole);
+        session
+            .change_diffs
+            .push(("dddeeeff".to_owned(), DiffSet::parse(whole).unwrap()));
+        let stack = vec![JjChangeSummary {
+            change_id: "dddeeeff".to_owned(),
+            bookmarks: String::new(),
+            description: "test: cover priority ordering and retry drops".to_owned(),
+        }];
+
+        let zen = ZenState::new(&session, &stack).unwrap();
+
+        assert!(zen.stops.iter().any(|stop| matches!(stop, ZenStop::Chunk(row) if row.part.as_ref().is_some_and(|part| part.path == "tests/basic.rs"))));
+        assert!(!zen.glance_rows.iter().any(|row| {
+            row.part
+                .as_ref()
+                .is_some_and(|part| part.path == "tests/basic.rs")
+        }));
+    }
+
+    #[test]
     fn multi_change_chapters_omit_derived_lines_when_files_are_unattributable() {
         let mut session = snapshot_session(two_file_diff());
         let mut first = spotlight("s1", "first", Some("aaabbbcc"), "a.rs");
@@ -1607,6 +1760,47 @@ diff --git a/src/render.rs b/src/render.rs
         assert_eq!(chapter(&zen, 2).title(), "feat: second");
         assert_eq!(chunk_stop(&zen, 1).change_id.as_deref(), Some("aaabbbcc"));
         assert_eq!(chunk_stop(&zen, 3).change_id.as_deref(), Some("dddeeeff"));
+    }
+
+    #[test]
+    fn uncurated_fallback_scopes_derived_facts_to_each_change_diff() {
+        let whole = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+pub fn api() {}\ndiff --git a/tests/basic.rs b/tests/basic.rs\n--- /dev/null\n+++ b/tests/basic.rs\n@@ -0,0 +1 @@\n+#[test] fn basic() {}\n";
+        let mut session = snapshot_session(whole);
+        session.change_diffs.push((
+            "aaabbbcc".to_owned(),
+            DiffSet::parse("diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+pub fn api() {}\n").unwrap(),
+        ));
+        session.change_diffs.push((
+            "dddeeeff".to_owned(),
+            DiffSet::parse("diff --git a/tests/basic.rs b/tests/basic.rs\n--- /dev/null\n+++ b/tests/basic.rs\n@@ -0,0 +1 @@\n+#[test] fn basic() {}\n").unwrap(),
+        ));
+
+        let zen = ZenState::new(&session, &stack()).unwrap();
+
+        assert!(
+            chapter(&zen, 0)
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("no tests touched"))
+        );
+        assert!(
+            chapter(&zen, 0)
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("public API"))
+        );
+        assert!(
+            chapter(&zen, 2)
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("tests touched"))
+        );
+        assert!(
+            !chapter(&zen, 2)
+                .derived_lines
+                .iter()
+                .any(|l| l.contains("public API"))
+        );
     }
 
     #[test]

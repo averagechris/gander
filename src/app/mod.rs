@@ -103,6 +103,10 @@ pub struct ReviewSession {
     pub review_chunks: Vec<ReviewChunk>,
     /// Agent-written per-change briefings for stacked walkthroughs.
     pub change_briefs: Vec<ChangeBrief>,
+    /// Lazily populated jj diffs for each stack change, keyed by change id.
+    /// Zen fallback uses these so per-change chapter facts come from that
+    /// change's own parent diff instead of the whole reviewed range.
+    pub change_diffs: Vec<(String, DiffSet)>,
     /// Agent-drafted comments with their dispositions.
     pub agent_drafts: Vec<AgentDraft>,
     selected_comment_id: Option<String>,
@@ -342,6 +346,7 @@ impl ReviewSession {
             agent_flags: Vec::new(),
             review_chunks: Vec::new(),
             change_briefs: Vec::new(),
+            change_diffs: Vec::new(),
             agent_drafts: Vec::new(),
             selected_comment_id: None,
             context_expansion: BTreeMap::new(),
