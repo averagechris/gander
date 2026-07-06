@@ -105,6 +105,8 @@ pub struct ArtifactParams {
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ChunkParams {
+    /// Stable chunk id. Omit to generate a new id.
+    pub id: Option<String>,
     /// Short human-readable title for the reviewable unit.
     pub title: String,
     /// spotlight for the few stops worth touring; glance for routine/context
@@ -136,6 +138,18 @@ pub struct SetChunksParams {
     /// Reviewable units that can span or subdivide files; replaces the
     /// previous set.
     pub chunks: Vec<ChunkParams>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateChunksParams {
+    /// Reviewable units to upsert: matching ids replace in place, new ids append.
+    pub chunks: Vec<ChunkParams>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RemoveChunksParams {
+    /// Chunk ids to remove. Unknown ids are rejected without applying changes.
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -374,6 +388,28 @@ impl GanderMcp {
         let chunks = serde_json::to_value(&params.chunks)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         self.call("review/set_chunks", json!({ "chunks": chunks }))
+    }
+
+    #[tool(
+        description = "Incrementally upsert review chunks: matching ids replace in place; new ids append"
+    )]
+    fn update_chunks(
+        &self,
+        Parameters(params): Parameters<UpdateChunksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let chunks = serde_json::to_value(&params.chunks)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        self.call("review/update_chunks", json!({ "chunks": chunks }))
+    }
+
+    #[tool(
+        description = "Remove review chunks by id; unknown ids are rejected without applying changes"
+    )]
+    fn remove_chunks(
+        &self,
+        Parameters(params): Parameters<RemoveChunksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call("review/remove_chunks", json!({ "ids": params.ids }))
     }
 
     #[tool(
@@ -780,7 +816,7 @@ impl ServerHandler for GanderMcp {
                  current_focus; then help organize the review with set_ordering, \
                  flag_section, set_change_briefs (one short high-level brief \
                  per change in the stack — shown as a chapter intro before that \
-                 change's walkthrough stops), set_chunks (3-7 \
+                 change's walkthrough stops), set_chunks/update_chunks/remove_chunks (3-7 \
                  importance=spotlight chunks with a \
                  teaching `explanation` each; importance=glance for the routine \
                  rest — the human tours spotlights full-screen and skims glance \
@@ -917,6 +953,7 @@ mod tests {
         server
             .set_chunks(Parameters(SetChunksParams {
                 chunks: vec![ChunkParams {
+                    id: None,
                     title: "core change".to_owned(),
                     importance: Some("spotlight".to_owned()),
                     change_id: None,

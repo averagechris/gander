@@ -97,6 +97,8 @@ within one poll tick.
 | `review/set_ordering` | `{paths: [string]}` | suggested review order, highest priority first; unknown paths are rejected |
 | `review/flag_section` | `{path, line?, reason, priority?}` | flag a critical section (`priority`: `critical`/`high`/`medium`/`low`, default `high`) |
 | `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
+| `review/update_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | upsert reviewable units. Chunks whose `id` matches an existing overlay chunk replace it in place; chunks with new/generated ids append. Response: `{chunks, updated, added}` |
+| `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
 | `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's stops |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; returns `{id}` |
 
@@ -108,7 +110,18 @@ focus or chapter card with `e` (scrollable, `h`/`l` cycles).
 
 ### Chunk validation
 
-`review/set_chunks` validates every chunk part before replacing the overlay.
+`review/set_chunks` and `review/update_chunks` validate every incoming chunk
+part before mutating the overlay. A single invalid part rejects the whole
+request with all per-part reasons and leaves the previous chunk list intact.
+`review/remove_chunks` is similarly all-or-nothing for unknown ids. The CLI
+equivalent is `gander chunks`: `list`, `set --file spec.json`,
+`update --file spec.json`, `remove --id <id>...`, and `clear`. The spec file is
+JSON in the same chunk shape: `{ "chunks": [ { "id": "optional", "title":
+"...", "importance": "spotlight|glance", "change_id": "optional",
+"rationale": "...", "explanation": "...", "artifacts": [{"title":"...",
+"kind":"example|output|diagram|note", "body":"..."}], "parts":
+[{"path":"...", "start_line": 1, "end_line": 10}] } ] }`; `--file -` or an
+omitted `--file` reads stdin.
 Parts must reference a file in the anchored change diff (or the current session
 diff when `change_id` is omitted), and any supplied line range must intersect
 that file's diff line space. Unknown or unresolvable `change_id`s are invalid.

@@ -577,6 +577,7 @@ fn fallback_file_row(session: &ReviewSession, file: &FileDiff) -> ChunkRow {
             end_line: end,
         }),
         part_position: None,
+        invalid_reason: None,
     }
 }
 
@@ -607,6 +608,7 @@ fn whole_file_row(path: String, rationale: Option<String>) -> ChunkRow {
             end_line: None,
         }),
         part_position: None,
+        invalid_reason: None,
     }
 }
 

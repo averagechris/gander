@@ -1781,7 +1781,7 @@ fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Chun
                         .as_deref()
                         .map(|rationale| format!(" — {rationale}"))
                         .unwrap_or_default();
-                    Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(format!("{marker} {}{position} ", row.title), style),
                         Span::styled(
                             format!("[{}] ", row.importance.label()),
@@ -1793,7 +1793,15 @@ fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Chun
                         ),
                         Span::styled(location, Style::default().fg(Color::Cyan)),
                         Span::styled(rationale, Style::default().fg(Color::DarkGray)),
-                    ])
+                    ];
+                    if let Some(reason) = &row.invalid_reason {
+                        spans.push(Span::styled(" [invalid]", Style::default().fg(Color::Red)));
+                        spans.push(Span::styled(
+                            format!(" {reason}"),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
+                    Line::from(spans)
                 }),
         );
         if visible_window.hidden_below > 0 {
@@ -4300,6 +4308,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                 end_line: Some(9),
             }),
             part_position: None,
+            invalid_reason: None,
         };
         assert_eq!(chunk_row_location(&row), "src/app.rs:3-9");
 
@@ -4331,6 +4340,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                 end_line: Some(3),
             }),
             part_position: None,
+            invalid_reason: None,
         };
 
         // Cursor inside the stop range: the excerpt is the range window.

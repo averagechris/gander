@@ -122,6 +122,7 @@ impl FlagPriority {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewChunk {
+    #[serde(default = "new_chunk_id")]
     pub id: String,
     pub title: String,
     /// How aggressively the UI should feature this chunk. Spotlight chunks
@@ -191,13 +192,103 @@ pub struct ChangeDiffContext<'a> {
     pub files: &'a [FileDiff],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvalidChunkPart {
     pub chunk_id: String,
     pub chunk_title: String,
     pub part_index: usize,
     pub path: String,
     pub reason: String,
+}
+
+fn new_chunk_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
+    invalid
+        .iter()
+        .map(|part| {
+            format!(
+                "chunk '{}' part {} ({}): {}",
+                part.chunk_title, part.part_index, part.path, part.reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkUpdateSummary {
+    pub chunks: usize,
+    pub updated: usize,
+    pub added: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkRemoveSummary {
+    pub chunks: usize,
+    pub removed: usize,
+}
+
+pub fn replace_review_chunks(
+    existing: &mut Vec<ReviewChunk>,
+    chunks: Vec<ReviewChunk>,
+    context: &ChunkValidationContext<'_>,
+) -> Result<usize, Vec<InvalidChunkPart>> {
+    let invalid = validate_review_chunks(&chunks, context);
+    if !invalid.is_empty() {
+        return Err(invalid);
+    }
+    *existing = chunks;
+    Ok(existing.len())
+}
+
+pub fn update_review_chunks(
+    existing: &mut Vec<ReviewChunk>,
+    chunks: Vec<ReviewChunk>,
+    context: &ChunkValidationContext<'_>,
+) -> Result<ChunkUpdateSummary, Vec<InvalidChunkPart>> {
+    let invalid = validate_review_chunks(&chunks, context);
+    if !invalid.is_empty() {
+        return Err(invalid);
+    }
+    let mut updated = 0;
+    let mut added = 0;
+    for chunk in chunks {
+        if let Some(slot) = existing.iter_mut().find(|existing| existing.id == chunk.id) {
+            *slot = chunk;
+            updated += 1;
+        } else {
+            existing.push(chunk);
+            added += 1;
+        }
+    }
+    Ok(ChunkUpdateSummary {
+        chunks: existing.len(),
+        updated,
+        added,
+    })
+}
+
+pub fn remove_review_chunks(
+    existing: &mut Vec<ReviewChunk>,
+    ids: &[String],
+) -> Result<ChunkRemoveSummary, Vec<String>> {
+    let unknown = ids
+        .iter()
+        .filter(|id| !existing.iter().any(|chunk| chunk.id == **id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        return Err(unknown);
+    }
+    let before = existing.len();
+    existing.retain(|chunk| !ids.iter().any(|id| id == &chunk.id));
+    Ok(ChunkRemoveSummary {
+        chunks: existing.len(),
+        removed: before - existing.len(),
+    })
 }
 
 pub fn validate_review_chunks(
@@ -413,6 +504,67 @@ mod validation_tests {
                 .reason
                 .contains("unknown or unresolvable change id")
         );
+    }
+
+    #[test]
+    fn update_chunks_preserves_position_and_appends_new_ids() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let context = ChunkValidationContext {
+            session_files: &files,
+            change_diffs: Vec::new(),
+        };
+        let mut chunks = vec![
+            chunk("a", None, vec![part("a.rs", 1, 1)]),
+            chunk("b", None, vec![part("a.rs", 1, 1)]),
+        ];
+        let summary = update_review_chunks(
+            &mut chunks,
+            vec![
+                chunk("a", None, vec![part("a.rs", 1, 1)]),
+                chunk("c", None, vec![part("a.rs", 1, 1)]),
+            ],
+            &context,
+        )
+        .unwrap();
+        assert_eq!((summary.updated, summary.added, summary.chunks), (1, 1, 3));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn remove_chunks_rejects_unknown_ids_without_applying() {
+        let mut chunks = vec![chunk("a", None, Vec::new())];
+        assert_eq!(
+            remove_review_chunks(&mut chunks, &["missing".to_owned()]),
+            Err(vec!["missing".to_owned()])
+        );
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn update_chunks_rejects_invalid_parts_without_applying() {
+        let files = diff_files(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let context = ChunkValidationContext {
+            session_files: &files,
+            change_diffs: Vec::new(),
+        };
+        let mut chunks = vec![chunk("a", None, vec![part("a.rs", 1, 1)])];
+        let result = update_review_chunks(
+            &mut chunks,
+            vec![chunk("b", None, vec![part("missing.rs", 1, 1)])],
+            &context,
+        );
+        assert!(result.is_err());
+        assert_eq!(chunks[0].id, "a");
     }
 }
 

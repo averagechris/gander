@@ -2,7 +2,7 @@
 //! files. The popup lists every chunk part and jumps to its location.
 
 use crate::{
-    agent::{Artifact, ChunkImportance, ChunkPart, ReviewChunk},
+    agent::{Artifact, ChunkImportance, ChunkPart, InvalidChunkPart, ReviewChunk},
     app::ReviewSession,
 };
 
@@ -29,14 +29,36 @@ pub(super) struct ChunkRow {
     pub(super) part: Option<ChunkPart>,
     /// Position of this part within its chunk, e.g. (1, 3) for "part 1/3".
     pub(super) part_position: Option<(usize, usize)>,
+    pub(super) invalid_reason: Option<String>,
 }
 
 impl ChunkListState {
+    #[allow(dead_code)]
     pub(super) fn new(session: &ReviewSession) -> Self {
         Self {
             rows: session.review_chunks.iter().flat_map(chunk_rows).collect(),
             selected: 0,
         }
+    }
+
+    pub(super) fn new_with_invalid(session: &ReviewSession, invalid: &[InvalidChunkPart]) -> Self {
+        let mut rows: Vec<_> = session.review_chunks.iter().flat_map(chunk_rows).collect();
+        rows.extend(invalid.iter().map(|part| ChunkRow {
+            title: part.chunk_title.clone(),
+            importance: ChunkImportance::Glance,
+            change_id: None,
+            rationale: None,
+            explanation: None,
+            artifacts: Vec::new(),
+            part: Some(ChunkPart {
+                path: part.path.clone(),
+                start_line: None,
+                end_line: None,
+            }),
+            part_position: Some((part.part_index, part.part_index)),
+            invalid_reason: Some(part.reason.clone()),
+        }));
+        Self { rows, selected: 0 }
     }
 
     pub(super) fn move_selection(&mut self, delta: isize) {
@@ -64,6 +86,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
             artifacts: chunk.artifacts.clone(),
             part: None,
             part_position: None,
+            invalid_reason: None,
         }];
     }
     let total = chunk.parts.len();
@@ -80,6 +103,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
             artifacts: chunk.artifacts.clone(),
             part: Some(part.clone()),
             part_position: (total > 1).then_some((index + 1, total)),
+            invalid_reason: None,
         })
         .collect()
 }

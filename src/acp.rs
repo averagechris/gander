@@ -28,7 +28,8 @@ use crate::{
     agent::{
         AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief,
         ChangeDiffContext, ChunkImportance, ChunkPart, ChunkValidationContext, DraftState,
-        FlagPriority, ReviewChunk, validate_review_chunks,
+        FlagPriority, ReviewChunk, invalid_chunk_parts_message, remove_review_chunks,
+        replace_review_chunks, update_review_chunks,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -176,6 +177,8 @@ impl AcpHandler {
                     "review/set_ordering",
                     "review/flag_section",
                     "review/set_chunks",
+                    "review/update_chunks",
+                    "review/remove_chunks",
                     "review/set_change_briefs",
                     "review/draft_comment",
                 ],
@@ -384,23 +387,55 @@ impl AcpHandler {
                     .iter()
                     .map(parse_chunk)
                     .collect::<Result<Vec<_>, String>>()?;
-                let invalid = self.validate_chunks_for_session(session, &chunks)?;
-                if !invalid.is_empty() {
-                    let details = invalid
-                        .iter()
-                        .map(|part| {
-                            format!(
-                                "chunk '{}' part {} ({}): {}",
-                                part.chunk_title, part.part_index, part.path, part.reason
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(format!("invalid chunk part(s): {details}"));
-                }
-                self.overlay.chunks = chunks;
+                let context = self.chunk_validation_context(session, &chunks)?;
+                replace_review_chunks(&mut self.overlay.chunks, chunks, &context).map_err(
+                    |invalid| {
+                        format!(
+                            "invalid chunk part(s): {}",
+                            invalid_chunk_parts_message(&invalid)
+                        )
+                    },
+                )?;
                 self.save_overlay()?;
                 Ok(json!({ "chunks": self.overlay.chunks.len() }))
+            }
+            "review/update_chunks" => {
+                let chunks = params
+                    .get("chunks")
+                    .and_then(Value::as_array)
+                    .ok_or("missing array param: chunks")?
+                    .iter()
+                    .map(parse_chunk)
+                    .collect::<Result<Vec<_>, String>>()?;
+                let context = self.chunk_validation_context(session, &chunks)?;
+                let summary = update_review_chunks(&mut self.overlay.chunks, chunks, &context)
+                    .map_err(|invalid| {
+                        format!(
+                            "invalid chunk part(s): {}",
+                            invalid_chunk_parts_message(&invalid)
+                        )
+                    })?;
+                self.save_overlay()?;
+                Ok(
+                    json!({ "chunks": summary.chunks, "updated": summary.updated, "added": summary.added }),
+                )
+            }
+            "review/remove_chunks" => {
+                let ids = params
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .ok_or("missing array param: ids")?
+                    .iter()
+                    .map(|id| {
+                        id.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "ids must be strings".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let summary = remove_review_chunks(&mut self.overlay.chunks, &ids)
+                    .map_err(|unknown| format!("unknown chunk id(s): {}", unknown.join(", ")))?;
+                self.save_overlay()?;
+                Ok(json!({ "chunks": summary.chunks, "removed": summary.removed }))
             }
             // Per-change briefings, one per change in the stack. The zen
             // walkthrough shows each as a chapter intro card before that
@@ -464,11 +499,11 @@ impl AcpHandler {
             .map_err(|error| error.to_string())
     }
 
-    fn validate_chunks_for_session(
+    pub(crate) fn chunk_validation_context(
         &self,
         session: &ReviewSession,
         chunks: &[ReviewChunk],
-    ) -> Result<Vec<crate::agent::InvalidChunkPart>, String> {
+    ) -> Result<ChunkValidationContext<'static>, String> {
         let session_files = session
             .files
             .iter()
@@ -492,20 +527,21 @@ impl AcpHandler {
                 }
             }
         }
-        let change_diffs = parsed_changes
+        let leaked_session: &'static [crate::diff::FileDiff] =
+            Box::leak(session_files.into_boxed_slice());
+        let leaked_changes: &'static [(String, crate::diff::DiffSet)] =
+            Box::leak(parsed_changes.into_boxed_slice());
+        let change_diffs = leaked_changes
             .iter()
             .map(|(change_id, diff)| ChangeDiffContext {
                 change_id: change_id.clone(),
                 files: &diff.files,
             })
             .collect::<Vec<_>>();
-        Ok(validate_review_chunks(
-            chunks,
-            &ChunkValidationContext {
-                session_files: &session_files,
-                change_diffs,
-            },
-        ))
+        Ok(ChunkValidationContext {
+            session_files: leaked_session,
+            change_diffs,
+        })
     }
 }
 
@@ -1055,6 +1091,48 @@ diff --git a/README.md b/README.md
         assert_eq!(overlay.drafts.len(), 1);
         assert_eq!(overlay.drafts[0].id, draft["id"].as_str().unwrap());
         assert_eq!(overlay.drafts[0].state, DraftState::Pending);
+    }
+
+    #[test]
+    fn update_and_remove_chunks_are_incremental_and_strict() {
+        let (mut server, dir) = server();
+        call(
+            &mut server,
+            "review/set_chunks",
+            json!({ "chunks": [
+                { "id": "a", "title": "first", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] },
+                { "id": "b", "title": "second", "parts": [{ "path": "README.md", "start_line": 1, "end_line": 1 }] }
+            ] }),
+        );
+        let result = call(
+            &mut server,
+            "review/update_chunks",
+            json!({ "chunks": [
+                { "id": "a", "title": "updated", "importance": "glance", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] },
+                { "id": "c", "title": "third", "parts": [{ "path": "README.md", "start_line": 1, "end_line": 1 }] }
+            ] }),
+        );
+        assert_eq!(result, json!({ "chunks": 3, "updated": 1, "added": 1 }));
+        let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "review/remove_chunks", "params": { "ids": ["missing"] } }).to_string();
+        let err = server.handle_line(&request).unwrap();
+        assert!(
+            err["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown chunk id")
+        );
+        let result = call(&mut server, "review/remove_chunks", json!({ "ids": ["b"] }));
+        assert_eq!(result, json!({ "chunks": 2, "removed": 1 }));
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(
+            overlay
+                .chunks
+                .iter()
+                .map(|chunk| chunk.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(overlay.chunks[0].title, "updated");
     }
 
     #[test]

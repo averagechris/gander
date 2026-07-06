@@ -125,6 +125,7 @@ struct TuiState {
     /// suggestions written mid-session are picked up without reloading on
     /// every tick.
     overlay_mtime: Option<std::time::SystemTime>,
+    invalid_chunk_parts: Vec<crate::agent::InvalidChunkPart>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
     /// Where a summoned agent's output is logged.
@@ -574,6 +575,7 @@ fn maybe_reload_agent_overlay(
         Ok(overlay) => {
             let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
             session.apply_agent_overlay(&overlay);
+            tui_state.invalid_chunk_parts = invalid.clone();
             if notify {
                 let message = if let Some(first) = invalid.first() {
                     format!(
@@ -743,7 +745,23 @@ fn reapply_agent_overlay(session: &mut ReviewSession, tui_state: &mut TuiState) 
     let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
         return;
     };
-    if let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
+    if let Ok(mut overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
+        let session_files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let invalid = crate::agent::validate_review_chunks(
+            &overlay.chunks,
+            &crate::agent::ChunkValidationContext {
+                session_files: &session_files,
+                change_diffs: Vec::new(),
+            },
+        );
+        if !invalid.is_empty() {
+            overlay.chunks = crate::agent::remove_invalid_chunk_parts(&overlay.chunks, &invalid);
+        }
+        tui_state.invalid_chunk_parts = invalid;
         session.apply_agent_overlay(&overlay);
     }
     // Our own read is not news; suppress the poll-based reload notice.
@@ -1039,7 +1057,10 @@ fn handle_normal_action(
                     message: "no review chunks suggested".to_owned(),
                 });
             } else {
-                *mode = Mode::ChunkList(ChunkListState::new(session));
+                *mode = Mode::ChunkList(ChunkListState::new_with_invalid(
+                    session,
+                    &tui_state.invalid_chunk_parts,
+                ));
             }
         }
         Action::Zen => {
@@ -1781,6 +1802,13 @@ fn handle_chunk_list_key(
         KeyCode::Esc => true,
         KeyCode::Enter => {
             if let Some(row) = list.selected_row().cloned() {
+                if let Some(reason) = row.invalid_reason {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: format!("invalid chunk part: {reason}"),
+                    });
+                    return true;
+                }
                 // A change-anchored chunk lives in its own change's diff;
                 // load it before jumping so line anchors line up. This is a
                 // user retarget (an active zen walkthrough ends).

@@ -20,13 +20,21 @@ mod tui;
 mod walkthrough;
 mod web_export;
 
-use std::{io::Write as _, path::PathBuf};
+use std::{
+    io::{Read as _, Write as _},
+    path::PathBuf,
+};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::eyre::{Context, eyre};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
+    agent::{
+        AgentOverlay, ChangeDiffContext, ChunkValidationContext, ReviewChunk,
+        invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
+        update_review_chunks,
+    },
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
@@ -182,6 +190,42 @@ enum Command {
         #[command(subcommand)]
         command: WalkthroughCommand,
     },
+    /// Author agent-curated review chunks from JSON specs.
+    #[command(
+        long_about = "Author agent-curated review chunks. Specs are JSON objects like {\"chunks\":[{\"title\":\"Parser flow\",\"importance\":\"spotlight\",\"parts\":[{\"path\":\"src/lib.rs\",\"start_line\":10,\"end_line\":20}]}]}. id is optional for set/update and generated when omitted. Use --file - (or omit --file) to read stdin."
+    )]
+    Chunks {
+        #[command(subcommand)]
+        command: ChunksCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ChunksCommand {
+    /// List current overlay chunks as pretty JSON.
+    List,
+    /// Replace all chunks from a JSON spec file (or stdin with --file - / omitted).
+    Set {
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Upsert chunks from a JSON spec file (or stdin with --file - / omitted).
+    Update {
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+    },
+    /// Remove chunks by id. Repeat --id for multiple chunks.
+    Remove {
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+    },
+    /// Empty the chunk list.
+    Clear,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunksSpec {
+    chunks: Vec<ReviewChunk>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -667,6 +711,9 @@ fn run() -> color_eyre::Result<()> {
                 );
             }
         }
+        Command::Chunks { command } => {
+            handle_chunks_command(command, &session, &jj, &workspace_paths.overlay_file())?
+        }
         Command::Files { command } => match command {
             FilesCommand::List => print_json(&session_files_json(&session))?,
         },
@@ -874,6 +921,113 @@ fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {
     serde_json::to_writer_pretty(&mut stdout, value)?;
     stdout.write_all(b"\n")?;
     Ok(())
+}
+
+fn handle_chunks_command(
+    command: ChunksCommand,
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    overlay_path: &std::path::Path,
+) -> color_eyre::Result<()> {
+    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
+    match command {
+        ChunksCommand::List => print_json(&overlay.chunks)?,
+        ChunksCommand::Set { file } => {
+            let spec = read_chunks_spec(file.as_ref())?;
+            let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
+            replace_review_chunks(&mut overlay.chunks, spec.chunks, &context).map_err(
+                |invalid| {
+                    eyre!(
+                        "invalid chunk part(s): {}",
+                        invalid_chunk_parts_message(&invalid)
+                    )
+                },
+            )?;
+            overlay.save(overlay_path)?;
+            println!("Set {} chunks", overlay.chunks.len());
+        }
+        ChunksCommand::Update { file } => {
+            let spec = read_chunks_spec(file.as_ref())?;
+            let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
+            let summary = update_review_chunks(&mut overlay.chunks, spec.chunks, &context)
+                .map_err(|invalid| {
+                    eyre!(
+                        "invalid chunk part(s): {}",
+                        invalid_chunk_parts_message(&invalid)
+                    )
+                })?;
+            overlay.save(overlay_path)?;
+            println!(
+                "Updated {} chunks, added {}; total {}",
+                summary.updated, summary.added, summary.chunks
+            );
+        }
+        ChunksCommand::Remove { ids } => {
+            let summary = remove_review_chunks(&mut overlay.chunks, &ids)
+                .map_err(|unknown| eyre!("unknown chunk id(s): {}", unknown.join(", ")))?;
+            overlay.save(overlay_path)?;
+            println!("Removed {}; remaining {}", summary.removed, summary.chunks);
+        }
+        ChunksCommand::Clear => {
+            overlay.chunks.clear();
+            overlay.save(overlay_path)?;
+            println!("Cleared chunks");
+        }
+    }
+    Ok(())
+}
+
+fn read_chunks_spec(file: Option<&PathBuf>) -> color_eyre::Result<ChunksSpec> {
+    let mut contents = String::new();
+    match file {
+        Some(path) if path != std::path::Path::new("-") => {
+            contents = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read chunk spec {}", path.display()))?;
+        }
+        _ => {
+            std::io::stdin().read_to_string(&mut contents)?;
+        }
+    }
+    serde_json::from_str(&contents).wrap_err("failed to parse chunk spec JSON")
+}
+
+fn chunk_validation_context_for_cli(
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    chunks: &[ReviewChunk],
+) -> color_eyre::Result<ChunkValidationContext<'static>> {
+    let session_files = session
+        .files
+        .iter()
+        .map(|file| file.diff.clone())
+        .collect::<Vec<_>>();
+    let mut parsed_changes = Vec::new();
+    for change_id in chunks.iter().filter_map(|chunk| chunk.change_id.as_ref()) {
+        if parsed_changes
+            .iter()
+            .any(|(existing, _): &(String, DiffSet)| existing == change_id)
+        {
+            continue;
+        }
+        let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+        if let Ok(raw) = jj.diff(&session.repo, &target)
+            && let Ok(diff) = DiffSet::parse(&raw)
+        {
+            parsed_changes.push((change_id.clone(), diff));
+        }
+    }
+    let leaked_session = Box::leak(session_files.into_boxed_slice());
+    let leaked_changes: &'static [(String, DiffSet)] = Box::leak(parsed_changes.into_boxed_slice());
+    Ok(ChunkValidationContext {
+        session_files: leaked_session,
+        change_diffs: leaked_changes
+            .iter()
+            .map(|(change_id, diff)| ChangeDiffContext {
+                change_id: change_id.clone(),
+                files: &diff.files,
+            })
+            .collect(),
+    })
 }
 
 fn is_broken_pipe_report(error: &color_eyre::Report) -> bool {
