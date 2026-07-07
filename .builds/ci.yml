@@ -1,5 +1,7 @@
 image: nixos/unstable
 arch: x86_64
+secrets:
+  - 731f7e55-4497-4228-8fa4-1657da7d3625 # cachix averagechris-dotfiles -> ~/.ci_secrets/cachix_token
 environment:
   NIX_CONFIG: "experimental-features = nix-command flakes"
 sources:
@@ -17,3 +19,15 @@ tasks:
   - test: |
       cd gander
       nix run --accept-flake-config .#ci-test
+  - package: |
+      cd gander
+      nix build --accept-flake-config .#gander --print-build-logs
+  - closure-size: |
+      cd gander
+      nix path-info -S ./result
+      nix path-info -rS ./result | sort -k2 -n | tail -n 5
+  - cache-warm: |
+      cd gander
+      if [ ! -f ~/.ci_secrets/cachix_token ]; then echo "no cachix token available; skipping cache warm"; exit 0; fi
+      CACHIX_AUTH_TOKEN="$(cat ~/.ci_secrets/cachix_token)"; export CACHIX_AUTH_TOKEN
+      nix run --inputs-from . nixpkgs#cachix -- push averagechris-dotfiles ./result
