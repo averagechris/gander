@@ -21,7 +21,8 @@ tasks:
   - upload-and-refresh: |
       set -eu
       cd gander
-      hut() { nix shell --inputs-from . nixpkgs#hut --command hut "$@"; }
+      srht() { nix run 'git+https://git.sr.ht/~averagechris/srht' -- "$@"; }
+      export SRHT_TOKEN="${SRHT_TOKEN:-$(awk -F ' *= *' '$1 == "oauth-token" { gsub(/\"/, "", $2); print $2; exit }' ~/.config/hut/config)}"
       version="$(awk '/^\[package\]/{s=1} s && /^version = /{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)"
       tag="v${version#v}"
       commit="$(git rev-parse HEAD)"
@@ -29,7 +30,8 @@ tasks:
       set -- result-release-artifact/*.tar.gz
       [ -e "$1" ] || { printf '%s\n' 'no release artifacts found' >&2; exit 1; }
       for artifact do
-        hut git artifact upload -r gander --rev "$tag" "$artifact" "$artifact.sha256"
+        srht git artifact upload -r gander --rev "$tag" "$artifact"
+        srht git artifact upload -r gander --rev "$tag" "$artifact.sha256"
       done
 
       manifest="$(mktemp)"
@@ -56,7 +58,7 @@ tasks:
             cd averagechris.srht.site
             nix run .#refresh-pages
       EOF
-      hut builds submit "$manifest" --note "site refresh: gander $tag" --visibility unlisted
+      srht builds submit "$manifest" --secrets --note "site refresh: gander $tag"
 artifacts:
   - artifacts/gander-v0.6.1-x86_64-linux.tar.gz
   - artifacts/gander-v0.6.1-x86_64-linux.tar.gz.sha256
