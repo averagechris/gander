@@ -198,3 +198,25 @@ clobbering them.
 This is a minimal ACP-style surface, not (yet) a full implementation of the
 published Agent Client Protocol schema. The method set is versioned via
 `initialize.version` and will grow toward spec compliance.
+## Live presentation control (`present/*`)
+
+`present/*` methods are only available through a live TUI's per-instance ACP
+Unix socket. Snapshot ACP servers return a clear `present/* methods require a
+live TUI` error. The TUI applies these as typed UI commands between frames and
+rejects them while the human is in a modal/editor (`user is busy: <mode>`).
+
+- `present/status` → `{ "active": false }` or `{ "active": true,
+  "slide_index": 0, "slide_count": 5, "phase": "focus", "current":
+  { "title": "...", "path": "src/lib.rs", "line": 42 } }`.
+- `present/start` starts the tour, equivalent to pressing `T`, and returns
+  status.
+- `present/end` ends the tour and returns status.
+- `present/next`, `present/prev` move between slides and return status.
+- `present/goto` accepts `{ "index": 3 }` or `{ "step_id": "..." }` and
+  returns status. Indexes are zero-based.
+- `present/focus` accepts `{ "path": "src/foo.rs", "line": 42,
+  "end_line": 60, "note": "look here" }`, validates that `path` is in the
+  current diff, jumps the review view there, and surfaces `note` as a TUI
+  notice.
+- `present/reload` re-reads local review/agent state and rebuilds the active
+  tour from durable walkthrough steps, then returns status.

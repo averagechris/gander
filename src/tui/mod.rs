@@ -45,7 +45,7 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 use crate::{
-    agent::AgentProcess,
+    agent::{AgentProcess, ChunkPart},
     app::{Focus, ReviewSession},
     artifact::{
         ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
@@ -59,6 +59,7 @@ use crate::{
     review,
     state::{ReviewState, ReviewStateTombstones, WalkthroughStep},
 };
+use serde_json::{Value, json};
 
 use chooser::TargetChooserState;
 use chunks::ChunkListState;
@@ -394,20 +395,33 @@ fn run_loop(
         // Answer queued agent requests against the live session before
         // drawing so their effects render this frame.
         #[cfg(unix)]
-        if let Some(bridge) = acp_bridge.as_deref_mut()
-            && bridge.process_pending(session)
-        {
-            // The bridge already applied overlay changes; skip the redundant
-            // "file changed" reload+notice for our own writes.
-            if let Some(overlay_path) = agent_overlay_path {
-                tui_state.overlay_mtime = std::fs::metadata(overlay_path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok();
+        if let Some(bridge) = acp_bridge.as_deref_mut() {
+            let (overlay_changed, commands) = bridge.drain_ui_commands(session);
+            for command in commands {
+                let result = apply_present_command(
+                    command.command.clone(),
+                    review_loader,
+                    session,
+                    mode,
+                    tui_state,
+                    state_path,
+                    agent_overlay_path,
+                );
+                command.respond(result);
             }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "agent suggestions updated".to_owned(),
-            });
+            if overlay_changed {
+                // The bridge already applied overlay changes; skip the redundant
+                // "file changed" reload+notice for our own writes.
+                if let Some(overlay_path) = agent_overlay_path {
+                    tui_state.overlay_mtime = std::fs::metadata(overlay_path)
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
+                }
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "agent suggestions updated".to_owned(),
+                });
+            }
         }
 
         // A retarget (t/p/b/R, stack step, operation picker) invalidates the
@@ -849,6 +863,244 @@ fn mode_allows_live_refresh(mode: &Mode) -> bool {
         mode,
         Mode::Normal | Mode::Activity(_) | Mode::Help | Mode::OperationPicker(_)
     )
+}
+
+fn mode_label(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::Help => "help",
+        Mode::TargetChooser(_) => "target chooser",
+        Mode::RevsetInput(_) => "revset input",
+        Mode::OperationPicker(_) => "operation picker",
+        Mode::JjHelpers(_) => "jj helpers",
+        Mode::FlagList(_) => "flag list",
+        Mode::TaskList(_) => "task list",
+        Mode::Activity(_) => "activity",
+        Mode::ChunkList(_) => "chunk list",
+        Mode::DraftList(_) => "draft list",
+        Mode::FileSearch(_) => "file search",
+        Mode::SymbolOutline(_) => "symbol outline",
+        Mode::CommentList(_) => "comment list",
+        Mode::ViewOptions(_) => "view options",
+        Mode::WalkthroughList(_) => "walkthrough list",
+        Mode::CommentInput { .. } => "comment editor",
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn apply_present_command(
+    command: crate::acp::socket::PresentCommand,
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    mode: &Mode,
+    tui_state: &mut TuiState,
+    state_path: Option<&Path>,
+    agent_overlay_path: Option<&Path>,
+) -> Result<Value, (i64, String)> {
+    if !mode_allows_live_refresh(mode) {
+        return Err((-32001, format!("user is busy: {}", mode_label(mode))));
+    }
+    use crate::acp::socket::PresentCommand;
+    match command {
+        PresentCommand::Status => Ok(present_status(session, tui_state)),
+        PresentCommand::Start => {
+            start_present_tour(review_loader, session, tui_state)?;
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::End => {
+            if let Some(zen) = tui_state.zen.take() {
+                zen::end(session, &zen);
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "zen ended by presenter".to_owned(),
+                });
+            }
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::Next => {
+            let Some(mut zen) = tui_state.zen.take() else {
+                return Err((-32002, "tour is not active".to_owned()));
+            };
+            if zen.advance()
+                && let Some(stop) = zen.current().cloned()
+            {
+                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            }
+            tui_state.zen = Some(zen);
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::Prev => {
+            let Some(mut zen) = tui_state.zen.take() else {
+                return Err((-32002, "tour is not active".to_owned()));
+            };
+            if zen.back()
+                && let Some(stop) = zen.current().cloned()
+            {
+                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            }
+            tui_state.zen = Some(zen);
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::GotoIndex(index) => {
+            let Some(mut zen) = tui_state.zen.take() else {
+                return Err((-32002, "tour is not active".to_owned()));
+            };
+            if index >= zen.stops.len() {
+                return Err((-32602, format!("slide index {index} out of range")));
+            }
+            zen.index = index;
+            if let Some(stop) = zen.current().cloned() {
+                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            }
+            tui_state.zen = Some(zen);
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::GotoStep(step_id) => {
+            let Some(mut zen) = tui_state.zen.take() else {
+                return Err((-32002, "tour is not active".to_owned()));
+            };
+            let Some(index) = zen.stops.iter().position(|stop| match stop {
+                zen::ZenStop::Chunk(row) => row.chunk_id == step_id,
+                zen::ZenStop::Chapter(_) => false,
+            }) else {
+                tui_state.zen = Some(zen);
+                return Err((-32602, format!("unknown step_id: {step_id}")));
+            };
+            zen.index = index;
+            if let Some(stop) = zen.current().cloned() {
+                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            }
+            tui_state.zen = Some(zen);
+            Ok(present_status(session, tui_state))
+        }
+        PresentCommand::Focus {
+            path,
+            line,
+            end_line,
+            note,
+        } => {
+            if !session.files.iter().any(|file| file.path == path) {
+                return Err((-32602, format!("path is not in the diff: {path}")));
+            }
+            session.jump_to_chunk_part(&ChunkPart {
+                path: path.clone(),
+                start_line: Some(line),
+                end_line,
+            });
+            session.focus = Focus::Diff;
+            if let Some(note) = note {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: note,
+                });
+            }
+            Ok(json!({ "ok": true, "path": path, "line": line, "end_line": end_line }))
+        }
+        PresentCommand::Reload => {
+            if let Some(state_path) = state_path {
+                maybe_reload_review_state(session, state_path, tui_state, false);
+            }
+            if let Some(agent_overlay_path) = agent_overlay_path {
+                maybe_reload_agent_overlay(
+                    session,
+                    agent_overlay_path,
+                    tui_state,
+                    review_loader,
+                    false,
+                );
+            }
+            if tui_state.zen.is_some() {
+                reload_present_tour(review_loader, session, tui_state)?;
+            }
+            Ok(present_status(session, tui_state))
+        }
+    }
+}
+
+fn present_status(session: &ReviewSession, tui_state: &TuiState) -> Value {
+    let Some(zen) = tui_state.zen.as_ref() else {
+        return json!({ "active": false });
+    };
+    json!({
+        "active": true,
+        "slide_index": zen.index,
+        "slide_count": zen.stops.len(),
+        "phase": format!("{:?}", zen.phase).to_lowercase(),
+        "current": current_present_stop(session, zen),
+    })
+}
+
+fn current_present_stop(session: &ReviewSession, zen: &ZenState) -> Value {
+    match zen.current() {
+        Some(zen::ZenStop::Chapter(chapter)) => {
+            json!({ "title": chapter.title(), "path": null, "line": null })
+        }
+        Some(zen::ZenStop::Chunk(row)) => {
+            let (path, line) = row
+                .part
+                .as_ref()
+                .map(|p| (Some(p.path.as_str()), p.start_line))
+                .unwrap_or((None, None));
+            json!({ "title": row.title, "path": path, "line": line })
+        }
+        None => json!({ "title": session.summary_line(), "path": null, "line": null }),
+    }
+}
+
+fn start_present_tour(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) -> Result<(), (i64, String)> {
+    if tui_state.zen.is_some() {
+        return Ok(());
+    }
+    let mut stack = review_loader
+        .jj
+        .stack_changes(&session.repo, &session.target)
+        .unwrap_or_default();
+    stack.retain(|change| !change.matches_rev(&session.target.base));
+    load_change_diffs_for_stack(review_loader, session, &stack);
+    let Some(mut zen) = ZenState::new(session, &stack) else {
+        return Err((
+            -32002,
+            "nothing to review — no changed files in this target".to_owned(),
+        ));
+    };
+    session.file_pane_visible = false;
+    if let Some(stop) = zen.current().cloned() {
+        zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+    }
+    tui_state.zen = Some(zen);
+    Ok(())
+}
+
+fn reload_present_tour(
+    review_loader: &ReviewLoader<'_>,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) -> Result<(), (i64, String)> {
+    let mut stack = review_loader
+        .jj
+        .stack_changes(&session.repo, &session.target)
+        .unwrap_or_default();
+    stack.retain(|change| !change.matches_rev(&session.target.base));
+    load_change_diffs_for_stack(review_loader, session, &stack);
+    let Some(zen) = tui_state.zen.as_mut() else {
+        return start_present_tour(review_loader, session, tui_state);
+    };
+    if !zen.refresh(session, &stack) {
+        tui_state.zen = None;
+        return Err((-32002, "tour has no slides after reload".to_owned()));
+    }
+    if let Some(mut zen) = tui_state.zen.take() {
+        if let Some(stop) = zen.current().cloned() {
+            zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+        }
+        tui_state.zen = Some(zen);
+    }
+    Ok(())
 }
 
 /// Reload the current target in place: view state survives, agent

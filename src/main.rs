@@ -24,7 +24,7 @@ use std::{
     error::Error,
     fmt,
     io::{Read as _, Write as _},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -203,6 +203,17 @@ enum Command {
     /// serving this workspace's ACP socket; otherwise serves a snapshot
     /// directly. See docs/acp.md.
     Acp,
+    /// Drive the tour/view in a live TUI via its ACP socket (defaults to status).
+    #[command(
+        after_help = "Examples:\n  gander present\n  gander present next\n  gander present goto --index 3\n  gander present focus --path src/lib.rs --line 42 --end-line 60 --note 'look here'\n\nRequires a live TUI for this workspace; start one with `gander tui --tour`."
+    )]
+    Present {
+        #[command(subcommand)]
+        command: Option<PresentCommand>,
+        /// Target a specific live TUI instance by pid when several serve this workspace.
+        #[arg(long)]
+        pid: Option<u32>,
+    },
     /// Serve the review session to agent harnesses as MCP tools on stdio
     /// (rmcp SDK). Routes each tool call to this workspace's live TUI
     /// instance via the instance registry; without one, serves a snapshot.
@@ -356,6 +367,40 @@ struct DraftCommentSpec {
     path: String,
     line: Option<usize>,
     body: String,
+}
+
+#[derive(Debug, Subcommand)]
+enum PresentCommand {
+    /// Print live presentation status.
+    Status,
+    /// Start the tour, like pressing T in the TUI.
+    Start,
+    /// End the tour.
+    End,
+    /// Advance to the next slide.
+    Next,
+    /// Move to the previous slide.
+    Prev,
+    /// Jump to a slide by zero-based index or durable step id.
+    Goto {
+        #[arg(long, conflicts_with = "step")]
+        index: Option<usize>,
+        #[arg(long)]
+        step: Option<String>,
+    },
+    /// Spotlight a diff location in the normal review view.
+    Focus {
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        line: u32,
+        #[arg(long)]
+        end_line: Option<u32>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Reload review/walkthrough state and rebuild the active tour.
+    Reload,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1044,6 +1089,23 @@ fn run() -> color_eyre::Result<()> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;
+        }
+        Command::Present { command, pid } => {
+            #[cfg(not(unix))]
+            {
+                color_eyre::eyre::bail!("gander present requires Unix sockets and a live TUI");
+            }
+            #[cfg(unix)]
+            {
+                let instance = select_present_instance(
+                    &workspace_paths.registry_dir,
+                    &workspace_paths.workspace_root,
+                    pid,
+                )?;
+                let request = present_request_json(command.unwrap_or(PresentCommand::Status));
+                let response = send_present_request(&instance.socket_path, &request)?;
+                println!("{response}");
+            }
         }
         Command::Mcp => {
             let (target, diff, state, config, generated_matcher) =
@@ -2652,6 +2714,92 @@ fn session_hunk_diff(session: &ReviewSession, id: &str) -> Option<String> {
 
 fn session_comments_json(session: &ReviewSession) -> serde_json::Value {
     serde_json::json!({ "comments": session.comments })
+}
+
+#[cfg(unix)]
+fn select_present_instance(
+    registry_dir: &Path,
+    workspace_root: &Path,
+    pid: Option<u32>,
+) -> color_eyre::Result<crate::registry::InstanceInfo> {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let matches: Vec<_> = crate::registry::live_instances(registry_dir)
+        .into_iter()
+        .filter(|instance| instance.workspace_root == workspace_root)
+        .collect();
+    if let Some(pid) = pid {
+        return matches
+            .into_iter()
+            .find(|instance| instance.pid == pid)
+            .ok_or_else(|| user_error(format!("no live TUI with pid {pid} for this workspace")));
+    }
+    match matches.as_slice() {
+        [] => Err(user_error(
+            "no live TUI for this workspace; start one with `gander tui --tour` and retry",
+        )),
+        [one] => Ok(one.clone()),
+        many => {
+            let list = many
+                .iter()
+                .map(|instance| {
+                    format!(
+                        "  pid {}: {}..{} ({})",
+                        instance.pid, instance.base, instance.rev, instance.summary
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(user_error(format!(
+                "multiple live TUIs serve this workspace; pass --pid:\n{list}"
+            )))
+        }
+    }
+}
+
+fn present_request_json(command: PresentCommand) -> serde_json::Value {
+    match command {
+        PresentCommand::Status => {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/status"})
+        }
+        PresentCommand::Start => {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/start"})
+        }
+        PresentCommand::End => serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/end"}),
+        PresentCommand::Next => serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/next"}),
+        PresentCommand::Prev => serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/prev"}),
+        PresentCommand::Reload => {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/reload"})
+        }
+        PresentCommand::Goto { index, step } => {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/goto","params":{"index":index,"step_id":step}})
+        }
+        PresentCommand::Focus {
+            path,
+            line,
+            end_line,
+            note,
+        } => {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"present/focus","params":{"path":path,"line":line,"end_line":end_line,"note":note}})
+        }
+    }
+}
+
+#[cfg(unix)]
+fn send_present_request(
+    socket_path: &Path,
+    request: &serde_json::Value,
+) -> color_eyre::Result<String> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket_path)
+        .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
+    writeln!(stream, "{request}")?;
+    stream.flush()?;
+    let mut response = String::new();
+    std::io::BufReader::new(stream).read_line(&mut response)?;
+    Ok(response.trim_end().to_owned())
 }
 
 #[cfg(test)]

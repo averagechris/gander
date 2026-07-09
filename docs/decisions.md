@@ -146,3 +146,15 @@ flows through the overlay file (durable, mergeable, crash-safe atomic
 writes) and the live socket (fresh reads, immediate UI application). This
 keeps stdio ownership clean: TUI renders to stderr, keyboard on stdin,
 artifacts on stdout; `gander acp`/`gander mcp` own their own stdio.
+## D8 (2026-07): remote present control is ephemeral, socket-transported UI control
+
+External agents may drive what a human sees in a live TUI with ACP
+`present/*` methods, the CLI-first `gander present` commands, and MCP tools
+that route to the same per-instance Unix socket. These commands are ephemeral
+UI commands: they move the active view/tour and may reload local review state,
+but they do not fetch from forges or mutate the user's code workspace.
+
+The TUI event loop, not the immutable ACP snapshot handler, applies these
+commands so modal safety is enforced with the same gate as live refresh. If
+the human is in a comment editor or popup, presentation commands fail with
+`user is busy: <mode>` rather than yanking the view away mid-edit.

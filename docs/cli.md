@@ -268,3 +268,27 @@ gander --state-file "$state" tasks list | jq -r '.tasks[] | select(.status == "o
   done
 gander --state-file "$state" reviews show "$review_id" | jq '{id, title, tasks}'
 ```
+## `gander present`
+
+`gander present` is the CLI-first way for an external process to drive what a
+human sees in a live TUI. It discovers the live instance for the current
+workspace from the registry, connects once to that instance's ACP socket,
+sends a `present/*` JSON-RPC request, and prints the raw JSON-RPC response.
+If several live TUIs serve the same workspace, pass `--pid <pid>`; otherwise
+the command errors and lists the candidate pids.
+
+Examples:
+
+```bash
+gander present                         # present/status
+gander present start                   # start the tour
+gander present next                    # advance one slide
+gander present goto --index 3          # zero-based slide index
+gander present goto --step step-id     # durable walkthrough step id
+gander present focus --path src/foo.rs --line 42 --end-line 60 --note "look here"
+gander present reload                  # reload review state and rebuild tour
+```
+
+The command requires a live TUI (`gander tui --tour`) and respects modal
+safety: if the human is typing a comment or using a popup, the TUI returns
+`user is busy: <mode>` instead of moving the view.

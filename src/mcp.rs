@@ -69,6 +69,20 @@ pub struct FileDiffParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PresentGotoParams {
+    pub index: Option<usize>,
+    pub step_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PresentFocusParams {
+    pub path: String,
+    pub line: u32,
+    pub end_line: Option<u32>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetOrderingParams {
     /// File paths in suggested review order, highest priority first.
     pub paths: Vec<String>,
@@ -328,6 +342,59 @@ impl GanderMcp {
     )]
     fn current_focus(&self) -> Result<CallToolResult, McpError> {
         self.call("review/current_focus", Value::Null)
+    }
+
+    #[tool(
+        description = "Live TUI presentation status: active tour, slide index/count, phase, and current slide target"
+    )]
+    fn present_status(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/status", Value::Null)
+    }
+
+    #[tool(description = "Start the live TUI tour, like pressing T")]
+    fn present_start(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/start", Value::Null)
+    }
+
+    #[tool(description = "End the live TUI tour")]
+    fn present_end(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/end", Value::Null)
+    }
+
+    #[tool(description = "Advance the live TUI tour to the next slide")]
+    fn present_next(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/next", Value::Null)
+    }
+
+    #[tool(description = "Move the live TUI tour to the previous slide")]
+    fn present_prev(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/prev", Value::Null)
+    }
+
+    #[tool(description = "Jump the live TUI tour to a zero-based slide index or durable step id")]
+    fn present_goto(
+        &self,
+        Parameters(params): Parameters<PresentGotoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call(
+            "present/goto",
+            json!({ "index": params.index, "step_id": params.step_id }),
+        )
+    }
+
+    #[tool(
+        description = "Spotlight a path/line in the live TUI review view and optionally show a note"
+    )]
+    fn present_focus(
+        &self,
+        Parameters(params): Parameters<PresentFocusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call("present/focus", json!({ "path": params.path, "line": params.line, "end_line": params.end_line, "note": params.note }))
+    }
+
+    #[tool(description = "Reload review/walkthrough state from disk and rebuild the live TUI tour")]
+    fn present_reload(&self) -> Result<CallToolResult, McpError> {
+        self.call("present/reload", Value::Null)
     }
 
     #[tool(

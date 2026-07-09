@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Live presentation control: `gander present`, ACP `present/*` methods,
+  and matching MCP tools can drive a running TUI's tour/view through the
+  per-instance socket, with modal safety guards.
+
 ### Changed
 
 - Walkthroughs and the zen tour now share one durable model; legacy
