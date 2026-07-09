@@ -171,6 +171,20 @@ canonical form in docs and JSON remains `--path`.
 
 ## Deprecated curation shims (chunks, briefs) and drafts
 
+## Tour slide deck
+
+```sh
+gander tui --tour
+gander tour render [--width 100] [--height 30] [--slide N]
+```
+
+`tui --tour` launches the normal TUI directly into zen's full-screen slide deck.
+`tour render` uses the same ratatui draw path with a test backend and prints the
+slides as plain text separated by `──── slide K/N ────`, which is useful for
+agents and documentation snapshots. If a walkthrough is present, spotlight steps
+become slides, chapter steps become intro slides, and glance steps appear on the
+final “At a glance” slide; otherwise the tour falls back to changed files.
+
 ```sh
 gander chunks list
 gander chunks lines [--change <change-id>] [--path <path>]

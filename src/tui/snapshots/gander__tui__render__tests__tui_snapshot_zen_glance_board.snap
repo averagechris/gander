@@ -1,23 +1,23 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4769
+assertion_line: 4920
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 18)"
 ---
-┌ zen · at a glance ───────────────────────────────────────────────────────────────────────────────┐
-│1 spotlight stop(s) toured. 1 glance group(s) below (1 item(s)) — skim, then `a` marks them all   │
-│viewed.                                                                                           │
-│                                                                                                  │
-│› • test churn tests/app.rs:1-1 +1 -1 — mechanical rename in tests                                │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+          At a glance
+          1 spotlight stops toured · 1 glance items
+
+          › • tests/app.rs:1-1 — test churn  — mechanical rename in tests
+
+          j/k select · enter dives to location · esc ends tour
+
+
+
+
+
+
+
+
+
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @
 zen glance · 1 item(s) · j/k move · enter jump · a mark all viewed & finish · p back · esc end

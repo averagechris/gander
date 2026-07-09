@@ -262,18 +262,18 @@ then everything mechanical acknowledged in bulk. Design decisions:
 - **Zen subsumes tour mode.** The old modal `Mode::Tour` is gone; `T`
   (or `Z`) now enters zen. One walkthrough mode, not two.
 - **Three surfaces, one state machine** (`ZenPhase`):
-  - *Focus card* (default): a full-screen takeover per spotlight stop —
-    progress dots, the stop's critical lines excerpted ± 2 context rows
-    and vertically centered, and the agent's `explanation` in a "why
-    this matters" panel. One object of attention; no panes.
+  - *Spotlight slide* (default): a full-screen, full-bleed slide per spotlight
+    stop — dim breadcrumb, progress dots, a bold title, syntax-highlighted
+    excerpt from the existing diff-row pipeline, one subtle rule, then generous
+    prose. No backdrop border, floating card, shadow, or nested panels.
   - *Reading view* (`tab`/`o` toggles): the normal review UI with
     out-of-range rows dimmed (`Modifier::DIM`, render-time only) and a
     bottom orientation panel. The full normal-mode vocabulary —
     comments, flags, context expansion, split view, search — works here;
     only stop-navigation keys are intercepted.
-  - *Glance board* (`g`, or automatically after the last stop): every
-    glance chunk plus every file no chunk part covers, one line each
-    (title, location, ±stats, rationale, viewed check). `enter` jumps
+  - *At a glance slide* (`g`, or automatically after the last stop): every
+    glance chunk plus every file no chunk part covers, one clean line each
+    (`path:line — title/why`, viewed check). `enter` jumps
     into the diff and ends zen; `a` bulk-marks all glance files viewed
     and finishes. The board is modal — other keys are swallowed so
     normal actions cannot fire invisibly.
@@ -310,7 +310,9 @@ then everything mechanical acknowledged in bulk. Design decisions:
   chapters as `▎` bars grouping the stop dots; human-facing stop numbers
   count spotlight stops only. Cards show the change's *full* description
   (headline bold, body beneath, `d` collapses to the headline) — the
-  change's own words come first, the agent's brief second.
+  change's own words come first, the agent's brief second. Chapter rendering is
+  now a hero slide: breadcrumb, title, narrative, compact stats, and an
+  “enter to begin” line; derived facts are folded into one dim line.
 - **Artifacts** (2026-07 follow-up). Agents can *show* instead of only
   telling: spotlight chunks and change briefs may carry `artifacts`
   (`{title, kind: example|output|diagram|note, body}`) — a usage example

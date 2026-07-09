@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- `gander tui --tour` starts directly in the zen tour, and `gander tour render`
+  renders the slide deck to plain text for automation and review.
+
 ### Changed
 
+- Zen/tour mode now presents a polished full-screen slide deck with full-bleed
+  chapter, spotlight, and at-a-glance slides instead of framed floating cards.
 - Walkthroughs and the zen tour now share one durable model; legacy
   chunks/briefs authoring is treated as a deprecated compatibility shim.
 

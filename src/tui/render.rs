@@ -2314,19 +2314,8 @@ fn draw_zen_chapter(
     chapter: &super::zen::ChapterCard,
 ) {
     frame.render_widget(Clear, area);
+    let inner = slide_inner(area);
     let (number, total) = chapter.position;
-    let mut title = format!(" zen · chapter {number}/{total} ");
-    if zen.has_glance() {
-        title.push_str(&format!("· then {} at a glance ", zen.glance_rows.len()));
-    }
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(title),
-        area,
-    );
-    let inner = inner_bordered(area);
 
     // Where this chapter lives: its own change, or the walkthrough's target.
     let mut location = match &chapter.change_id {
@@ -2357,12 +2346,26 @@ fn draw_zen_chapter(
         ));
     }
 
-    let mut body: Vec<Line<'static>> = vec![Line::from(Span::styled(
-        headline,
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ))];
+    let mut body: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("chapter {number}/{total} · {location}"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                zen_progress_ascii(zen),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            headline,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
     // The change's own words come right after the headline: the full
     // description body, collapsible with `d` when it gets in the way.
     if !description_body.is_empty() {
@@ -2393,21 +2396,6 @@ fn draw_zen_chapter(
         stops_hint,
         Style::default().fg(Color::DarkGray),
     )));
-    match zen.curation_state(session) {
-        super::zen::ZenCurationState::Uncurated => {
-            body.push(Line::from(Span::styled(
-            "uncurated tour — derived from the diff; press @ to summon ACP/agent curation for intent/risk",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-        )));
-        }
-        super::zen::ZenCurationState::PartiallyCurated => {
-            body.push(Line::from(Span::styled(
-                "partially curated — agent briefs below; stops are derived from the diff (no spotlight chunks yet)",
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            )));
-        }
-        super::zen::ZenCurationState::Curated => {}
-    }
     let has_curated_brief = chapter.summary.is_some();
     let summary = chapter.summary.clone().unwrap_or_else(|| {
         "No agent brief for this change — the facts above are derived from the diff.".to_owned()
@@ -2438,165 +2426,45 @@ fn draw_zen_chapter(
             )));
         }
     }
-    if inner.height < 8 {
-        // Too small for the card layout: header only.
-        body.insert(0, Line::from(location));
-        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
-        return;
-    }
-
-    // Progress dots stay on the backdrop, like the stop cards.
-    frame.render_widget(
-        Paragraph::new(zen_progress_line(zen)),
-        Rect { height: 1, ..inner },
-    );
-
-    let max_card_width = inner.width.saturating_sub(4).max(20);
-    let card_width = 100.min(max_card_width).max(50.min(max_card_width));
-    let text_width = card_width.saturating_sub(4).max(20) as usize;
-    let bottom_text = if has_curated_brief {
-        if zen.chapter_brief_expanded {
-            let facts = chapter
-                .derived_lines
-                .iter()
-                .map(|line| format!("  {line}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if facts.is_empty() {
-                "derived: none detected".to_owned()
-            } else {
-                format!("derived facts\n{facts}")
-            }
-        } else {
-            format!(
-                "derived: {} · d for detail",
-                derived_summary(&chapter.derived_lines)
-            )
-        }
-    } else {
-        summary.clone()
-    };
-    let estimated: usize = bottom_text
-        .lines()
-        .map(|line| line.chars().count().div_ceil(text_width).max(1))
-        .sum();
-    let full_summary_height = estimated as u16 + 1;
-    let summary_height = if zen.chapter_brief_expanded {
-        full_summary_height
-            .min(inner.height.saturating_sub(6))
-            .max(2)
-    } else {
-        full_summary_height.clamp(2, (inner.height / 2).max(3))
-    };
-    // Wrap-aware height for the top section so a long description body
-    // gets the room it asked for (bounded by the screen).
-    let estimated_body: usize = body
-        .iter()
-        .map(|line| line.width().div_ceil(text_width).max(1))
-        .sum();
-    let card_height =
-        (estimated_body as u16 + summary_height + 2).min(inner.height.saturating_sub(2));
-
-    let card = Rect {
-        x: inner.x + inner.width.saturating_sub(card_width) / 2,
-        y: inner.y + 1 + inner.height.saturating_sub(1).saturating_sub(card_height) / 2,
-        width: card_width,
-        height: card_height,
-    };
-
-    // The same one-cell drop shadow as the stop cards.
-    let shadow = Rect {
-        x: (card.x + 2).min(area.right().saturating_sub(1)),
-        y: (card.y + 1).min(area.bottom().saturating_sub(1)),
-        width: card.width.min(area.right().saturating_sub(card.x + 2)),
-        height: card.height.min(area.bottom().saturating_sub(card.y + 1)),
-    };
-    if shadow.width > 0 && shadow.height > 0 {
-        frame.render_widget(Clear, shadow);
-        frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Black)),
-            shadow,
-        );
-    }
-
-    frame.render_widget(Clear, card);
-    let chapter_location = chunk_location_label(&location, card.width.saturating_sub(22) as usize);
-    let card_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Line::from(vec![
-            Span::styled(
-                format!(" chapter {number}/{total} "),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("· {chapter_location} "),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]));
-    let card_inner = card_block.inner(card);
-    frame.render_widget(card_block, card);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(summary_height)])
-        .split(card_inner);
-
-    let mut chapter_body = body;
-    let body_capacity = sections[0].height.saturating_sub(1) as usize;
-    if body_capacity > 0 && chapter_body.len() > body_capacity {
-        chapter_body.truncate(body_capacity);
-        chapter_body.push(Line::from(Span::styled(
-            "… d expands",
+    if !chapter.derived_lines.is_empty() {
+        body.push(Line::from(Span::styled(
+            format!("derived: {}", derived_summary(&chapter.derived_lines)),
             Style::default().fg(Color::DarkGray),
         )));
     }
-    frame.render_widget(
-        Paragraph::new(chapter_body)
-            .block(Block::default().padding(Padding::horizontal(1)))
-            .wrap(Wrap { trim: false }),
-        sections[0],
-    );
-    let summary = if !has_curated_brief
-        && !zen.chapter_brief_expanded
-        && full_summary_height > summary_height
-    {
-        format!(
-            "{bottom_text}\n… d expands the brief ({} more line(s))",
-            full_summary_height - summary_height
-        )
-    } else {
-        bottom_text
-    };
-    frame.render_widget(
-        Paragraph::new(summary)
-            .style(Style::default().fg(Color::Gray))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .padding(Padding::horizontal(1))
-                    .title(Span::styled(
-                        if has_curated_brief {
-                            " derived "
-                        } else {
-                            " what this change does "
-                        },
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-            )
-            .wrap(Wrap { trim: false }),
-        sections[1],
-    );
+    body.push(Line::from(""));
+    body.push(Line::from(Span::styled(
+        format!("enter to begin — {} stops", chapter.stop_count),
+        Style::default().fg(Color::Cyan),
+    )));
+    if inner.height < 8 {
+        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
 }
 
-fn chunk_location_label(location: &str, max_width: usize) -> String {
-    truncate_middle(location, max_width)
+fn slide_inner(area: Rect) -> Rect {
+    let margin = (area.width / 10).clamp(0, 10).min(area.width / 3);
+    Rect {
+        x: area.x + margin,
+        y: area.y + 1.min(area.height),
+        width: area.width.saturating_sub(margin * 2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn zen_progress_ascii(zen: &ZenState) -> String {
+    zen.stops
+        .iter()
+        .take(40)
+        .enumerate()
+        .map(|(i, stop)| match stop {
+            super::zen::ZenStop::Chapter(_) => '▎',
+            super::zen::ZenStop::Chunk(_) if i <= zen.index => '●',
+            super::zen::ZenStop::Chunk(_) => '○',
+        })
+        .collect()
 }
 
 fn derived_summary(lines: &[String]) -> String {
@@ -2637,23 +2505,9 @@ fn draw_zen_stop(
     stop: &super::chunks::ChunkRow,
 ) {
     frame.render_widget(Clear, area);
-
+    let inner = slide_inner(area);
     let (stop_number, stop_total) = zen.chunk_position();
-    let mut title = format!(" zen · stop {stop_number}/{stop_total} ");
-    if zen.has_glance() {
-        title.push_str(&format!("· then {} at a glance ", zen.glance_rows.len()));
-    }
-    // The backdrop recedes (dim border) so the centered card pops.
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(title),
-        area,
-    );
-    let inner = inner_bordered(area);
     if inner.height < 8 {
-        // Too small for the card layout: fall back to the header only.
         frame.render_widget(
             Paragraph::new(zen_focus_header_lines(zen, stop)).wrap(Wrap { trim: false }),
             inner,
@@ -2661,22 +2515,8 @@ fn draw_zen_stop(
         return;
     }
 
-    // Progress dots stay on the backdrop, top-left, like a slide counter.
-    frame.render_widget(
-        Paragraph::new(zen_focus_header_lines(zen, stop)),
-        Rect {
-            height: 2.min(inner.height),
-            ..inner
-        },
-    );
-
-    // Build the excerpt first: the card is sized to its content so the code
-    // and the explanation sit together in one framed unit instead of
-    // drifting apart across a tall terminal. When the cursor wanders off
-    // the stop the excerpt follows it (a scrolling window), so line
-    // navigation never walks out of view; `.` snaps back.
     let rows = session.diff_rows_for_selected_file();
-    let max_excerpt = ((inner.height as usize).saturating_sub(8)).clamp(3, 24);
+    let max_excerpt = ((inner.height as usize * 3) / 5).clamp(3, 24);
     let cursor = (session.focus == Focus::Diff).then_some(session.diff_cursor);
     let (indices, wandered) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
     let mut excerpt: Vec<Line<'static>> = Vec::new();
@@ -2715,116 +2555,56 @@ fn draw_zen_stop(
         explanation = format!("explanation with part 1/{total}");
     }
 
-    // Card width: hug the widest excerpt line (plus breathing room), but
-    // stay wide enough for prose and inside the backdrop.
-    let widest = excerpt.iter().map(Line::width).max().unwrap_or(40);
-    let max_card_width = inner.width.saturating_sub(4).max(20);
-    let card_width =
-        ((widest as u16).saturating_add(4)).clamp(50.min(max_card_width), max_card_width);
-
-    let text_width = card_width.saturating_sub(4).max(20) as usize;
+    let text_width = inner.width.max(20) as usize;
     let comment_lines = zen_stop_comment_lines(session, stop);
     let mechanics_line = if zen.source == super::zen::ZenSource::Files {
         stop.explanation.clone()
     } else {
         None
     };
-    let sibling_line = sibling_parts_line(zen, stop, card_width.saturating_sub(6) as usize);
-    let wrapped_height = |line: &str| line.chars().count().div_ceil(text_width).max(1);
-    let estimated: usize = explanation.lines().map(wrapped_height).sum::<usize>()
-        + mechanics_line.as_deref().map(wrapped_height).unwrap_or(0)
-        + sibling_line.as_deref().map(wrapped_height).unwrap_or(0)
-        + comment_lines
-            .iter()
-            .map(|line| wrapped_height(line))
-            .sum::<usize>();
-    // The explanation block carries its own top border (the divider), so
-    // +1 covers it; clamp so prose can never crowd out the code.
-    let explanation_height = (estimated as u16 + 1).clamp(2, (inner.height / 3).max(3));
-    let card_height =
-        (excerpt.len() as u16 + explanation_height + 2).min(inner.height.saturating_sub(2));
-
-    // Center the card in the backdrop (below the dots row).
-    let card = Rect {
-        x: inner.x + inner.width.saturating_sub(card_width) / 2,
-        y: inner.y + 1 + inner.height.saturating_sub(1).saturating_sub(card_height) / 2,
-        width: card_width,
-        height: card_height,
-    };
-
-    // A one-cell drop shadow sells the "popped up" effect.
-    let shadow = Rect {
-        x: (card.x + 2).min(area.right().saturating_sub(1)),
-        y: (card.y + 1).min(area.bottom().saturating_sub(1)),
-        width: card.width.min(area.right().saturating_sub(card.x + 2)),
-        height: card.height.min(area.bottom().saturating_sub(card.y + 1)),
-    };
-    if shadow.width > 0 && shadow.height > 0 {
-        frame.render_widget(Clear, shadow);
-        frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Black)),
-            shadow,
-        );
-    }
-
-    frame.render_widget(Clear, card);
+    let sibling_line = sibling_parts_line(zen, stop, inner.width.saturating_sub(2) as usize);
     let position = stop
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
         .unwrap_or_default();
-    let title_budget = card.width.saturating_sub(4) as usize;
-    let location_title = chunk_row_location_width(stop, title_budget / 2);
-    let stop_title = truncate_tail(
-        &stop.title,
-        title_budget.saturating_sub(location_title.width() + position.width() + 8),
-    );
-    let card_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if wandered {
-            Color::DarkGray
-        } else {
-            Color::Yellow
-        }))
-        .title(Line::from({
-            let mut spans = vec![
-                Span::styled(
-                    format!(" {stop_title}{position} "),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "stop {stop_number}/{stop_total} · {}",
+                    chunk_row_location_width(stop, text_width / 2)
                 ),
-                Span::styled(
-                    format!("· {location_title} "),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ];
-            if !stop.artifacts.is_empty() {
-                spans.push(Span::styled(
-                    format!("· e {} artifact(s) ", stop.artifacts.len()),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-            if wandered {
-                spans.push(Span::styled(
-                    "· off the stop — . refocuses ",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            spans
-        }));
-    let card_inner = card_block.inner(card);
-    frame.render_widget(card_block, card);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(explanation_height)])
-        .split(card_inner);
-
-    frame.render_widget(Paragraph::new(excerpt), sections[0]);
-    let mut explanation_lines = vec![Line::from(explanation)];
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                zen_progress_ascii(zen),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("{}{position}", stop.title),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(excerpt);
+    lines.push(Line::from(Span::styled(
+        "─".repeat(text_width.min(80)),
+        Style::default().fg(Color::DarkGray),
+    )));
+    let mut explanation_lines = vec![
+        Line::from(Span::styled(
+            explanation_title.trim(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::ITALIC),
+        )),
+        Line::from(explanation),
+    ];
     if let Some(mechanics) = mechanics_line {
         explanation_lines.push(Line::from(Span::styled(
             mechanics,
@@ -2843,24 +2623,21 @@ fn draw_zen_stop(
             Style::default().fg(Color::Blue),
         )));
     }
-    frame.render_widget(
-        Paragraph::new(explanation_lines)
-            .style(Style::default().fg(Color::Gray))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray))
-                    .padding(Padding::horizontal(1))
-                    .title(Span::styled(
-                        explanation_title,
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-            )
-            .wrap(Wrap { trim: false }),
-        sections[1],
-    );
+    lines.extend(explanation_lines);
+    if !stop.artifacts.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("e · {} exhibits", stop.artifacts.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if wandered {
+        lines.push(Line::from(Span::styled(
+            "off the stop — . refocuses",
+            Style::default().fg(Color::Magenta),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Header lines for the focus card backdrop: the progress dots.
@@ -3097,40 +2874,32 @@ fn draw_zen_glance(
     zen: &ZenState,
 ) {
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" zen · at a glance "),
-        area,
-    );
-    let inner = inner_bordered(area);
+    let inner = slide_inner(area);
 
     let glance_groups = grouped_glance_rows(&zen.glance_rows);
     let selected_group = glance_groups
         .iter()
         .position(|group| group.indices.contains(&zen.glance_selected))
         .unwrap_or(0);
-    let fixed_lines = 4usize;
+    let fixed_lines = 5usize;
     let list_height = (inner.height as usize).saturating_sub(fixed_lines).max(1);
     let window = picker_visible_window(selected_group, glance_groups.len(), list_height);
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{} spotlight stop(s) toured. ", zen.chunk_stop_count()),
-                Style::default().fg(Color::Gray),
+        Line::from(Span::styled(
+            "At a glance",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} spotlight stops toured · {} glance items",
+                zen.chunk_stop_count(),
+                zen.glance_rows.len()
             ),
-            Span::styled(
-                format!(
-                    "{} glance group(s) below ({} item(s)) — skim, then `a` marks them all viewed.",
-                    glance_groups.len(),
-                    zen.glance_rows.len()
-                ),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+            Style::default().fg(Color::DarkGray),
+        )),
         Line::from(""),
     ];
     if window.hidden_above > 0 {
@@ -3162,12 +2931,6 @@ fn draw_zen_glance(
         } else {
             Style::default().fg(Color::Gray)
         };
-        let stats = row
-            .part
-            .as_ref()
-            .and_then(|part| session.files.iter().find(|file| file.path == part.path))
-            .map(|file| format!(" +{} -{}", file.additions, file.deletions))
-            .unwrap_or_default();
         let rationale = row
             .rationale
             .as_deref()
@@ -3176,7 +2939,7 @@ fn draw_zen_glance(
         let locations = group
             .rows
             .iter()
-            .map(|row| chunk_row_location_width(row, 28))
+            .map(|row| chunk_row_location_width(row, 34))
             .collect::<Vec<_>>()
             .join(" · ");
         let title = if group.rows.len() == 1
@@ -3189,9 +2952,9 @@ fn draw_zen_glance(
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
             Span::styled(format!("{check} "), Style::default().fg(Color::Green)),
-            Span::styled(title, style),
             Span::styled(locations, Style::default().fg(Color::Cyan)),
-            Span::styled(stats, Style::default().fg(Color::Magenta)),
+            Span::styled(" — ", Style::default().fg(Color::DarkGray)),
+            Span::styled(title, style),
             Span::styled(rationale, Style::default().fg(Color::DarkGray)),
         ]));
     }
@@ -3201,6 +2964,11 @@ fn draw_zen_glance(
             Style::default().fg(Color::DarkGray),
         )));
     }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "j/k select · enter dives to location · esc ends tour",
+        Style::default().fg(Color::DarkGray),
+    )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 

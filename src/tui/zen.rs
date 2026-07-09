@@ -139,6 +139,7 @@ pub(super) enum ZenSource {
     Files,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ZenCurationState {
     Curated,
@@ -204,6 +205,7 @@ impl ZenState {
         })
     }
 
+    #[allow(dead_code)]
     pub(super) fn curation_state(&self, session: &ReviewSession) -> ZenCurationState {
         let has_walkthrough = !durable_walkthrough_steps(session).is_empty();
         match (self.source, has_walkthrough) {

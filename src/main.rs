@@ -154,6 +154,14 @@ enum Command {
         /// Artifact output path for --artifact-on-quit write.
         #[arg(long = "artifact-output")]
         artifact_output: Option<PathBuf>,
+        /// Start directly in the full-screen tour slide deck.
+        #[arg(long)]
+        tour: bool,
+    },
+    /// Render the tour slide deck to plain terminal text.
+    Tour {
+        #[command(subcommand)]
+        command: TourCommand,
     },
     /// Export the current review as JSON or Markdown.
     #[command(
@@ -264,6 +272,19 @@ enum Command {
     Drafts {
         #[command(subcommand)]
         command: DraftsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TourCommand {
+    /// Render tour slides using the production TUI draw path.
+    Render {
+        #[arg(long, default_value_t = 100)]
+        width: u16,
+        #[arg(long, default_value_t = 30)]
+        height: u16,
+        #[arg(long)]
+        slide: Option<usize>,
     },
 }
 
@@ -799,6 +820,7 @@ fn run() -> color_eyre::Result<()> {
         artifact_format: None,
         artifact_profile: None,
         artifact_output: None,
+        tour: false,
     });
     if matches!(command, Command::Paths) {
         print_paths(&workspace_paths, &repo, cli.state.as_deref());
@@ -850,6 +872,7 @@ fn run() -> color_eyre::Result<()> {
             artifact_format,
             artifact_profile,
             artifact_output,
+            tour,
         } => {
             // Resolve before entering the TUI so a misconfiguration (write
             // mode without a destination) fails fast instead of after the
@@ -878,6 +901,7 @@ fn run() -> color_eyre::Result<()> {
                     workspace_root: Some(workspace_paths.workspace_root.clone()),
                 },
                 config.agent.clone(),
+                tour,
             )?;
             state = session.clone().into_state();
             state.save(&state_path)?;
@@ -910,6 +934,23 @@ fn run() -> color_eyre::Result<()> {
                 }
             }
         }
+        Command::Tour { command } => match command {
+            TourCommand::Render {
+                width,
+                height,
+                slide,
+            } => {
+                let rendered = tui::render_tour_text(
+                    &mut session,
+                    &config.keybindings,
+                    &jj,
+                    width,
+                    height,
+                    slide,
+                )?;
+                print!("{rendered}");
+            }
+        },
         Command::Export {
             format,
             output,

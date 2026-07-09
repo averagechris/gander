@@ -241,6 +241,7 @@ pub fn run(
     acp_jj: Option<Box<dyn JjBackend + Send>>,
     paths: TuiPaths,
     agent_config: AgentConfig,
+    start_tour: bool,
 ) -> Result<()> {
     let TuiPaths {
         state_file: state_path,
@@ -341,6 +342,13 @@ pub fn run(
     if tui_state.agent_config.autostart && tui_state.agent_config.command.is_some() {
         summon_agent(session, &mut tui_state);
     }
+    if start_tour {
+        seed_zen_tour(session, &review_loader, &mut tui_state);
+        if tui_state.zen.is_none() {
+            println!("nothing to tour — no walkthrough steps or changed files in this target");
+            return Ok(());
+        }
+    }
     let result = run_loop(
         &mut terminal,
         session,
@@ -362,6 +370,123 @@ pub fn run(
     )?;
     terminal.show_cursor()?;
     result
+}
+
+pub fn render_tour_text(
+    session: &mut ReviewSession,
+    keybindings: &KeybindingsConfig,
+    jj: &dyn JjBackend,
+    width: u16,
+    height: u16,
+    slide: Option<usize>,
+) -> Result<String> {
+    let keymap = KeyMap::try_from(keybindings)?;
+    let matcher = GeneratedMatcher::new(&Default::default())?;
+    let loader = ReviewLoader {
+        ignore_globs: Vec::new(),
+        generated_matcher: matcher,
+        jj,
+    };
+    let mut tui_state = TuiState::default();
+    seed_zen_tour(session, &loader, &mut tui_state);
+    let Some(mut zen) = tui_state.zen.clone() else {
+        return Ok(
+            "nothing to tour — no walkthrough steps or changed files in this target\n".to_owned(),
+        );
+    };
+    let total = zen.stops.len() + usize::from(zen.has_glance());
+    let indices: Vec<usize> = match slide {
+        Some(n) => vec![n.saturating_sub(1).min(total.saturating_sub(1))],
+        None => (0..total).collect(),
+    };
+    let mut out = String::new();
+    for idx in indices {
+        if idx < zen.stops.len() {
+            zen.index = idx;
+            zen.phase = zen::ZenPhase::Focus;
+            if let Some(stop) = zen.current().cloned() {
+                let _ = zen_goto_stop(&loader, session, &mut zen, &stop, &mut tui_state);
+            }
+        } else {
+            zen.phase = zen::ZenPhase::Glance;
+        }
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend)?;
+        terminal.draw(|frame| {
+            render::draw(
+                frame,
+                session,
+                &Mode::Normal,
+                &keymap,
+                &tui_state,
+                None,
+                Some(&zen),
+            )
+        })?;
+        out.push_str(&format!("──── slide {}/{} ────\n", idx + 1, total));
+        out.push_str(&buffer_text(terminal.backend().buffer()));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let area = buffer.area;
+    let mut out = String::new();
+    for y in area.y..area.y + area.height {
+        let mut line = String::new();
+        for x in area.x..area.x + area.width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+fn seed_zen_tour(
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) {
+    let mut stack = review_loader
+        .jj
+        .stack_changes(&session.repo, &session.target)
+        .unwrap_or_default();
+    stack.retain(|change| !change.matches_rev(&session.target.base));
+    load_change_diffs_for_stack(review_loader, session, &stack);
+    match ZenState::new(session, &stack) {
+        Some(mut zen) => {
+            session.file_pane_visible = false;
+            if let Some(stop) = zen.current().cloned() {
+                let _ = zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            }
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: match zen.source {
+                    zen::ZenSource::Chunks => format!(
+                        "zen: {} chapter(s), {} focus stop(s), {} at a glance",
+                        zen.chapter_count(),
+                        zen.chunk_stop_count(),
+                        zen.glance_rows.len()
+                    ),
+                    zen::ZenSource::Files => format!(
+                        "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
+                        zen.chunk_stop_count()
+                    ),
+                },
+            });
+            tui_state.zen = Some(zen);
+        }
+        None => {
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: "nothing to review — no changed files in this target".to_owned(),
+            })
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1468,52 +1593,7 @@ fn handle_normal_action(
             }
         }
         Action::Zen => {
-            // Chapter cards want the stack's metadata (descriptions,
-            // bookmarks); zen still works with an empty stack when jj is
-            // unavailable, the cards just carry less context.
-            let mut stack = review_loader
-                .jj
-                .stack_changes(&session.repo, &session.target)
-                .unwrap_or_default();
-            stack.retain(|change| !change.matches_rev(&session.target.base));
-            load_change_diffs_for_stack(review_loader, session, &stack);
-            match ZenState::new(session, &stack) {
-                Some(mut zen) => {
-                    session.file_pane_visible = false;
-                    let landed = match zen.current().cloned() {
-                        Some(stop) => {
-                            zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-                        }
-                        None => true,
-                    };
-                    if landed {
-                        tui_state.notice = Some(UiNotice {
-                            level: UiNoticeLevel::Info,
-                            message: match zen.source {
-                                zen::ZenSource::Chunks => {
-                                    format!(
-                                        "zen: {} chapter(s), {} focus stop(s), {} at a glance",
-                                        zen.chapter_count(),
-                                        zen.chunk_stop_count(),
-                                        zen.glance_rows.len()
-                                    )
-                                }
-                                zen::ZenSource::Files => format!(
-                                    "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
-                                    zen.chunk_stop_count()
-                                ),
-                            },
-                        });
-                    }
-                    tui_state.zen = Some(zen);
-                }
-                None => {
-                    tui_state.notice = Some(UiNotice {
-                        level: UiNoticeLevel::Info,
-                        message: "nothing to review — no changed files in this target".to_owned(),
-                    });
-                }
-            }
+            seed_zen_tour(session, review_loader, tui_state);
         }
         Action::DraftList => {
             let drafts = DraftListState::new(session);
@@ -2461,7 +2541,7 @@ fn handle_zen_key(
                 restore_target: true,
             };
         }
-        KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right => {
+        KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right | KeyCode::Char(' ') => {
             let Some(stop) = zen.current().cloned() else {
                 return ZenKeyOutcome::End {
                     restore_target: true,

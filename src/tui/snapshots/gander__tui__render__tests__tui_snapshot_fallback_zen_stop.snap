@@ -1,29 +1,29 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5078
+assertion_line: 4859
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
-┌ zen · stop 1/1 · then 2 at a glance ─────────────────────────────────────────────────────────────┐
-│▎●                                                                                                │
-│src/app.rs · source  src/app.rs:1-6                                                               │
-│                                                                                                  │
-│                                                                                                  │
-│                        ╭ src/app.rs · source · src/app.rs:1-6 ──────────╮                        │
-│                        │    1   fn main() {                             │                        │
-│                        │    2 -     old();                              │                        │
-│                        │    2 +     new();                              │                        │
-│                        │    3 +     extra();                            │                        │
-│                        │    4   }                                       │                        │
-│                        │    5 + fn helper() {}                          │                        │
-│                        │ why this matters ──────────────────────────────│                        │
-│                        │ largest hunk +3 −1 · symbols: none detected    │                        │
-│                        │ Showing the largest of 1 hunk(s); file total   │                        │
-│                        │ +3 −1. tab opens the full diff.                │                        │
-│                        ╰────────────────────────────────────────────────╯                        │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-│                                                                                                  │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+          stop 1/1 · src/app.rs:1-6  ▎●
+
+          src/app.rs · source
+
+              1   fn main() {
+              2 -     old();
+              2 +     new();
+              3 +     extra();
+              4   }
+              5 + fn helper() {}
+          ────────────────────────────────────────────────────────────────────────────────
+          why this matters
+          largest hunk +3 −1 · symbols: none detected
+          Showing the largest of 1 hunk(s); file total +3 −1. tab opens the full diff.
+
+
+
+
+
+
+
 3 files (0/3 viewed, 0 generated/noisy), +5/-2, 0 comments · following @
 zen 1/1 · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance · c comm
