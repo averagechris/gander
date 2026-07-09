@@ -37,6 +37,24 @@ use crate::{
 };
 
 pub const ACP_PROTOCOL_VERSION: u32 = 1;
+const PRESENT_METHODS: &[&str] = &[
+    "present/status",
+    "present/start",
+    "present/end",
+    "present/next",
+    "present/prev",
+    "present/goto",
+    "present/focus",
+    "present/reload",
+];
+
+pub fn is_present_method(method: &str) -> bool {
+    PRESENT_METHODS.contains(&method)
+}
+
+pub fn no_live_tui_error() -> String {
+    "present/* methods require a live TUI; start one with `gander tui --tour` and retry".to_owned()
+}
 
 /// Method dispatch plus overlay persistence, independent of transport and of
 /// who owns the session (snapshot or live TUI session).
@@ -182,8 +200,17 @@ impl AcpHandler {
                     "review/remove_chunks",
                     "review/set_change_briefs",
                     "review/draft_comment",
+                    "present/status",
+                    "present/start",
+                    "present/end",
+                    "present/next",
+                    "present/prev",
+                    "present/goto",
+                    "present/focus",
+                    "present/reload",
                 ],
             })),
+            method if is_present_method(method) => Err(no_live_tui_error()),
             "review/summary" => Ok(json!({
                 "repo": session.repo.display().to_string(),
                 "base": session.target.base,
@@ -700,7 +727,9 @@ pub mod socket {
 
     use color_eyre::eyre::{Context, Result, bail};
 
-    use super::AcpHandler;
+    use serde_json::{Value, json};
+
+    use super::{AcpHandler, error_response, is_present_method};
     use crate::{app::ReviewSession, jj::JjBackend};
 
     /// One JSON-RPC line from a connected agent, plus where to send the
@@ -708,6 +737,40 @@ pub mod socket {
     pub struct AcpSocketRequest {
         line: String,
         reply: mpsc::Sender<Option<String>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PresentCommand {
+        Status,
+        Start,
+        End,
+        Next,
+        Prev,
+        GotoIndex(usize),
+        GotoStep(String),
+        Focus {
+            path: String,
+            line: usize,
+            end_line: Option<usize>,
+            note: Option<String>,
+        },
+        Reload,
+    }
+
+    pub struct PresentRequest {
+        pub id: Value,
+        pub command: PresentCommand,
+        reply: mpsc::Sender<Option<String>>,
+    }
+
+    impl PresentRequest {
+        pub fn respond(self, result: Result<Value, (i64, String)>) {
+            let response = match result {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": self.id, "result": result }),
+                Err((code, message)) => error_response(self.id, code, &message),
+            };
+            let _ = self.reply.send(Some(response.to_string()));
+        }
     }
 
     /// Live ACP host owned by the TUI: a listener thread feeds requests
@@ -784,9 +847,29 @@ pub mod socket {
         /// apply any overlay changes to it. Returns whether the overlay
         /// changed (i.e. an agent wrote suggestions); latency is bounded by
         /// the event-loop tick.
+        #[cfg(test)]
         pub fn process_pending(&mut self, session: &mut ReviewSession) -> bool {
+            let (overlay_changed, commands) = self.drain_ui_commands(session);
+            for command in commands {
+                command.respond(Err((
+                    -32000,
+                    "present command was not applied by the TUI".to_owned(),
+                )));
+            }
+            overlay_changed
+        }
+
+        pub fn drain_ui_commands(
+            &mut self,
+            session: &mut ReviewSession,
+        ) -> (bool, Vec<PresentRequest>) {
             let mut overlay_changed = false;
+            let mut commands = Vec::new();
             while let Ok(request) = self.receiver.try_recv() {
+                if let Some(command) = parse_present_request(&request.line, request.reply.clone()) {
+                    commands.push(command);
+                    continue;
+                }
                 // Pick up dispositions the TUI wrote since the last request
                 // so reads (review/overlay) are never stale.
                 self.handler.refresh_overlay();
@@ -801,8 +884,73 @@ pub mod socket {
                     .reply
                     .send(response.map(|response| response.to_string()));
             }
-            overlay_changed
+            (overlay_changed, commands)
         }
+    }
+
+    fn parse_present_request(
+        line: &str,
+        reply: mpsc::Sender<Option<String>>,
+    ) -> Option<PresentRequest> {
+        let request: Value = match serde_json::from_str(line) {
+            Ok(request) => request,
+            Err(_) => return None,
+        };
+        let method = request.get("method").and_then(Value::as_str)?;
+        if !is_present_method(method) {
+            return None;
+        }
+        let id = request.get("id").cloned()?;
+        let params = request.get("params").cloned().unwrap_or(Value::Null);
+        let command = match method {
+            "present/status" => PresentCommand::Status,
+            "present/start" => PresentCommand::Start,
+            "present/end" => PresentCommand::End,
+            "present/next" => PresentCommand::Next,
+            "present/prev" => PresentCommand::Prev,
+            "present/reload" => PresentCommand::Reload,
+            "present/goto" => {
+                if let Some(index) = params.get("index").and_then(Value::as_u64) {
+                    PresentCommand::GotoIndex(index as usize)
+                } else if let Some(step) = params.get("step_id").and_then(Value::as_str) {
+                    PresentCommand::GotoStep(step.to_owned())
+                } else {
+                    let _ = reply.send(Some(
+                        error_response(id, -32602, "present/goto requires index or step_id")
+                            .to_string(),
+                    ));
+                    return None;
+                }
+            }
+            "present/focus" => {
+                let Some(path) = params.get("path").and_then(Value::as_str) else {
+                    let _ = reply.send(Some(
+                        error_response(id, -32602, "present/focus requires path").to_string(),
+                    ));
+                    return None;
+                };
+                let Some(line) = params.get("line").and_then(Value::as_u64) else {
+                    let _ = reply.send(Some(
+                        error_response(id, -32602, "present/focus requires line").to_string(),
+                    ));
+                    return None;
+                };
+                PresentCommand::Focus {
+                    path: path.to_owned(),
+                    line: line as usize,
+                    end_line: params
+                        .get("end_line")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as usize),
+                    note: params
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                }
+            }
+            _ => unreachable!(),
+        };
+        Some(PresentRequest { id, command, reply })
     }
 
     impl Drop for AcpBridge {
@@ -1019,6 +1167,29 @@ diff --git a/README.md b/README.md
                 .as_array()
                 .unwrap()
                 .contains(&json!("review/draft_comment"))
+        );
+        assert!(
+            result["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("present/status"))
+        );
+    }
+
+    #[test]
+    fn snapshot_present_methods_return_no_live_tui_error() {
+        let (mut server, _dir) = server();
+        let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "present/status" }).to_string();
+
+        let response = server.handle_line(&request).unwrap();
+
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], -32000);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("require a live TUI")
         );
     }
 
