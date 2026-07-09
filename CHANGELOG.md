@@ -21,6 +21,10 @@
 
 ### Fixed
 
+- Comment input supports readline-style line editing shortcuts: Ctrl+U
+  deletes to the start of the current line, Ctrl+K deletes to the end,
+  Ctrl+W deletes the previous word, Ctrl+A/Ctrl+E move to line
+  boundaries, and Alt+B/Alt+F or Ctrl+Left/Ctrl+Right move by word.
 - Deprecated `chunks set` and `briefs set` shims no longer silently clobber
   authored walkthroughs; replacing mixed-author content now requires
   `--replace` or the explicit `walkthrough set` command.

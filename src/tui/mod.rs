@@ -3714,12 +3714,25 @@ fn handle_comment_action(
 }
 
 fn handle_comment_key(key: KeyEvent, editor: &mut CommentEditor) {
-    match key.code {
-        KeyCode::Char(ch) => editor.insert_char(ch),
-        KeyCode::Left => editor.move_left(),
-        KeyCode::Right => editor.move_right(),
-        KeyCode::Up => editor.move_up(),
-        KeyCode::Down => editor.move_down(),
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => editor.delete_to_line_start(),
+        (KeyCode::Char('k'), KeyModifiers::CONTROL) => editor.delete_to_line_end(),
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => editor.delete_previous_word(),
+        (KeyCode::Char('a'), KeyModifiers::CONTROL) => editor.move_to_line_start(),
+        (KeyCode::Char('e'), KeyModifiers::CONTROL) => editor.move_to_line_end(),
+        (KeyCode::Char('b'), KeyModifiers::ALT) | (KeyCode::Left, KeyModifiers::CONTROL) => {
+            editor.move_word_left();
+        }
+        (KeyCode::Char('f'), KeyModifiers::ALT) | (KeyCode::Right, KeyModifiers::CONTROL) => {
+            editor.move_word_right();
+        }
+        (KeyCode::Char(ch), modifiers) if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            editor.insert_char(ch);
+        }
+        (KeyCode::Left, _) => editor.move_left(),
+        (KeyCode::Right, _) => editor.move_right(),
+        (KeyCode::Up, _) => editor.move_up(),
+        (KeyCode::Down, _) => editor.move_down(),
         _ => {}
     }
 }
