@@ -78,6 +78,9 @@ pub(super) struct ChapterCard {
     pub(super) stop_count: usize,
     /// jj description (full, multiline); empty when unknown.
     pub(super) description: String,
+    /// Author-supplied chapter headline/body from durable walkthrough state.
+    pub(super) authored_title: Option<String>,
+    pub(super) authored_body: Option<String>,
     pub(super) bookmarks: String,
     /// The agent's high-level narrative for this change, when briefed.
     pub(super) summary: Option<String>,
@@ -89,12 +92,26 @@ pub(super) struct ChapterCard {
 impl ChapterCard {
     /// The description's first line — the card's headline.
     pub(super) fn title(&self) -> &str {
-        self.description.lines().next().unwrap_or_default()
+        self.authored_title
+            .as_deref()
+            .or_else(|| self.description.lines().next())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn subtitle(&self) -> &str {
+        if self.authored_title.is_some() {
+            self.description.lines().next().unwrap_or_default()
+        } else {
+            ""
+        }
     }
 
     /// Description lines after the headline, outer blank lines trimmed.
     /// What the collapsible body of the chapter card shows.
     pub(super) fn description_body(&self) -> Vec<&str> {
+        if let Some(body) = &self.authored_body {
+            return trim_lines(body.lines().collect());
+        }
         let mut lines: Vec<&str> = self.description.lines().skip(1).collect();
         while lines.first().is_some_and(|line| line.trim().is_empty()) {
             lines.remove(0);
@@ -104,6 +121,16 @@ impl ChapterCard {
         }
         lines
     }
+}
+
+fn trim_lines(mut lines: Vec<&str>) -> Vec<&str> {
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines
 }
 
 /// The zen surfaces. Focus is the default landing surface for each stop;
@@ -187,11 +214,12 @@ impl ZenState {
             } else {
                 spotlight
             };
-            glance_rows.extend(uncovered_file_rows(session));
+            glance_rows.extend(uncovered_file_rows(session, &walkthrough_steps));
             (stops, glance_rows, ZenSource::Chunks)
         };
-        (!chunk_stops.is_empty()).then(|| Self {
-            stops: chaptered_stops(chunk_stops, &walkthrough_steps, session, stack),
+        let stops = chaptered_stops(chunk_stops, &walkthrough_steps, session, stack);
+        (!stops.is_empty()).then(|| Self {
+            stops,
             glance_rows,
             index: 0,
             phase: ZenPhase::Focus,
@@ -338,6 +366,21 @@ fn chaptered_stops(
             _ => groups.push((row.change_id.clone(), vec![row])),
         }
     }
+    for step in walkthrough_steps
+        .iter()
+        .copied()
+        .filter(|step| step.kind == StepKind::Chapter)
+    {
+        if let Some(change_id) = &step.change_id
+            && !groups.iter().any(|(anchor, _)| {
+                anchor
+                    .as_deref()
+                    .is_some_and(|id| change_ids_match(id, change_id))
+            })
+        {
+            groups.push((Some(change_id.clone()), Vec::new()));
+        }
+    }
     let total = groups.len();
     let mut stops = Vec::new();
     let mut previous_scopes: Vec<Vec<&FileDiff>> = Vec::new();
@@ -439,6 +482,15 @@ fn chapter_card(
                         .is_some_and(|id| change_ids_match(id, &change_id))
             })
         });
+    let legacy_brief = anchor
+        .as_deref()
+        .or_else(|| summary.map(|change| change.change_id.as_str()))
+        .and_then(|change_id| {
+            session
+                .change_briefs
+                .iter()
+                .find(|brief| change_ids_match(&brief.change_id, change_id))
+        });
     ChapterCard {
         change_id: anchor,
         position,
@@ -446,27 +498,33 @@ fn chapter_card(
         description: summary
             .map(|change| change.description.clone())
             .unwrap_or_default(),
+        authored_title: chapter_step.and_then(|step| step.title.clone()),
+        authored_body: chapter_step.and_then(|step| step.body.clone()),
         bookmarks: summary
             .map(|change| change.bookmarks.clone())
             .unwrap_or_default(),
-        summary: chapter_step.and_then(|step| step.body.clone()),
-        artifacts: chapter_step
-            .map(|step| {
-                step.artifacts
-                    .iter()
-                    .map(|artifact| Artifact {
-                        title: artifact.title.clone(),
-                        kind: match artifact.kind {
-                            StepArtifactKind::Example => crate::agent::ArtifactKind::Example,
-                            StepArtifactKind::Output => crate::agent::ArtifactKind::Output,
-                            StepArtifactKind::Diagram => crate::agent::ArtifactKind::Diagram,
-                            StepArtifactKind::Note => crate::agent::ArtifactKind::Note,
-                        },
-                        body: artifact.body.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        summary: chapter_step
+            .and_then(|step| step.body.clone())
+            .or_else(|| legacy_brief.map(|brief| brief.summary.clone())),
+        artifacts: if let Some(step) = chapter_step {
+            step.artifacts
+                .iter()
+                .map(|artifact| Artifact {
+                    title: artifact.title.clone(),
+                    kind: match artifact.kind {
+                        StepArtifactKind::Example => crate::agent::ArtifactKind::Example,
+                        StepArtifactKind::Output => crate::agent::ArtifactKind::Output,
+                        StepArtifactKind::Diagram => crate::agent::ArtifactKind::Diagram,
+                        StepArtifactKind::Note => crate::agent::ArtifactKind::Note,
+                    },
+                    body: artifact.body.clone(),
+                })
+                .collect()
+        } else {
+            legacy_brief
+                .map(|brief| brief.artifacts.clone())
+                .unwrap_or_default()
+        },
         derived_lines: file_scope
             .as_deref()
             .map(|files| derived_chapter_lines(session, files))
@@ -819,12 +877,30 @@ fn change_bucket(index: usize, total_rows: usize, total_changes: usize) -> usize
 
 /// Files no chunk part mentions: they join the glance board so the briefing
 /// covers the entire change even when the agent's chunks do not.
-fn uncovered_file_rows(session: &ReviewSession) -> Vec<ChunkRow> {
-    let covered: std::collections::BTreeSet<&str> = session
+fn covered_file_paths<'a>(
+    session: &'a ReviewSession,
+    steps: &[&'a WalkthroughStep],
+) -> std::collections::BTreeSet<&'a str> {
+    let mut covered: std::collections::BTreeSet<&str> = session
         .review_chunks
         .iter()
         .flat_map(|chunk| chunk.parts.iter().map(|part| part.path.as_str()))
         .collect();
+    for step in steps {
+        if let Some(path) = step.target.file.as_deref() {
+            covered.insert(path);
+        }
+        for target in &step.extra_targets {
+            if let Some(path) = target.file.as_deref() {
+                covered.insert(path);
+            }
+        }
+    }
+    covered
+}
+
+fn uncovered_file_rows(session: &ReviewSession, steps: &[&WalkthroughStep]) -> Vec<ChunkRow> {
+    let covered = covered_file_paths(session, steps);
     session
         .ordered_visible_file_paths()
         .into_iter()
@@ -2015,6 +2091,8 @@ diff --git a/tests/basic.rs b/tests/basic.rs
             position: (1, 1),
             stop_count: 0,
             description: "feat: headline\n\n\nbody one\nbody two\n\n".to_owned(),
+            authored_title: None,
+            authored_body: None,
             bookmarks: String::new(),
             summary: None,
             artifacts: Vec::new(),

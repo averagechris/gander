@@ -1,21 +1,21 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4875
+assertion_line: 5018
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
-          chapter 1/1 · trunk()..@ · startup-fix  ▎○
+          chapter 1/2 · trunk()..@ · startup-fix  ▎○▎
 
+          zzzzyyyy
           feat: swap old() for new()
-          … d expands the description (2 more line(s))
+          … d expands the description (1 more line(s))
 
           2 file(s) · +3 −2
-          n tours the 1 stop(s) in this chapter
+          1 stop(s) in this chapter
 
           what this change does
           Swaps the legacy old() startup call for new() and batches extra() alongside it,
           so both effects fire together.
-          derived: +3 −2 · tests touched
 
           enter to begin — 1 stops
 
@@ -26,4 +26,4 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 
 
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @
-zen chapter 1/1 · n tours its 1 stop(s) · d details · p back · tab full diff · g glance · esc end
+zen chapter 1/2 · n tours its 1 stop(s) · d details · p back · tab full diff · g glance · esc end

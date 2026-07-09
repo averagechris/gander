@@ -424,8 +424,22 @@ pub fn render_tour_text(
                 Some(&zen),
             )
         })?;
+        let breadcrumb = zen.current().map(tour_breadcrumb).unwrap_or_default();
         out.push_str(&format!("──── slide {}/{} ────\n", idx + 1, total));
-        out.push_str(&buffer_text(terminal.backend().buffer()));
+        out.push_str(&tour_buffer_text(
+            terminal.backend().buffer(),
+            &format!("slide {}/{} · {breadcrumb}", idx + 1, total),
+        ));
+        if let Some(stop) = zen.current() {
+            for artifact in zen::stop_artifacts(stop) {
+                out.push_str(&format!("\n  exhibit: {}\n", artifact.title));
+                for line in artifact.body.lines() {
+                    out.push_str("  ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -433,10 +447,11 @@ pub fn render_tour_text(
     Ok(out)
 }
 
-fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+fn tour_buffer_text(buffer: &ratatui::buffer::Buffer, footer: &str) -> String {
     let area = buffer.area;
     let mut out = String::new();
-    for y in area.y..area.y + area.height {
+    let content_height = area.height.saturating_sub(2);
+    for y in area.y..area.y + content_height {
         let mut line = String::new();
         for x in area.x..area.x + area.width {
             line.push_str(buffer[(x, y)].symbol());
@@ -444,7 +459,28 @@ fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
         out.push_str(line.trim_end());
         out.push('\n');
     }
+    out.push_str(&footer.chars().take(area.width as usize).collect::<String>());
+    out.push('\n');
     out
+}
+
+fn tour_breadcrumb(stop: &zen::ZenStop) -> String {
+    match stop {
+        zen::ZenStop::Chapter(chapter) => chapter
+            .change_id
+            .as_ref()
+            .map(|id| format!("change {id}"))
+            .unwrap_or_else(|| "chapter".to_owned()),
+        zen::ZenStop::Chunk(row) => row
+            .part
+            .as_ref()
+            .map(|part| match (part.start_line, part.end_line) {
+                (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
+                (Some(start), None) => format!("{}:{start}", part.path),
+                _ => part.path.clone(),
+            })
+            .unwrap_or_else(|| row.title.clone()),
+    }
 }
 
 fn seed_zen_tour(

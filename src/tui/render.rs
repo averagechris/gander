@@ -2326,8 +2326,8 @@ fn draw_zen_chapter(
         location.push_str(&format!(" · {}", chapter.bookmarks));
     }
 
-    let headline = if chapter.description.is_empty() {
-        "(no description)".to_owned()
+    let headline = if chapter.title().is_empty() {
+        "chapter".to_owned()
     } else {
         chapter.title().to_owned()
     };
@@ -2338,7 +2338,11 @@ fn draw_zen_chapter(
         "{} file(s) · +{additions} −{deletions}",
         session.files.len()
     );
-    let mut stops_hint = format!("n tours the {} stop(s) in this chapter", chapter.stop_count);
+    let mut stops_hint = if chapter.stop_count == 0 {
+        "0 stops — skim".to_owned()
+    } else {
+        format!("{} stop(s) in this chapter", chapter.stop_count)
+    };
     if !chapter.artifacts.is_empty() {
         stops_hint.push_str(&format!(
             " · e opens {} artifact(s)",
@@ -2366,6 +2370,12 @@ fn draw_zen_chapter(
                 .add_modifier(Modifier::BOLD),
         )),
     ];
+    if !chapter.subtitle().is_empty() {
+        body.push(Line::from(Span::styled(
+            chapter.subtitle().to_owned(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
     // The change's own words come right after the headline: the full
     // description body, collapsible with `d` when it gets in the way.
     if !description_body.is_empty() {
@@ -2379,12 +2389,11 @@ fn draw_zen_chapter(
             )));
         } else {
             body.push(Line::from(""));
-            for line in &description_body {
-                body.push(Line::from(Span::styled(
-                    (*line).to_owned(),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
+            push_text_lines(
+                &mut body,
+                &description_body.join("\n"),
+                Style::default().fg(Color::Gray),
+            );
         }
     }
     body.push(Line::from(""));
@@ -2426,17 +2435,19 @@ fn draw_zen_chapter(
             )));
         }
     }
-    if !chapter.derived_lines.is_empty() {
+    if !chapter.derived_lines.is_empty() && inner.height < 18 {
         body.push(Line::from(Span::styled(
             format!("derived: {}", derived_summary(&chapter.derived_lines)),
             Style::default().fg(Color::DarkGray),
         )));
     }
-    body.push(Line::from(""));
-    body.push(Line::from(Span::styled(
-        format!("enter to begin — {} stops", chapter.stop_count),
-        Style::default().fg(Color::Cyan),
-    )));
+    if chapter.stop_count > 0 {
+        body.push(Line::from(""));
+        body.push(Line::from(Span::styled(
+            format!("enter to begin — {} stops", chapter.stop_count),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
     if inner.height < 8 {
         frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
         return;
@@ -2465,6 +2476,16 @@ fn zen_progress_ascii(zen: &ZenState) -> String {
             super::zen::ZenStop::Chunk(_) => '○',
         })
         .collect()
+}
+
+fn push_text_lines(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
+    for raw in text.split('\n') {
+        if raw.trim().is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(Span::styled(raw.to_owned(), style)));
+        }
+    }
 }
 
 fn derived_summary(lines: &[String]) -> String {
@@ -2516,9 +2537,21 @@ fn draw_zen_stop(
     }
 
     let rows = session.diff_rows_for_selected_file();
-    let max_excerpt = ((inner.height as usize * 3) / 5).clamp(3, 24);
+    let has_prose = stop
+        .rationale
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || stop
+            .explanation
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty());
+    let max_excerpt = if has_prose {
+        ((inner.height as usize) / 3).clamp(3, 14)
+    } else {
+        ((inner.height as usize * 3) / 5).clamp(3, 24)
+    };
     let cursor = (session.focus == Focus::Diff).then_some(session.diff_cursor);
-    let (indices, wandered) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
+    let (indices, wandered, clipped) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
     let mut excerpt: Vec<Line<'static>> = Vec::new();
     if indices.is_empty() {
         excerpt.push(Line::from(Span::styled(
@@ -2528,6 +2561,12 @@ fn draw_zen_stop(
     }
     for index in indices {
         excerpt.push(unified_row_line(session, &rows[index], index, 0));
+    }
+    if let Some((more, end)) = clipped {
+        excerpt.push(Line::from(Span::styled(
+            format!("  … {more} more lines through {end} — j/k"),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
 
     let (mut explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
@@ -2557,11 +2596,6 @@ fn draw_zen_stop(
 
     let text_width = inner.width.max(20) as usize;
     let comment_lines = zen_stop_comment_lines(session, stop);
-    let mechanics_line = if zen.source == super::zen::ZenSource::Files {
-        stop.explanation.clone()
-    } else {
-        None
-    };
     let sibling_line = sibling_parts_line(zen, stop, inner.width.saturating_sub(2) as usize);
     let position = stop
         .part_position
@@ -2596,18 +2630,33 @@ fn draw_zen_stop(
         "─".repeat(text_width.min(80)),
         Style::default().fg(Color::DarkGray),
     )));
-    let mut explanation_lines = vec![
-        Line::from(Span::styled(
+    let mut explanation_lines = Vec::new();
+    if let Some(why) = stop.rationale.as_ref().filter(|s| !s.trim().is_empty()) {
+        explanation_lines.push(Line::from(Span::styled(
             explanation_title.trim(),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
-        )),
-        Line::from(explanation),
-    ];
-    if let Some(mechanics) = mechanics_line {
+        )));
         explanation_lines.push(Line::from(Span::styled(
-            mechanics,
+            why.clone(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+    if let Some(body_text) = stop.explanation.as_ref().filter(|s| !s.trim().is_empty()) {
+        if !explanation_lines.is_empty() {
+            explanation_lines.push(Line::from(""));
+        }
+        push_text_lines(
+            &mut explanation_lines,
+            body_text,
+            Style::default().fg(Color::Gray),
+        );
+    } else if explanation_lines.is_empty() {
+        explanation_lines.push(Line::from(Span::styled(
+            explanation,
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -2627,7 +2676,14 @@ fn draw_zen_stop(
     if !stop.artifacts.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            format!("e · {} exhibits", stop.artifacts.len()),
+            format!(
+                "e exhibits: {}",
+                stop.artifacts
+                    .iter()
+                    .map(|artifact| artifact.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -2726,7 +2782,7 @@ fn zen_excerpt_indices(
     stop: &super::chunks::ChunkRow,
     max_rows: usize,
     cursor: Option<usize>,
-) -> (Vec<usize>, bool) {
+) -> (Vec<usize>, bool, Option<(usize, usize)>) {
     const CONTEXT: usize = 2;
     let range = stop.part.as_ref().and_then(|part| {
         part.start_line
@@ -2760,7 +2816,11 @@ fn zen_excerpt_indices(
             .map(|(index, _)| index)
             .collect(),
     };
-    indices.truncate(max_rows.max(1));
+    let max_rows = max_rows.max(1);
+    let clipped = range.and_then(|(_, end)| {
+        (indices.len() > max_rows).then_some((indices.len().saturating_sub(max_rows), end))
+    });
+    indices.truncate(max_rows);
 
     // Cursor off the stop: follow it with a window of the same size.
     if let Some(cursor) = cursor
@@ -2776,14 +2836,13 @@ fn zen_excerpt_indices(
             .map(|(index, _)| index)
             .collect();
         if let Some(position) = all.iter().position(|&index| index == cursor) {
-            let max_rows = max_rows.max(1);
             let start = position.saturating_sub(max_rows / 2);
             let end = (start + max_rows).min(all.len());
             let start = end.saturating_sub(max_rows);
-            return (all[start..end].to_vec(), true);
+            return (all[start..end].to_vec(), true, None);
         }
     }
-    (indices, false)
+    (indices, false, clipped)
 }
 
 /// A modal exhibit viewer layered over the focus card: one agent-produced
@@ -2876,6 +2935,17 @@ fn draw_zen_glance(
     frame.render_widget(Clear, area);
     let inner = slide_inner(area);
 
+    let curated_rows = zen
+        .glance_rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.part.as_ref().is_none_or(|part| part.path != row.title))
+        .collect::<Vec<_>>();
+    let auto_rows = zen
+        .glance_rows
+        .iter()
+        .filter(|row| row.part.as_ref().is_some_and(|part| part.path == row.title))
+        .collect::<Vec<_>>();
     let glance_groups = grouped_glance_rows(&zen.glance_rows);
     let selected_group = glance_groups
         .iter()
@@ -2894,9 +2964,9 @@ fn draw_zen_glance(
         )),
         Line::from(Span::styled(
             format!(
-                "{} spotlight stops toured · {} glance items",
-                zen.chunk_stop_count(),
-                zen.glance_rows.len()
+                "{} curated · {} files not toured",
+                curated_rows.len(),
+                auto_rows.len()
             ),
             Style::default().fg(Color::DarkGray),
         )),
@@ -2908,6 +2978,13 @@ fn draw_zen_glance(
             Style::default().fg(Color::DarkGray),
         )));
     }
+    lines.push(Line::from(Span::styled(
+        "curated",
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let mut rendered = 0usize;
     for (group_index, group) in glance_groups
         .iter()
         .enumerate()
@@ -2915,6 +2992,10 @@ fn draw_zen_glance(
         .take(window.end.saturating_sub(window.start))
     {
         let row = group.rows[0];
+        if row.part.as_ref().is_some_and(|part| part.path == row.title) {
+            continue;
+        }
+        rendered += 1;
         let selected = group_index == selected_group;
         let marker = if selected { "›" } else { " " };
         let viewed = group
@@ -2934,12 +3015,13 @@ fn draw_zen_glance(
         let rationale = row
             .rationale
             .as_deref()
+            .filter(|rationale| !rationale.trim().is_empty())
             .map(|rationale| format!(" — {rationale}"))
             .unwrap_or_default();
         let locations = group
             .rows
             .iter()
-            .map(|row| chunk_row_location_width(row, 34))
+            .map(|row| chunk_row_location_width(row, 46))
             .collect::<Vec<_>>()
             .join(" · ");
         let title = if group.rows.len() == 1
@@ -2957,6 +3039,25 @@ fn draw_zen_glance(
             Span::styled(title, style),
             Span::styled(rationale, Style::default().fg(Color::DarkGray)),
         ]));
+    }
+    if rendered == 0 {
+        lines.push(Line::from(Span::styled(
+            "  (none)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("not toured — {} files", auto_rows.len()),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for line in glance_auto_role_lines(&auto_rows, inner.width.saturating_sub(4) as usize) {
+        lines.push(Line::from(Span::styled(
+            format!("  {line}"),
+            Style::default().fg(Color::Gray),
+        )));
     }
     if window.hidden_below > 0 {
         lines.push(Line::from(Span::styled(
@@ -2998,6 +3099,48 @@ fn grouped_glance_rows(rows: &[super::chunks::ChunkRow]) -> Vec<GlanceGroup<'_>>
         });
     }
     groups
+}
+
+fn glance_auto_role_lines(rows: &[&super::chunks::ChunkRow], max_width: usize) -> Vec<String> {
+    let mut by_role = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let path = row
+            .part
+            .as_ref()
+            .map(|part| part.path.clone())
+            .unwrap_or_else(|| row.title.clone());
+        let role = row
+            .rationale
+            .as_deref()
+            .unwrap_or("other")
+            .split('·')
+            .next()
+            .unwrap_or("other")
+            .trim()
+            .to_owned();
+        by_role.entry(role).or_default().push(path);
+    }
+    by_role
+        .into_iter()
+        .map(|(role, paths)| {
+            let names = paths
+                .iter()
+                .map(|p| distinguish_path_tail(p))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            truncate_tail(&format!("{role} ({}): {names}", paths.len()), max_width)
+        })
+        .collect()
+}
+
+fn distinguish_path_tail(path: &str) -> String {
+    let mut parts = path.rsplit('/');
+    let file = parts.next().unwrap_or(path);
+    if let Some(parent) = parts.next() {
+        format!("{parent}/{file}")
+    } else {
+        file.to_owned()
+    }
 }
 
 fn draw_draft_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &DraftListState) {
@@ -5018,7 +5161,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             .iter()
             .position(|row| row.new_lineno == Some(2))
             .unwrap();
-        let (indices, wandered) = zen_excerpt_indices(&rows, &stop, 5, Some(in_range));
+        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, Some(in_range));
         assert!(!wandered);
         assert!(indices.contains(&in_range));
         assert_eq!(rows[indices[0]].new_lineno, Some(1)); // 2 - context
@@ -5028,7 +5171,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             .iter()
             .position(|row| row.new_lineno == Some(20))
             .unwrap();
-        let (indices, wandered) = zen_excerpt_indices(&rows, &stop, 5, Some(far));
+        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, Some(far));
         assert!(wandered);
         assert!(indices.contains(&far));
         assert_eq!(indices.len(), 5);
@@ -5036,7 +5179,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         assert_eq!(rows[indices[0]].new_lineno, Some(18));
 
         // No cursor (files pane focus): the stop range wins.
-        let (indices, wandered) = zen_excerpt_indices(&rows, &stop, 5, None);
+        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, None);
         assert!(!wandered);
         assert_eq!(rows[indices[0]].new_lineno, Some(1));
     }
