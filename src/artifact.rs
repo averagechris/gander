@@ -10,7 +10,7 @@ use crate::{
     diff::{DiffLineKind, Hunk},
     state::{
         ActionIntent, Comment, CommentKind, CommentState, ReviewState, ReviewTarget,
-        ReviewTaskStatus,
+        ReviewTaskStatus, StepArtifact, StepImportance, StepKind,
     },
 };
 
@@ -132,6 +132,10 @@ pub struct WalkthroughArtifact<'a> {
 #[derive(Debug, Serialize)]
 pub struct WalkthroughStepArtifact<'a> {
     pub id: &'a str,
+    pub kind: StepKind,
+    pub importance: StepImportance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,6 +143,8 @@ pub struct WalkthroughStepArtifact<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<&'a str>,
     pub target: TargetArtifact<'a>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<&'a StepArtifact>,
 }
 
 #[derive(Debug, Serialize)]
@@ -269,10 +275,14 @@ impl<'a> ReviewArtifact<'a> {
                         .iter()
                         .map(|step| WalkthroughStepArtifact {
                             id: &step.id,
+                            kind: step.kind,
+                            importance: step.importance,
+                            change_id: step.change_id.as_deref(),
                             title: step.title.as_deref(),
                             why: step.why.as_deref(),
                             body: step.body.as_deref(),
                             target: target_artifact(&step.target),
+                            artifacts: step.artifacts.iter().collect(),
                         })
                         .collect(),
                 })
@@ -330,9 +340,13 @@ pub fn render_handoff_json(
                     serde_json::json!({
                         "id": step.id,
                         "order": index + 1,
+                        "kind": step.kind,
+                        "importance": step.importance,
+                        "change_id": step.change_id,
                         "title": step.title,
                         "why": step.why,
                         "body": step.body,
+                        "artifacts": step.artifacts,
                         "target": step.target,
                     })
                 })

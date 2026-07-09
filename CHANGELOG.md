@@ -17,6 +17,15 @@
 - Walkthroughs and the zen tour now share one durable model; legacy
   chunks/briefs authoring is treated as a deprecated compatibility shim.
 
+### Fixed
+
+- Deprecated `chunks set` and `briefs set` shims no longer silently clobber
+  authored walkthroughs; replacing mixed-author content now requires
+  `--replace` or the explicit `walkthrough set` command.
+- Walkthrough authoring validates unknown fields, chapter `change_id`s, and
+  target line ranges against the diff line space, and repeated
+  `walkthrough set` runs preserve stable step ids.
+
 ## v0.6.1 - 2026-07-05
 
 ### Fixed
