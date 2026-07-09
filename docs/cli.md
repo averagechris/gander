@@ -150,7 +150,7 @@ gander walkthrough add-step --title <title> [--path <path>] [--line <n>] \
   [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>] \
   [--importance spotlight|glance] [--change <change-id>] [--artifact '<json>']...
 gander walkthrough add-chapter --change <change-id> --summary <text>
-gander walkthrough set [--file <spec.json|->]
+gander walkthrough set [--file <spec.json|->] [--dry-run]
 gander walkthrough remove-step <id>
 gander walkthrough move-step <id> --to <zero-based-index>
 gander walkthrough show
@@ -163,7 +163,9 @@ why/body/artifacts, an optional change id, and an optional stable target. `--lin
 and `--end-line` are 1-indexed new-side (post-image) line numbers in the current
 jj diff. Chapters introduce stack changes and use `summary` as their narrative.
 `walkthrough set` replaces the current walkthrough from `{ "title", "steps" }`
-JSON using the same step fields as state.json. The target is a nested object:
+JSON using the same step fields as state.json. Pass `--dry-run` to validate the
+spec, print diagnostics plus the would-be replacement summary, and echo the
+preserved-id result without writing state. The target is a nested object:
 
 ```json
 {

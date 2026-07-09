@@ -6,6 +6,8 @@
 
 - `gander tui --tour` starts directly in the zen tour, and `gander tour render`
   renders the slide deck to plain text for automation and review.
+- `gander walkthrough set --dry-run` validates a walkthrough replacement and
+  prints the would-be result without writing review state.
 - Live presentation control: `gander present`, ACP `present/*` methods,
   and matching MCP tools can drive a running TUI's tour/view through the
   per-instance socket, with modal safety guards.

@@ -2630,8 +2630,21 @@ fn draw_zen_stop(
         "─".repeat(text_width.min(80)),
         Style::default().fg(Color::DarkGray),
     )));
+    let abbreviated_part = stop
+        .part_position
+        .is_some_and(|(part, total)| part > 1 && total > 1);
     let mut explanation_lines = Vec::new();
-    if let Some(why) = stop.rationale.as_ref().filter(|s| !s.trim().is_empty()) {
+    if abbreviated_part {
+        if let Some((part, total)) = stop.part_position {
+            let sibling = sibling_line
+                .clone()
+                .unwrap_or_else(|| "other parts: part 1".to_owned());
+            explanation_lines.push(Line::from(Span::styled(
+                format!("prose on part 1 · part {part}/{total} · {sibling}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else if let Some(why) = stop.rationale.as_ref().filter(|s| !s.trim().is_empty()) {
         explanation_lines.push(Line::from(Span::styled(
             explanation_title.trim(),
             Style::default()
@@ -2645,7 +2658,9 @@ fn draw_zen_stop(
                 .add_modifier(Modifier::ITALIC),
         )));
     }
-    if let Some(body_text) = stop.explanation.as_ref().filter(|s| !s.trim().is_empty()) {
+    if !abbreviated_part
+        && let Some(body_text) = stop.explanation.as_ref().filter(|s| !s.trim().is_empty())
+    {
         if !explanation_lines.is_empty() {
             explanation_lines.push(Line::from(""));
         }
@@ -2660,7 +2675,7 @@ fn draw_zen_stop(
             Style::default().fg(Color::DarkGray),
         )));
     }
-    if let Some(sibling) = sibling_line {
+    if !abbreviated_part && let Some(sibling) = sibling_line {
         explanation_lines.push(Line::from(Span::styled(
             sibling,
             Style::default().fg(Color::DarkGray),
@@ -2790,7 +2805,11 @@ fn zen_excerpt_indices(
     });
     let mut indices: Vec<usize> = match range {
         Some((start, end)) => {
-            let lo = start.saturating_sub(CONTEXT);
+            let lo = if max_rows <= CONTEXT + 1 {
+                start
+            } else {
+                start.saturating_sub(CONTEXT)
+            };
             let hi = end + CONTEXT;
             rows.iter()
                 .enumerate()
@@ -2817,6 +2836,18 @@ fn zen_excerpt_indices(
             .collect(),
     };
     let max_rows = max_rows.max(1);
+    if let Some((start, end)) = range
+        && indices.len() > max_rows
+        && let Some(anchor_pos) = indices.iter().position(|&index| {
+            rows.get(index).is_some_and(|row| {
+                row.new_lineno
+                    .or(row.old_lineno)
+                    .is_some_and(|line| line >= start && line <= end)
+            })
+        })
+    {
+        indices = indices[anchor_pos..].to_vec();
+    }
     let clipped = range.and_then(|(_, end)| {
         (indices.len() > max_rows).then_some((indices.len().saturating_sub(max_rows), end))
     });
@@ -5182,6 +5213,22 @@ diff --git a/Cargo.toml b/Cargo.toml
         let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, None);
         assert!(!wandered);
         assert_eq!(rows[indices[0]].new_lineno, Some(1));
+
+        // At tiny prose-first heights, do not spend the whole budget on
+        // leading context: start at the target range and still report the
+        // clipped range trailer.
+        let stop = crate::tui::chunks::ChunkRow {
+            part: Some(crate::agent::ChunkPart {
+                path: "big.txt".to_owned(),
+                start_line: Some(10),
+                end_line: Some(20),
+            }),
+            ..stop
+        };
+        let (indices, wandered, clipped) = zen_excerpt_indices(&rows, &stop, 3, None);
+        assert!(!wandered);
+        assert_eq!(rows[indices[0]].new_lineno, Some(10));
+        assert_eq!(clipped, Some((10, 20)));
     }
 
     #[test]

@@ -503,9 +503,10 @@ fn chapter_card(
         bookmarks: summary
             .map(|change| change.bookmarks.clone())
             .unwrap_or_default(),
-        summary: chapter_step
-            .and_then(|step| step.body.clone())
-            .or_else(|| legacy_brief.map(|brief| brief.summary.clone())),
+        // Authored chapter bodies already render in the hero position under
+        // the headline. Do not also feed the same prose into the curated
+        // brief slot, which renders as "what this change does".
+        summary: legacy_brief.map(|brief| brief.summary.clone()),
         artifacts: if let Some(step) = chapter_step {
             step.artifacts
                 .iter()

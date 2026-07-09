@@ -360,7 +360,7 @@ struct BriefsSpec {
     briefs: Vec<ChangeBrief>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct WalkthroughSetSpec {
     title: Option<String>,
     steps: Vec<WalkthroughStep>,
@@ -706,6 +706,9 @@ enum WalkthroughCommand {
         /// Spec file, or -/omitted for stdin.
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Validate and print the would-be replacement without writing state.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Remove a walkthrough step by id or unique id prefix.
     RemoveStep {
@@ -1630,7 +1633,7 @@ fn run() -> color_eyre::Result<()> {
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
-            WalkthroughCommand::Set { file } => {
+            WalkthroughCommand::Set { file, dry_run } => {
                 let mut spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
                 let target_spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &target_spec);
@@ -1648,6 +1651,13 @@ fn run() -> color_eyre::Result<()> {
                 spec.steps = review::preserve_walkthrough_step_ids(prior, spec.steps);
                 warn_walkthrough_set_issues(&session, &jj, &spec)?;
                 let new_count = spec.steps.len();
+                if dry_run {
+                    eprintln!(
+                        "would replace walkthrough ({replaced} steps) with {new_count} steps"
+                    );
+                    print_json(&spec)?;
+                    return Ok(());
+                }
                 let walkthrough = review::set_walkthrough(rs, spec.title, spec.steps);
                 state.save(&state_path)?;
                 eprintln!("replaced walkthrough ({replaced} steps) with {new_count} steps");

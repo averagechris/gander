@@ -424,12 +424,24 @@ pub fn render_tour_text(
                 Some(&zen),
             )
         })?;
-        let breadcrumb = zen.current().map(tour_breadcrumb).unwrap_or_default();
+        let breadcrumb = if idx < zen.stops.len() {
+            zen.current().map(tour_breadcrumb).unwrap_or_default()
+        } else {
+            "at a glance".to_owned()
+        };
         out.push_str(&format!("──── slide {}/{} ────\n", idx + 1, total));
-        out.push_str(&tour_buffer_text(
+        let mut slide_text = tour_buffer_text(
             terminal.backend().buffer(),
             &format!("slide {}/{} · {breadcrumb}", idx + 1, total),
-        ));
+        );
+        slide_text = slide_text
+            .replace(" — j/k", "")
+            .replace("j/k select · enter dives to location · esc ends tour", "")
+            .replace(
+                "j/k move · enter jump · a mark all viewed & finish · p back · esc end",
+                "",
+            );
+        out.push_str(&slide_text);
         if let Some(stop) = zen.current() {
             for artifact in zen::stop_artifacts(stop) {
                 out.push_str(&format!("\n  exhibit: {}\n", artifact.title));
