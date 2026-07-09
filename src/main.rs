@@ -316,6 +316,9 @@ enum ChunksCommand {
     Set {
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Replace non-chunk authored walkthrough steps too.
+        #[arg(long)]
+        replace: bool,
     },
     /// Upsert chunks from a JSON spec file (or stdin with --file - / omitted).
     Update {
@@ -344,6 +347,9 @@ enum BriefsCommand {
     Set {
         #[arg(short, long)]
         file: Option<PathBuf>,
+        /// Replace existing walkthrough chapters not present in this spec.
+        #[arg(long)]
+        replace: bool,
     },
     /// Empty the brief list.
     Clear,
@@ -1587,6 +1593,7 @@ fn run() -> color_eyre::Result<()> {
             } => {
                 if let Some(file) = file.as_deref() {
                     ensure_diff_file(&session, file)?;
+                    warn_target_line_space(&session, "new step", file, line)?;
                 }
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
@@ -1624,13 +1631,26 @@ fn run() -> color_eyre::Result<()> {
                 print_json(&step)?;
             }
             WalkthroughCommand::Set { file } => {
-                let spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
-                warn_walkthrough_set_issues(&session, &jj, &spec)?;
+                let mut spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
                 let target_spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &target_spec);
                 let rs = review::ensure_session(&mut state, &target_spec, None);
+                let replaced = rs
+                    .walkthroughs
+                    .first()
+                    .map(|walkthrough| walkthrough.steps.len())
+                    .unwrap_or(0);
+                let prior = rs
+                    .walkthroughs
+                    .first()
+                    .map(|walkthrough| walkthrough.steps.as_slice())
+                    .unwrap_or(&[]);
+                spec.steps = review::preserve_walkthrough_step_ids(prior, spec.steps);
+                warn_walkthrough_set_issues(&session, &jj, &spec)?;
+                let new_count = spec.steps.len();
                 let walkthrough = review::set_walkthrough(rs, spec.title, spec.steps);
                 state.save(&state_path)?;
+                eprintln!("replaced walkthrough ({replaced} steps) with {new_count} steps");
                 print_json(&walkthrough)?;
             }
             WalkthroughCommand::RemoveStep { id } => {
@@ -1774,7 +1794,7 @@ fn handle_chunks_command(
             };
             print_json(&chunk_line_space(&files, path.as_deref()))?;
         }
-        ChunksCommand::Set { file } => {
+        ChunksCommand::Set { file, replace } => {
             eprintln!("warning: chunks commands are deprecated; writing durable walkthrough steps");
             let spec = read_chunks_spec(file.as_ref())?;
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
@@ -1787,7 +1807,7 @@ fn handle_chunks_command(
                     ))
                 },
             )?;
-            write_chunk_steps_to_state(state_path, session, chunks, false)?;
+            write_chunk_steps_to_state(state_path, session, chunks, false, replace)?;
             overlay.chunks.clear();
             overlay.save(overlay_path)?;
             println!("Set walkthrough steps from chunks");
@@ -1804,7 +1824,7 @@ fn handle_chunks_command(
                         invalid_chunk_parts_message(&invalid)
                     ))
                 })?;
-            write_chunk_steps_to_state(state_path, session, chunks, true)?;
+            write_chunk_steps_to_state(state_path, session, chunks, true, false)?;
             overlay.chunks.clear();
             overlay.save(overlay_path)?;
             println!(
@@ -1860,6 +1880,7 @@ fn write_chunk_steps_to_state(
     session: &ReviewSession,
     chunks: Vec<ReviewChunk>,
     append: bool,
+    replace: bool,
 ) -> color_eyre::Result<()> {
     let mut state = ReviewState::load_or_default(state_path)?;
     let rs = walkthrough_session_mut(&mut state, session);
@@ -1869,7 +1890,17 @@ fn write_chunk_steps_to_state(
             review::add_walkthrough_step(rs, step);
         }
     } else {
-        review::set_walkthrough(rs, Some("Walkthrough".to_owned()), new_steps);
+        let existing_steps = rs
+            .walkthroughs
+            .first()
+            .map(|walkthrough| walkthrough.steps.len())
+            .unwrap_or(0);
+        if existing_steps > 0 && !replace {
+            return Err(user_error(format!(
+                "walkthrough has {existing_steps} steps; use walkthrough set, or pass --replace"
+            )));
+        }
+        review::set_walkthrough_preserve_ids(rs, Some("Walkthrough".to_owned()), new_steps);
     }
     state.save(state_path)?;
     Ok(())
@@ -1907,17 +1938,30 @@ fn write_brief_chapters_to_state(
     state_path: &std::path::Path,
     session: &ReviewSession,
     briefs: Vec<ChangeBrief>,
+    replace: bool,
 ) -> color_eyre::Result<()> {
     let mut state = ReviewState::load_or_default(state_path)?;
     let rs = walkthrough_session_mut(&mut state, session);
     if rs.walkthroughs.is_empty() {
         review::set_walkthrough(rs, Some("Walkthrough".to_owned()), Vec::new());
     }
-    rs.walkthroughs[0]
-        .steps
-        .retain(|step| step.kind != StepKind::Chapter);
+    if replace {
+        rs.walkthroughs[0]
+            .steps
+            .retain(|step| step.kind != StepKind::Chapter);
+    }
     for brief in briefs {
-        review::add_walkthrough_step(rs, brief_to_walkthrough_step(brief));
+        let step = brief_to_walkthrough_step(brief);
+        if let Some(change_id) = step.change_id.as_deref()
+            && let Some(existing) = rs.walkthroughs[0].steps.iter_mut().find(|existing| {
+                existing.kind == StepKind::Chapter
+                    && existing.change_id.as_deref() == Some(change_id)
+            })
+        {
+            *existing = step;
+            continue;
+        }
+        review::add_walkthrough_step(rs, step);
     }
     state.save(state_path)?;
     Ok(())
@@ -1937,6 +1981,23 @@ const CHUNK_PART_KEYS: &[&str] = &["path", "start_line", "end_line"];
 const ARTIFACT_KEYS: &[&str] = &["title", "kind", "body"];
 const BRIEF_KEYS: &[&str] = &["change_id", "summary", "artifacts"];
 const DRAFT_KEYS: &[&str] = &["path", "line", "body"];
+const WALKTHROUGH_KEYS: &[&str] = &["title", "steps"];
+const WALKTHROUGH_STEP_KEYS: &[&str] = &[
+    "id",
+    "target",
+    "importance",
+    "kind",
+    "change_id",
+    "title",
+    "body",
+    "why",
+    "artifacts",
+    "extra_targets",
+    "updated_at",
+];
+const WALKTHROUGH_TARGET_KEYS: &[&str] = &[
+    "repo", "base", "revision", "revset", "file", "line", "end_line", "symbol",
+];
 
 fn push_unknown_field_warnings(
     warnings: &mut Vec<String>,
@@ -2025,6 +2086,45 @@ fn briefs_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
     warnings
 }
 
+fn walkthrough_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+    push_unknown_field_warnings(&mut warnings, value, "spec root", WALKTHROUGH_KEYS);
+    for (index, step) in value
+        .get("steps")
+        .and_then(|steps| steps.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("steps[{index}]");
+        push_unknown_field_warnings(&mut warnings, step, &at, WALKTHROUGH_STEP_KEYS);
+        artifact_unknown_field_warnings(&mut warnings, step, &at);
+        if let Some(target) = step.get("target") {
+            push_unknown_field_warnings(
+                &mut warnings,
+                target,
+                &format!("{at}.target"),
+                WALKTHROUGH_TARGET_KEYS,
+            );
+        }
+        for (target_index, target) in step
+            .get("extra_targets")
+            .and_then(|targets| targets.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            push_unknown_field_warnings(
+                &mut warnings,
+                target,
+                &format!("{at}.extra_targets[{target_index}]"),
+                WALKTHROUGH_TARGET_KEYS,
+            );
+        }
+    }
+    warnings
+}
+
 fn drafts_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
     let mut warnings = Vec::new();
     if value.get("drafts").is_some() {
@@ -2059,13 +2159,13 @@ fn handle_briefs_command(
     let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
     match command {
         BriefsCommand::List => print_json(&overlay.briefs)?,
-        BriefsCommand::Set { file } => {
+        BriefsCommand::Set { file, replace } => {
             eprintln!(
                 "warning: briefs commands are deprecated; writing durable walkthrough chapters"
             );
             let spec: BriefsSpec = read_json_spec(file.as_ref(), "brief")?;
             validate_briefs_for_cli(session, jj, &spec.briefs)?;
-            write_brief_chapters_to_state(state_path, session, spec.briefs.clone())?;
+            write_brief_chapters_to_state(state_path, session, spec.briefs.clone(), replace)?;
             overlay.briefs.clear();
             let warnings = brief_without_spotlight_warnings(&overlay.briefs, &overlay.chunks);
             overlay.save(overlay_path)?;
@@ -2170,6 +2270,7 @@ fn read_json_spec<T: for<'de> Deserialize<'de>>(
         let warnings = match spec_name {
             "brief" => briefs_spec_unknown_fields(&value),
             "draft" => drafts_spec_unknown_fields(&value),
+            "walkthrough" => walkthrough_spec_unknown_fields(&value),
             _ => Vec::new(),
         };
         for warning in warnings {
@@ -2309,11 +2410,29 @@ fn warn_walkthrough_set_issues(
         .steps
         .iter()
         .filter(|step| step.kind == StepKind::Chapter)
-        .filter_map(|step| step.change_id.clone())
-        .collect();
+        .map(|step| {
+            step.change_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    user_error(format!(
+                        "chapter step {} missing change_id",
+                        step_label(step)
+                    ))
+                })
+        })
+        .collect::<color_eyre::Result<Vec<_>>>()?;
     if !chapter_ids.is_empty() {
         validate_change_ids_for_cli(session, jj, &chapter_ids)?;
     }
+    let line_space = chunk_line_space(
+        &session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>(),
+        None,
+    );
     for step in &spec.steps {
         for target in std::iter::once(&step.target).chain(step.extra_targets.iter()) {
             if let Some(file) = target.file.as_deref()
@@ -2321,10 +2440,86 @@ fn warn_walkthrough_set_issues(
             {
                 eprintln!(
                     "warning: walkthrough step {} targets file not in diff: {file}",
-                    step.id
+                    step_label(step)
                 );
+            } else if let (Some(file), Some(line)) = (target.file.as_deref(), target.line) {
+                let in_range = line_space
+                    .iter()
+                    .find(|entry| entry.path == file)
+                    .is_some_and(|entry| {
+                        entry
+                            .hunks
+                            .iter()
+                            .any(|hunk| line >= hunk.start_line && line <= hunk.end_line)
+                    });
+                if !in_range {
+                    let ranges = line_space
+                        .iter()
+                        .find(|entry| entry.path == file)
+                        .map(|entry| {
+                            entry
+                                .hunks
+                                .iter()
+                                .map(|hunk| format!("{}-{}", hunk.start_line, hunk.end_line))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .filter(|ranges| !ranges.is_empty())
+                        .unwrap_or_else(|| "none".to_owned());
+                    eprintln!(
+                        "warning: walkthrough step {} targets {file}:{line} outside diff line space; valid ranges: {ranges}",
+                        step_label(step)
+                    );
+                }
             }
         }
+    }
+    Ok(())
+}
+
+fn step_label(step: &WalkthroughStep) -> &str {
+    if !step.id.is_empty() {
+        &step.id
+    } else {
+        step.title.as_deref().unwrap_or("<untitled>")
+    }
+}
+
+fn warn_target_line_space(
+    session: &ReviewSession,
+    label: &str,
+    file: &str,
+    line: Option<usize>,
+) -> color_eyre::Result<()> {
+    let Some(line) = line else { return Ok(()) };
+    let files = session
+        .files
+        .iter()
+        .map(|file| file.diff.clone())
+        .collect::<Vec<_>>();
+    let line_space = chunk_line_space(&files, Some(file));
+    let in_range = line_space.first().is_some_and(|entry| {
+        entry
+            .hunks
+            .iter()
+            .any(|hunk| line >= hunk.start_line && line <= hunk.end_line)
+    });
+    if !in_range {
+        let ranges = line_space
+            .first()
+            .map(|entry| {
+                entry
+                    .hunks
+                    .iter()
+                    .map(|hunk| format!("{}-{}", hunk.start_line, hunk.end_line))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|ranges| !ranges.is_empty())
+            .unwrap_or_else(|| "none".to_owned());
+        eprintln!(
+            "warning: walkthrough step {label} targets {file}:{line} outside diff line space; valid ranges: {ranges}"
+        );
     }
     Ok(())
 }

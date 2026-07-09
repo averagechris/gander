@@ -163,13 +163,57 @@ why/body/artifacts, an optional change id, and an optional stable target. `--lin
 and `--end-line` are 1-indexed new-side (post-image) line numbers in the current
 jj diff. Chapters introduce stack changes and use `summary` as their narrative.
 `walkthrough set` replaces the current walkthrough from `{ "title", "steps" }`
-JSON using the same step fields as state.json.
+JSON using the same step fields as state.json. The target is a nested object:
+
+```json
+{
+  "title": "Review tour",
+  "steps": [
+    {
+      "kind": "chapter",
+      "change_id": "abc123",
+      "title": "abc123",
+      "body": "Why this stack change exists"
+    },
+    {
+      "kind": "step",
+      "importance": "spotlight",
+      "title": "Read the state model",
+      "why": "The durable fields drive CLI, TUI, and MCP behavior.",
+      "body": "Check that serialization remains backward compatible.",
+      "change_id": "abc123",
+      "target": { "file": "src/state.rs", "line": 129, "symbol": "WalkthroughStep" },
+      "artifacts": [
+        { "title": "Example", "kind": "note", "body": "Agents can attach supporting context." }
+      ]
+    },
+    {
+      "kind": "step",
+      "importance": "glance",
+      "title": "Skim docs",
+      "target": { "file": "docs/cli.md", "line": 146 }
+    }
+  ]
+}
+```
+
+Repeated `walkthrough set` runs preserve existing step ids, matching by explicit
+id first and then by `(kind, title, target.file, target.line)`; only new steps
+receive new UUIDs. The command warns about unknown JSON fields and targets that
+fall outside the diff line space (including the valid ranges); chapter steps
+must include a non-empty `change_id`.
 `show` emits JSON; `export` emits Markdown.
 
 File-anchor commands accept both `--path` and `--file` for compatibility. The
 canonical form in docs and JSON remains `--path`.
 
 ## Deprecated curation shims (chunks, briefs) and drafts
+
+`chunks set` and `briefs set` write through to durable walkthroughs for
+compatibility, but they refuse to replace an existing authored walkthrough unless
+you pass `--replace`. Prefer `walkthrough set` for intentional full replacement;
+`chunks update` still upserts by chunk id, and `briefs set` upserts chapter steps
+by `change_id`.
 
 ## Tour slide deck
 

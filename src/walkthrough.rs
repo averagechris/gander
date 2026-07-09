@@ -1,4 +1,6 @@
-use crate::state::{ReviewState, ReviewTarget, Walkthrough, WalkthroughStep};
+use crate::state::{
+    ReviewState, ReviewTarget, StepImportance, StepKind, Walkthrough, WalkthroughStep,
+};
 
 /// Render persisted local walkthroughs as Markdown.
 ///
@@ -54,7 +56,16 @@ fn write_step(out: &mut String, number: usize, step: &WalkthroughStep) {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| step.id.trim());
-    out.push_str(&format!("### {number}. {title}\n\n"));
+    if step.kind == StepKind::Chapter {
+        out.push_str(&format!("## Chapter: {title}\n\n"));
+    } else {
+        let suffix = if step.importance == StepImportance::Glance {
+            " (glance)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("### {number}. {title}{suffix}\n\n"));
+    }
 
     if let Some(location) = target_location(&step.target) {
         out.push_str(&format!("Location: `{location}`\n\n"));
@@ -78,6 +89,14 @@ fn write_step(out: &mut String, number: usize, step: &WalkthroughStep) {
         .filter(|body| !body.is_empty())
     {
         out.push_str(body);
+        out.push_str("\n\n");
+    }
+    for artifact in &step.artifacts {
+        out.push_str(&format!(
+            "#### Artifact: {} ({:?})\n\n",
+            artifact.title, artifact.kind
+        ));
+        out.push_str(artifact.body.trim());
         out.push_str("\n\n");
     }
 }

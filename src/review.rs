@@ -470,6 +470,44 @@ pub fn set_walkthrough(
     session.walkthroughs[0].clone()
 }
 
+pub fn set_walkthrough_preserve_ids(
+    session: &mut ReviewSession,
+    title: Option<String>,
+    steps: Vec<WalkthroughStep>,
+) -> Walkthrough {
+    ensure_default_walkthrough(session);
+    let prior = session.walkthroughs[0].steps.clone();
+    let steps = preserve_walkthrough_step_ids(&prior, steps);
+    set_walkthrough(session, title, steps)
+}
+
+pub fn preserve_walkthrough_step_ids(
+    prior: &[WalkthroughStep],
+    mut steps: Vec<WalkthroughStep>,
+) -> Vec<WalkthroughStep> {
+    for step in &mut steps {
+        if !step.id.is_empty() && prior.iter().any(|old| old.id == step.id) {
+            continue;
+        }
+        if let Some(old) = prior
+            .iter()
+            .find(|old| same_walkthrough_identity(old, step))
+        {
+            step.id = old.id.clone();
+        } else if step.id.is_empty() {
+            step.id = uuid::Uuid::new_v4().to_string();
+        }
+    }
+    steps
+}
+
+fn same_walkthrough_identity(a: &WalkthroughStep, b: &WalkthroughStep) -> bool {
+    a.kind == b.kind
+        && a.title == b.title
+        && a.target.file == b.target.file
+        && a.target.line == b.target.line
+}
+
 #[allow(dead_code)]
 pub fn add_chapter(
     session: &mut ReviewSession,
