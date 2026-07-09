@@ -322,7 +322,9 @@ mod tests {
                         symbol: Some("thing".into()),
                         ..Default::default()
                     },
+                    ..WalkthroughStep::default()
                 }],
+                ..Walkthrough::default()
             }],
             ..Default::default()
         });

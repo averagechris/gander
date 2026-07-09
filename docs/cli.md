@@ -147,22 +147,29 @@ comment ids are rejected.
 
 ```sh
 gander walkthrough add-step --title <title> [--path <path>] [--line <n>] \
-  [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]
+  [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>] \
+  [--importance spotlight|glance] [--change <change-id>] [--artifact '<json>']...
+gander walkthrough add-chapter --change <change-id> --summary <text>
+gander walkthrough set [--file <spec.json|->]
 gander walkthrough remove-step <id>
 gander walkthrough move-step <id> --to <zero-based-index>
 gander walkthrough show
 gander walkthrough export
 ```
 
-Walkthrough steps have a title, optional why/body, and an optional stable target.
-`--line` and `--end-line` are 1-indexed new-side (post-image) line numbers in
-the current jj diff.
+Walkthroughs are the durable source of truth for zen tours. Steps have a title,
+importance (`spotlight` tours; `glance` lands on the glance board), optional
+why/body/artifacts, an optional change id, and an optional stable target. `--line`
+and `--end-line` are 1-indexed new-side (post-image) line numbers in the current
+jj diff. Chapters introduce stack changes and use `summary` as their narrative.
+`walkthrough set` replaces the current walkthrough from `{ "title", "steps" }`
+JSON using the same step fields as state.json.
 `show` emits JSON; `export` emits Markdown.
 
 File-anchor commands accept both `--path` and `--file` for compatibility. The
 canonical form in docs and JSON remains `--path`.
 
-## Curation overlay (chunks, briefs, drafts)
+## Deprecated curation shims (chunks, briefs) and drafts
 
 ```sh
 gander chunks list
@@ -175,13 +182,13 @@ gander briefs list|set [--file <spec>]|clear
 gander drafts list|add [--file <spec>]|remove --id <id>
 ```
 
-These author the same agent-curation overlay ACP/MCP write (zen spotlight and
-glance chunks, per-change briefs, draft comments) — full CLI parity, no
-JSON-RPC required. Specs are JSON files or stdin; see `gander chunks --help`
-for the inline spec example. `chunks lines` prints the exact line ranges the
-validator accepts (per change with `--change`), closing the line-space
-guessing loop. Validation is all-or-nothing with per-part reasons; line-range
-errors echo the valid ranges for the failing path. Unknown spec fields warn
+`chunks` and `briefs` are deprecated compatibility shims: chunk specs are
+translated into durable walkthrough steps and brief specs into chapter steps;
+the overlay is retained for ordering, flags, and drafts. Specs are JSON files or
+stdin. `chunks lines` still prints the exact line ranges the validator accepts
+(per change with `--change`), closing the line-space guessing loop. Validation
+is all-or-nothing with per-part reasons; line-range errors echo the valid ranges
+for the failing path. Unknown spec fields warn
 (typos never silently degrade to defaults). A live TUI on the same workspace
 picks up overlay writes within a poll; the CLI warns when the live session is
 reviewing a different target.

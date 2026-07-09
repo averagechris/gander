@@ -5446,6 +5446,31 @@ diff --git a/b.rs b/b.rs
                 body: "3 passed".to_owned(),
             },
         ];
+        let spotlight_id = session.review_chunks[0].id.clone();
+        let artifacts: Vec<_> = session.review_chunks[0]
+            .artifacts
+            .iter()
+            .map(|artifact| crate::state::StepArtifact {
+                title: artifact.title.clone(),
+                kind: match artifact.kind {
+                    crate::agent::ArtifactKind::Example => crate::state::StepArtifactKind::Example,
+                    crate::agent::ArtifactKind::Output => crate::state::StepArtifactKind::Output,
+                    crate::agent::ArtifactKind::Diagram => crate::state::StepArtifactKind::Diagram,
+                    crate::agent::ArtifactKind::Note => crate::state::StepArtifactKind::Note,
+                },
+                body: artifact.body.clone(),
+            })
+            .collect();
+        for step in session
+            .sessions
+            .iter_mut()
+            .flat_map(|durable| durable.walkthroughs.iter_mut())
+            .flat_map(|walkthrough| walkthrough.steps.iter_mut())
+        {
+            if step.id == spotlight_id {
+                step.artifacts = artifacts.clone();
+            }
+        }
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
         let mut tui_state = TuiState::default();
@@ -6230,6 +6255,7 @@ diff --git a/c.rs b/c.rs
     fn starting_zen_without_chunks_tours_files_and_hides_the_pane() {
         let mut session = zen_session();
         session.review_chunks.clear();
+        session.sessions.clear();
         let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),

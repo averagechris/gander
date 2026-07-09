@@ -33,7 +33,11 @@ use crate::{
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
-    state::{Comment, CommentState, FileState, ReviewState, ReviewStateMeta},
+    state::{
+        Comment, CommentState, FileState, ReviewSessionStatus, ReviewState, ReviewStateMeta,
+        ReviewTarget as StateReviewTarget, StepArtifact, StepArtifactKind, StepImportance,
+        StepKind, Walkthrough, WalkthroughStep,
+    },
     syntax::SyntaxConfig,
 };
 
@@ -50,6 +54,60 @@ const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
 /// Rough number of diff rows kept visible below the cursor when auto-scrolling.
 const DIFF_CURSOR_SCROLL_MARGIN: usize = 15;
+
+fn chunk_to_step(chunk: &ReviewChunk) -> WalkthroughStep {
+    let mut targets = chunk.parts.iter().map(chunk_part_to_target);
+    WalkthroughStep {
+        id: chunk.id.clone(),
+        title: Some(chunk.title.clone()),
+        importance: match chunk.importance {
+            crate::agent::ChunkImportance::Spotlight => StepImportance::Spotlight,
+            crate::agent::ChunkImportance::Glance => StepImportance::Glance,
+        },
+        kind: StepKind::Step,
+        change_id: chunk.change_id.clone(),
+        why: chunk.rationale.clone(),
+        body: chunk.explanation.clone(),
+        artifacts: chunk.artifacts.iter().map(agent_artifact_to_step).collect(),
+        target: targets.next().unwrap_or_default(),
+        extra_targets: targets.collect(),
+        ..Default::default()
+    }
+}
+
+fn brief_to_step(brief: &ChangeBrief) -> WalkthroughStep {
+    WalkthroughStep {
+        id: format!("chapter-{}", brief.change_id),
+        title: Some(brief.change_id.clone()),
+        kind: StepKind::Chapter,
+        change_id: Some(brief.change_id.clone()),
+        body: Some(brief.summary.clone()),
+        artifacts: brief.artifacts.iter().map(agent_artifact_to_step).collect(),
+        ..Default::default()
+    }
+}
+
+fn chunk_part_to_target(part: &ChunkPart) -> StateReviewTarget {
+    StateReviewTarget {
+        file: Some(part.path.clone()),
+        line: part.start_line,
+        end_line: part.end_line,
+        ..Default::default()
+    }
+}
+
+fn agent_artifact_to_step(artifact: &crate::agent::Artifact) -> StepArtifact {
+    StepArtifact {
+        title: artifact.title.clone(),
+        kind: match artifact.kind {
+            crate::agent::ArtifactKind::Example => StepArtifactKind::Example,
+            crate::agent::ArtifactKind::Output => StepArtifactKind::Output,
+            crate::agent::ArtifactKind::Diagram => StepArtifactKind::Diagram,
+            crate::agent::ArtifactKind::Note => StepArtifactKind::Note,
+        },
+        body: artifact.body.clone(),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ReviewSession {
@@ -844,6 +902,50 @@ impl ReviewSession {
         self.review_chunks = overlay.chunks.clone();
         self.change_briefs = overlay.briefs.clone();
         self.agent_drafts = overlay.drafts.clone();
+        self.apply_overlay_as_walkthrough(overlay);
+    }
+
+    fn apply_overlay_as_walkthrough(&mut self, overlay: &AgentOverlay) {
+        if overlay.chunks.is_empty() && overlay.briefs.is_empty() {
+            return;
+        }
+        let target = StateReviewTarget {
+            repo: Some(self.repo.display().to_string()),
+            base: Some(self.target.base.clone()),
+            revision: Some(self.target.rev.clone()),
+            ..Default::default()
+        };
+        let session = if let Some(index) = self.sessions.iter().position(|session| {
+            session.status == ReviewSessionStatus::Open && session.target == target
+        }) {
+            &mut self.sessions[index]
+        } else {
+            self.sessions.push(crate::state::ReviewSession {
+                id: uuid::Uuid::new_v4().to_string(),
+                target,
+                status: ReviewSessionStatus::Open,
+                ..Default::default()
+            });
+            self.sessions.last_mut().unwrap()
+        };
+        let mut steps: Vec<WalkthroughStep> = overlay
+            .briefs
+            .iter()
+            .map(brief_to_step)
+            .chain(overlay.chunks.iter().map(chunk_to_step))
+            .collect();
+        if steps.is_empty() {
+            return;
+        }
+        if session.walkthroughs.is_empty() {
+            session.walkthroughs.push(Walkthrough {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: Some("Walkthrough".to_owned()),
+                ..Default::default()
+            });
+        }
+        session.walkthroughs[0].steps.clear();
+        session.walkthroughs[0].steps.append(&mut steps);
     }
 
     /// Agent drafts still awaiting a human decision.

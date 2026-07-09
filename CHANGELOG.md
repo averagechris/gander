@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Walkthroughs and the zen tour now share one durable model; legacy
+  chunks/briefs authoring is treated as a deprecated compatibility shim.
 
 ## v0.6.1 - 2026-07-05
 

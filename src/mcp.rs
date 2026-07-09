@@ -636,6 +636,7 @@ impl GanderMcp {
                         symbol: params.symbol,
                         ..StateReviewTarget::default()
                     },
+                    ..WalkthroughStep::default()
                 },
             ))
         })

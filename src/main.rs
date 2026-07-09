@@ -33,9 +33,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{
-        AgentDraft, AgentOverlay, ChangeBrief, ChangeDiffContext, ChunkValidationContext,
-        DraftState, ReviewChunk, brief_without_spotlight_warnings, chunk_line_space,
-        invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
+        AgentDraft, AgentOverlay, ChangeBrief, ChangeDiffContext, ChunkImportance,
+        ChunkValidationContext, DraftState, ReviewChunk, brief_without_spotlight_warnings,
+        chunk_line_space, invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
         update_review_chunks,
     },
     anchor::comment_anchor_for_file_lines,
@@ -54,7 +54,7 @@ use crate::{
     review::SessionTargetSpec,
     state::{
         ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
-        WalkthroughStep,
+        StepArtifact, StepArtifactKind, StepImportance, StepKind, WalkthroughStep,
     },
 };
 
@@ -320,6 +320,12 @@ enum BriefsCommand {
 #[derive(Debug, Deserialize)]
 struct BriefsSpec {
     briefs: Vec<ChangeBrief>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WalkthroughSetSpec {
+    title: Option<String>,
+    steps: Vec<WalkthroughStep>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -604,6 +610,30 @@ enum WalkthroughCommand {
         /// Optional step details/body text.
         #[arg(long)]
         body: Option<String>,
+        /// Presentation importance in zen mode.
+        #[arg(long, value_enum, default_value_t = StepImportanceArg::Spotlight)]
+        importance: StepImportanceArg,
+        /// jj change id this step belongs to.
+        #[arg(long = "change")]
+        change_id: Option<String>,
+        /// Artifact JSON object; repeat for multiple artifacts.
+        #[arg(long = "artifact")]
+        artifacts: Vec<String>,
+    },
+    /// Add a chapter card for a jj change.
+    AddChapter {
+        /// jj change id for the chapter.
+        #[arg(long = "change")]
+        change_id: String,
+        /// Narrative chapter summary.
+        #[arg(long)]
+        summary: String,
+    },
+    /// Replace the current walkthrough from a JSON spec.
+    Set {
+        /// Spec file, or -/omitted for stdin.
+        #[arg(short, long)]
+        file: Option<PathBuf>,
     },
     /// Remove a walkthrough step by id or unique id prefix.
     RemoveStep {
@@ -636,6 +666,21 @@ enum ActionIntentArg {
     Test,
     #[value(alias = "followup")]
     FollowUp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum StepImportanceArg {
+    Spotlight,
+    Glance,
+}
+
+impl From<StepImportanceArg> for StepImportance {
+    fn from(value: StepImportanceArg) -> Self {
+        match value {
+            StepImportanceArg::Spotlight => StepImportance::Spotlight,
+            StepImportanceArg::Glance => StepImportance::Glance,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CommentStateArg {
@@ -1043,11 +1088,23 @@ fn run() -> color_eyre::Result<()> {
         }
         Command::Chunks { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_chunks_command(command, &session, &jj, &workspace_paths.overlay_file())?
+            handle_chunks_command(
+                command,
+                &session,
+                &jj,
+                &workspace_paths.overlay_file(),
+                &state_path,
+            )?
         }
         Command::Briefs { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_briefs_command(command, &session, &jj, &workspace_paths.overlay_file())?
+            handle_briefs_command(
+                command,
+                &session,
+                &jj,
+                &workspace_paths.overlay_file(),
+                &state_path,
+            )?
         }
         Command::Drafts { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
@@ -1421,6 +1478,9 @@ fn run() -> color_eyre::Result<()> {
                 symbol,
                 why,
                 body,
+                importance,
+                change_id,
+                artifacts,
             } => {
                 if let Some(file) = file.as_deref() {
                     ensure_diff_file(&session, file)?;
@@ -1435,6 +1495,9 @@ fn run() -> color_eyre::Result<()> {
                         title: Some(title),
                         body,
                         why,
+                        importance: importance.into(),
+                        change_id,
+                        artifacts: parse_step_artifacts(&artifacts)?,
                         target: StateReviewTarget {
                             file,
                             line,
@@ -1442,10 +1505,30 @@ fn run() -> color_eyre::Result<()> {
                             symbol,
                             ..StateReviewTarget::default()
                         },
+                        ..WalkthroughStep::default()
                     },
                 );
                 state.save(&state_path)?;
                 print_json(&step)?;
+            }
+            WalkthroughCommand::AddChapter { change_id, summary } => {
+                validate_change_ids_for_cli(&session, &jj, std::slice::from_ref(&change_id))?;
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let rs = review::ensure_session(&mut state, &spec, None);
+                let step = review::add_chapter(rs, change_id, summary, None);
+                state.save(&state_path)?;
+                print_json(&step)?;
+            }
+            WalkthroughCommand::Set { file } => {
+                let spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
+                warn_walkthrough_set_issues(&session, &jj, &spec)?;
+                let target_spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &target_spec);
+                let rs = review::ensure_session(&mut state, &target_spec, None);
+                let walkthrough = review::set_walkthrough(rs, spec.title, spec.steps);
+                state.save(&state_path)?;
+                print_json(&walkthrough)?;
             }
             WalkthroughCommand::RemoveStep { id } => {
                 let spec = session_target_spec(&repo, &session.target);
@@ -1563,6 +1646,7 @@ fn handle_chunks_command(
     session: &ReviewSession,
     jj: &dyn JjBackend,
     overlay_path: &std::path::Path,
+    state_path: &std::path::Path,
 ) -> color_eyre::Result<()> {
     let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
     match command {
@@ -1588,9 +1672,11 @@ fn handle_chunks_command(
             print_json(&chunk_line_space(&files, path.as_deref()))?;
         }
         ChunksCommand::Set { file } => {
+            eprintln!("warning: chunks commands are deprecated; writing durable walkthrough steps");
             let spec = read_chunks_spec(file.as_ref())?;
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
-            replace_review_chunks(&mut overlay.chunks, spec.chunks, &context).map_err(
+            let chunks = spec.chunks;
+            replace_review_chunks(&mut overlay.chunks, chunks.clone(), &context).map_err(
                 |invalid| {
                     user_error(format!(
                         "invalid chunk part(s): {}",
@@ -1598,19 +1684,25 @@ fn handle_chunks_command(
                     ))
                 },
             )?;
+            write_chunk_steps_to_state(state_path, session, chunks, false)?;
+            overlay.chunks.clear();
             overlay.save(overlay_path)?;
-            println!("Set {} chunks", overlay.chunks.len());
+            println!("Set walkthrough steps from chunks");
         }
         ChunksCommand::Update { file } => {
+            eprintln!("warning: chunks commands are deprecated; writing durable walkthrough steps");
             let spec = read_chunks_spec(file.as_ref())?;
             let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
-            let summary = update_review_chunks(&mut overlay.chunks, spec.chunks, &context)
+            let chunks = spec.chunks;
+            let summary = update_review_chunks(&mut overlay.chunks, chunks.clone(), &context)
                 .map_err(|invalid| {
                     user_error(format!(
                         "invalid chunk part(s): {}",
                         invalid_chunk_parts_message(&invalid)
                     ))
                 })?;
+            write_chunk_steps_to_state(state_path, session, chunks, true)?;
+            overlay.chunks.clear();
             overlay.save(overlay_path)?;
             println!(
                 "Updated {} chunks, added {}; total {}",
@@ -1618,14 +1710,22 @@ fn handle_chunks_command(
             );
         }
         ChunksCommand::Remove { ids } => {
+            eprintln!(
+                "warning: chunks commands are deprecated; removing durable walkthrough steps"
+            );
             let summary = remove_review_chunks(&mut overlay.chunks, &ids).map_err(|unknown| {
                 user_error(format!("unknown chunk id(s): {}", unknown.join(", ")))
             })?;
+            remove_walkthrough_steps_from_state(state_path, session, &ids)?;
             overlay.save(overlay_path)?;
             println!("Removed {}; remaining {}", summary.removed, summary.chunks);
         }
         ChunksCommand::Clear => {
+            eprintln!(
+                "warning: chunks commands are deprecated; clearing durable walkthrough steps"
+            );
             overlay.chunks.clear();
+            clear_walkthrough_kind_from_state(state_path, session, StepKind::Step)?;
             overlay.save(overlay_path)?;
             println!("Cleared chunks");
         }
@@ -1642,6 +1742,82 @@ fn read_chunks_spec(file: Option<&PathBuf>) -> color_eyre::Result<ChunksSpec> {
     }
     serde_json::from_str(&contents)
         .map_err(|error| user_error(format!("failed to parse chunk spec JSON: {error}")))
+}
+
+fn walkthrough_session_mut<'a>(
+    state: &'a mut ReviewState,
+    session: &ReviewSession,
+) -> &'a mut crate::state::ReviewSession {
+    let spec = session_target_spec(&session.repo, &session.target);
+    review::ensure_session(state, &spec, None)
+}
+
+fn write_chunk_steps_to_state(
+    state_path: &std::path::Path,
+    session: &ReviewSession,
+    chunks: Vec<ReviewChunk>,
+    append: bool,
+) -> color_eyre::Result<()> {
+    let mut state = ReviewState::load_or_default(state_path)?;
+    let rs = walkthrough_session_mut(&mut state, session);
+    let new_steps: Vec<_> = chunks.into_iter().map(chunk_to_walkthrough_step).collect();
+    if append {
+        for step in new_steps {
+            review::add_walkthrough_step(rs, step);
+        }
+    } else {
+        review::set_walkthrough(rs, Some("Walkthrough".to_owned()), new_steps);
+    }
+    state.save(state_path)?;
+    Ok(())
+}
+
+fn remove_walkthrough_steps_from_state(
+    state_path: &std::path::Path,
+    session: &ReviewSession,
+    ids: &[String],
+) -> color_eyre::Result<()> {
+    let mut state = ReviewState::load_or_default(state_path)?;
+    let rs = walkthrough_session_mut(&mut state, session);
+    for id in ids {
+        let _ = review::remove_walkthrough_step(rs, id);
+    }
+    state.save(state_path)?;
+    Ok(())
+}
+
+fn clear_walkthrough_kind_from_state(
+    state_path: &std::path::Path,
+    session: &ReviewSession,
+    kind: StepKind,
+) -> color_eyre::Result<()> {
+    let mut state = ReviewState::load_or_default(state_path)?;
+    let rs = walkthrough_session_mut(&mut state, session);
+    for walkthrough in &mut rs.walkthroughs {
+        walkthrough.steps.retain(|step| step.kind != kind);
+    }
+    state.save(state_path)?;
+    Ok(())
+}
+
+fn write_brief_chapters_to_state(
+    state_path: &std::path::Path,
+    session: &ReviewSession,
+    briefs: Vec<ChangeBrief>,
+) -> color_eyre::Result<()> {
+    let mut state = ReviewState::load_or_default(state_path)?;
+    let rs = walkthrough_session_mut(&mut state, session);
+    if rs.walkthroughs.is_empty() {
+        review::set_walkthrough(rs, Some("Walkthrough".to_owned()), Vec::new());
+    }
+    rs.walkthroughs[0]
+        .steps
+        .retain(|step| step.kind != StepKind::Chapter);
+    for brief in briefs {
+        review::add_walkthrough_step(rs, brief_to_walkthrough_step(brief));
+    }
+    state.save(state_path)?;
+    Ok(())
 }
 
 const CHUNK_SPEC_KEYS: &[&str] = &[
@@ -1775,14 +1951,19 @@ fn handle_briefs_command(
     session: &ReviewSession,
     jj: &dyn JjBackend,
     overlay_path: &std::path::Path,
+    state_path: &std::path::Path,
 ) -> color_eyre::Result<()> {
     let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
     match command {
         BriefsCommand::List => print_json(&overlay.briefs)?,
         BriefsCommand::Set { file } => {
+            eprintln!(
+                "warning: briefs commands are deprecated; writing durable walkthrough chapters"
+            );
             let spec: BriefsSpec = read_json_spec(file.as_ref(), "brief")?;
             validate_briefs_for_cli(session, jj, &spec.briefs)?;
-            overlay.briefs = spec.briefs;
+            write_brief_chapters_to_state(state_path, session, spec.briefs.clone())?;
+            overlay.briefs.clear();
             let warnings = brief_without_spotlight_warnings(&overlay.briefs, &overlay.chunks);
             overlay.save(overlay_path)?;
             for warning in &warnings {
@@ -1791,7 +1972,11 @@ fn handle_briefs_command(
             println!("Set {} briefs", overlay.briefs.len());
         }
         BriefsCommand::Clear => {
+            eprintln!(
+                "warning: briefs commands are deprecated; clearing durable walkthrough chapters"
+            );
             overlay.briefs.clear();
+            clear_walkthrough_kind_from_state(state_path, session, StepKind::Chapter)?;
             overlay.save(overlay_path)?;
             println!("Cleared briefs");
         }
@@ -1920,6 +2105,123 @@ fn validate_briefs_for_cli(
             "invalid brief(s): {}",
             invalid.join("; ")
         )));
+    }
+    Ok(())
+}
+
+fn validate_change_ids_for_cli(
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    change_ids: &[String],
+) -> color_eyre::Result<()> {
+    let changes = jj.stack_changes(&session.repo, &session.target)?;
+    let invalid: Vec<_> = change_ids
+        .iter()
+        .filter(|id| !changes.iter().any(|change| change.change_id == id.trim()))
+        .cloned()
+        .collect();
+    if !invalid.is_empty() {
+        return Err(user_error(format!(
+            "unknown change id(s): {}",
+            invalid.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn parse_step_artifacts(values: &[String]) -> color_eyre::Result<Vec<StepArtifact>> {
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_str(value)
+                .map_err(|error| user_error(format!("invalid artifact JSON: {error}")))
+        })
+        .collect()
+}
+
+fn chunk_to_walkthrough_step(chunk: ReviewChunk) -> WalkthroughStep {
+    let mut targets = chunk.parts.into_iter().map(|part| StateReviewTarget {
+        file: Some(part.path),
+        line: part.start_line,
+        end_line: part.end_line,
+        ..Default::default()
+    });
+    WalkthroughStep {
+        id: chunk.id,
+        title: Some(chunk.title),
+        importance: match chunk.importance {
+            ChunkImportance::Spotlight => StepImportance::Spotlight,
+            ChunkImportance::Glance => StepImportance::Glance,
+        },
+        kind: StepKind::Step,
+        change_id: chunk.change_id,
+        why: chunk.rationale,
+        body: chunk.explanation,
+        artifacts: chunk
+            .artifacts
+            .into_iter()
+            .map(agent_artifact_to_step)
+            .collect(),
+        target: targets.next().unwrap_or_default(),
+        extra_targets: targets.collect(),
+        ..Default::default()
+    }
+}
+
+fn brief_to_walkthrough_step(brief: ChangeBrief) -> WalkthroughStep {
+    WalkthroughStep {
+        id: format!("chapter-{}", brief.change_id),
+        title: Some(brief.change_id.clone()),
+        kind: StepKind::Chapter,
+        change_id: Some(brief.change_id),
+        body: Some(brief.summary),
+        artifacts: brief
+            .artifacts
+            .into_iter()
+            .map(agent_artifact_to_step)
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn agent_artifact_to_step(artifact: crate::agent::Artifact) -> StepArtifact {
+    StepArtifact {
+        title: artifact.title,
+        kind: match artifact.kind {
+            crate::agent::ArtifactKind::Example => StepArtifactKind::Example,
+            crate::agent::ArtifactKind::Output => StepArtifactKind::Output,
+            crate::agent::ArtifactKind::Diagram => StepArtifactKind::Diagram,
+            crate::agent::ArtifactKind::Note => StepArtifactKind::Note,
+        },
+        body: artifact.body,
+    }
+}
+
+fn warn_walkthrough_set_issues(
+    session: &ReviewSession,
+    jj: &dyn JjBackend,
+    spec: &WalkthroughSetSpec,
+) -> color_eyre::Result<()> {
+    let chapter_ids: Vec<String> = spec
+        .steps
+        .iter()
+        .filter(|step| step.kind == StepKind::Chapter)
+        .filter_map(|step| step.change_id.clone())
+        .collect();
+    if !chapter_ids.is_empty() {
+        validate_change_ids_for_cli(session, jj, &chapter_ids)?;
+    }
+    for step in &spec.steps {
+        for target in std::iter::once(&step.target).chain(step.extra_targets.iter()) {
+            if let Some(file) = target.file.as_deref()
+                && !session.files.iter().any(|f| f.path == file)
+            {
+                eprintln!(
+                    "warning: walkthrough step {} targets file not in diff: {file}",
+                    step.id
+                );
+            }
+        }
     }
     Ok(())
 }

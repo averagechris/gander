@@ -2,8 +2,9 @@
 //! files. The popup lists every chunk part and jumps to its location.
 
 use crate::{
-    agent::{Artifact, ChunkImportance, ChunkPart, InvalidChunkPart, ReviewChunk},
+    agent::{Artifact, ArtifactKind, ChunkImportance, ChunkPart, InvalidChunkPart, ReviewChunk},
     app::ReviewSession,
+    state::{ReviewTarget, StepArtifact, StepArtifactKind, StepImportance, WalkthroughStep},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +113,74 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
             invalid_reason: None,
         })
         .collect()
+}
+
+pub(super) fn walkthrough_step_rows(step: &WalkthroughStep) -> Vec<ChunkRow> {
+    let parts: Vec<_> = std::iter::once(&step.target)
+        .chain(step.extra_targets.iter())
+        .filter_map(target_to_part)
+        .collect();
+    let importance = match step.importance {
+        StepImportance::Spotlight => ChunkImportance::Spotlight,
+        StepImportance::Glance => ChunkImportance::Glance,
+    };
+    let title = step
+        .title
+        .clone()
+        .unwrap_or_else(|| "Walkthrough step".to_owned());
+    let artifacts = step.artifacts.iter().map(step_artifact_to_agent).collect();
+    if parts.is_empty() {
+        return vec![ChunkRow {
+            chunk_id: step.id.clone(),
+            title,
+            importance,
+            change_id: step.change_id.clone(),
+            rationale: step.why.clone(),
+            explanation: step.body.clone(),
+            artifacts,
+            part: None,
+            part_position: None,
+            invalid_reason: None,
+        }];
+    }
+    let total = parts.len();
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| ChunkRow {
+            chunk_id: step.id.clone(),
+            title: title.clone(),
+            importance,
+            change_id: step.change_id.clone(),
+            rationale: step.why.clone(),
+            explanation: step.body.clone(),
+            artifacts: artifacts.clone(),
+            part: Some(part),
+            part_position: (total > 1).then_some((index + 1, total)),
+            invalid_reason: None,
+        })
+        .collect()
+}
+
+fn target_to_part(target: &ReviewTarget) -> Option<ChunkPart> {
+    target.file.as_ref().map(|path| ChunkPart {
+        path: path.clone(),
+        start_line: target.line,
+        end_line: target.end_line,
+    })
+}
+
+fn step_artifact_to_agent(artifact: &StepArtifact) -> Artifact {
+    Artifact {
+        title: artifact.title.clone(),
+        kind: match artifact.kind {
+            StepArtifactKind::Example => ArtifactKind::Example,
+            StepArtifactKind::Output => ArtifactKind::Output,
+            StepArtifactKind::Diagram => ArtifactKind::Diagram,
+            StepArtifactKind::Note => ArtifactKind::Note,
+        },
+        body: artifact.body.clone(),
+    }
 }
 
 #[cfg(test)]

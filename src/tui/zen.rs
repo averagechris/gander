@@ -23,9 +23,9 @@ use crate::agent::{Artifact, ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
 use crate::diff::{DiffLineKind, FileDiff, Hunk};
 use crate::jj::{JjChangeSummary, ReviewTarget};
-use crate::state::Comment;
+use crate::state::{Comment, ReviewSessionStatus, StepArtifactKind, StepKind, WalkthroughStep};
 
-use super::chunks::{ChunkRow, chunk_rows};
+use super::chunks::{ChunkRow, walkthrough_step_rows};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ZenState {
@@ -118,6 +118,21 @@ pub(super) enum ZenPhase {
     Artifact { index: usize, scroll: u16 },
 }
 
+fn durable_walkthrough_steps(session: &ReviewSession) -> Vec<&WalkthroughStep> {
+    session
+        .sessions
+        .iter()
+        .filter(|durable| {
+            durable.status == ReviewSessionStatus::Open
+                && durable.target.repo.as_deref() == Some(&session.repo.display().to_string())
+                && durable.target.base.as_deref() == Some(&session.target.base)
+                && durable.target.revision.as_deref() == Some(&session.target.rev)
+        })
+        .flat_map(|durable| durable.walkthroughs.iter())
+        .flat_map(|walkthrough| walkthrough.steps.iter())
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ZenSource {
     Chunks,
@@ -146,11 +161,20 @@ impl ZenState {
         if session.files.is_empty() {
             return None;
         }
-        let (chunk_stops, glance_rows, source) = if session.review_chunks.is_empty() {
+        let walkthrough_steps: Vec<_> = durable_walkthrough_steps(session);
+        let content_steps: Vec<_> = walkthrough_steps
+            .iter()
+            .copied()
+            .filter(|step| step.kind == StepKind::Step)
+            .collect();
+        let (chunk_stops, glance_rows, source) = if content_steps.is_empty() {
             let (stops, glance) = fallback_rows(session, stack);
             (stops, glance, ZenSource::Files)
         } else {
-            let rows: Vec<ChunkRow> = session.review_chunks.iter().flat_map(chunk_rows).collect();
+            let rows: Vec<ChunkRow> = content_steps
+                .iter()
+                .flat_map(|step| walkthrough_step_rows(step))
+                .collect();
             let (spotlight, glance): (Vec<_>, Vec<_>) = rows
                 .into_iter()
                 .partition(|row| row.importance == ChunkImportance::Spotlight);
@@ -166,7 +190,7 @@ impl ZenState {
             (stops, glance_rows, ZenSource::Chunks)
         };
         (!chunk_stops.is_empty()).then(|| Self {
-            stops: chaptered_stops(chunk_stops, session, stack),
+            stops: chaptered_stops(chunk_stops, &walkthrough_steps, session, stack),
             glance_rows,
             index: 0,
             phase: ZenPhase::Focus,
@@ -181,10 +205,11 @@ impl ZenState {
     }
 
     pub(super) fn curation_state(&self, session: &ReviewSession) -> ZenCurationState {
-        match (self.source, session.change_briefs.is_empty()) {
+        let has_walkthrough = !durable_walkthrough_steps(session).is_empty();
+        match (self.source, has_walkthrough) {
             (ZenSource::Chunks, _) => ZenCurationState::Curated,
-            (ZenSource::Files, false) => ZenCurationState::PartiallyCurated,
-            (ZenSource::Files, true) => ZenCurationState::Uncurated,
+            (ZenSource::Files, true) => ZenCurationState::PartiallyCurated,
+            (ZenSource::Files, false) => ZenCurationState::Uncurated,
         }
     }
 
@@ -300,6 +325,7 @@ pub(super) fn stop_artifacts(stop: &ZenStop) -> &[Artifact] {
 /// so every walkthrough starts with the big picture.
 fn chaptered_stops(
     chunk_stops: Vec<ChunkRow>,
+    walkthrough_steps: &[&WalkthroughStep],
     session: &ReviewSession,
     stack: &[JjChangeSummary],
 ) -> Vec<ZenStop> {
@@ -320,6 +346,7 @@ fn chaptered_stops(
             (index + 1, total),
             rows.len(),
             file_scope.clone(),
+            walkthrough_steps,
             session,
             stack,
         );
@@ -388,6 +415,7 @@ fn chapter_card(
     position: (usize, usize),
     stop_count: usize,
     file_scope: Option<Vec<&FileDiff>>,
+    walkthrough_steps: &[&WalkthroughStep],
     session: &ReviewSession,
     stack: &[JjChangeSummary],
 ) -> ChapterCard {
@@ -397,14 +425,17 @@ fn chapter_card(
             .find(|change| change_ids_match(&change.change_id, change_id)),
         None => home_change(session, stack),
     };
-    let brief = anchor
+    let chapter_step = anchor
         .clone()
         .or_else(|| summary.map(|change| change.change_id.clone()))
         .and_then(|change_id| {
-            session
-                .change_briefs
-                .iter()
-                .find(|brief| change_ids_match(&brief.change_id, &change_id))
+            walkthrough_steps.iter().copied().find(|step| {
+                step.kind == StepKind::Chapter
+                    && step
+                        .change_id
+                        .as_deref()
+                        .is_some_and(|id| change_ids_match(id, &change_id))
+            })
         });
     ChapterCard {
         change_id: anchor,
@@ -416,9 +447,23 @@ fn chapter_card(
         bookmarks: summary
             .map(|change| change.bookmarks.clone())
             .unwrap_or_default(),
-        summary: brief.map(|brief| brief.summary.clone()),
-        artifacts: brief
-            .map(|brief| brief.artifacts.clone())
+        summary: chapter_step.and_then(|step| step.body.clone()),
+        artifacts: chapter_step
+            .map(|step| {
+                step.artifacts
+                    .iter()
+                    .map(|artifact| Artifact {
+                        title: artifact.title.clone(),
+                        kind: match artifact.kind {
+                            StepArtifactKind::Example => crate::agent::ArtifactKind::Example,
+                            StepArtifactKind::Output => crate::agent::ArtifactKind::Output,
+                            StepArtifactKind::Diagram => crate::agent::ArtifactKind::Diagram,
+                            StepArtifactKind::Note => crate::agent::ArtifactKind::Note,
+                        },
+                        body: artifact.body.clone(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
         derived_lines: file_scope
             .as_deref()
@@ -1421,10 +1466,23 @@ diff --git a/b.rs b/b.rs
         let zen = ZenState::new(&session, &[]).unwrap();
         assert_eq!(zen.curation_state(&session), ZenCurationState::Uncurated);
 
-        session.change_briefs.push(ChangeBrief {
-            change_id: "aaabbbcc".to_owned(),
-            summary: "Agent narrative exists.".to_owned(),
-            artifacts: Vec::new(),
+        session.sessions.push(crate::state::ReviewSession {
+            target: crate::state::ReviewTarget {
+                repo: Some(session.repo.display().to_string()),
+                base: Some(session.target.base.clone()),
+                revision: Some(session.target.rev.clone()),
+                ..Default::default()
+            },
+            walkthroughs: vec![crate::state::Walkthrough {
+                steps: vec![WalkthroughStep {
+                    kind: StepKind::Chapter,
+                    change_id: Some("aaabbbcc".to_owned()),
+                    body: Some("Agent narrative exists.".to_owned()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
         });
         let zen = ZenState::new(&session, &[]).unwrap();
         assert_eq!(

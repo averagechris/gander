@@ -126,7 +126,9 @@ mod tests {
                         symbol: Some("ReviewState".to_owned()),
                         ..ReviewTarget::default()
                     },
+                    ..WalkthroughStep::default()
                 }],
+                ..Walkthrough::default()
             }],
             ..ReviewSession::default()
         });

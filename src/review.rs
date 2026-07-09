@@ -446,19 +446,65 @@ pub fn delete_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> 
 }
 
 pub fn add_walkthrough_step(session: &mut ReviewSession, step: WalkthroughStep) -> WalkthroughStep {
+    ensure_default_walkthrough(session);
+    let step = prepare_walkthrough_step(step);
+    session.walkthroughs[0].steps.push(step.clone());
+    session.walkthroughs[0].updated_at = step.updated_at;
+    touch(session);
+    step
+}
+
+#[allow(dead_code)]
+pub fn set_walkthrough(
+    session: &mut ReviewSession,
+    title: Option<String>,
+    steps: Vec<WalkthroughStep>,
+) -> Walkthrough {
+    ensure_default_walkthrough(session);
+    let now = chrono::Utc::now();
+    let steps = steps.into_iter().map(prepare_walkthrough_step).collect();
+    session.walkthroughs[0].title = title;
+    session.walkthroughs[0].steps = steps;
+    session.walkthroughs[0].updated_at = Some(now);
+    touch(session);
+    session.walkthroughs[0].clone()
+}
+
+#[allow(dead_code)]
+pub fn add_chapter(
+    session: &mut ReviewSession,
+    change_id: String,
+    summary: String,
+    title: Option<String>,
+) -> WalkthroughStep {
+    add_walkthrough_step(
+        session,
+        WalkthroughStep {
+            change_id: Some(change_id.clone()),
+            title: title.or(Some(change_id)),
+            body: Some(summary),
+            kind: crate::state::StepKind::Chapter,
+            ..Default::default()
+        },
+    )
+}
+
+fn ensure_default_walkthrough(session: &mut ReviewSession) {
     if session.walkthroughs.is_empty() {
         session.walkthroughs.push(Walkthrough {
             id: uuid::Uuid::new_v4().to_string(),
             title: Some("Walkthrough".to_owned()),
             steps: Vec::new(),
+            updated_at: Some(chrono::Utc::now()),
         });
     }
-    let mut step = step;
+}
+
+fn prepare_walkthrough_step(mut step: WalkthroughStep) -> WalkthroughStep {
     if step.id.is_empty() {
         step.id = uuid::Uuid::new_v4().to_string();
     }
-    session.walkthroughs[0].steps.push(step.clone());
-    touch(session);
+    step.updated_at = Some(chrono::Utc::now());
     step
 }
 
@@ -472,7 +518,9 @@ pub fn remove_walkthrough_step(
             .iter()
             .position(|step| step.id.starts_with(step_id))
         {
-            let step = walkthrough.steps.remove(index);
+            let mut step = walkthrough.steps.remove(index);
+            step.updated_at = Some(chrono::Utc::now());
+            walkthrough.updated_at = step.updated_at;
             touch(session);
             return Ok(step);
         }
@@ -491,9 +539,11 @@ pub fn move_walkthrough_step(
             .iter()
             .position(|step| step.id.starts_with(step_id))
         {
-            let step = walkthrough.steps.remove(index);
+            let mut step = walkthrough.steps.remove(index);
+            step.updated_at = Some(chrono::Utc::now());
             let to = new_index.min(walkthrough.steps.len());
             walkthrough.steps.insert(to, step.clone());
+            walkthrough.updated_at = step.updated_at;
             touch(session);
             return Ok(step);
         }

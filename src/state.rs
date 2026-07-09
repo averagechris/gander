@@ -120,6 +120,8 @@ pub struct Walkthrough {
     pub id: String,
     pub title: Option<String>,
     pub steps: Vec<WalkthroughStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,9 +129,55 @@ pub struct Walkthrough {
 pub struct WalkthroughStep {
     pub id: String,
     pub target: ReviewTarget,
+    #[serde(default)]
+    pub importance: StepImportance,
+    #[serde(default)]
+    pub kind: StepKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
     pub title: Option<String>,
     pub body: Option<String>,
     pub why: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<StepArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_targets: Vec<ReviewTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepImportance {
+    #[default]
+    Spotlight,
+    Glance,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepKind {
+    #[default]
+    Step,
+    Chapter,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StepArtifact {
+    pub title: String,
+    pub kind: StepArtifactKind,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepArtifactKind {
+    #[default]
+    Example,
+    Output,
+    Diagram,
+    Note,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -326,7 +374,7 @@ fn merge_session_children(
         &mut local.walkthroughs,
         external.walkthroughs.clone(),
         &tombstones.walkthroughs,
-        |_, _| false,
+        |local, external| prefer_external_by_updated_at(local.updated_at, external.updated_at),
     );
     for external_walkthrough in &external.walkthroughs {
         if let Some(local_walkthrough) = local
@@ -338,7 +386,9 @@ fn merge_session_children(
                 &mut local_walkthrough.steps,
                 external_walkthrough.steps.clone(),
                 &tombstones.walkthrough_steps,
-                |_, _| false,
+                |local, external| {
+                    prefer_external_by_updated_at(local.updated_at, external.updated_at)
+                },
             );
         }
     }
@@ -605,6 +655,65 @@ mod tests {
         local.merge_external(external, &ReviewStateTombstones::default());
 
         assert_eq!(local.sessions[0].tasks[0].title, "new");
+    }
+
+    #[test]
+    fn merge_external_uses_newer_updated_at_for_walkthrough_steps() {
+        let older = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let newer = chrono::Utc::now();
+        let mut local = ReviewState::default();
+        local.sessions.push(ReviewSession {
+            id: "s".into(),
+            walkthroughs: vec![Walkthrough {
+                id: "w".into(),
+                steps: vec![WalkthroughStep {
+                    id: "st".into(),
+                    title: Some("old".into()),
+                    updated_at: Some(older),
+                    ..Default::default()
+                }],
+                updated_at: Some(older),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut external = local.clone();
+        external.sessions[0].walkthroughs[0].steps[0].title = Some("new".into());
+        external.sessions[0].walkthroughs[0].steps[0].updated_at = Some(newer);
+        local.merge_external(external, &ReviewStateTombstones::default());
+        assert_eq!(
+            local.sessions[0].walkthroughs[0].steps[0].title.as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn merge_external_keeps_newer_local_walkthrough_steps() {
+        let older = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let newer = chrono::Utc::now();
+        let mut local = ReviewState::default();
+        local.sessions.push(ReviewSession {
+            id: "s".into(),
+            walkthroughs: vec![Walkthrough {
+                id: "w".into(),
+                steps: vec![WalkthroughStep {
+                    id: "st".into(),
+                    title: Some("new".into()),
+                    updated_at: Some(newer),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut external = local.clone();
+        external.sessions[0].walkthroughs[0].steps[0].title = Some("old".into());
+        external.sessions[0].walkthroughs[0].steps[0].updated_at = Some(older);
+        local.merge_external(external, &ReviewStateTombstones::default());
+        assert_eq!(
+            local.sessions[0].walkthroughs[0].steps[0].title.as_deref(),
+            Some("new")
+        );
     }
 
     #[test]

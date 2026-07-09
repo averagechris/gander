@@ -1552,7 +1552,9 @@ mod tests {
                         symbol: Some("parse".to_owned()),
                         ..crate::state::ReviewTarget::default()
                     },
+                    ..crate::state::WalkthroughStep::default()
                 }],
+                ..crate::state::Walkthrough::default()
             }],
             ..crate::state::ReviewSession::default()
         });
@@ -1855,6 +1857,7 @@ mod tests {
                     },
                     ..crate::state::WalkthroughStep::default()
                 }],
+                ..crate::state::Walkthrough::default()
             }],
             ..crate::state::ReviewSession::default()
         });
