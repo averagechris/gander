@@ -2358,7 +2358,7 @@ fn draw_zen_chapter(
             ),
             Span::raw("  "),
             Span::styled(
-                zen_progress_ascii(zen),
+                zen_progress_label(zen),
                 Style::default().fg(Color::DarkGray),
             ),
         ]),
@@ -2424,14 +2424,15 @@ fn draw_zen_chapter(
             )));
         }
     } else if !chapter.derived_lines.is_empty() {
+        body.push(Line::from(""));
         body.push(Line::from(Span::styled(
             "derived facts",
             Style::default().fg(Color::DarkGray),
         )));
-        for line in &chapter.derived_lines {
+        for line in chapter.derived_lines.iter().take(3) {
             body.push(Line::from(Span::styled(
-                format!("  {line}"),
-                Style::default().fg(Color::Gray),
+                truncate_tail(&format!("  {line}"), inner.width as usize),
+                Style::default().fg(Color::DarkGray),
             )));
         }
     }
@@ -2456,26 +2457,67 @@ fn draw_zen_chapter(
 }
 
 fn slide_inner(area: Rect) -> Rect {
-    let margin = (area.width / 10).clamp(0, 10).min(area.width / 3);
+    slide_column(area, 72)
+}
+
+fn slide_column(area: Rect, target_width: usize) -> Rect {
+    let available = area.width as usize;
+    let width = target_width
+        .clamp(20.min(available), available)
+        .min(available) as u16;
+    // Keep the deck from drifting to the exact center on wide terminals. A
+    // one-third leftover margin feels editorial: enough air at the right edge,
+    // with the reading column anchored in a stable, slightly-left-of-center spot.
+    let margin = area.width.saturating_sub(width) / 3;
     Rect {
         x: area.x + margin,
         y: area.y + 1.min(area.height),
-        width: area.width.saturating_sub(margin * 2),
+        width,
         height: area.height.saturating_sub(2),
     }
 }
 
-fn zen_progress_ascii(zen: &ZenState) -> String {
-    zen.stops
+fn measured_content_width(available: u16, excerpt_width: usize) -> usize {
+    let available = available as usize;
+    if available < 72 {
+        return available;
+    }
+    excerpt_width.clamp(72, 100).min(available)
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|span| span.content.width()).sum()
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: usize) -> usize {
+    let line_width = line_width(line);
+    if line_width == 0 || width == 0 {
+        1
+    } else {
+        line_width.div_ceil(width).max(1)
+    }
+}
+
+fn zen_progress_label(zen: &ZenState) -> String {
+    let (chapter, chapters) = current_chapter_position(zen);
+    format!("ch {chapter}/{chapters}")
+}
+
+fn current_chapter_position(zen: &ZenState) -> (usize, usize) {
+    let total = zen
+        .stops
         .iter()
-        .take(40)
-        .enumerate()
-        .map(|(i, stop)| match stop {
-            super::zen::ZenStop::Chapter(_) => '▎',
-            super::zen::ZenStop::Chunk(_) if i <= zen.index => '●',
-            super::zen::ZenStop::Chunk(_) => '○',
-        })
-        .collect()
+        .filter(|stop| matches!(stop, ZenStop::Chapter(_)))
+        .count()
+        .max(1);
+    let current = zen
+        .stops
+        .iter()
+        .take(zen.index.saturating_add(1))
+        .filter(|stop| matches!(stop, ZenStop::Chapter(_)))
+        .count()
+        .max(1);
+    (current, total)
 }
 
 fn push_text_lines(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
@@ -2526,48 +2568,27 @@ fn draw_zen_stop(
     stop: &super::chunks::ChunkRow,
 ) {
     frame.render_widget(Clear, area);
-    let inner = slide_inner(area);
+    let initial_inner = slide_inner(area);
     let (stop_number, stop_total) = zen.chunk_position();
-    if inner.height < 8 {
+    if initial_inner.height < 8 {
         frame.render_widget(
             Paragraph::new(zen_focus_header_lines(zen, stop)).wrap(Wrap { trim: false }),
-            inner,
+            initial_inner,
         );
         return;
     }
 
     let rows = session.diff_rows_for_selected_file();
-    let has_prose = stop
-        .rationale
-        .as_ref()
-        .is_some_and(|s| !s.trim().is_empty())
-        || stop
-            .explanation
-            .as_ref()
-            .is_some_and(|s| !s.trim().is_empty());
-    let max_excerpt = if has_prose {
-        ((inner.height as usize) / 3).clamp(3, 14)
-    } else {
-        ((inner.height as usize * 3) / 5).clamp(3, 24)
-    };
     let cursor = (session.focus == Focus::Diff).then_some(session.diff_cursor);
-    let (indices, wandered, clipped) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
-    let mut excerpt: Vec<Line<'static>> = Vec::new();
-    if indices.is_empty() {
-        excerpt.push(Line::from(Span::styled(
-            "  (no diff lines to excerpt — tab shows the full file)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-    for index in indices {
-        excerpt.push(unified_row_line(session, &rows[index], index, 0));
-    }
-    if let Some((more, end)) = clipped {
-        excerpt.push(Line::from(Span::styled(
-            format!("  … {more} more lines through {end} — j/k"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
+    let probe_rows = ((initial_inner.height as usize) / 2).clamp(5, 18);
+    let (probe_indices, _, _) = zen_excerpt_indices(&rows, stop, probe_rows, cursor);
+    let probe_width = probe_indices
+        .iter()
+        .map(|&index| line_width(&unified_row_line(session, &rows[index], index, 0)))
+        .max()
+        .unwrap_or(0);
+    let content_width = measured_content_width(area.width, probe_width);
+    let inner = slide_column(area, content_width);
 
     let (mut explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
         (
@@ -2601,21 +2622,15 @@ fn draw_zen_stop(
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
         .unwrap_or_default();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!(
-                    "stop {stop_number}/{stop_total} · {}",
-                    chunk_row_location_width(stop, text_width / 2)
-                ),
-                Style::default().fg(Color::DarkGray),
+    let mut prose_lines = vec![
+        Line::from(vec![Span::styled(
+            format!(
+                "stop {stop_number}/{stop_total} · {} · {}",
+                chunk_row_location_width(stop, text_width / 2),
+                zen_progress_label(zen)
             ),
-            Span::raw("  "),
-            Span::styled(
-                zen_progress_ascii(zen),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
+            Style::default().fg(Color::DarkGray),
+        )]),
         Line::from(""),
         Line::from(Span::styled(
             format!("{}{position}", stop.title),
@@ -2625,11 +2640,6 @@ fn draw_zen_stop(
         )),
         Line::from(""),
     ];
-    lines.extend(excerpt);
-    lines.push(Line::from(Span::styled(
-        "─".repeat(text_width.min(80)),
-        Style::default().fg(Color::DarkGray),
-    )));
     let abbreviated_part = stop
         .part_position
         .is_some_and(|(part, total)| part > 1 && total > 1);
@@ -2687,7 +2697,62 @@ fn draw_zen_stop(
             Style::default().fg(Color::Blue),
         )));
     }
-    lines.extend(explanation_lines);
+    prose_lines.extend(explanation_lines);
+    let prose_height: usize = prose_lines
+        .iter()
+        .map(|line| wrapped_line_height(line, text_width))
+        .sum();
+    let reserved_after_excerpt = if stop.artifacts.is_empty() { 0 } else { 2 } + 1;
+    let max_excerpt = (inner.height as usize)
+        // One row separates prose from code, one row is the divider after the
+        // excerpt, and one row of slack keeps the static footer/live footer
+        // from being the thing that clips the trailer at exact boundaries.
+        .saturating_sub(prose_height + reserved_after_excerpt + 2)
+        .clamp(3, 24);
+    let (mut indices, wandered, clipped) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
+    let mut excerpt: Vec<Line<'static>> = Vec::new();
+    if indices.is_empty() {
+        excerpt.push(Line::from(Span::styled(
+            "  (no diff lines to excerpt — tab shows the full file)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    let last_excerpt_lineno = indices
+        .last()
+        .and_then(|&index| rows.get(index))
+        .and_then(|row| row.new_lineno.or(row.old_lineno));
+    let mut forced_clip = clipped.or_else(|| {
+        let end = stop.part.as_ref()?.end_line?;
+        let last = last_excerpt_lineno?;
+        (last < end).then_some((end.saturating_sub(last), end))
+    });
+    if forced_clip.is_some() && indices.len() >= max_excerpt {
+        indices.pop();
+        if let Some(end) = stop.part.as_ref().and_then(|part| part.end_line)
+            && let Some(last) = indices
+                .last()
+                .and_then(|&index| rows.get(index))
+                .and_then(|row| row.new_lineno.or(row.old_lineno))
+        {
+            forced_clip = Some((end.saturating_sub(last), end));
+        }
+    }
+    for index in indices {
+        excerpt.push(unified_row_line(session, &rows[index], index, 0));
+    }
+    if let Some((more, end)) = forced_clip {
+        excerpt.push(Line::from(Span::styled(
+            format!("  … {more} more lines through {end} — j/k"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    let mut lines = prose_lines;
+    lines.push(Line::from(""));
+    lines.extend(excerpt);
+    lines.push(Line::from(Span::styled(
+        "─".repeat(text_width),
+        Style::default().fg(Color::DarkGray),
+    )));
     if !stop.artifacts.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -2848,10 +2913,41 @@ fn zen_excerpt_indices(
     {
         indices = indices[anchor_pos..].to_vec();
     }
-    let clipped = range.and_then(|(_, end)| {
-        (indices.len() > max_rows).then_some((indices.len().saturating_sub(max_rows), end))
-    });
-    indices.truncate(max_rows);
+    let clipped = if let Some((_, end)) = range {
+        if indices.len() > max_rows {
+            // The trailer is part of the excerpt's vertical budget. Reserve a
+            // row for it up front; otherwise exact-fit focus cards render a
+            // full code window and the `… N more lines through <end>` cue is
+            // pushed below the slide/footer.
+            let visible_rows = max_rows.saturating_sub(1).max(1);
+            let more = indices.len().saturating_sub(visible_rows);
+            indices.truncate(visible_rows);
+            Some((more, end))
+        } else {
+            indices.truncate(max_rows);
+            let last_visible_line = indices
+                .last()
+                .and_then(|&index| rows.get(index))
+                .and_then(|row| row.new_lineno.or(row.old_lineno));
+            last_visible_line.filter(|line| *line < end).map(|line| {
+                if indices.len() >= max_rows {
+                    let visible_rows = max_rows.saturating_sub(1).max(1);
+                    indices.truncate(visible_rows);
+                    let line = indices
+                        .last()
+                        .and_then(|&index| rows.get(index))
+                        .and_then(|row| row.new_lineno.or(row.old_lineno))
+                        .unwrap_or(line);
+                    (end.saturating_sub(line), end)
+                } else {
+                    (end.saturating_sub(line), end)
+                }
+            })
+        }
+    } else {
+        indices.truncate(max_rows);
+        None
+    };
 
     // Cursor off the stop: follow it with a window of the same size.
     if let Some(cursor) = cursor
@@ -3047,7 +3143,7 @@ fn draw_zen_glance(
             .rationale
             .as_deref()
             .filter(|rationale| !rationale.trim().is_empty())
-            .map(|rationale| format!(" — {rationale}"))
+            .map(|rationale| format!(" · {rationale}"))
             .unwrap_or_default();
         let locations = group
             .rows
@@ -3062,13 +3158,19 @@ fn draw_zen_glance(
         } else {
             format!("{} ", row.title)
         };
+        let row_width = inner.width.saturating_sub(4) as usize;
+        let detail = truncate_tail(&format!("{title}{rationale}"), row_width);
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
             Span::styled(format!("{check} "), Style::default().fg(Color::Green)),
-            Span::styled(locations, Style::default().fg(Color::Cyan)),
-            Span::styled(" — ", Style::default().fg(Color::DarkGray)),
-            Span::styled(title, style),
-            Span::styled(rationale, Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                truncate_tail(&locations, row_width),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(detail, Style::default().fg(Color::DarkGray)),
         ]));
     }
     if rendered == 0 {
@@ -5101,6 +5203,14 @@ diff --git a/Cargo.toml b/Cargo.toml
     }
 
     #[test]
+    fn measured_content_width_tracks_excerpt_but_stays_readable() {
+        assert_eq!(measured_content_width(200, 48), 72);
+        assert_eq!(measured_content_width(200, 88), 88);
+        assert_eq!(measured_content_width(200, 140), 100);
+        assert_eq!(measured_content_width(80, 140), 80);
+    }
+
+    #[test]
     fn chunk_row_location_names_the_anchored_change() {
         let mut row = crate::tui::chunks::ChunkRow {
             chunk_id: "c1".to_owned(),
@@ -5228,7 +5338,15 @@ diff --git a/Cargo.toml b/Cargo.toml
         let (indices, wandered, clipped) = zen_excerpt_indices(&rows, &stop, 3, None);
         assert!(!wandered);
         assert_eq!(rows[indices[0]].new_lineno, Some(10));
-        assert_eq!(clipped, Some((10, 20)));
+        assert_eq!(indices.len(), 2);
+        assert_eq!(clipped, Some((11, 20)));
+
+        // Exact budget boundary: the trailer still gets a reserved row rather
+        // than being pushed out by the last visible code line.
+        let (indices, wandered, clipped) = zen_excerpt_indices(&rows, &stop, 11, None);
+        assert!(!wandered);
+        assert_eq!(indices.len(), 10);
+        assert_eq!(clipped, Some((3, 20)));
     }
 
     #[test]

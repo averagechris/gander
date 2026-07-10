@@ -1,28 +1,28 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4972
+assertion_line: 5105
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 80, 24)"
 ---
 
-        stop 1/1 · src/deeply…t/retry_policy.rs:2-3  ▎●▎
+  stop 1/1 · src/deeply/…port/retry_policy.rs:2-3 · ch 1/2
 
-        very long generated client compatibility migration with
-        unusually verbose title
+  very long generated client compatibility migration with unusually
+  verbose title
 
-            1   fn main() {
-            2 -     old();
-            2 +     new();
-            3 +     extra();
-            4   }
-        ────────────────────────────────────────────────────────────────
-        why this matters
-        start here
+  why this matters
+  start here
 
-        main() now calls new() and adds extra() — the old single-call
-        contract is gone, so every caller that relied on old() firing
-        once must be re-checked.
+  main() now calls new() and adds extra() — the old single-call contract
+  is gone, so every caller that relied on old() firing once must be
+  re-checked.
 
-        e exhibits: startup output
+      2 -     old();
+      2 +     new();
+      3 +     extra();
+      4   }
+  ────────────────────────────────────────────────────────────────────────
+
+  e exhibits: startup output
 
 
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @

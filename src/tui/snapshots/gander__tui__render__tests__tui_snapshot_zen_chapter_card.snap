@@ -1,25 +1,25 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4934
+assertion_line: 4996
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
-          chapter 1/2 · trunk()..@ · startup-fix  ▎○▎
+         chapter 1/2 · trunk()..@ · startup-fix  ch 1/2
 
-          zzzzyyyy
-          feat: swap old() for new()
+         zzzzyyyy
+         feat: swap old() for new()
 
-          Swaps the legacy old() startup call for new() and batches extra() alongside it,
-          so both effects fire together.
+         Swaps the legacy old() startup call for new() and batches extra()
+         alongside it, so both effects fire together.
 
-          2 file(s) · +3 −2
-          1 stop(s) in this chapter
+         2 file(s) · +3 −2
+         1 stop(s) in this chapter
 
-          what this change does
-          Swaps the legacy old() startup call for new() and batches extra() alongside it,
-          so both effects fire together.
+         what this change does
+         Swaps the legacy old() startup call for new() and batches extra()
+         alongside it, so both effects fire together.
 
-          enter to begin — 1 stops
+         enter to begin — 1 stops
 
 
 

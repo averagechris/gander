@@ -1,19 +1,19 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5073
+assertion_line: 5125
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 18)"
 ---
 
-          At a glance
-          1 curated · 0 files not toured
+         At a glance
+         1 curated · 0 files not toured
 
-          curated
-          › • tests/app.rs:1-1 — test churn  — mechanical rename in tests
+         curated
+         › • tests/app.rs:1-1
+             test churn  · mechanical rename in tests
 
-          not toured — 0 files
+         not toured — 0 files
 
-          j/k select · enter dives to location · esc ends tour
-
+         j/k select · enter dives to location · esc ends tour
 
 
 
