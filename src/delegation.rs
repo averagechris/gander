@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff},
     state::{
-        ActionIntent, Comment, CommentKind, CommentState, ReviewSession, ReviewState, ReviewTarget,
-        ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
+        ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession, ReviewState,
+        ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
     },
 };
 
@@ -114,6 +114,7 @@ pub struct CommentEvidence {
     pub end_line: Option<usize>,
     pub body: String,
     pub action: Option<ActionIntent>,
+    pub replies: Vec<CommentReply>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +156,7 @@ pub fn build_delegation_packet(
     spec: &DelegationSpec,
 ) -> Result<DelegationPacket> {
     let selected = select_action_items(session, &state.comments, spec)?;
+    let return_contract = return_contract(&selected);
     let paths = selected
         .iter()
         .filter_map(|i| i.target.as_ref()?.file.clone())
@@ -188,7 +190,7 @@ pub fn build_delegation_packet(
         action_items: selected,
         walkthrough: walkthrough_context(&session.walkthroughs),
         reference_hunks: reference_hunks(diff, &paths, spec.hunk_context_lines),
-        return_contract: return_contract(&session.id),
+        return_contract,
     })
 }
 
@@ -241,11 +243,15 @@ fn resolve_tasks<'a>(
         selectors
             .iter()
             .map(|s| {
-                one(
+                let task = one(
                     tasks.iter().filter(|t| t.id.starts_with(s)).collect(),
                     "task",
                     s,
-                )
+                )?;
+                if task.status != ReviewTaskStatus::Open {
+                    return Err(eyre!("task `{}` is not open", task.id));
+                }
+                Ok(task)
             })
             .collect()
     } else if explicit {
@@ -266,11 +272,15 @@ fn resolve_comments<'a>(
         selectors
             .iter()
             .map(|s| {
-                one(
+                let comment = one(
                     comments.iter().filter(|c| c.id.starts_with(s)).collect(),
                     "comment",
                     s,
-                )
+                )?;
+                if comment.state == CommentState::Resolved {
+                    return Err(eyre!("comment `{}` is already resolved", comment.id));
+                }
+                Ok(comment)
             })
             .collect()
     } else if explicit {
@@ -328,13 +338,21 @@ fn comment_evidence(c: &Comment) -> CommentEvidence {
         end_line: c.end_line,
         body: c.body.clone(),
         action: c.action,
+        replies: c.replies.clone(),
     }
 }
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("TODO").trim().to_owned()
 }
-fn item_key(i: &DelegatedActionItem) -> (String, usize, String) {
+fn item_key(i: &DelegatedActionItem) -> (u8, String, usize, String) {
     (
+        match i.action {
+            ActionIntent::Fix => 0,
+            ActionIntent::Test => 1,
+            ActionIntent::FollowUp => 2,
+            ActionIntent::Explain => 3,
+            ActionIntent::None => 4,
+        },
         i.target
             .as_ref()
             .and_then(|t| t.file.clone())
@@ -428,46 +446,71 @@ fn sorted_files(files: &[FileDiff]) -> Vec<&FileDiff> {
     v.sort_by(|a, b| a.path.cmp(&b.path));
     v
 }
-fn return_contract(session_id: &str) -> ReviewStateReturnContract {
+fn return_contract(items: &[DelegatedActionItem]) -> ReviewStateReturnContract {
+    let mut commands = Vec::new();
+    let mut comment_ids = BTreeSet::new();
+    for item in items {
+        match item.source {
+            ActionSource::Task => commands.push(ReturnCommand {
+                purpose: format!("mark delegated task {} complete", item.id),
+                command: format!(
+                    "gander tasks complete {} --summary '<what changed and how it was verified>'",
+                    item.id
+                ),
+            }),
+            ActionSource::Comment => {
+                comment_ids.insert(item.id.clone());
+            }
+        }
+        comment_ids.extend(
+            item.evidence_comments
+                .iter()
+                .map(|comment| comment.id.clone()),
+        );
+    }
+    commands.extend(comment_ids.into_iter().map(|id| ReturnCommand {
+        purpose: format!("reply to and resolve addressed comment {id}"),
+        command: format!(
+            "gander comments resolve {id} --reply '<what changed and how it was verified>'"
+        ),
+    }));
+    commands.push(ReturnCommand {
+        purpose: "add a follow-up comment".into(),
+        command: "gander comments add --path <path> --line <line> --kind issue --action follow-up --body '<body>'".into(),
+    });
+
     ReviewStateReturnContract {
         summary_required: true,
         allowed_task_statuses: vec!["open".into(), "done".into(), "dismissed".into()],
         allowed_comment_states: vec!["todo".into(), "resolved".into()],
-        commands: vec![
-            ReturnCommand {
-                purpose: "mark a delegated task complete".into(),
-                command: format!(
-                    "gander review task done {session_id} <task-id> --resolution '<summary>'"
-                ),
-            },
-            ReturnCommand {
-                purpose: "resolve a source TODO comment".into(),
-                command: "gander comment resolve <comment-id>".into(),
-            },
-            ReturnCommand {
-                purpose: "add a follow-up comment".into(),
-                command: format!(
-                    "gander review comment add {session_id} <path> --line <line> --kind issue --action follow-up --body '<body>'"
-                ),
-            },
-        ],
+        commands,
     }
 }
 
 pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
     let mut out = format!(
-        "# Gander Delegation Packet\n\nSchema version: `{}`\nKind: `{:?}`\nSession: `{}`\n\n",
-        packet.schema_version, packet.kind, packet.session.id
+        "# Gander Delegation Packet\n\nSchema version: `{}`\nKind: `gander_delegation`\nSession: `{}`\n\n",
+        packet.schema_version, packet.session.id
     );
     if let Some(r) = &packet.brief.recipient {
         out.push_str(&format!("Recipient: {r}\n\n"));
     }
+    out.push_str("## Source snapshot\n\n");
+    if let Some(repo) = &packet.target.repo {
+        out.push_str(&format!("- Repository: `{repo}`\n"));
+    }
+    if let Some(base) = &packet.target.base {
+        out.push_str(&format!("- Base: `{base}`\n"));
+    }
+    if let Some(revision) = &packet.target.revision {
+        out.push_str(&format!("- Revision: `{revision}`\n"));
+    }
+    out.push_str(&format!(
+        "- Diff fingerprint: `{}`\n\n",
+        packet.fingerprints.diff
+    ));
     out.push_str(&format!("## Objective\n\n{}\n\n", packet.brief.objective));
-    list(
-        &mut out,
-        "Repeated constraints",
-        &packet.brief.repeated_constraints,
-    );
+    list(&mut out, "Constraints", &packet.brief.repeated_constraints);
     list(
         &mut out,
         "Acceptance criteria",
@@ -475,22 +518,56 @@ pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
     );
     list(
         &mut out,
-        "Requested verification (inert; do not execute unless you choose to)",
+        "Requested verification (not executed by Gander)",
         &packet.brief.requested_verification,
     );
     out.push_str("## Action items\n\n");
-    for i in &packet.action_items {
-        out.push_str(&format!("- `{}` {:?}: {}\n", i.id, i.source, i.title));
+    for (index, i) in packet.action_items.iter().enumerate() {
+        out.push_str(&format!(
+            "### {}. {} [`{:?}` / `{:?}`]\n\nID: `{}`\n",
+            index + 1,
+            i.title,
+            i.source,
+            i.action,
+            i.id
+        ));
+        if let Some(target) = &i.target {
+            out.push_str(&format!("Location: {}\n", target_label(target)));
+        }
+        if let Some(body) = &i.body
+            && body.trim() != i.title.trim()
+        {
+            out.push_str(&format!("\n{}\n", body.trim()));
+        }
         for e in &i.evidence_comments {
             out.push_str(&format!(
-                "  - evidence comment `{}` at `{}`: {}\n",
+                "\nReviewer comment `{}` at `{}`:\n\n> {}\n",
                 e.id,
                 e.path,
-                first_line(&e.body)
+                e.body.trim().replace('\n', "\n> ")
             ));
+            for reply in &e.replies {
+                out.push_str(&format!("\nReply `{}`: {}\n", reply.id, reply.body.trim()));
+            }
         }
+        out.push('\n');
     }
-    out.push_str("\n## Reference hunks\n\n");
+    if !packet.walkthrough.is_empty() {
+        out.push_str("## Walkthrough context\n\n");
+        for step in &packet.walkthrough {
+            out.push_str(&format!(
+                "- `{}` {} — {}\n",
+                step.step_id,
+                step.title.as_deref().unwrap_or("Untitled step"),
+                target_label(&step.target)
+            ));
+            if let Some(why) = &step.why {
+                out.push_str(&format!("  Why: {}\n", why.trim()));
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("## Reference hunks\n\n");
     for h in &packet.reference_hunks {
         out.push_str(&format!(
             "### `{}` {}\n\n```diff\n{}\n```\n\n",
@@ -504,6 +581,26 @@ pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
         out.push_str(&format!("- {}: `{}`\n", c.purpose, c.command));
     }
     out
+}
+
+fn target_label(target: &ReviewTarget) -> String {
+    let mut label = target
+        .file
+        .as_deref()
+        .map(|file| format!("`{file}`"))
+        .unwrap_or_else(|| "review target".to_owned());
+    if let Some(line) = target.line {
+        label.push_str(&format!(":{line}"));
+        if let Some(end_line) = target.end_line
+            && end_line != line
+        {
+            label.push_str(&format!("-{end_line}"));
+        }
+    }
+    if let Some(symbol) = &target.symbol {
+        label.push_str(&format!(" (`{symbol}`)"));
+    }
+    label
 }
 fn list(out: &mut String, title: &str, xs: &[String]) {
     if !xs.is_empty() {
@@ -706,7 +803,42 @@ mod tests {
         let md = render_delegation_markdown(&p);
         assert!(md.contains("do it"));
         assert!(md.contains("cargo test"));
-        assert!(md.contains("gander review task done sess <task-id>"));
-        assert!(md.contains("gander comment resolve <comment-id>"));
+        assert!(md.contains("gander tasks complete t-open --summary"));
+        assert!(md.contains("gander comments resolve c-linked --reply"));
+        assert!(md.contains("gander comments resolve c-todo --reply"));
+    }
+
+    #[test]
+    fn explicit_selection_rejects_closed_items() {
+        let (mut state, session, diff) = fixture();
+        state.comments.push(comment(
+            "c-resolved",
+            CommentState::Resolved,
+            Some(CommentKind::Issue),
+            Some(ActionIntent::Fix),
+            "a.rs",
+        ));
+
+        let done = DelegationSpec {
+            task_selectors: vec!["t-done".into()],
+            ..Default::default()
+        };
+        assert!(
+            build_delegation_packet(&state, &session, &diff, &done)
+                .unwrap_err()
+                .to_string()
+                .contains("not open")
+        );
+
+        let resolved = DelegationSpec {
+            comment_selectors: vec!["c-resolved".into()],
+            ..Default::default()
+        };
+        assert!(
+            build_delegation_packet(&state, &session, &diff, &resolved)
+                .unwrap_err()
+                .to_string()
+                .contains("already resolved")
+        );
     }
 }

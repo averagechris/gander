@@ -16,6 +16,9 @@
   and verification text.
 - `gander skills list/show/install` exposes bundled CLI-first agent skills
   without requiring repository, config, or jj initialization.
+- Comments now carry append-only UUID-addressed replies and `updated_at`
+  timestamps. CLI/MCP agents can reply, reply-and-resolve atomically, and carry
+  the full thread through artifacts and handoffs.
 
 ### Changed
 

@@ -71,8 +71,8 @@ enum ListFormat {
 #[command(
     version,
     about = "Durable guided review sessions over jj-visible work.",
-    long_about = "Gander is a local-first review workspace for jj-visible work. It reads code state, writes durable review state (viewed files, comments, tasks, walkthroughs, and artifacts), and keeps CLI automation at parity with the TUI and agent harnesses. No command launches the TUI unless you explicitly run `gander tui` or omit a subcommand.",
-    after_help = "First review loop:\n  gander comments add --path src/lib.rs --line 42 --body 'Check this invariant'\n  gander tasks add --title 'Add parser regression' --path src/lib.rs --line 42\n  gander walkthrough add-step --title 'Parser flow' --path src/lib.rs --line 42\n  gander handoff --copy"
+    long_about = "Gander is a local-first review workspace for jj-visible work. It reads code state and writes durable review state: viewed files, comments, tasks, walkthroughs, and artifacts. The CLI is the normal automation surface; MCP is optional. Run `gander tui` or omit a subcommand to launch the TUI.",
+    after_help = "First review loop:\n  gander reviews create --title 'Parser review'\n  gander files list --format text\n  gander comments add --path src/lib.rs --line 42 --body 'Check this invariant'\n  gander tasks add --title 'Add parser regression' --path src/lib.rs --line 42\n  gander walkthrough add-step --title 'Parser flow' --path src/lib.rs --line 42\n  gander handoff --copy"
 )]
 struct Cli {
     /// Repository root. Defaults to the current directory.
@@ -230,6 +230,9 @@ enum Command {
         copy: bool,
     },
     /// Manage bundled agent skills without requiring a repository.
+    #[command(
+        after_help = "Examples:\n  gander skills list\n  gander skills show gander-review\n  gander skills install --dir .agents/skills\n  gander skills install gander-address-review --force"
+    )]
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
@@ -273,6 +276,9 @@ enum Command {
         command: HunksCommand,
     },
     /// Machine-readable comment queries for the current review session.
+    #[command(
+        after_help = "Examples:\n  gander comments list --format text\n  gander comments add --path src/lib.rs --line 42 --kind issue --action fix --body 'Check this invariant'\n  gander comments resolve <id> --reply 'Fixed and verified'"
+    )]
     Comments {
         #[command(subcommand)]
         command: CommentsCommand,
@@ -283,11 +289,17 @@ enum Command {
         command: ReviewsCommand,
     },
     /// Machine-readable task queries for the current review session.
+    #[command(
+        after_help = "Examples:\n  gander tasks list --format text\n  gander tasks add --title 'Add regression coverage' --path src/lib.rs --line 42 --action test\n  gander tasks complete <id> --summary 'Added and ran the regression test'"
+    )]
     Tasks {
         #[command(subcommand)]
         command: TasksCommand,
     },
     /// Walkthrough queries and exports over persisted local review state.
+    #[command(
+        after_help = "Examples:\n  gander walkthrough add-step --title 'Start here' --path src/lib.rs --line 42\n  gander walkthrough set --file tour.json --dry-run\n  gander walkthrough export"
+    )]
     Walkthrough {
         #[command(subcommand)]
         command: WalkthroughCommand,
@@ -515,7 +527,7 @@ enum CommentsCommand {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Add a durable comment anchored to a changed file in the post-image.
+    /// Add a durable comment anchored to a changed file.
     Add {
         /// Changed file path to comment on. Alias: --file.
         #[arg(long, alias = "file")]
@@ -580,7 +592,7 @@ enum CommentsCommand {
         /// Comment id or unique id prefix.
         id: String,
         /// New changed file path. Alias: --file.
-        #[arg(long, visible_alias = "file")]
+        #[arg(long, alias = "file")]
         path: Option<String>,
         /// New 1-indexed new-side (post-image) line number.
         #[arg(long, conflicts_with = "start_line")]
@@ -651,7 +663,7 @@ enum TasksCommand {
         /// Optional task details/body text.
         #[arg(long)]
         body: Option<String>,
-        /// Action intent. Accepts fix, explain, test, follow-up, and legacy followup.
+        /// Action intent. Accepts none, fix, explain, test, follow-up, and legacy followup.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
         /// Source comment id or unique id prefix to link.
@@ -855,22 +867,31 @@ enum HandoffMode {
 enum SkillsCommand {
     /// List bundled skills.
     List {
+        /// Output format for bundled skill metadata.
         #[arg(long, value_enum, default_value_t = ListFormat::Text)]
         format: ListFormat,
     },
     /// Show one bundled skill.
     Show {
+        /// Bundled skill name from `gander skills list`.
+        #[arg(value_name = "NAME")]
         name: String,
+        /// Print exact Markdown or a structured JSON envelope.
         #[arg(long, value_enum, default_value_t = SkillShowFormat::Markdown)]
         format: SkillShowFormat,
     },
     /// Install bundled skills to ~/.agents/skills or --dir.
     Install {
+        /// Skill names to install. Omit to install every bundled skill.
+        #[arg(value_name = "NAME")]
         names: Vec<String>,
+        /// Destination root; each skill is written to NAME/SKILL.md.
         #[arg(long = "dir")]
         dir: Option<PathBuf>,
+        /// Replace existing skill files.
         #[arg(long)]
         force: bool,
+        /// Output format for installed paths.
         #[arg(long, value_enum, default_value_t = ListFormat::Text)]
         format: ListFormat,
     },
@@ -970,7 +991,7 @@ fn main() -> color_eyre::Result<()> {
 
 fn run() -> color_eyre::Result<()> {
     let mut cli = Cli::parse();
-    if let Some(Command::Skills { command }) = cli.command.take() {
+    if let Some(command) = take_skills_command(&mut cli.command) {
         return handle_skills(command);
     }
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
@@ -1729,9 +1750,7 @@ fn run() -> color_eyre::Result<()> {
                     rs,
                     title,
                     body,
-                    action
-                        .and_then(action_intent_arg_to_option)
-                        .unwrap_or_default(),
+                    action.map(action_intent_arg).unwrap_or_default(),
                     comment,
                     target,
                 );
@@ -1821,7 +1840,7 @@ fn run() -> color_eyre::Result<()> {
                     review::TaskEdits {
                         title,
                         body,
-                        action: action.and_then(action_intent_arg_to_option),
+                        action: action.map(action_intent_arg),
                         source_comment_id: comment,
                         target: target.map(Some),
                     },
@@ -1975,6 +1994,16 @@ fn run() -> color_eyre::Result<()> {
     }
 
     Ok(())
+}
+
+fn take_skills_command(command: &mut Option<Command>) -> Option<SkillsCommand> {
+    if !matches!(command.as_ref(), Some(Command::Skills { .. })) {
+        return None;
+    }
+    match command.take() {
+        Some(Command::Skills { command }) => Some(command),
+        _ => unreachable!("skills command was checked before taking it"),
+    }
 }
 
 fn warn_if_live_session_target_differs(paths: &WorkspacePaths, session: &ReviewSession) {
@@ -2992,6 +3021,16 @@ fn action_intent_arg_to_option(value: ActionIntentArg) -> Option<ActionIntent> {
         ActionIntentArg::Explain => Some(ActionIntent::Explain),
         ActionIntentArg::Test => Some(ActionIntent::Test),
         ActionIntentArg::FollowUp => Some(ActionIntent::FollowUp),
+    }
+}
+
+fn action_intent_arg(value: ActionIntentArg) -> ActionIntent {
+    match value {
+        ActionIntentArg::None => ActionIntent::None,
+        ActionIntentArg::Fix => ActionIntent::Fix,
+        ActionIntentArg::Explain => ActionIntent::Explain,
+        ActionIntentArg::Test => ActionIntent::Test,
+        ActionIntentArg::FollowUp => ActionIntent::FollowUp,
     }
 }
 impl From<CommentStateArg> for CommentState {
@@ -4086,6 +4125,26 @@ mod tests {
     }
 
     #[test]
+    fn early_skills_dispatch_does_not_consume_other_commands() {
+        let mut ordinary = Some(Command::Summary);
+        assert!(take_skills_command(&mut ordinary).is_none());
+        assert!(matches!(ordinary, Some(Command::Summary)));
+
+        let mut skills = Some(Command::Skills {
+            command: SkillsCommand::List {
+                format: ListFormat::Text,
+            },
+        });
+        assert!(matches!(
+            take_skills_command(&mut skills),
+            Some(SkillsCommand::List {
+                format: ListFormat::Text
+            })
+        ));
+        assert!(skills.is_none());
+    }
+
+    #[test]
     fn help_contains_stable_cli_consistency_text() {
         fn help_for(path: &[&str]) -> String {
             let mut cmd = Cli::command();
@@ -4098,7 +4157,7 @@ mod tests {
 
         let top = help_for(&[]);
         assert!(top.contains("local-first review workspace for jj-visible work"));
-        assert!(top.contains("No command launches the TUI unless you explicitly run `gander tui`"));
+        assert!(top.contains("Run `gander tui` or omit a subcommand to launch the TUI"));
         assert!(top.contains("First review loop:"));
         assert!(!top.contains("chunks"));
         assert!(!top.contains("briefs"));
@@ -4170,6 +4229,12 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(command).is_err());
         }
+    }
+
+    #[test]
+    fn none_action_maps_to_a_real_task_action_but_clears_optional_comment_action() {
+        assert_eq!(action_intent_arg(ActionIntentArg::None), ActionIntent::None);
+        assert_eq!(action_intent_arg_to_option(ActionIntentArg::None), None);
     }
 
     #[test]

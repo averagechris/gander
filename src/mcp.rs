@@ -537,16 +537,14 @@ impl GanderMcp {
         )
     }
 
-    #[tool(
-        description = "List durable review sessions from the state file. Equivalent to `gander reviews list`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
-    )]
+    #[tool(description = "List durable review sessions. Equivalent to `gander reviews list`.")]
     fn reviews_list(&self) -> Result<CallToolResult, McpError> {
         let state = self.load_state()?;
         json_result(json!({ "sessions": review::list_sessions(&state) }))
     }
 
     #[tool(
-        description = "Show one durable review session from the state file. Equivalent to `gander reviews show <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Show one durable review session. Equivalent to `gander reviews show <id>`."
     )]
     fn reviews_show(
         &self,
@@ -559,7 +557,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Create or reuse the durable review session for this MCP target. Equivalent to `gander reviews create`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Create or reuse the durable review session for this MCP target. Equivalent to `gander reviews create`."
     )]
     fn reviews_create(
         &self,
@@ -571,7 +569,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review comment. Equivalent to `gander comments add`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Add a durable review comment. Equivalent to `gander comments add`; external additions merge into a running TUI."
     )]
     fn comment_add(
         &self,
@@ -598,7 +596,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Resolve a durable review comment, optionally appending a reply first. Equivalent to `gander comments resolve <id> [--reply <text>]`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Resolve a durable review comment, optionally appending a reply first. Equivalent to `gander comments resolve <id> [--reply <text>]`. Timestamped comment updates and replies merge into a running TUI's review state."
     )]
     fn comment_resolve(
         &self,
@@ -621,7 +619,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Append a durable reply to a review comment. Equivalent to `gander comments reply <id> --body <text> [--resolve]`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Append a durable reply to a review comment. Equivalent to `gander comments reply <id> --body <text> [--resolve]`. Timestamped comment updates and replies merge into a running TUI's review state."
     )]
     fn comment_reply(
         &self,
@@ -640,7 +638,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Set a durable review comment state. Equivalent to `gander comments set-state <id> <state>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Set a durable review comment state. Equivalent to `gander comments set-state <id> --state <state>`; timestamped updates merge into a running TUI."
     )]
     fn comment_set_state(
         &self,
@@ -658,7 +656,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review task. Equivalent to `gander tasks add`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Add a durable review task. Equivalent to `gander tasks add`; external additions merge into a running TUI."
     )]
     fn task_add(
         &self,
@@ -690,7 +688,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Complete a durable review task. Equivalent to `gander tasks complete <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Complete a durable review task. Equivalent to `gander tasks complete <id>`; timestamped updates merge into a running TUI."
     )]
     fn task_complete(
         &self,
@@ -703,7 +701,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Reopen a durable review task. Equivalent to `gander tasks reopen <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Reopen a durable review task. Equivalent to `gander tasks reopen <id>`; timestamped updates merge into a running TUI."
     )]
     fn task_reopen(
         &self,
@@ -715,9 +713,7 @@ impl GanderMcp {
         })
     }
 
-    #[tool(
-        description = "List durable review tasks. Equivalent to `gander tasks list`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
-    )]
+    #[tool(description = "List durable review tasks. Equivalent to `gander tasks list`.")]
     fn tasks_list(&self) -> Result<CallToolResult, McpError> {
         let mut state = self.load_state()?;
         let session = review::ensure_session(&mut state, &self.target, None).clone();
@@ -725,7 +721,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable walkthrough step. Equivalent to `gander walkthrough add-step`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Add a durable walkthrough step. Equivalent to `gander walkthrough add-step`; external additions merge into a running TUI."
     )]
     fn walkthrough_add_step(
         &self,
@@ -757,7 +753,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Remove a durable walkthrough step. Equivalent to `gander walkthrough remove-step <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Remove a durable walkthrough step. Equivalent to `gander walkthrough remove-step <id>`."
     )]
     fn walkthrough_remove_step(
         &self,
@@ -770,7 +766,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Move a durable walkthrough step. Equivalent to `gander walkthrough move-step <id> <to>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Move a durable walkthrough step. Equivalent to `gander walkthrough move-step <id> --to <index>`; timestamped updates merge into a running TUI."
     )]
     fn walkthrough_move_step(
         &self,
@@ -782,9 +778,7 @@ impl GanderMcp {
         })
     }
 
-    #[tool(
-        description = "Show durable walkthroughs. Equivalent to `gander walkthrough show`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
-    )]
+    #[tool(description = "Show durable walkthroughs. Equivalent to `gander walkthrough show`.")]
     fn walkthrough_show(&self) -> Result<CallToolResult, McpError> {
         let mut state = self.load_state()?;
         let session = review::ensure_session(&mut state, &self.target, None).clone();

@@ -66,7 +66,7 @@ hunk ids suitable for `hunks show` and accepts the file as a positional or
 ```sh
 gander comments list [--format json|text]
 gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
-  [--kind note|issue|question|praise] [--action fix|explain|test|follow-up] \
+  [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] \
   [--format json|text]
 gander comments reply <id> --body <text> [--resolve] [--format json|text]
 gander comments resolve <id> [--reply <text>] [--format json|text]
@@ -263,17 +263,16 @@ session diff or in `<change_id>`'s own diff when the chunk carries a
 Review-state writes are safe while a TUI holds the session: the TUI watches
 the state file and merges external changes (a CLI-added comment appears in
 the running TUI within a poll and survives the TUI's save/quit). Deletions
-made in the TUI are not resurrected by merges. Remaining limitation: comments
-are merged by id as append-only objects, so two writers updating the same
-comment id are not reconciled by `updated_at`; use `comments edit` from one
-writer at a time until the parallel same-ID comment-update track lands. Tasks,
-walkthroughs, walkthrough steps, and sessions do use newer `updated_at` for
-same-id conflicts.
+made in the TUI are not resurrected by merges. Same-id comments use the newer
+`updated_at` value for body/state metadata and union append-only replies by
+reply id, so an external reply or resolution is not overwritten by a later TUI
+save. Tasks, walkthroughs, walkthrough steps, and sessions likewise use newer
+`updated_at` values for same-id conflicts.
 
 ## Export/import and state utilities
 
 ```sh
-gander handoff [--format markdown|json] [--output <path>] [--copy]
+gander handoff [--mode prompt|delegate] [--format markdown|json] [--output <path>] [--copy]
 gander export [json|markdown|html] [--profile human|agent] [--output <path>]
 gander import <json-artifact>
 gander mark-viewed
@@ -301,7 +300,50 @@ artifacts cross-reference each other). Import currently restores only matching
 viewed state and duplicate-safe comments; exported tasks and walkthroughs are
 not restored by `gander import`.
 
+Delegate mode emits an independently versioned `gander_delegation` packet for
+an external human or agent. It selects open work without mutating review state
+or executing verification text:
+
+```sh
+gander handoff --mode delegate \
+  --task <task-id> --include-comment <comment-id> \
+  --to implementation-agent \
+  --objective "Fix the parser finding and add coverage." \
+  --constraint "Preserve the public API." \
+  --accept "The regression test fails before the fix and passes after it." \
+  --verify "nix run .#ci-test" \
+  --format json
+```
+
+Selectors accept full ids or unambiguous prefixes. With no selectors, delegate
+mode includes open durable tasks and actionable `todo` comments, folds linked
+source comments into task evidence, and excludes resolved comments and closed
+tasks. Packets include source fingerprints, walkthrough context, relevant
+hunks, reply history, and concrete `comments resolve --reply` / `tasks complete
+--summary` return commands. `--verify` is inert requested text; Gander never
+executes it.
+
 `export html` writes a self-contained static review page and rejects an explicitly supplied `--profile`; JSON and Markdown are the complete session artifact formats. `--profile agent` adds all raw hunks and comment excerpts for tools, including resolved comments as reference.
+
+## Bundled agent skills
+
+```sh
+gander skills list [--format text|json]
+gander skills show <name> [--format markdown|json]
+gander skills install [<name>...] [--dir <path>] [--force] [--format text|json]
+```
+
+`skills` commands are embedded, config-free, and repository-free: they run
+without initializing jj or Gander review state. `show` prints the exact bundled
+`SKILL.md` by default. `install` writes `<dir>/<name>/SKILL.md`, validates all
+requested names and overwrite conflicts before writing, and refuses to replace
+files unless `--force` is supplied. The harness-neutral default directory is
+`~/.agents/skills`; use `--dir` for a project or harness-specific location.
+
+The bundled `gander-review` skill teaches read-only review authoring. The
+`gander-address-review` skill teaches an implementation agent to consume a
+handoff, edit/test through external development tools, and then record honest
+reply, resolution, and task-completion evidence in Gander.
 
 ## MCP and ACP
 
