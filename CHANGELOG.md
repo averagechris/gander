@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.7.0 - 2026-07-10
+
 ### Added
 
 - Comments now freeze an optional creation observation and replies capture a
@@ -24,8 +27,8 @@
   and matching MCP tools can drive a running TUI's tour/view through the
   per-instance socket, with modal safety guards.
 - `gander handoff --mode delegate` emits typed Markdown/JSON delegation packets
-  with task/comment selectors, recipient, objective, constraints, acceptance,
-  and verification text.
+  with action-item/comment selectors, recipient, objective, constraints,
+  acceptance, and verification text.
 - `gander skills list/show/install` exposes bundled CLI-first agent skills
   without requiring repository, config, or jj initialization.
 - Comments now carry append-only UUID-addressed replies and `updated_at`
@@ -55,7 +58,8 @@
   walkthroughs, zen/tour mode, drafts, and active ACP/MCP agent-overlay curation
   remain supported.
 - Removed the hidden compatibility `gander handoff --only-open` flag; prompt
-  handoff continues to include only open action items by default.
+  handoff continues to include only open action items and ready (`todo`)
+  comments by default.
 - CLI/help text now describes Gander as local-first durable review state over
   jj-visible work, hides deprecated chunks/briefs from generated help, and
   rejects explicit HTML artifact profiles instead of ignoring them.
@@ -78,7 +82,6 @@
 - Bundled skills no longer contain stale flags or stdin-body examples, and CLI
   parsing/handler validation now enforces comment/task/walkthrough range and
   target invariants consistently.
-
 ## v0.6.1 - 2026-07-05
 
 ### Fixed

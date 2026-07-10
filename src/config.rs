@@ -418,7 +418,6 @@ struct KeybindingsConfigPatch {
     toggle_large_diff: Option<Vec<String>>,
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
-    #[serde(alias = "task-list")]
     open_work: Option<Vec<String>>,
     activity: Option<Vec<String>>,
     walkthrough_list: Option<Vec<String>>,
@@ -1126,21 +1125,6 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
         assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
-    }
-
-    #[test]
-    fn open_work_keybinding_accepts_legacy_task_list_alias() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("legacy.toml");
-        fs::write(&path, "[keybindings]\ntask-list = [\"ctrl-x\"]\n").unwrap();
-
-        let config = Config::load_layers(&[ConfigSource {
-            path,
-            required: true,
-        }])
-        .unwrap();
-
-        assert_eq!(config.keybindings.open_work, ["ctrl-x"]);
     }
 
     #[test]
