@@ -147,6 +147,13 @@ Notes:
 - `tasks` and `walkthroughs` are exported from the active durable session when
   one is present. They are empty arrays otherwise. Task targets and walkthrough
   step targets include local file/line/symbol coordinates when recorded.
+- Export is broader than import: `gander import` currently restores only
+  duplicate-safe comments and viewed files whose diff fingerprints still match
+  the current target. It does not restore `tasks` or `walkthroughs` from the
+  artifact yet.
+- Line anchors are 1-indexed diff lines. New-side/post-image anchors are
+  preferred; old-side coordinates are used only as a fallback for removed-only
+  lines that have no new-side line.
 - `comments[].state` is one of `draft`, `todo`, `resolved`; missing values
   deserialize as `draft` for artifacts written before version 4.
 - `comments[].updated_at` and `comments[].replies` are emitted when present.

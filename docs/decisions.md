@@ -49,7 +49,7 @@ keyed by workspace root:
   `XDG_RUNTIME_DIR` when set, else the state dir
 - `<workspace-key>` = short hash of the canonicalized workspace root plus a
   human-readable slug (e.g. `gander-3f9c2a`), so paths are debuggable
-- explicit overrides stay supported (`--state`, config), and a
+- explicit overrides stay supported (`--state-file`, config), and a
   `gander paths` style command should print resolved locations
 
 **Config is the exception.** A committed `gander.toml` at the repo root is a
@@ -69,7 +69,8 @@ working-copy root.
 (`gander mcp`, stdio), implemented as a thin adapter over the same
 `AcpHandler`/live-socket plumbing that exists today. Tools: `review_summary`,
 `review_files`, `file_diff`, `comments`, `set_ordering`, `flag_section`,
-`set_chunks`, `draft_comment`, plus `current_focus` (what the human is
+`set_chunks` (now a compatibility path behind walkthrough curation),
+`draft_comment`, plus `current_focus` (what the human is
 looking at: instance, file, line, hunk) and `list_reviews` (instance
 registry). Prefer the official Rust MCP SDK (`rmcp`) over hand-rolling;
 MCP's surface (initialization, capabilities, tool schemas) is larger than
@@ -93,7 +94,8 @@ later, but as a *client* role (see D4).
 conversation lives in the user's harness (opencode/claude/... in a split
 pane), which does chat UX (history, modes, permissions, streaming) far
 better than a ratatui side panel would. Gander's inbound channel from agents
-is structured suggestions (ordering, flags, chunks, drafts) plus footer
+is structured suggestions (walkthroughs, ordering, flags, compatibility chunks,
+drafts) plus footer
 status.
 
 **Kept open.** Two smaller affordances may earn their place later:
@@ -104,9 +106,9 @@ status.
   harness's API or MCP sampling; requires gander to act as a spec-ACP
   *client* or harness-API client — deliberately deferred.
 - **zen mode** (`T`/`Z`, formerly tour mode): a focused-walkthrough layer
-  stepping through agent-suggested chunks (or files, chunkless) with their
-  rationale displayed; gander-native, reads the overlay, needs no live
-  agent.
+  stepping through durable walkthrough steps/chapters (or files when no
+  walkthrough exists) with their rationale displayed; gander-native, reads
+  local review state, needs no live agent.
 
 **Why.** The chat panel is where TUIs go to get complicated (focus
 management, scrollback, streaming layout). Zen mode + drafts + `current_focus`

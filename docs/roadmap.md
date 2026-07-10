@@ -196,9 +196,10 @@ below).
   nudge thresholds (`nudge-diff-lines`/`nudge-files`, 0 disables) and no
   agent has organized it yet, the footer hints that an agent can (`@` or
   the harness); re-raised on retarget
-- [x] tour mode (`T`): step through agent-suggested chunks in order with
+- [x] tour mode (`T`): step through agent-suggested review chunks in order with
   rationale displayed in a bottom panel; auto-mark viewed on advance; esc
-  returns to free navigation (evolved into zen mode in milestone 10)
+  returns to free navigation (evolved into walkthrough-backed zen mode in
+  milestone 10)
 - [x] docs: harness setup recipes (docs/harness-setup.md — opencode/claude/
   codex MCP registration, split-pane workflow, attach-to-running-server
   summon commands)
@@ -228,10 +229,10 @@ Status: designed, in progress.
   terminals
 - [x] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
   `jj file show` content; expanded rows not commentable in v1
-- [x] zen mode (tour mode + the above + agent-curated chunks): tour
+- [x] zen mode (tour mode + the above + agent-curated walkthroughs): tour
   evolved into a non-modal walkthrough layer (`T`/`Z`) — file pane
-  hidden, out-of-stop rows dimmed, progress panel, chunkless file-order
-  fallback, full review vocabulary available mid-walkthrough
+  hidden, out-of-stop rows dimmed, progress panel, file-order fallback when no
+  walkthrough exists, full review vocabulary available mid-walkthrough
   (docs/focused-diff-ux.md §6)
 
 ## Milestone 11: first-class review sessions
@@ -256,7 +257,7 @@ task, walkthrough, comment kind, and action-intent fields are now part of
 
 Status: mostly complete. Mutating session/comment/task/walkthrough commands,
 file and hunk queries, JSON/Markdown/HTML exports, and the CLI/MCP parity table
-have landed. Remaining work is a stable `--json` contract audit.
+have landed. Remaining work is a stable JSON contract audit.
 
 - [x] add scriptable commands for sessions, files, hunks, comments, tasks,
   walkthroughs, and exports
@@ -265,7 +266,7 @@ have landed. Remaining work is a stable `--json` contract audit.
   same core service
 - [x] make CLI automation usable without MCP, for users who avoid MCP context
   pollution
-- [ ] audit and freeze a stable `--json` contract across all commands
+- [ ] audit and freeze stable JSON output contracts across commands
 
 ## Milestone 13: TUI over the shared session core
 

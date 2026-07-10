@@ -6,12 +6,13 @@
 > docs/decisions.md D7 and docs/vision.md). The protocol below keeps working
 > in the meantime for the TUI bridge and compatibility.
 
-`gander acp` hosts the review session for agents: a line-delimited JSON-RPC
-2.0 server on stdio (the transport style used by the Agent Client Protocol).
-Agents read the diff, comments, and viewed state, and write review
-suggestions into the shared **agent overlay** (`agent.json` in the
-per-workspace state directory; run `gander paths` to see where), which the
-running TUI polls and surfaces live.
+`gander acp` hosts a lower-level line-delimited JSON-RPC 2.0 server on stdio
+(the transport style used by the Agent Client Protocol). Normal automation
+should prefer the CLI or optional MCP adapter; ACP remains available for the
+TUI live bridge and compatibility. Agents can read the diff, comments, and
+viewed state, and write review suggestions into the shared **agent overlay**
+(`agent.json` in the per-workspace state directory; run `gander paths` to see
+where), which the running TUI polls and surfaces live.
 
 ```sh
 gander --base 'trunk()' --rev '@' acp
@@ -87,7 +88,7 @@ prompt and run a subprocess works.
 | `review/comments` | – | array of comments with `id`, target fields, `body`, `kind`, `action`, `state`, `replies`, `created_at`, and `updated_at` |
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
 | `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
-| `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what chunk parts anchored to this change must reference |
+| `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what compatibility chunk parts anchored to this change must reference |
 | `review/overlay` | – | the full agent overlay (ordering, flags, chunks, change briefs, drafts with dispositions) |
 
 ## Write methods
@@ -99,11 +100,11 @@ within one poll tick.
 | --- | --- | --- |
 | `review/set_ordering` | `{paths: [string]}` | suggested review order, highest priority first; unknown paths are rejected |
 | `review/flag_section` | `{path, line?, reason, priority?}` | flag a critical section (`priority`: `critical`/`high`/`medium`/`low`, default `high`) |
-| `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace the reviewable units. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
+| `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace compatibility reviewable units, which are translated toward walkthrough stops. Prefer walkthrough CLI/MCP tools for new curation. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
 | `review/update_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | upsert reviewable units. Chunks whose `id` matches an existing overlay chunk replace it in place; chunks with new/generated ids append. Response: `{chunks, updated, added}` |
 | `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
 | `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's spotlight stops. Response: `{briefs, warnings}`; warnings are advisory |
-| `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; `line` is new-side, 1-indexed post-image line space for the current session diff; returns `{id}` |
+| `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; `line` is a 1-indexed diff line for the current session diff, preferring new-side/post-image coordinates with old-side fallback for removed-only lines; returns `{id}` |
 
 `artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
 one of `example` (default), `output`, `diagram`, or `note`: exhibits that
@@ -127,7 +128,9 @@ JSON in the same chunk shape: `{ "chunks": [ { "id": "optional", "title":
 omitted `--file` reads stdin.
 Parts must reference a file in the anchored change diff (or the current session
 diff when `change_id` is omitted), and any supplied line range must intersect
-that file's diff line space. Unknown or unresolvable `change_id`s are invalid.
+that file's 1-indexed diff line space. New-side/post-image coordinates are
+preferred; old-side coordinates are accepted only for removed-only lines with no
+new-side line. Unknown or unresolvable `change_id`s are invalid.
 If any part is invalid the entire request is rejected with a JSON-RPC error
 listing the invalid parts; no valid subset is applied.
 
@@ -168,7 +171,8 @@ render on a curated zen chapter right now`. This does not reject the write;
 briefs are often authored before chunks. Use `gander drafts list`,
 `add --file spec.json`, or `remove --id <id>...` with the ACP
 `review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`;
-`line` is the new-side, 1-indexed post-image line in the current session diff)
+`line` is a 1-indexed diff line in the current session diff, new side preferred
+with old-side fallback for removed-only lines)
 or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append pending drafts and
 print the generated ids; remove is strict and rejects unknown ids without
 mutating the overlay. For all three groups, `--file -` or an omitted `--file`

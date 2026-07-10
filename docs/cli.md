@@ -77,12 +77,14 @@ gander comments delete <id> [--format json|text]
 ```
 
 `add` creates a persisted comment. `--line`, `--start-line`, and `--end-line`
-are 1-indexed new-side (post-image) line numbers in the current jj diff;
-omitting them creates a file-level anchor. `edit` updates the body and/or
-re-anchors the comment with the same post-image line semantics, recomputing the
-stored excerpt anchor from the current diff. If a supplied line is not in the
-current diff for the file, Gander stores the comment without an excerpt anchor
-and prints a warning so intentional unchanged-context comments remain possible.
+are 1-indexed diff line anchors, preferring the new side (post-image). For a
+removed-only line with no new-side coordinate, Gander falls back to the old-side
+line in the current jj diff. Omitting them creates a file-level anchor. `edit`
+updates the body and/or re-anchors the comment with the same semantics,
+recomputing the stored excerpt anchor from the current diff. If a supplied line
+is not in either accepted side for the file, Gander stores the comment without
+an excerpt anchor and prints a warning so intentional unchanged-context comments
+remain possible.
 `delete` removes the comment from local Gander review state. Example:
 
 ```json
@@ -123,8 +125,8 @@ ambiguous prefixes are one-line errors. Comment-backed todo entries in
 `tasks list` always carry a string `title` (synthesized from the comment
 body's first line when the comment has no explicit title).
 Example `tasks list`:
-`--line` is a 1-indexed new-side (post-image) line number in the current jj
-diff. `--action` emits `follow-up`; legacy JSON or CLI input spelled
+`--line` is a 1-indexed diff line anchor in the current jj diff: new side
+preferred, old side only for removed-only lines. `--action` emits `follow-up`; legacy JSON or CLI input spelled
 `followup` is still accepted. `--comment` accepts a full comment id or
 unambiguous prefix and stores the canonical full id; unknown or ambiguous
 comment ids are rejected.
@@ -164,8 +166,9 @@ gander walkthrough export
 Walkthroughs are the durable source of truth for zen tours. Steps have a title,
 importance (`spotlight` tours; `glance` lands on the glance board), optional
 why/body/artifacts, an optional change id, and an optional stable target. `--line`
-and `--end-line` are 1-indexed new-side (post-image) line numbers in the current
-jj diff. Chapters introduce stack changes and use `summary` as their narrative.
+and `--end-line` are 1-indexed diff line anchors: new side (post-image)
+preferred, with old-side fallback for removed-only lines in the current jj diff.
+Chapters introduce stack changes and use `summary` as their narrative.
 `walkthrough set` replaces the current walkthrough from `{ "title", "steps" }`
 JSON using the same step fields as state.json. Pass `--dry-run` to validate the
 spec, print diagnostics plus the would-be replacement summary, and echo the
@@ -257,8 +260,9 @@ for the failing path. Unknown spec fields warn
 picks up overlay writes within a poll; the CLI warns when the live session is
 reviewing a different target.
 
-Chunk line numbers live in the new-side (post-image) line space of the
-session diff, or of `<change_id>`'s own diff when the chunk carries a
+Chunk line numbers use the same 1-indexed diff-line semantics as walkthrough
+targets: new side preferred, old side only for removed-only lines, in the
+session diff or in `<change_id>`'s own diff when the chunk carries a
 `change_id` — see `docs/acp.md` for the shared semantics.
 
 ## Live state and the TUI
@@ -266,7 +270,12 @@ session diff, or of `<change_id>`'s own diff when the chunk carries a
 Review-state writes are safe while a TUI holds the session: the TUI watches
 the state file and merges external changes (a CLI-added comment appears in
 the running TUI within a poll and survives the TUI's save/quit). Deletions
-made in the TUI are not resurrected by merges.
+made in the TUI are not resurrected by merges. Remaining limitation: comments
+are merged by id as append-only objects, so two writers updating the same
+comment id are not reconciled by `updated_at`; use `comments edit` from one
+writer at a time until the parallel same-ID comment-update track lands. Tasks,
+walkthroughs, walkthrough steps, and sessions do use newer `updated_at` for
+same-id conflicts.
 
 ## Export/import and state utilities
 
@@ -293,9 +302,11 @@ are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
 `--only-open` is accepted for compatibility and matches the default; `--output`
 writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
 wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
-when you need the full session artifact for import/archive or broad
+when you need the full session artifact for archive/reference or broad
 automation (its H1 is `# Review session export (agent profile)`; the two
-artifacts cross-reference each other).
+artifacts cross-reference each other). Import currently restores only matching
+viewed state and duplicate-safe comments; exported tasks and walkthroughs are
+not restored by `gander import`.
 
 `export html` writes a self-contained static review page. JSON and Markdown are
 the complete session artifact formats; `--profile agent` adds all raw hunks and

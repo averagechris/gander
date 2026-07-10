@@ -48,9 +48,10 @@ This repo is intentionally early, but the first vertical slice is in place:
 - offers split/squash jj helpers that only run after explicit confirmation (`!`)
 - streams diff parsing, renders lazily, and shows placeholders for binary
   files and diffs over a configurable size threshold (`L` to expand)
-- hosts agent-collaborative review over ACP (`gander acp`): agents read the
-  session and suggest ordering (`A`), flag critical sections (`F`), define
-  review chunks (`S`), and draft comments the human triages (`D`)
+- hosts agent-collaborative review through CLI-first workflows, optional MCP
+  (`gander mcp`), and the lower-level ACP bridge (`gander acp`): agents read
+  the session, curate walkthroughs (`W`/`T`), suggest ordering (`A`), flag
+  critical sections (`F`), and draft comments the human triages (`D`)
 - offers optional MCP (`gander mcp`) with live-session tools plus CLI-parity
   tools for reviews, comments, tasks, and walkthroughs; see
   [docs/harness-setup.md](docs/harness-setup.md)
@@ -389,7 +390,7 @@ gander paths
 ```
 
 to print every resolved location for the current workspace. Use
-`--state <path>` to override the state file. Legacy state in a project-local
+`--state-file <path>` to override the state file. Legacy state in a project-local
 `.gander/` directory is migrated to the new location automatically (one
 release of fallback).
 State stores the last reviewed base/revision metadata alongside viewed files and
@@ -428,8 +429,8 @@ full grouped keymap; the footer only shows the everyday hints.
 | `F` | agent-flagged sections popup |
 | `X` | review tasks popup (jump to task-backed comments, cycle state) |
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
-| `S` | agent review chunks popup |
-| `T` / `Z` | zen mode: focused walkthrough of agent chunks (or files), marking files viewed |
+| `S` | deprecated agent chunks popup (compatibility view for walkthrough-backed curation) |
+| `T` / `Z` | zen mode: focused walkthrough of authored steps (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
@@ -459,20 +460,23 @@ Mouse support:
 - click the diff pane to focus/select a diff line
 - click-drag across diff rows to open a range comment editor
 
-## Agent-collaborative review (ACP)
+## Agent-collaborative review
 
-Serve the review session to agents over line-delimited JSON-RPC 2.0 on stdio:
+The normal agent path is CLI-first (`gander reviews`, `comments`, `tasks`,
+`walkthrough`, `handoff`) or typed MCP (`gander mcp`) when a harness benefits
+from tool schemas and live focus. `gander acp` is the lower-level
+line-delimited JSON-RPC bridge used by MCP and live presentation plumbing, not
+the interface most agents need to hand-author:
 
 ```sh
 cargo run -- acp
 ```
 
-Agents can read the diff, comments, and viewed state, and write suggestions
-into the shared agent overlay (`agent.json` in the per-workspace state
-dir): a review ordering, flagged critical sections,
-review chunks, and draft comments. A running TUI polls the overlay and
-surfaces suggestions live; draft dispositions (accept/edit/discard) are
-written back so agents observe the outcome.
+Agents can read the diff, comments, and viewed state, and write review state or
+suggestions: durable walkthrough steps/chapters, a review ordering, flagged
+critical sections, compatibility chunks, and draft comments. A running TUI polls
+the persisted state/overlay and surfaces suggestions live; draft dispositions
+(accept/edit/discard) are written back so agents observe the outcome.
 
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
 It prints an implementation prompt with action items first, then walkthrough
@@ -481,8 +485,10 @@ walkthrough stops.
 Use `gander handoff --format json` for the structured action schema
 `session`, `action_items`, `walkthrough`, and trailing `reference.hunks`; use
 `gander export markdown --profile agent` or `gander export json --profile agent`
-for the full session artifact when you need import/archive fidelity, all hunks,
-and resolved comments as reference rather than a compact implementation handoff.
+for a fuller archive/reference artifact with all hunks and resolved comments.
+Current import restores duplicate-safe comments and matching viewed state only;
+tasks and walkthroughs are exported for reference but are not restored by
+`gander import`.
 
 While the TUI is running it also serves the same protocol on a Unix socket
 (in the workspace runtime dir; see `gander paths`) backed by the **live**
@@ -541,12 +547,13 @@ opencode:
 
 When a review is large (thresholds under `[limits]`), the TUI nudges you
 that an agent can organize it: summon one with `@` or ask your harness,
-then press `T` (or `Z`) for **zen mode** — a focused walkthrough of the
-suggested chunks in order. The file pane hides, rows outside the current
-stop dim so the chunk pops, and a bottom panel shows progress and the
-agent's rationale; advancing (Enter/`n`) marks the file viewed. Without
-agent chunks, zen walks the files in review order instead. Every normal
-review key (comments, flags, context expansion, view toggles) keeps
+then press `T` (or `Z`) for **zen mode** — a focused walkthrough of authored
+steps and chapters. The file pane hides, rows outside the current stop dim, and
+a bottom panel shows progress and rationale; advancing (Enter/`n`) marks the
+file viewed. Without walkthrough steps, zen walks the files in review order
+instead. `chunks`/`briefs` remain compatibility shims that write through toward
+walkthrough curation; prefer `gander walkthrough ...` for new automation. Every
+normal review key (comments, flags, context expansion, view toggles) keeps
 working mid-walkthrough; Esc returns to free navigation.
 
 See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:

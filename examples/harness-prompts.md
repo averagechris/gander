@@ -2,7 +2,7 @@
 
 ## CLI-only path
 
-> Use Gander's CLI only. Do not edit code yet. Create a temp `--state` file,
+> Use Gander's CLI only. Do not edit code yet. Create a temp `--state-file`,
 > run `gander reviews create`, inspect `gander files list` and `gander hunks
 > list/show`, add comments with `gander comments add --kind issue --action fix`
 > for concrete problems, create tasks with `gander tasks add`, then print
@@ -21,5 +21,6 @@
 
 > Organize this review for the human in the adjacent Gander TUI. Use
 > `stack_changes` and `change_diff` for stacked changes, `set_ordering` for
-> risky files first, `flag_section` for sensitive areas, `set_chunks` for a
-> guided zen pass, and `draft_comment` only for comments the human should triage.
+> risky files first, `flag_section` for sensitive areas, walkthrough tools for
+> a guided zen pass (use `set_chunks` only as a compatibility fallback), and
+> `draft_comment` only for comments the human should triage.

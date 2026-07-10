@@ -38,7 +38,7 @@ The expected integration model is that a user or harness prepares a workspace
 where the work is already visible to jj, then invokes Gander there:
 
 ```sh
-gander review create --revset @
+gander reviews create
 gander tui
 ```
 
@@ -60,9 +60,10 @@ local commands/protocols those harnesses can consume.
    must call the same review-domain services. No interface gets separate
    business logic.
 4. **CLI parity is mandatory.** Every capability exposed through MCP or the TUI
-   must have a scriptable CLI equivalent, preferably with stable `--json`
-   output. Many agent workflows should work without MCP to avoid context
-   pollution.
+   must have a scriptable CLI equivalent with stable JSON output where useful
+   (most list/mutation commands default to JSON and use `--format text` for a
+   compact human view). Many agent workflows should work without MCP to avoid
+   context pollution.
 5. **MCP is optional, not privileged.** MCP is a convenience adapter for
    harnesses that want typed tools. It should be thin over the same core API and
    no more capable than the CLI.
@@ -104,7 +105,7 @@ changes, onboarding new contributors, and collaborative teammate review.
 - Add scriptable commands for sessions, files, hunks, comments, tasks,
   walkthroughs, and exports.
 - Ensure mutating review-state commands write only Gander state.
-- Provide stable `--json` output for harnesses and agents.
+- Provide stable JSON output for harnesses and agents.
 - Treat the CLI as the automation contract, not just a human convenience.
 
 Example shape:
@@ -149,10 +150,10 @@ gander walkthrough export
 ### Self-review
 
 ```sh
-gander review create --revset @
+gander reviews create
 gander tui
-gander tasks list --status open --json
-gander walkthrough export --format markdown
+gander tasks list | jq '.tasks[] | select(.status == "open")'
+gander walkthrough export
 ```
 
 ### Reviewing an agent's changes

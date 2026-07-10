@@ -26,13 +26,15 @@ capabilities as MCP tools over the same core business logic.
 Current shape (see [docs/cli.md](cli.md) for the complete reference):
 
 ```sh
+gander reviews create --title "Agent pass"
 gander reviews list
 gander reviews show <id>
+gander comments add --path src/lib.rs --line 42 --kind issue --action fix --body "Check this invariant."
+gander tasks add --title "Tighten invariant" --action fix --comment <comment-id> --path src/lib.rs --line 42
+gander walkthrough add-step --title "Start at the invariant" --path src/lib.rs --line 42 --why "This controls the rest of the change."
+gander walkthrough show
+gander handoff --copy
 gander hunks show <hunk-id>
-gander comments list
-gander tasks list
-gander tasks complete <task-id> --summary "Handled by agent workspace changes"
-gander walkthrough export
 ```
 
 Use MCP when your harness benefits from typed tools and live `current_focus`.
@@ -56,8 +58,9 @@ Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`
 `current_focus` (file/line/hunk the human is looking at right now),
 `stack_changes` (the `trunk()..@` stack, oldest first — treat it like
 stacked PRs), `change_diff` (one change against its parent),
-`set_ordering`, `flag_section`, `set_chunks` (anchor chunks to a stack
-change with `change_id`), `draft_comment`,
+`set_ordering`, `flag_section`, `set_chunks` (deprecated compatibility input;
+prefer `walkthrough_*` for new curation, with optional stack `change_id`),
+`draft_comment`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
 `comment_*`, `task_*`/`tasks_list`, and `walkthrough_*`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
@@ -65,10 +68,13 @@ via `S` and zen mode `T`/`Z`, drafts via `D`).
 
 The CLI-parity state-file tools load and save the persisted review state
 directly, matching the corresponding `gander reviews`, `comments`, `tasks`,
-and `walkthrough` commands. They are best used when no TUI is actively
-autosaving: the TUI holds review state in memory and writes it back on save or
-quit, so concurrent state-file edits can be overwritten by an older in-memory
-snapshot.
+and `walkthrough` commands. They are safe to use beside a live TUI: the TUI
+watches the state file and merges external additions/updates before saving, so
+CLI-added comments, tasks, and walkthrough steps survive TUI save/quit. The
+remaining caveat is same-ID comment updates: comments are currently merged by id
+as append-only objects, so two writers editing the same comment are not
+reconciled by `updated_at`. Same-ID conflicts for sessions, tasks,
+walkthroughs, and walkthrough steps prefer the newer timestamp.
 
 ### MCP ⇄ CLI parity table
 
@@ -172,9 +178,9 @@ D4). The recommended setup is two panes in the same directory:
 2. start your harness in the other pane, same cwd, with the gander MCP
    server registered;
 3. talk to the harness about the review. Useful prompts:
-   - *"Use gander's review_summary and set_chunks to break this change
-     into reviewable units, ordered by risk."* — then press `T` in gander
-     for a zen walkthrough of the chunks;
+   - *"Use gander's review_summary and walkthrough tools to break this change
+     into reviewable steps and chapters, ordered by risk."* — then press `T` in
+     gander for a zen walkthrough;
    - *"Flag anything security-sensitive with flag_section."* — flags show
      as red `!` pins, `F` lists them;
    - *"What am I looking at?"* / *"Explain this function."* — the harness
@@ -226,7 +232,9 @@ agent how to reach the review session and what to do with it.
 
 - `gander mcp` with no TUI: snapshot-backed tools for one-shot agent
   passes (e.g. CI review bots).
-- `gander acp`: the raw line-delimited JSON-RPC socket bridge, kept for
-  scripting (docs/acp.md).
+- `gander acp`: lower-level line-delimited JSON-RPC bridge for compatibility
+  and live-session plumbing. Prefer CLI or MCP for normal agent harnesses.
 - `gander export --profile agent`: a static JSON artifact with raw
-  excerpts and stable anchors when you don't need a live session.
+  excerpts and stable anchors when you don't need a live session. It is an
+  archive/reference artifact; import currently restores comments and matching
+  viewed state, not tasks or walkthroughs.

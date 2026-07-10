@@ -21,6 +21,9 @@
 
 ### Fixed
 
+- Documentation and examples now use current CLI syntax (`--state-file`,
+  per-command `--format`, `reviews`/`walkthrough` commands) and clarify current
+  line-anchor, import, MCP/ACP, and concurrent state-merge semantics.
 - Comment input supports readline-style line editing shortcuts: Ctrl+U
   deletes to the start of the current line, Ctrl+K deletes to the end,
   Ctrl+W deletes the previous word, Ctrl+A/Ctrl+E move to line

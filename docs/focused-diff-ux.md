@@ -272,25 +272,25 @@ then everything mechanical acknowledged in bulk. Design decisions:
     comments, flags, context expansion, split view, search — works here;
     only stop-navigation keys are intercepted.
   - *At a glance slide* (`g`, or automatically after the last stop): every
-    glance chunk plus every file no chunk part covers, one clean line each
+    glance walkthrough step plus every file no walkthrough/chunk part covers, one clean line each
     (`path:line — title/why`, viewed check). `enter` jumps
     into the diff and ends zen; `a` bulk-marks all glance files viewed
     and finishes. The board is modal — other keys are swallowed so
     normal actions cannot fire invisibly.
 - **Attention budget is agent-enforced.** The summon prompt instructs
-  agents: at most 3–7 `importance=spotlight` chunks, each with precise
+  agents: at most 3–7 `importance=spotlight` walkthrough steps, each with precise
   line ranges and a 2–5 sentence `explanation` that teaches the change;
-  ALL remaining hunks grouped into `importance=glance` chunks. Uncovered
+  ALL remaining hunks grouped into `importance=glance` steps. Uncovered
   files still land on the glance board, so the briefing always covers
   the whole change even with a sloppy agent.
-- **Chunkless fallback.** With no agent chunks, stops are one-per-file in
-  display order (agent `set_ordering` respected). Zen is useful
-  standalone; agents upgrade it from "flip through files" to "be taught
-  the change".
+- **Walkthroughless fallback.** With no authored walkthrough steps, stops are
+  one-per-file in display order (agent `set_ordering` respected). Zen is useful
+  standalone; agents upgrade it from "flip through files" to "be taught the
+  change".
 - **Framing.** The file pane hides on entry (visibility restored on
   exit). In the reading view, rows outside the stop's range dim; the
   cursor row never dims. Whole-file stops dim nothing.
-- **Stacked walkthroughs.** Chunks anchored to a jj change (`change_id`)
+- **Stacked walkthroughs.** Steps anchored to a jj change (`change_id`)
   make zen retarget the review to that change's own diff
   (`change-..change`) for the stop — the tour flows through the stack
   like stacked PRs, and ending zen returns to the home target. Zen-driven
@@ -305,7 +305,7 @@ then everything mechanical acknowledged in bulk. Design decisions:
   builds on the previous changes). Every walkthrough gets an opening
   chapter for its home target (single-change targets resolve their
   description; multi-change ranges stay generic rather than showing the
-  tip's description), so even the chunkless fallback starts with the big
+  tip's description), so even the walkthroughless fallback starts with the big
   picture. Chapter cards mark nothing viewed; the progress strip renders
   chapters as `▎` bars grouping the stop dots; human-facing stop numbers
   count spotlight stops only. Cards show the change's *full* description
