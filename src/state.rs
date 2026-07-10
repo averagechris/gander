@@ -74,7 +74,48 @@ pub struct Comment {
     pub action: Option<ActionIntent>,
     #[serde(default)]
     pub state: CommentState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<CommentReply>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Default for Comment {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            path: String::new(),
+            line: None,
+            end_line: None,
+            anchor: None,
+            body: String::new(),
+            kind: None,
+            action: None,
+            state: CommentState::default(),
+            replies: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CommentReply {
+    pub id: String,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for CommentReply {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            body: String::new(),
+            created_at: chrono::Utc::now(),
+        }
+    }
 }
 
 /// Durable local review session over a jj-visible code state.
@@ -303,12 +344,7 @@ impl ReviewState {
     /// later save cannot clobber writes from CLI/MCP processes.
     pub fn merge_external(&mut self, external: ReviewState, tombstones: &ReviewStateTombstones) {
         self.merge_external_files(external.files);
-        merge_vec_by_id(
-            &mut self.comments,
-            external.comments,
-            &tombstones.comments,
-            |_, _| false,
-        );
+        merge_comments(&mut self.comments, external.comments, &tombstones.comments);
         self.merge_external_sessions(external.sessions, tombstones);
     }
 
@@ -400,7 +436,55 @@ fn prefer_external_by_updated_at(
     local: Option<chrono::DateTime<chrono::Utc>>,
     external: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    matches!((local, external), (Some(local), Some(external)) if external > local)
+    match (local, external) {
+        (None, Some(_)) => true,
+        (Some(local), Some(external)) => external > local,
+        _ => false,
+    }
+}
+
+fn merge_comments(local: &mut Vec<Comment>, external: Vec<Comment>, tombstones: &BTreeSet<String>) {
+    for mut external_comment in external {
+        if tombstones.contains(&external_comment.id) {
+            continue;
+        }
+        if let Some(local_comment) = local
+            .iter_mut()
+            .find(|comment| comment.id == external_comment.id)
+        {
+            merge_comment_replies(local_comment, &external_comment);
+            external_comment.replies = local_comment.replies.clone();
+            if *local_comment != external_comment
+                && prefer_external_by_updated_at(
+                    local_comment.updated_at,
+                    external_comment.updated_at,
+                )
+            {
+                *local_comment = external_comment;
+            }
+        } else {
+            local.push(external_comment);
+        }
+    }
+}
+
+fn merge_comment_replies(local: &mut Comment, external: &Comment) {
+    for external_reply in &external.replies {
+        if let Some(local_reply) = local
+            .replies
+            .iter_mut()
+            .find(|reply| reply.id == external_reply.id)
+        {
+            if external_reply.created_at > local_reply.created_at {
+                *local_reply = external_reply.clone();
+            }
+        } else {
+            local.replies.push(external_reply.clone());
+        }
+    }
+    local
+        .replies
+        .sort_by_key(|reply| (reply.created_at, reply.id.clone()));
 }
 
 trait Identified {
@@ -560,6 +644,7 @@ mod tests {
             action: None,
             state: CommentState::Draft,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         }
     }
 
@@ -741,6 +826,45 @@ mod tests {
 
         assert_eq!(local.comments[0].body, "local");
         assert_eq!(local.sessions[0].title.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn merge_external_unions_replies_for_same_comment_id() {
+        let mut local = ReviewState {
+            comments: vec![comment("comment", "local")],
+            ..Default::default()
+        };
+        local.comments[0].replies.push(CommentReply {
+            id: "local-reply".into(),
+            body: "local".into(),
+            created_at: chrono::Utc::now(),
+        });
+        let mut external = ReviewState {
+            comments: vec![comment("comment", "external")],
+            ..Default::default()
+        };
+        external.comments[0].updated_at = Some(chrono::Utc::now() + chrono::TimeDelta::seconds(1));
+        external.comments[0].replies.push(CommentReply {
+            id: "external-reply".into(),
+            body: "external".into(),
+            created_at: chrono::Utc::now(),
+        });
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(local.comments[0].body, "external");
+        assert!(
+            local.comments[0]
+                .replies
+                .iter()
+                .any(|reply| reply.id == "local-reply")
+        );
+        assert!(
+            local.comments[0]
+                .replies
+                .iter()
+                .any(|reply| reply.id == "external-reply")
+        );
     }
 
     #[test]

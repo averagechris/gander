@@ -82,7 +82,8 @@ scriptable surface.
 | `reviews_show` | `gander reviews show <id>` |
 | `reviews_create` | `gander reviews create [--title <title>]` |
 | `comment_add` | `gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> [--kind ...] [--action ...]` |
-| `comment_resolve` | `gander comments resolve <id>` |
+| `comment_reply` | `gander comments reply <id> --body <text> [--resolve]` |
+| `comment_resolve` | `gander comments resolve <id> [--reply <text>]` |
 | `comment_set_state` | `gander comments set-state <id> --state draft|todo|resolved` |
 | `task_add` | `gander tasks add --title <title> [--body <text>] [--action ...] [--comment <id>] [--path <path>] [--line <n>]` |
 | `task_complete` | `gander tasks complete <id> [--summary <text>]` |

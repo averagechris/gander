@@ -258,7 +258,12 @@ impl AcpHandler {
                         "line": comment.line,
                         "end_line": comment.end_line,
                         "body": comment.body,
+                        "kind": comment.kind,
+                        "action": comment.action,
                         "state": comment.state.label(),
+                        "replies": comment.replies,
+                        "created_at": comment.created_at,
+                        "updated_at": comment.updated_at,
                     }))
                     .collect::<Vec<_>>()
             )),

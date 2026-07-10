@@ -231,6 +231,24 @@ pub struct CommentSetStateParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentReplyParams {
+    /// Full id or unambiguous id prefix. Equivalent to `gander comments reply <id>`.
+    pub id: String,
+    /// Reply body text. Must contain non-whitespace text.
+    pub body: String,
+    /// Also mark the parent comment resolved after appending the reply.
+    pub resolve: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentResolveParams {
+    /// Full id or unambiguous id prefix. Equivalent to `gander comments resolve <id>`.
+    pub id: String,
+    /// Optional reply body to append before resolving.
+    pub reply: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TaskAddParams {
     /// Task title. Equivalent to `gander tasks add <title>`.
     pub title: String,
@@ -580,15 +598,44 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Resolve a durable review comment. Equivalent to `gander comments resolve <id>`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+        description = "Resolve a durable review comment, optionally appending a reply first. Equivalent to `gander comments resolve <id> [--reply <text>]`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
     )]
     fn comment_resolve(
         &self,
-        Parameters(params): Parameters<IdParams>,
+        Parameters(params): Parameters<CommentResolveParams>,
     ) -> Result<CallToolResult, McpError> {
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
-            review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &params.id)
+            if let Some(reply) = params.reply {
+                review::reply_and_maybe_resolve_comment(
+                    &mut state.sessions[idx],
+                    &mut state.comments,
+                    &params.id,
+                    reply,
+                    true,
+                )
+            } else {
+                review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &params.id)
+            }
+        })
+    }
+
+    #[tool(
+        description = "Append a durable reply to a review comment. Equivalent to `gander comments reply <id> --body <text> [--resolve]`. Best used when no TUI is actively autosaving, because the TUI holds review state in memory."
+    )]
+    fn comment_reply(
+        &self,
+        Parameters(params): Parameters<CommentReplyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::reply_and_maybe_resolve_comment(
+                &mut state.sessions[idx],
+                &mut state.comments,
+                &params.id,
+                params.body,
+                params.resolve.unwrap_or(false),
+            )
         })
     }
 

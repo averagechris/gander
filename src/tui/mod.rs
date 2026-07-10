@@ -4004,6 +4004,7 @@ mod tests {
             action: Some(ActionIntent::Fix),
             state: CommentState::Todo,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
         ensure_tui_review_session(&mut session)
             .tasks
@@ -4353,6 +4354,7 @@ mod tests {
             action: None,
             state: CommentState::Draft,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
         on_disk.save(&state_path).unwrap();
 
@@ -4630,6 +4632,7 @@ mod tests {
             action: None,
             state: CommentState::Draft,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
         initial.save(&state_path).unwrap();
 
@@ -4662,6 +4665,7 @@ mod tests {
             action: None,
             state: CommentState::Draft,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
         external.save(&state_path).unwrap();
         session.toggle_viewed();

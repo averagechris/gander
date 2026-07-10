@@ -495,11 +495,28 @@ enum CommentsCommand {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Mark a comment resolved by id or unique id prefix.
+    /// Mark a comment resolved by id or unique id prefix, optionally appending a reply first.
     Resolve {
         /// Comment id or unique id prefix.
         id: String,
+        /// Reply body to append before resolving.
+        #[arg(long)]
+        reply: Option<String>,
         /// Echo format for the resolved comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Append a durable reply to a comment by id or unique id prefix.
+    Reply {
+        /// Comment id or unique id prefix.
+        id: String,
+        /// Reply body text (must contain non-whitespace text).
+        #[arg(long)]
+        body: String,
+        /// Also mark the parent comment resolved after appending the reply.
+        #[arg(long)]
+        resolve: bool,
+        /// Echo format for the updated comment.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
@@ -1301,14 +1318,56 @@ fn run() -> color_eyre::Result<()> {
                     ListFormat::Text => print!("{}", comment_echo_text(&comment)),
                 }
             }
-            CommentsCommand::Resolve { id, format } => {
+            CommentsCommand::Resolve { id, reply, format } => {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
-                let comment =
+                let comment = if let Some(reply) = reply {
+                    review::reply_and_maybe_resolve_comment(
+                        &mut state.sessions[idx],
+                        &mut state.comments,
+                        &id,
+                        reply,
+                        true,
+                    )
+                } else {
                     review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)
-                        .map_err(|error| user_error(error.to_string()))?;
+                }
+                .map_err(|error| user_error(error.to_string()))?;
+                state.save(&state_path)?;
+                match format {
+                    ListFormat::Json => print_json(&comment)?,
+                    ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
+            }
+            CommentsCommand::Reply {
+                id,
+                body,
+                resolve,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let comment = if resolve {
+                    review::reply_and_maybe_resolve_comment(
+                        &mut state.sessions[idx],
+                        &mut state.comments,
+                        &id,
+                        body,
+                        true,
+                    )
+                } else {
+                    review::reply_to_comment(
+                        &mut state.sessions[idx],
+                        &mut state.comments,
+                        &id,
+                        body,
+                    )
+                }
+                .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&comment)?,
@@ -2777,11 +2836,12 @@ fn session_comments_text(session: &ReviewSession) -> String {
     let mut out = String::new();
     for c in &session.comments {
         out.push_str(&format!(
-            "{:<8} [{:<8}] {:<20} {:<36} {}\n",
+            "{:<8} [{:<8}] {:<20} {:<36} r{:<2} {}\n",
             &c.id[..c.id.len().min(8)],
             c.state.label(),
             format!("[{}/{}]", kind_label(c.kind), action_label_opt(c.action)),
             ellipsize(&loc(&c.path, c.line, c.end_line), 36),
+            c.replies.len(),
             ellipsize(&c.body, 80)
         ));
     }
@@ -4007,6 +4067,7 @@ mod tests {
             action: Some(crate::state::ActionIntent::Fix),
             state: crate::state::CommentState::Todo,
             created_at: chrono::Utc.with_ymd_and_hms(2026, 7, 4, 0, 0, 0).unwrap(),
+            ..Default::default()
         });
         ReviewSession::new(
             PathBuf::from("/repo"),
@@ -4030,7 +4091,7 @@ mod tests {
         let text = session_comments_text(&sample_session());
         assert_eq!(
             text,
-            "c1       [todo    ] [issue/fix]          src/lib.rs:2                         please fix\n"
+            "c1       [todo    ] [issue/fix]          src/lib.rs:2                         r0  please fix\n"
         );
     }
 

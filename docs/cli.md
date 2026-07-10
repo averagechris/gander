@@ -68,7 +68,8 @@ gander comments list [--format json|text]
 gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
   [--kind note|issue|question|praise] [--action fix|explain|test|follow-up] \
   [--format json|text]
-gander comments resolve <id> [--format json|text]
+gander comments reply <id> --body <text> [--resolve] [--format json|text]
+gander comments resolve <id> [--reply <text>] [--format json|text]
 gander comments set-state <id> --state draft|todo|resolved [--format json|text]
 gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
   [--body <text>] [--format json|text]
@@ -97,8 +98,11 @@ and prints a warning so intentional unchanged-context comments remain possible.
 }
 ```
 
-`comments list` returns `{ "comments": [...] }`. `resolve` is a convenience for
-`set-state --state resolved`.
+`comments list` returns `{ "comments": [...] }`. `reply` appends an immutable
+UUID-addressed reply with a timestamp and updates the parent comment's
+`updated_at`; `--resolve` also marks the parent resolved. `resolve` is a
+convenience for `set-state --state resolved`, and `--reply` first appends the
+given reply before resolving.
 
 ## Tasks
 

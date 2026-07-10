@@ -5722,6 +5722,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             action: None,
             state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
         session.comments.push(Comment {
             id: "c2".to_owned(),
@@ -5734,6 +5735,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             action: None,
             state: crate::state::CommentState::default(),
             created_at: chrono::Utc::now(),
+            ..Default::default()
         });
 
         let rendered = render_tui_text(&session, &Mode::Normal, 100, 16);

@@ -1586,6 +1586,7 @@ diff --git a/b.rs b/b.rs
             action: None,
             state: crate::state::CommentState::Todo,
             created_at: chrono::Utc::now(),
+            ..Default::default()
         }
     }
 

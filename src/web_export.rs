@@ -180,10 +180,19 @@ fn render_comment(out: &mut String, comment: &Comment) {
         esc_to(out, &format!("{action:?}").to_lowercase());
         out.push_str("</span>");
     }
+    out.push_str("<span class=\"pill\">id ");
+    esc_to(out, &comment.id[..comment.id.len().min(8)]);
+    out.push_str("</span><span class=\"pill\">replies ");
+    esc_to(out, &comment.replies.len().to_string());
+    out.push_str("</span>");
     out.push_str("<span class=\"loc\">");
     esc_to(out, &line_range(comment.line, comment.end_line));
     out.push_str("</span></div><p>");
     esc_to(out, &comment.body);
+    for reply in &comment.replies {
+        out.push_str("</p><p class=\"reply\"><strong>Reply:</strong> ");
+        esc_to(out, &reply.body);
+    }
     out.push_str("</p></article>");
 }
 
@@ -304,6 +313,7 @@ mod tests {
             action: None,
             state: CommentState::Draft,
             created_at: Utc::now(),
+            ..Default::default()
         });
         state.sessions.push(crate::state::ReviewSession {
             id: "s1".into(),

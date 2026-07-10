@@ -525,12 +525,34 @@ pub fn import_json_artifact_into_state(
     }
 
     for comment in &artifact.comments {
-        if state
+        if let Some(existing) = state
             .comments
-            .iter()
-            .any(|existing| existing.id == comment.id)
+            .iter_mut()
+            .find(|existing| existing.id == comment.id)
         {
-            summary.duplicate_comments_skipped += 1;
+            let before = existing.clone();
+            for reply in &comment.replies {
+                if !existing
+                    .replies
+                    .iter()
+                    .any(|existing_reply| existing_reply.id == reply.id)
+                {
+                    existing.replies.push(reply.clone());
+                }
+            }
+            existing
+                .replies
+                .sort_by_key(|reply| (reply.created_at, reply.id.clone()));
+            if comment.updated_at > existing.updated_at {
+                let replies = existing.replies.clone();
+                *existing = comment.clone();
+                existing.replies = replies;
+            }
+            if *existing == before {
+                summary.duplicate_comments_skipped += 1;
+            } else {
+                summary.comments_imported += 1;
+            }
         } else {
             state.comments.push(comment.clone());
             summary.comments_imported += 1;
@@ -626,6 +648,7 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
             out.push_str(&format!("Status: {}\n\n", comment.comment.state.label()));
             out.push_str(comment.comment.body.trim());
             out.push_str("\n\n");
+            write_comment_replies(&mut out, comment.comment);
         }
     }
 
@@ -778,7 +801,11 @@ fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
                     out.push_str("; linked to task ");
                     out.push_str(&linked_tasks.join(", "));
                 }
-                out.push('\n');
+                out.push_str(&format!(
+                    "\n  ID: `{}`; reply: `gander comments reply {} --body <text>`; resolve: `gander comments resolve {} --reply <text>`\n",
+                    comment.comment.id, comment.comment.id, comment.comment.id
+                ));
+                write_comment_replies(out, comment.comment);
                 write_excerpt(out, comment.excerpt.as_deref());
             }
         }
@@ -804,6 +831,7 @@ fn write_other_comments(artifact: &ReviewArtifact<'_>, out: &mut String) {
         ));
         out.push_str(comment.comment.body.trim());
         out.push_str("\n\n");
+        write_comment_replies(out, comment.comment);
         write_excerpt(out, comment.excerpt.as_deref());
     }
     if !other {
@@ -1077,6 +1105,7 @@ fn write_target_suffix(out: &mut String, target: &TargetArtifact<'_>) {
 }
 
 fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
+    out.push_str(&format!("<!-- comment-id: {} -->\n", comment.id));
     match comment.anchor.as_ref() {
         Some(CommentAnchor::Line {
             path,
@@ -1131,6 +1160,22 @@ fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
             None => out.push_str(&format!("### `{}`\n\n", comment.path)),
         },
     }
+}
+
+fn write_comment_replies(out: &mut String, comment: &crate::state::Comment) {
+    if comment.replies.is_empty() {
+        return;
+    }
+    out.push_str("Replies:\n");
+    for reply in &comment.replies {
+        out.push_str(&format!(
+            "- `{}` at `{}`: {}\n",
+            reply.id,
+            reply.created_at,
+            reply.body.trim()
+        ));
+    }
+    out.push('\n');
 }
 
 #[cfg(test)]
@@ -2092,6 +2137,7 @@ mod tests {
             created_at: chrono::DateTime::parse_from_rfc3339("2026-06-30T00:00:00Z")
                 .unwrap()
                 .with_timezone(&chrono::Utc),
+            ..Default::default()
         });
         let artifact: OwnedReviewArtifact = serde_json::from_str(
             r#"{

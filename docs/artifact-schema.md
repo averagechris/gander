@@ -95,6 +95,14 @@ config.
       "state": "draft",
       "linked_task_ids": ["task-id"],
       "created_at": "2026-06-30T00:00:00Z",
+      "updated_at": "2026-06-30T00:05:00Z",
+      "replies": [
+        {
+          "id": "reply-uuid",
+          "body": "Acknowledged; resolving after the fix.",
+          "created_at": "2026-06-30T00:05:00Z"
+        }
+      ],
       "excerpt": [
         { "kind": "context", "old_line": 40, "new_line": 40, "text": "    before();" },
         { "kind": "added", "new_line": 42, "text": "    new_call();" },
@@ -141,10 +149,15 @@ Notes:
   step targets include local file/line/symbol coordinates when recorded.
 - `comments[].state` is one of `draft`, `todo`, `resolved`; missing values
   deserialize as `draft` for artifacts written before version 4.
+- `comments[].updated_at` and `comments[].replies` are emitted when present.
+  Replies are append-only objects with stable UUID `id`, `body`, and
+  `created_at`. Import merges same-id comments by timestamp and unions replies,
+  so newer reply/state data is not dropped as a duplicate.
 
 ## Version history
 
-- `5`: active durable session metadata plus session `tasks` and `walkthroughs`.
+- `5`: active durable session metadata plus session `tasks` and `walkthroughs`;
+  comment `updated_at` and append-only `replies` are backward-compatible fields.
 - `4`: comment `state`, optional `profile` marker, agent-profile `hunks` and
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).

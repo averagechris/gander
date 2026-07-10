@@ -7,8 +7,9 @@ use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
 
 use crate::state::{
-    ActionIntent, Comment, CommentKind, CommentState, ReviewSession, ReviewSessionStatus,
-    ReviewState, ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
+    ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession,
+    ReviewSessionStatus, ReviewState, ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough,
+    WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,13 @@ pub struct SessionTargetSpec {
     pub base: Option<String>,
     pub revision: Option<String>,
     pub revset: Option<String>,
+}
+
+pub fn validate_body(body: &str, label: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        return Err(eyre!("{label} must contain non-whitespace text"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -186,6 +194,8 @@ pub fn add_comment(
     comments: &mut Vec<Comment>,
     new: NewComment,
 ) -> Comment {
+    validate_body(&new.body, "comment body").expect("callers must validate comment bodies");
+    let now = chrono::Utc::now();
     let comment = Comment {
         id: uuid::Uuid::new_v4().to_string(),
         path: new.path,
@@ -196,7 +206,9 @@ pub fn add_comment(
         kind: new.kind,
         action: new.action,
         state: CommentState::Draft,
-        created_at: chrono::Utc::now(),
+        replies: Vec::new(),
+        created_at: now,
+        updated_at: Some(now),
     };
     comments.push(comment.clone());
     touch(session);
@@ -215,6 +227,7 @@ pub fn set_comment_state(
         .find(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
     comment.state = new_state;
+    comment.updated_at = Some(chrono::Utc::now());
     touch(session);
     Ok(comment.clone())
 }
@@ -225,6 +238,42 @@ pub fn resolve_comment(
     id: &str,
 ) -> Result<Comment> {
     set_comment_state(session, comments, id, CommentState::Resolved)
+}
+
+pub fn reply_to_comment(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    id: &str,
+    body: String,
+) -> Result<Comment> {
+    reply_and_maybe_resolve_comment(session, comments, id, body, false)
+}
+
+pub fn reply_and_maybe_resolve_comment(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    id: &str,
+    body: String,
+    resolve: bool,
+) -> Result<Comment> {
+    validate_body(&body, "reply body")?;
+    let canonical_id = resolve_comment_id(comments, id)?;
+    let comment = comments
+        .iter_mut()
+        .find(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
+    let now = chrono::Utc::now();
+    comment.replies.push(CommentReply {
+        id: uuid::Uuid::new_v4().to_string(),
+        body,
+        created_at: now,
+    });
+    if resolve {
+        comment.state = CommentState::Resolved;
+    }
+    comment.updated_at = Some(now);
+    touch(session);
+    Ok(comment.clone())
 }
 
 pub fn edit_comment(
@@ -251,8 +300,10 @@ pub fn edit_comment(
         comment.anchor = anchor;
     }
     if let Some(body) = edits.body {
+        validate_body(&body, "comment body")?;
         comment.body = body;
     }
+    comment.updated_at = Some(chrono::Utc::now());
     touch(session);
     Ok(comment.clone())
 }
@@ -671,6 +722,7 @@ mod tests {
                 action: None,
                 state: CommentState::Todo,
                 created_at: chrono::Utc::now(),
+                ..Default::default()
             }
         }
         let session = ReviewSession::default();
@@ -726,6 +778,7 @@ mod tests {
                 action: None,
                 state: CommentState::Draft,
                 created_at: chrono::Utc::now(),
+                ..Default::default()
             }
         }
         let comments = vec![
@@ -775,5 +828,31 @@ mod tests {
             a.id
         );
         assert_eq!(session.walkthroughs[0].steps.len(), 1);
+    }
+
+    #[test]
+    fn replies_append_and_can_resolve_with_timestamp() {
+        let mut session = ReviewSession::default();
+        let mut comments = vec![Comment {
+            id: "abcdef00".into(),
+            ..Default::default()
+        }];
+
+        let replied = reply_to_comment(&mut session, &mut comments, "abc", "done".into()).unwrap();
+        assert_eq!(replied.replies.len(), 1);
+        assert_eq!(replied.state, CommentState::Draft);
+        assert!(replied.updated_at.is_some());
+
+        let resolved = reply_and_maybe_resolve_comment(
+            &mut session,
+            &mut comments,
+            "abc",
+            "fixed".into(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(resolved.replies.len(), 2);
+        assert_eq!(resolved.state, CommentState::Resolved);
+        assert!(reply_to_comment(&mut session, &mut comments, "abc", "  ".into()).is_err());
     }
 }

@@ -1913,7 +1913,9 @@ impl ReviewSession {
             kind: None,
             action: None,
             state: CommentState::default(),
+            replies: Vec::new(),
             created_at,
+            updated_at: Some(created_at),
         });
     }
 
@@ -2772,6 +2774,7 @@ diff --git a/src/c.rs b/src/c.rs
             action: None,
             state: CommentState::Draft,
             created_at: Utc::now(),
+            ..Default::default()
         }
     }
 
