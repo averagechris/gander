@@ -1,6 +1,6 @@
 ---
 name: gander-address-review
-description: Address Gander review comments or tasks, then update durable Gander review state with the outcome.
+description: Address Gander todo comments or action items, then update durable Gander review state with the outcome.
 ---
 
 # Address a Gander Review
@@ -8,16 +8,16 @@ description: Address Gander review comments or tasks, then update durable Gander
 Use when a Gander handoff, delegation packet, or local session asks you to fix review feedback. Gander stores review state; use the reviewed project's normal tools to edit and check code.
 
 1. **Target the reviewed workspace.** If you are operating from another cwd, pass `--repo <reviewed-workspace>` to Gander commands. If a packet supplies repository/base/revision, preserve those global options (`--repo`, `--base`, `--rev`) in return commands. `--state-file` only selects review-state storage; it does not select the code workspace.
-2. **Read the relevant open items.** Commands accept compact unique ID prefixes (minimum 8 chars, longer only on collisions). Prompt handoff includes only open tasks and `todo` comments. Treat every todo comment as a request to address it, regardless of whether it is phrased as a question, explanation, praise, or `action=none`. Draft comments are private/withheld and should not appear in delegation unless the reviewer first readied them; resolved comments are history/reference. Use the packet/handoff selectors or list state:
+2. **Read the relevant open items.** Commands accept compact unique ID prefixes (minimum 8 chars, longer only on collisions). Prompt handoff includes open durable action items plus unlinked `todo` comments. Treat every todo comment as a request to address it, regardless of whether it is phrased as a question, explanation, praise, or `action=none`. Ordinary draft comments are private/withheld and are not action items; resolved comments are history/reference. Linked todo comments are evidence on their parent action item, not duplicate bullets. Use the packet/handoff selectors or list state:
    ```bash
    gander --repo <reviewed-workspace> comments list
-   gander --repo <reviewed-workspace> tasks list
+   gander --repo <reviewed-workspace> action-items list
    ```
 3. **Make the code/docs changes** with the project's usual edit, build, and test workflow.
-4. **Update Gander state concisely.** Reply/resolve comments and complete tasks with what changed and what was actually checked:
+4. **Update Gander state concisely.** Reply/resolve comments and close action items with what changed and what was actually checked:
    ```bash
    gander --repo <reviewed-workspace> comments resolve <comment-prefix> --reply '<what changed; what was checked>'
-   gander --repo <reviewed-workspace> tasks complete <task-prefix> --summary '<what changed; what was checked>'
+   gander --repo <reviewed-workspace> action-items close <item-prefix> --disposition completed --summary '<what changed; what was checked>'
    ```
 5. **If follow-up remains, record it** instead of claiming it is done. New
    comments default to the reviewer's configured initial state; pass `--state

@@ -24,7 +24,7 @@ How well machine-readable or agent-profile output supports autonomous coding age
 
 - **1:** Agents must re-discover the diff and review state from scratch because exports are missing anchors or actionable metadata.
 - **3:** Agents can reconstruct the review with multiple commands and raw hunks, but action state, excerpts, or relationships are fragmented.
-- **5:** A single structured artifact gives agents target metadata, comments, tasks, walkthroughs, exact anchors, and compact code excerpts.
+- **5:** A single structured artifact gives agents target metadata, comments, action items, walkthroughs, exact anchors, and compact code excerpts.
 
 ## Handoff readiness
 
@@ -32,7 +32,7 @@ How complete the review state is as a one-shot handoff from reviewer to implemen
 
 - **1:** Handoff is mostly a transcript or loose notes; important intent must be inferred.
 - **3:** Handoff contains the key findings, but an implementer still needs to stitch together commands or re-read broad diff context.
-- **5:** Handoff is directly actionable: ordered priorities, linked tasks/comments, anchors, excerpts, target range, and expected fixes are bundled.
+- **5:** Handoff is directly actionable: ordered priorities, linked action items/comments, anchors, excerpts, target range, and expected fixes are bundled.
 
 ## TUI review ergonomics
 

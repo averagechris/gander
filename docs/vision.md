@@ -17,7 +17,7 @@ Gander should read code state and write review state.
 It owns:
 
 - reading jj changes, revsets, files, hunks, symbols, and diff context;
-- durable review sessions, viewed state, comments, tasks, walkthroughs, and
+- durable review sessions, viewed state, comments, optional action items, walkthroughs, and
   exported artifacts;
 - local review navigation in the TUI and future web/static views;
 - machine-readable automation through a complete CLI surface and optional MCP
@@ -70,7 +70,7 @@ local commands/protocols those harnesses can consume.
 6. **Durable review sessions are the core product object.** A diff is input;
    the durable session is the thing Gander creates, resumes, exports, and shares
    with agents.
-7. **Private thinking precedes publishing.** Comments, tasks, and walkthroughs
+7. **Private thinking precedes publishing.** Comments, action items, and walkthroughs
    are local/private until an external tool exports or posts them. Gander should
    make review intent explicit but not surprise users by publishing anything.
 
@@ -81,8 +81,10 @@ The next-generation review session should include:
 - subject: jj revset/change stack/base+tip already visible in the workspace;
 - files, hunks, stable anchors, fingerprints, viewed state, and symbols;
 - comments with kind, status, action intent, author, timestamps, and target;
-- tasks derived from comments or created directly, with action intents such as
-  `fix`, `explain`, `test`, or `follow-up`;
+- todo comments as the primary implicit feedback: every todo comment is an
+  actionable request, while ordinary draft/resolved comments are not action items;
+- optional durable action items for higher-level coordination, grouping many
+  linked comments, and recording opaque external ticket references;
 - walkthroughs: ordered steps pointing at files/hunks/ranges/symbols with
   explanations and rationale;
 - exports in JSON, Markdown, and static HTML.
@@ -95,14 +97,14 @@ changes, onboarding new contributors, and collaborative teammate review.
 ### M11: Core review sessions
 
 - Promote sessions to first-class durable objects.
-- Model comments, action-tagged tasks, walkthrough steps, and stable targets in
+- Model comments, optional action items, walkthrough steps, and stable targets in
   the domain layer.
 - Keep artifacts serializable and migratable.
 - Preserve existing viewed-state/comment behavior through the new model.
 
 ### M12: Complete CLI surface
 
-- Add scriptable commands for sessions, files, hunks, comments, tasks,
+- Add scriptable commands for sessions, files, hunks, comments, action items,
   walkthroughs, and exports.
 - Ensure mutating review-state commands write only Gander state.
 - Provide stable JSON output for harnesses and agents.
@@ -115,7 +117,7 @@ gander reviews list
 gander reviews show <id>
 gander hunks list --file src/lib.rs
 gander comments add --path src/lib.rs --line 42 --state todo --kind issue --action fix --body "..."
-gander tasks list
+gander action-items list
 gander walkthrough add-step --file src/lib.rs --line 42 --why "Entry point" --title "Start here"
 gander walkthrough export
 ```
@@ -124,7 +126,7 @@ gander walkthrough export
 
 - Make the TUI read and write the same session objects as the CLI.
 - Add first-class affordances for key hunks, walkthrough editing, action-tagged
-  comments, and open review tasks.
+  todo comments, and open action-item work.
 - Keep focused/zen review modes as presentations of walkthrough/session state.
 
 ### M14: MCP parity adapter
@@ -137,7 +139,7 @@ gander walkthrough export
 
 - Export a self-contained HTML review/walkthrough artifact for sharing or
   onboarding.
-- Include key hunks, comments, task state, and walkthrough navigation.
+- Include key hunks, comments, action-item state, and walkthrough navigation.
 - Keep it local/static first; no hosted sync or forge integration.
 
 ### M16: Optional local web UI
@@ -152,15 +154,15 @@ gander walkthrough export
 ```sh
 gander reviews create
 gander tui
-gander tasks list | jq '.tasks[] | select(.status == "open")'
+gander action-items list | jq '.action_items[] | select(.status == "open")'
 gander walkthrough export
 ```
 
 ### Reviewing an agent's changes
 
 An external agent edits code in a jj workspace. Gander inspects the resulting
-change, the human leaves action-tagged tasks, and the agent harness consumes
-those tasks through CLI or MCP. The agent may edit files; Gander only records
+change, the human leaves todo comments and optional durable action items, and the agent harness consumes
+that open work through CLI or MCP. The agent may edit files; Gander only records
 and resolves review state.
 
 ### Reviewing teammate changes

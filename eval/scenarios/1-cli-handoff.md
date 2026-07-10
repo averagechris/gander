@@ -22,7 +22,7 @@ You are an honest UX evaluator dogfooding gander. Your goal is to surface concre
 4. Role-switch to a coding agent consuming the review:
    - Try `export markdown --profile agent`.
    - Try `export json --profile agent`.
-   - Run `tasks list`, `comments list`, and `walkthrough export`.
+   - Run `action-items list`, `comments list`, and `walkthrough export`.
    - Judge whether the available outputs are complete enough for an ideal one-shot handoff without re-reading the whole diff.
 5. Compare what you could do with what you expected from a polished agent handoff command.
 

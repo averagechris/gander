@@ -10,7 +10,7 @@ sessions (human or agent) can pick up implementation without relitigating.
 jj-visible changes. Users or external harnesses are responsible for fetching,
 checking out, or otherwise preparing teammate/agent work in a workspace where
 jj can see it. Gander reads that code state and writes review state: viewed
-marks, comments, tasks, walkthroughs, and artifacts.
+marks, comments, optional action items, walkthroughs, and artifacts.
 
 Gander should not directly integrate with GitHub/GitLab/SourceHut for now: no
 PR fetching, no review posting, no forge-specific comment sync. Harnesses can

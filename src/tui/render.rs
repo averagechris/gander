@@ -16,12 +16,13 @@ use crate::{
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     jj::JjChangeSummary,
-    state::Comment,
+    state::{Comment, ReviewTarget},
     syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
 use super::{
     ActivityListState, CommentInputTarget, Mode, TuiState, UiNotice, UiNoticeLevel,
+    action_items::{OpenWorkListState, OpenWorkRow},
     chooser::TargetChooserState,
     comments::CommentListState,
     drafts::DraftListState,
@@ -33,7 +34,6 @@ use super::{
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
-    tasks::TaskListState,
     view_options::{ViewOption, ViewOptionsState},
     walkthroughs::WalkthroughListState,
     zen::{ZenState, ZenStop},
@@ -145,7 +145,7 @@ pub(super) fn draw(
         Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
         Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
         Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
-        Mode::TaskList(list) => draw_task_list_popup(frame, frame.area(), session, list),
+        Mode::OpenWork(list) => draw_open_work_popup(frame, frame.area(), session, list),
         Mode::Activity(list) => draw_activity_popup(frame, frame.area(), tui_state, list),
         Mode::WalkthroughList(list) => {
             draw_walkthrough_list_popup(frame, frame.area(), session, list)
@@ -1301,8 +1301,8 @@ fn draw_footer(
             }
         }
         Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
-        Mode::TaskList(_) => {
-            "review tasks · j/k move · enter jump · d cycle state · esc close".to_owned()
+        Mode::OpenWork(_) => {
+            "action items & feedback · j/k move · enter jump · esc close".to_owned()
         }
         Mode::Activity(_) => "activity · j/k/n/e move · enter jump (file events) · esc close".to_owned(),
         Mode::WalkthroughList(_) => {
@@ -1580,7 +1580,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
             &[Action::CommentList],
             "comment center (n general, R ready)",
         ),
-        entry(&[Action::TaskList], "review tasks"),
+        entry(&[Action::OpenWork], "action items & todo feedback"),
         entry(&[Action::WalkthroughList], "walkthrough panel"),
         entry(&[Action::MarkWalkthrough], "mark for walkthrough"),
         entry(
@@ -3640,11 +3640,11 @@ fn draw_comment_list_popup(
     );
 }
 
-fn draw_task_list_popup(
+fn draw_open_work_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     session: &ReviewSession,
-    list: &TaskListState,
+    list: &OpenWorkListState,
 ) {
     let popup = centered_rect(82, 60, area);
     frame.render_widget(Clear, popup);
@@ -3652,12 +3652,12 @@ fn draw_task_list_popup(
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 2usize;
     let list_height = inner_height.saturating_sub(fixed_lines).max(1);
-    let visible_window = picker_visible_window(list.selected, list.comment_ids.len(), list_height);
+    let visible_window = picker_visible_window(list.selected, list.rows.len(), list_height);
 
     let mut lines = Vec::new();
-    if list.comment_ids.is_empty() {
+    if list.rows.is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no review tasks",
+            "  no open action items or todo feedback",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
@@ -3667,16 +3667,13 @@ fn draw_task_list_popup(
                 Style::default().fg(Color::DarkGray),
             )));
         }
-        for (index, id) in list
-            .comment_ids
+        for (index, row) in list
+            .rows
             .iter()
             .enumerate()
             .skip(visible_window.start)
             .take(visible_window.end.saturating_sub(visible_window.start))
         {
-            let Some(comment) = session.comments.iter().find(|comment| &comment.id == id) else {
-                continue;
-            };
             let selected = index == list.selected;
             let marker = if selected { "›" } else { " " };
             let style = if selected {
@@ -3686,27 +3683,7 @@ fn draw_task_list_popup(
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let location = comment_list_location(comment);
-            let summary = comment
-                .body
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("(empty comment)")
-                .trim()
-                .to_owned();
-            let mut spans = vec![
-                Span::styled(format!("{marker} "), style),
-                Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
-            ];
-            spans.extend(comment_badge_spans(comment));
-            spans.extend([
-                Span::styled(
-                    format!("[{}] ", comment.state.label()),
-                    comment_state_style(comment.state),
-                ),
-                Span::styled(summary, style),
-            ]);
-            lines.push(Line::from(spans));
+            lines.push(open_work_line(session, row, marker, style));
         }
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
@@ -3717,19 +3694,110 @@ fn draw_task_list_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · d cycle state · esc close",
+        "↑/↓ or j/k move · enter jump · esc close",
         Style::default().fg(Color::DarkGray),
     )));
 
     let paragraph = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(" Review tasks ")
+                .title(" Action items & feedback ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded),
         )
         .wrap(Wrap { trim: true });
     frame.render_widget(paragraph, popup);
+}
+
+fn open_work_line(
+    session: &ReviewSession,
+    row: &OpenWorkRow,
+    marker: &str,
+    style: Style,
+) -> Line<'static> {
+    match row {
+        OpenWorkRow::ActionItem {
+            title,
+            action,
+            target,
+            ..
+        } => {
+            let mut spans = vec![
+                Span::styled(format!("{marker} "), style),
+                Span::styled("[item] ", Style::default().fg(Color::Yellow)),
+            ];
+            if let Some(action) = action
+                && *action != crate::state::ActionIntent::None
+            {
+                spans.push(Span::styled(
+                    format!("[{}] ", action_intent_label(*action)),
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            spans.extend([
+                Span::styled(
+                    format!("{} ", action_item_location(target.as_ref().as_ref())),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(title.clone(), style),
+            ]);
+            Line::from(spans)
+        }
+        OpenWorkRow::EvidenceComment { id } | OpenWorkRow::TodoComment { id } => {
+            let nested = matches!(row, OpenWorkRow::EvidenceComment { .. });
+            let Some(comment) = session.comments.iter().find(|comment| comment.id == *id) else {
+                return Line::from(Span::styled(
+                    format!(
+                        "{marker} {}missing feedback {id}",
+                        if nested { "  └ " } else { "" }
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            };
+            let summary = comment
+                .body
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("(empty comment)")
+                .trim()
+                .to_owned();
+            let mut spans = vec![
+                Span::styled(
+                    format!("{marker} {}", if nested { "  └ " } else { "" }),
+                    style,
+                ),
+                Span::styled(
+                    if nested { "[evidence] " } else { "[feedback] " },
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::styled(
+                    format!("{} ", comment_list_location(comment)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("[{}] ", comment.state.label()),
+                    comment_state_style(comment.state),
+                ),
+            ];
+            spans.extend(comment_badge_spans(comment));
+            spans.push(Span::styled(summary, style));
+            Line::from(spans)
+        }
+    }
+}
+
+fn action_item_location(target: Option<&ReviewTarget>) -> String {
+    let Some(target) = target else {
+        return "general".to_owned();
+    };
+    let Some(path) = target.file.as_deref() else {
+        return "general".to_owned();
+    };
+    match (target.line, target.end_line) {
+        (Some(start), Some(end)) if end != start => format!("{path}:{start}-{end}"),
+        (Some(line), _) => format!("{path}:{line}"),
+        _ => path.to_owned(),
+    }
 }
 
 /// Wall-clock label for an activity event. Tests format in UTC so snapshot
@@ -4494,7 +4562,7 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn tui_snapshot_task_list() {
+    fn tui_snapshot_open_work() {
         let mut session = snapshot_session(
             r#"diff --git a/src/app.rs b/src/app.rs
 --- a/src/app.rs
@@ -4506,13 +4574,35 @@ diff --git a/README.md b/README.md
         );
         session.add_comment("Draft only".into());
         session.toggle_focus();
-        session.add_comment("Please add a regression test".into());
-        session.comments[1].id = "test-task".to_owned();
+        session.add_comment("Branch is untested".into());
+        session.add_comment("Please document the fallback".into());
+        session.comments[0].state = crate::state::CommentState::Draft;
+        session.comments[1].id = "test-evidence".to_owned();
         session.comments[1].action = Some(crate::state::ActionIntent::Test);
         session.comments[1].kind = Some(crate::state::CommentKind::Issue);
-        let id = session.comments[1].id.clone();
-        session.cycle_comment_state(&id);
-        let mode = Mode::TaskList(TaskListState::new(&session));
+        session.comments[1].state = crate::state::CommentState::Todo;
+        session.comments[2].id = "standalone-feedback".to_owned();
+        session.comments[2].state = crate::state::CommentState::Todo;
+        let durable_id = session.comments[1].session_id.clone().unwrap();
+        session
+            .sessions
+            .iter_mut()
+            .find(|durable| durable.id == durable_id)
+            .unwrap()
+            .action_items
+            .push(crate::state::ActionItem {
+                id: "regression-item".to_owned(),
+                title: "Cover fallback with a regression test".to_owned(),
+                action: Some(crate::state::ActionIntent::Test),
+                target: Some(crate::state::ReviewTarget {
+                    file: Some("src/app.rs".to_owned()),
+                    line: Some(1),
+                    ..crate::state::ReviewTarget::default()
+                }),
+                comment_ids: vec!["test-evidence".to_owned()],
+                ..crate::state::ActionItem::default()
+            });
+        let mode = Mode::OpenWork(OpenWorkListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }

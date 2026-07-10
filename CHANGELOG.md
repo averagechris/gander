@@ -23,13 +23,21 @@
 - Comments now carry append-only UUID-addressed replies and `updated_at`
   timestamps. CLI/MCP agents can reply, reply-and-resolve atomically, and carry
   the full thread through artifacts and handoffs.
+- Documented the action-item model: todo comments are the primary implicit
+  feedback; ordinary comments are not action items; durable action items are
+  optional coordination objects with many linked comments and external ticket
+  references; linked todo evidence is folded into its parent action item.
 
 ### Changed
 
-- Review state schema 2 adds optional comment `session_id` and `path`; artifact
-  schema 6 and delegation schema 2 carry the same general-comment shape. Legacy
-  anchored/unscoped comments still deserialize unchanged and remain visible for
-  compatibility.
+- Review state schema remains 2 and normalizes legacy serialized `tasks` into
+  `action_items` on save. Artifact schema 7 and delegation schema 3 carry the
+  action-item shape, while legacy anchored/unscoped comments still deserialize
+  unchanged and remain visible for compatibility.
+- Public docs now use `action-items` CLI/MCP terminology (`list/show/add/edit`,
+  `link-comment`/`unlink-comment`, `add-ticket`/`remove-ticket`,
+  `close`/`reopen`/`delete`, repeatable `--comment`, and handoff
+  `--action-item`) rather than the retired public tasks vocabulary.
 - Zen/tour mode now presents a polished full-screen slide deck with full-bleed
   chapter, spotlight, and at-a-glance slides instead of framed floating cards.
 - Removed the deprecated public `gander chunks` and `gander briefs` command

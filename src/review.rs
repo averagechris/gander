@@ -6,11 +6,11 @@
 use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
 
-use crate::ids::{MIN_SELECTOR_LEN, resolve_unique_prefix, shortest_unique_prefix};
+use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
-    ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession,
-    ReviewSessionStatus, ReviewState, ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough,
-    WalkthroughStep,
+    ActionIntent, ActionItem, ActionItemStatus, ClosedDisposition, Comment, CommentKind,
+    CommentReply, CommentState, ExternalTicket, ReviewSession, ReviewSessionStatus, ReviewState,
+    ReviewTarget, Walkthrough, WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,24 +35,28 @@ pub struct SessionSummary {
     pub title: Option<String>,
     pub target: ReviewTarget,
     pub status: ReviewSessionStatus,
-    pub task_count: usize,
+    pub action_item_count: usize,
     pub walkthrough_count: usize,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ListedTask {
+pub struct ListedActionItem {
     pub id: String,
     pub selector: String,
-    pub source: String,
     pub title: String,
     pub body: Option<String>,
-    pub status: ReviewTaskStatus,
+    pub status: ActionItemStatus,
     pub action: Option<ActionIntent>,
     pub target: Option<ReviewTarget>,
-    pub source_comment_id: Option<String>,
-    pub resolution: Option<String>,
+    pub comment_ids: Vec<String>,
+    pub external_tickets: Vec<ExternalTicket>,
+    pub disposition: Option<ClosedDisposition>,
+    pub outcome: Option<String>,
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub fn ensure_session<'a>(
@@ -117,7 +121,7 @@ pub fn session_summary(session: &ReviewSession) -> SessionSummary {
         title: session.title.clone(),
         target: session.target.clone(),
         status: session.status,
-        task_count: session.tasks.len(),
+        action_item_count: session.action_items.len(),
         walkthrough_count: session.walkthroughs.len(),
         created_at: session.created_at,
         updated_at: session.updated_at,
@@ -463,191 +467,467 @@ fn ensure_comment_belongs_to_session(comment: &Comment, session: &ReviewSession)
     }
 }
 
-pub fn add_task(
+#[derive(Debug, Clone, Default)]
+pub struct NewActionItem {
+    pub title: String,
+    pub body: Option<String>,
+    pub target: Option<ReviewTarget>,
+    pub action: Option<ActionIntent>,
+    pub comment_selectors: Vec<String>,
+    pub external_tickets: Vec<NewExternalTicket>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ActionItemEdits {
+    pub title: Option<String>,
+    pub body: Option<Option<String>>,
+    pub target: Option<Option<ReviewTarget>>,
+    pub action: Option<Option<ActionIntent>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewExternalTicket {
+    pub tracker: String,
+    pub reference: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OpenActionItem {
+    pub item: ActionItem,
+    pub linked_todo_comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OpenWork {
+    pub action_items: Vec<OpenActionItem>,
+    pub remaining_todo_comments: Vec<Comment>,
+}
+
+pub fn list_action_items(session: &ReviewSession) -> Vec<ListedActionItem> {
+    let ids = session
+        .action_items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<Vec<_>>();
+    session
+        .action_items
+        .iter()
+        .map(|item| ListedActionItem {
+            id: item.id.clone(),
+            selector: shortest_unique_prefix(&item.id, &ids),
+            title: item.title.clone(),
+            body: item.body.clone(),
+            status: item.status,
+            action: item.action,
+            target: item.target.clone(),
+            comment_ids: item.comment_ids.clone(),
+            external_tickets: item.external_tickets.clone(),
+            disposition: item.disposition,
+            outcome: item.outcome.clone(),
+            closed_at: item.closed_at,
+            created_at: item.created_at,
+            updated_at: item.updated_at,
+        })
+        .collect()
+}
+
+pub fn add_action_item(
     session: &mut ReviewSession,
-    title: String,
-    body: Option<String>,
-    action: ActionIntent,
-    source_comment_id: Option<String>,
-    target: Option<ReviewTarget>,
-) -> ReviewTask {
+    comments: &[Comment],
+    new: NewActionItem,
+) -> Result<ActionItem> {
+    validate_body(&new.title, "action item title")?;
+    if let Some(body) = new.body.as_deref() {
+        validate_body(body, "action item body")?;
+    }
+    let comment_ids = resolve_link_comment_ids(session, comments, None, &new.comment_selectors)?;
+    validate_new_tickets(&new.external_tickets, &[])?;
     let now = chrono::Utc::now();
-    let task = ReviewTask {
+    let item = ActionItem {
         id: uuid::Uuid::new_v4().to_string(),
-        title,
-        body,
-        target,
-        action,
-        status: ReviewTaskStatus::Open,
-        source_comment_id,
-        resolution: None,
+        title: new.title,
+        body: new.body,
+        target: new.target,
+        action: new.action,
+        comment_ids,
+        external_tickets: new
+            .external_tickets
+            .into_iter()
+            .map(|ticket| ExternalTicket {
+                tracker: ticket.tracker,
+                reference: ticket.reference,
+                url: ticket.url,
+                created_at: now,
+                updated_at: now,
+            })
+            .collect(),
+        status: ActionItemStatus::Open,
+        disposition: None,
+        outcome: None,
+        closed_at: None,
         created_at: Some(now),
         updated_at: Some(now),
     };
-    session.tasks.push(task.clone());
-    touch(session);
-    task
+    session.action_items.push(item.clone());
+    touch_at(session, now);
+    Ok(item)
 }
 
-pub fn complete_task(
-    session: &mut ReviewSession,
-    id: &str,
-    summary: Option<String>,
-) -> Result<ReviewTask> {
-    let canonical_id = resolve_task_id(session, id)?;
-    let task = session
-        .tasks
-        .iter_mut()
-        .find(|task| task.id == canonical_id)
-        .unwrap();
-    task.status = ReviewTaskStatus::Done;
-    task.resolution = summary;
-    task.updated_at = Some(chrono::Utc::now());
-    let out = task.clone();
-    touch(session);
-    Ok(out)
-}
-
-pub fn reopen_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> {
-    let canonical_id = resolve_task_id(session, id)?;
-    let task = session
-        .tasks
-        .iter_mut()
-        .find(|task| task.id == canonical_id)
-        .unwrap();
-    task.status = ReviewTaskStatus::Open;
-    task.resolution = None;
-    task.updated_at = Some(chrono::Utc::now());
-    let out = task.clone();
-    touch(session);
-    Ok(out)
-}
-
-pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTask> {
-    let task_ids = session
-        .tasks
-        .iter()
-        .map(|task| task.id.as_str())
-        .collect::<Vec<_>>();
-    let mut tasks = session
-        .tasks
-        .iter()
-        .map(|task| ListedTask {
-            id: task.id.clone(),
-            selector: shortest_unique_prefix(&task.id, &task_ids),
-            source: "session".to_owned(),
-            title: task.title.clone(),
-            body: task.body.clone(),
-            status: task.status,
-            action: Some(task.action),
-            target: task.target.clone(),
-            source_comment_id: task.source_comment_id.clone(),
-            resolution: task.resolution.clone(),
-        })
-        .collect::<Vec<_>>();
-    tasks.extend(
-        comments
-            .iter()
-            .filter(|c| c.state == CommentState::Todo && c.belongs_to_session(&session.id))
-            .map(|c| ListedTask {
-                id: c.id.clone(),
-                selector: shortest_unique_prefix(
-                    &c.id,
-                    &comments
-                        .iter()
-                        .map(|comment| comment.id.as_str())
-                        .collect::<Vec<_>>(),
-                ),
-                source: "comment".to_owned(),
-                title: title_from_comment(c),
-                body: Some(c.body.clone()),
-                status: ReviewTaskStatus::Open,
-                action: c.action,
-                target: c.path.as_ref().map(|path| ReviewTarget {
-                    file: Some(path.clone()),
-                    line: c.line,
-                    end_line: c.end_line,
-                    ..ReviewTarget::default()
-                }),
-                source_comment_id: Some(c.id.clone()),
-                resolution: None,
-            }),
-    );
-    tasks
-}
-
-fn title_from_comment(comment: &Comment) -> String {
-    let first = comment.body.trim().lines().next().unwrap_or("").trim();
-    if first.is_empty() {
-        format!(
-            "comment {}",
-            comment
-                .id
-                .chars()
-                .take(MIN_SELECTOR_LEN)
-                .collect::<String>()
-        )
-    } else if first.chars().count() > 72 {
-        format!("{}…", first.chars().take(71).collect::<String>())
-    } else {
-        first.to_owned()
-    }
-}
-
-pub fn resolve_task_id(session: &ReviewSession, id: &str) -> Result<String> {
+pub fn resolve_action_item_id(session: &ReviewSession, selector: &str) -> Result<String> {
     Ok(
-        resolve_unique_prefix(&session.tasks, id, "task id", |task| task.id.as_str())?
-            .id
-            .clone(),
+        resolve_unique_prefix(&session.action_items, selector, "action item", |item| {
+            item.id.as_str()
+        })?
+        .id
+        .clone(),
     )
 }
 
-pub struct TaskEdits {
-    pub title: Option<String>,
-    pub body: Option<String>,
-    pub action: Option<ActionIntent>,
-    pub source_comment_id: Option<String>,
-    pub target: Option<Option<ReviewTarget>>,
-}
-
-pub fn edit_task(session: &mut ReviewSession, id: &str, edits: TaskEdits) -> Result<ReviewTask> {
-    let canonical_id = resolve_task_id(session, id)?;
-    let task = session
-        .tasks
+pub fn edit_action_item(
+    session: &mut ReviewSession,
+    selector: &str,
+    edits: ActionItemEdits,
+) -> Result<ActionItem> {
+    if let Some(title) = edits.title.as_deref() {
+        validate_body(title, "action item title")?;
+    }
+    if let Some(Some(body)) = edits.body.as_ref() {
+        validate_body(body, "action item body")?;
+    }
+    let id = resolve_action_item_id(session, selector)?;
+    let item = session
+        .action_items
         .iter_mut()
-        .find(|task| task.id == canonical_id)
-        .unwrap();
+        .find(|item| item.id == id)
+        .expect("resolved action item must exist");
     if let Some(title) = edits.title {
-        task.title = title;
+        item.title = title;
     }
-    if edits.body.is_some() {
-        task.body = edits.body;
-    }
-    if let Some(action) = edits.action {
-        task.action = action;
-    }
-    if edits.source_comment_id.is_some() {
-        task.source_comment_id = edits.source_comment_id;
+    if let Some(body) = edits.body {
+        item.body = body;
     }
     if let Some(target) = edits.target {
-        task.target = target;
+        item.target = target;
     }
-    task.updated_at = Some(chrono::Utc::now());
-    let out = task.clone();
-    touch(session);
-    Ok(out)
+    if let Some(action) = edits.action {
+        item.action = action;
+    }
+    let now = chrono::Utc::now();
+    item.updated_at = Some(now);
+    let item = item.clone();
+    touch_at(session, now);
+    Ok(item)
 }
 
-pub fn delete_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> {
-    let canonical_id = resolve_task_id(session, id)?;
-    let index = session
-        .tasks
+pub fn link_comment(
+    session: &mut ReviewSession,
+    comments: &[Comment],
+    item_selector: &str,
+    comment_selectors: &[String],
+) -> Result<ActionItem> {
+    let item_id = resolve_action_item_id(session, item_selector)?;
+    let resolved =
+        resolve_link_comment_ids(session, comments, Some(item_id.as_str()), comment_selectors)?;
+    let item = session
+        .action_items
+        .iter_mut()
+        .find(|item| item.id == item_id)
+        .expect("resolved action item must exist");
+    let mut changed = false;
+    for comment_id in resolved {
+        if !item.comment_ids.contains(&comment_id) {
+            item.comment_ids.push(comment_id);
+            changed = true;
+        }
+    }
+    if changed {
+        let now = chrono::Utc::now();
+        item.updated_at = Some(now);
+        let item = item.clone();
+        touch_at(session, now);
+        Ok(item)
+    } else {
+        Ok(item.clone())
+    }
+}
+
+fn resolve_link_comment_ids(
+    session: &ReviewSession,
+    comments: &[Comment],
+    target_item_id: Option<&str>,
+    selectors: &[String],
+) -> Result<Vec<String>> {
+    let target_is_open = target_item_id.is_none_or(|id| {
+        session
+            .action_items
+            .iter()
+            .find(|item| item.id == id)
+            .is_none_or(|item| item.status == ActionItemStatus::Open)
+    });
+    let mut resolved = Vec::with_capacity(selectors.len());
+    for selector in selectors {
+        let id = resolve_comment_id(comments, selector)?;
+        let comment = comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .expect("resolved comment must exist");
+        ensure_comment_belongs_to_session(comment, session)?;
+        if target_is_open
+            && session.action_items.iter().any(|item| {
+                item.status == ActionItemStatus::Open
+                    && Some(item.id.as_str()) != target_item_id
+                    && item.comment_ids.contains(&id)
+            })
+        {
+            return Err(eyre!(
+                "comment `{id}` is linked to another open action item"
+            ));
+        }
+        if !resolved.contains(&id) {
+            resolved.push(id);
+        }
+    }
+    Ok(resolved)
+}
+
+pub fn unlink_comment(
+    session: &mut ReviewSession,
+    comments: &[Comment],
+    item_selector: &str,
+    comment_selectors: &[String],
+) -> Result<ActionItem> {
+    let item_id = resolve_action_item_id(session, item_selector)?;
+    let mut ids = Vec::with_capacity(comment_selectors.len());
+    for selector in comment_selectors {
+        let id = resolve_comment_id(comments, selector)?;
+        let comment = comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .expect("resolved comment must exist");
+        ensure_comment_belongs_to_session(comment, session)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    let item = session
+        .action_items
+        .iter_mut()
+        .find(|item| item.id == item_id)
+        .expect("resolved action item must exist");
+    let old_len = item.comment_ids.len();
+    item.comment_ids.retain(|id| !ids.contains(id));
+    if item.comment_ids.len() != old_len {
+        let now = chrono::Utc::now();
+        item.updated_at = Some(now);
+        let item = item.clone();
+        touch_at(session, now);
+        Ok(item)
+    } else {
+        Ok(item.clone())
+    }
+}
+
+pub fn add_ticket(
+    session: &mut ReviewSession,
+    item_selector: &str,
+    new: NewExternalTicket,
+) -> Result<ActionItem> {
+    let item_id = resolve_action_item_id(session, item_selector)?;
+    let item = session
+        .action_items
+        .iter_mut()
+        .find(|item| item.id == item_id)
+        .expect("resolved action item must exist");
+    validate_new_tickets(std::slice::from_ref(&new), &item.external_tickets)?;
+    let now = chrono::Utc::now();
+    item.external_tickets.push(ExternalTicket {
+        tracker: new.tracker,
+        reference: new.reference,
+        url: new.url,
+        created_at: now,
+        updated_at: now,
+    });
+    item.updated_at = Some(now);
+    let item = item.clone();
+    touch_at(session, now);
+    Ok(item)
+}
+
+fn validate_new_tickets(new: &[NewExternalTicket], existing: &[ExternalTicket]) -> Result<()> {
+    let mut references = existing
         .iter()
-        .position(|task| task.id == canonical_id)
-        .unwrap();
-    let task = session.tasks.remove(index);
-    touch(session);
-    Ok(task)
+        .map(|ticket| ticket.reference.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for ticket in new {
+        validate_body(&ticket.tracker, "ticket tracker")?;
+        validate_body(&ticket.reference, "ticket reference")?;
+        if !references.insert(ticket.reference.clone()) {
+            return Err(eyre!(
+                "ticket reference `{}` is already linked",
+                ticket.reference
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn remove_ticket(
+    session: &mut ReviewSession,
+    item_selector: &str,
+    reference_prefix: &str,
+) -> Result<ActionItem> {
+    let item_id = resolve_action_item_id(session, item_selector)?;
+    let item_index = session
+        .action_items
+        .iter()
+        .position(|item| item.id == item_id)
+        .expect("resolved action item must exist");
+    let matches = session.action_items[item_index]
+        .external_tickets
+        .iter()
+        .enumerate()
+        .filter(|(_, ticket)| ticket.reference.starts_with(reference_prefix))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let ticket_index = match matches.as_slice() {
+        [index] => *index,
+        [] => return Err(eyre!("unknown external ticket `{reference_prefix}`")),
+        _ => {
+            return Err(eyre!(
+                "ambiguous external ticket prefix `{reference_prefix}`"
+            ));
+        }
+    };
+    let selected = &session.action_items[item_index];
+    if selected.status == ActionItemStatus::Closed
+        && selected.disposition == Some(ClosedDisposition::Deferred)
+        && selected.external_tickets.len() == 1
+    {
+        return Err(eyre!("deferred action item requires an external ticket"));
+    }
+    let now = chrono::Utc::now();
+    let item = &mut session.action_items[item_index];
+    item.external_tickets.remove(ticket_index);
+    item.updated_at = Some(now);
+    let item = item.clone();
+    touch_at(session, now);
+    Ok(item)
+}
+
+pub fn close_action_item(
+    session: &mut ReviewSession,
+    selector: &str,
+    disposition: ClosedDisposition,
+    outcome: Option<String>,
+) -> Result<ActionItem> {
+    if let Some(outcome) = outcome.as_deref() {
+        validate_body(outcome, "action item outcome")?;
+    }
+    let id = resolve_action_item_id(session, selector)?;
+    let item = session
+        .action_items
+        .iter_mut()
+        .find(|item| item.id == id)
+        .expect("resolved action item must exist");
+    if disposition == ClosedDisposition::Deferred && item.external_tickets.is_empty() {
+        return Err(eyre!("deferred action item requires an external ticket"));
+    }
+    let now = chrono::Utc::now();
+    item.status = ActionItemStatus::Closed;
+    item.disposition = Some(disposition);
+    item.outcome = outcome;
+    item.closed_at = Some(now);
+    item.updated_at = Some(now);
+    let item = item.clone();
+    touch_at(session, now);
+    Ok(item)
+}
+
+pub fn reopen_action_item(session: &mut ReviewSession, selector: &str) -> Result<ActionItem> {
+    let id = resolve_action_item_id(session, selector)?;
+    let reopening = session
+        .action_items
+        .iter()
+        .find(|item| item.id == id)
+        .expect("resolved action item must exist");
+    if let Some(comment_id) = reopening.comment_ids.iter().find(|comment_id| {
+        session.action_items.iter().any(|item| {
+            item.id != id
+                && item.status == ActionItemStatus::Open
+                && item.comment_ids.contains(comment_id)
+        })
+    }) {
+        return Err(eyre!(
+            "comment `{comment_id}` is linked to another open action item"
+        ));
+    }
+    let item = session
+        .action_items
+        .iter_mut()
+        .find(|item| item.id == id)
+        .expect("resolved action item must exist");
+    let now = chrono::Utc::now();
+    item.status = ActionItemStatus::Open;
+    item.disposition = None;
+    item.outcome = None;
+    item.closed_at = None;
+    item.updated_at = Some(now);
+    let item = item.clone();
+    touch_at(session, now);
+    Ok(item)
+}
+
+pub fn delete_action_item(session: &mut ReviewSession, selector: &str) -> Result<ActionItem> {
+    let id = resolve_action_item_id(session, selector)?;
+    let index = session
+        .action_items
+        .iter()
+        .position(|item| item.id == id)
+        .expect("resolved action item must exist");
+    let now = chrono::Utc::now();
+    let mut item = session.action_items.remove(index);
+    item.updated_at = Some(now);
+    touch_at(session, now);
+    Ok(item)
+}
+
+pub fn open_work(session: &ReviewSession, comments: &[Comment]) -> OpenWork {
+    let active_todos = comments
+        .iter()
+        .filter(|comment| {
+            comment.state == CommentState::Todo && comment.belongs_to_session(&session.id)
+        })
+        .collect::<Vec<_>>();
+    let mut linked_ids = std::collections::BTreeSet::new();
+    let action_items = session
+        .action_items
+        .iter()
+        .filter(|item| item.status == ActionItemStatus::Open)
+        .map(|item| {
+            let linked_todo_comments = active_todos
+                .iter()
+                .filter(|comment| item.comment_ids.contains(&comment.id))
+                .map(|comment| {
+                    linked_ids.insert(comment.id.clone());
+                    (*comment).clone()
+                })
+                .collect();
+            OpenActionItem {
+                item: item.clone(),
+                linked_todo_comments,
+            }
+        })
+        .collect();
+    let remaining_todo_comments = active_todos
+        .into_iter()
+        .filter(|comment| !linked_ids.contains(&comment.id))
+        .cloned()
+        .collect();
+    OpenWork {
+        action_items,
+        remaining_todo_comments,
+    }
 }
 
 pub fn add_walkthrough_step(session: &mut ReviewSession, step: WalkthroughStep) -> WalkthroughStep {
@@ -849,65 +1129,46 @@ mod tests {
     }
 
     #[test]
-    fn complete_task_records_resolution() {
+    fn close_and_reopen_action_item_records_lifecycle() {
         let mut session = ReviewSession::default();
-        let task = add_task(
+        let item = add_action_item(
             &mut session,
-            "Fix".into(),
-            None,
-            ActionIntent::Fix,
-            None,
-            None,
-        );
-        let done = complete_task(&mut session, &task.id, Some("patched".into())).unwrap();
-        assert_eq!(done.status, ReviewTaskStatus::Done);
-        assert_eq!(done.resolution.as_deref(), Some("patched"));
-        assert_eq!(
-            reopen_task(&mut session, &task.id).unwrap().status,
-            ReviewTaskStatus::Open
-        );
-    }
-
-    #[test]
-    fn comment_backed_task_titles_are_synthesized() {
-        fn comment(id: &str, body: &str) -> Comment {
-            Comment {
-                id: id.into(),
-                path: Some("a.rs".into()),
-                line: Some(1),
-                end_line: None,
-                anchor: None,
-                body: body.into(),
-                kind: None,
-                action: None,
-                state: CommentState::Todo,
-                created_at: chrono::Utc::now(),
+            &[],
+            NewActionItem {
+                title: "Fix".into(),
+                action: Some(ActionIntent::Fix),
                 ..Default::default()
-            }
-        }
-        let session = ReviewSession::default();
-        let long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
-        let comments = vec![
-            comment("abcdef00-0000", "first line\nsecond"),
-            comment("bbbbbbbb-0000", long),
-            comment("cccccccc-0000", "   "),
-        ];
-        let tasks = list_tasks(&session, &comments);
-        assert_eq!(tasks[0].title, "first line");
-        assert!(tasks[1].title.ends_with('…'));
-        assert!(tasks[1].title.chars().count() <= 72);
-        assert_eq!(tasks[2].title, "comment cccccccc");
+            },
+        )
+        .unwrap();
+        let closed = close_action_item(
+            &mut session,
+            &item.id,
+            ClosedDisposition::Completed,
+            Some("patched".into()),
+        )
+        .unwrap();
+        assert_eq!(closed.status, ActionItemStatus::Closed);
+        assert_eq!(closed.disposition, Some(ClosedDisposition::Completed));
+        assert_eq!(closed.outcome.as_deref(), Some("patched"));
+        assert!(closed.closed_at.is_some());
+
+        let reopened = reopen_action_item(&mut session, &item.id).unwrap();
+        assert_eq!(reopened.status, ActionItemStatus::Open);
+        assert_eq!(reopened.disposition, None);
+        assert_eq!(reopened.outcome, None);
+        assert_eq!(reopened.closed_at, None);
     }
 
     #[test]
-    fn resolve_task_id_rejects_ambiguous_prefixes() {
+    fn resolve_action_item_id_rejects_ambiguous_prefixes() {
         let session = ReviewSession {
-            tasks: vec![
-                ReviewTask {
+            action_items: vec![
+                ActionItem {
                     id: "abcdef00-0000".into(),
                     ..Default::default()
                 },
-                ReviewTask {
+                ActionItem {
                     id: "abc12300-0000".into(),
                     ..Default::default()
                 },
@@ -915,39 +1176,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            resolve_task_id(&session, "abcdef").unwrap(),
+            resolve_action_item_id(&session, "abcdef").unwrap(),
             "abcdef00-0000"
         );
         assert_eq!(
-            resolve_task_id(&session, "abc").unwrap_err().to_string(),
-            "ambiguous task id prefix `abc`"
+            resolve_action_item_id(&session, "abc")
+                .unwrap_err()
+                .to_string(),
+            "ambiguous action item prefix `abc`"
         );
     }
 
     #[test]
-    fn edit_task_patches_target_instead_of_replacing_partial_fields() {
+    fn edit_action_item_patches_fields() {
         let mut session = ReviewSession::default();
-        let task = add_task(
+        let item = add_action_item(
             &mut session,
-            "fix".into(),
-            None,
-            ActionIntent::Fix,
-            None,
-            Some(ReviewTarget {
-                file: Some("src/lib.rs".into()),
-                line: Some(10),
-                ..ReviewTarget::default()
-            }),
-        );
+            &[],
+            NewActionItem {
+                title: "fix".into(),
+                action: Some(ActionIntent::Fix),
+                target: Some(ReviewTarget {
+                    file: Some("src/lib.rs".into()),
+                    line: Some(10),
+                    ..ReviewTarget::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let edited = edit_task(
+        let edited = edit_action_item(
             &mut session,
-            &task.id,
-            TaskEdits {
+            &item.id,
+            ActionItemEdits {
                 title: None,
                 body: None,
                 action: None,
-                source_comment_id: None,
                 target: Some(Some(ReviewTarget {
                     file: Some("src/main.rs".into()),
                     line: Some(10),
@@ -1300,5 +1565,246 @@ mod tests {
         assert!(delete_comment(&mut session, &mut comments, "foreign-").is_err());
         assert_eq!(comments, vec![foreign]);
         assert!(session.updated_at.is_none());
+    }
+
+    fn item(id: &str, status: ActionItemStatus, comment_ids: &[&str]) -> ActionItem {
+        ActionItem {
+            id: id.into(),
+            title: id.into(),
+            status,
+            comment_ids: comment_ids.iter().map(|id| (*id).into()).collect(),
+            ..ActionItem::default()
+        }
+    }
+
+    #[test]
+    fn multi_comment_link_is_atomic_deduped_owned_and_one_open_item_only() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            action_items: vec![
+                item("item-open-a", ActionItemStatus::Open, &[]),
+                item("item-open-b", ActionItemStatus::Open, &[]),
+                item("item-closed", ActionItemStatus::Closed, &[]),
+            ],
+            ..ReviewSession::default()
+        };
+        let comments = vec![
+            scoped_comment("comment-a-0000", Some("session-a"), CommentState::Todo),
+            scoped_comment("comment-b-0000", Some("session-a"), CommentState::Todo),
+            scoped_comment("comment-foreign", Some("session-b"), CommentState::Todo),
+        ];
+
+        let linked = link_comment(
+            &mut session,
+            &comments,
+            "item-open-a",
+            &["comment-a".into(), "comment-a".into()],
+        )
+        .unwrap();
+        assert_eq!(linked.comment_ids, ["comment-a-0000"]);
+        assert_eq!(comments[0].state, CommentState::Todo);
+
+        let snapshot = session.clone();
+        assert!(
+            link_comment(
+                &mut session,
+                &comments,
+                "item-open-a",
+                &["comment-b".into(), "missing".into()]
+            )
+            .is_err()
+        );
+        assert_eq!(session, snapshot);
+        assert!(
+            link_comment(
+                &mut session,
+                &comments,
+                "item-open-b",
+                &["comment-a".into()]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("another open action item")
+        );
+        assert!(
+            link_comment(
+                &mut session,
+                &comments,
+                "item-open-a",
+                &["comment-b".into(), "comment-foreign".into()]
+            )
+            .is_err()
+        );
+        assert_eq!(session, snapshot);
+
+        let historical = link_comment(
+            &mut session,
+            &comments,
+            "item-closed",
+            &["comment-a".into()],
+        )
+        .unwrap();
+        assert_eq!(historical.comment_ids, ["comment-a-0000"]);
+    }
+
+    #[test]
+    fn add_list_edit_unlink_and_delete_share_canonical_durable_state() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let comments = vec![scoped_comment(
+            "comment-a-0000",
+            Some("session-a"),
+            CommentState::Todo,
+        )];
+        let added = add_action_item(
+            &mut session,
+            &comments,
+            NewActionItem {
+                title: "Coordinate fix".into(),
+                body: Some("Original body".into()),
+                comment_selectors: vec!["comment-a".into(), "comment-a".into()],
+                external_tickets: vec![NewExternalTicket {
+                    tracker: "SourceHut".into(),
+                    reference: "todo/42".into(),
+                    url: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(added.comment_ids, ["comment-a-0000"]);
+        assert_eq!(added.external_tickets.len(), 1);
+        assert_eq!(added.updated_at, session.updated_at);
+        assert_eq!(list_action_items(&session)[0].id, added.id);
+
+        let edited = edit_action_item(
+            &mut session,
+            &added.id[..8],
+            ActionItemEdits {
+                title: Some("Coordinate final fix".into()),
+                body: Some(None),
+                action: Some(Some(ActionIntent::FollowUp)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.body, None);
+        assert_eq!(edited.action, Some(ActionIntent::FollowUp));
+        let unlinked = unlink_comment(
+            &mut session,
+            &comments,
+            &added.id[..8],
+            &["comment-a".into(), "comment-a".into()],
+        )
+        .unwrap();
+        assert!(unlinked.comment_ids.is_empty());
+        assert_eq!(comments[0].state, CommentState::Todo);
+
+        let deleted = delete_action_item(&mut session, &added.id[..8]).unwrap();
+        assert_eq!(deleted.id, added.id);
+        assert_eq!(deleted.updated_at, session.updated_at);
+        assert!(session.action_items.is_empty());
+    }
+
+    #[test]
+    fn deferred_requires_ticket_and_reopen_clears_closure() {
+        let mut session = ReviewSession {
+            action_items: vec![item("item-abcdef", ActionItemStatus::Open, &[])],
+            ..ReviewSession::default()
+        };
+        let snapshot = session.clone();
+        assert!(
+            close_action_item(
+                &mut session,
+                "item-a",
+                ClosedDisposition::Deferred,
+                Some("tracked elsewhere".into())
+            )
+            .is_err()
+        );
+        assert_eq!(session, snapshot);
+
+        add_ticket(
+            &mut session,
+            "item-a",
+            NewExternalTicket {
+                tracker: "Linear".into(),
+                reference: "GAN-123".into(),
+                url: Some("https://linear.example/GAN-123".into()),
+            },
+        )
+        .unwrap();
+        add_ticket(
+            &mut session,
+            "item-a",
+            NewExternalTicket {
+                tracker: "Linear".into(),
+                reference: "GAN-124".into(),
+                url: None,
+            },
+        )
+        .unwrap();
+        assert!(remove_ticket(&mut session, "item-a", "GAN-12").is_err());
+        assert_eq!(
+            remove_ticket(&mut session, "item-a", "GAN-124")
+                .unwrap()
+                .external_tickets
+                .len(),
+            1
+        );
+
+        let closed = close_action_item(
+            &mut session,
+            "item-a",
+            ClosedDisposition::Deferred,
+            Some("tracked elsewhere".into()),
+        )
+        .unwrap();
+        assert_eq!(closed.disposition, Some(ClosedDisposition::Deferred));
+        assert!(closed.closed_at.is_some());
+        assert!(remove_ticket(&mut session, "item-a", "GAN-123").is_err());
+        let reopened = reopen_action_item(&mut session, "item-a").unwrap();
+        assert_eq!(reopened.status, ActionItemStatus::Open);
+        assert_eq!(reopened.disposition, None);
+        assert_eq!(reopened.outcome, None);
+        assert_eq!(reopened.closed_at, None);
+        assert_eq!(reopened.updated_at, session.updated_at);
+    }
+
+    #[test]
+    fn open_work_folds_linked_todo_evidence_and_scopes_remaining_comments() {
+        let session = ReviewSession {
+            id: "session-a".into(),
+            action_items: vec![
+                item("open", ActionItemStatus::Open, &["linked-open"]),
+                item("closed", ActionItemStatus::Closed, &["linked-closed"]),
+            ],
+            ..ReviewSession::default()
+        };
+        let comments = vec![
+            scoped_comment("linked-open", Some("session-a"), CommentState::Todo),
+            scoped_comment("linked-closed", Some("session-a"), CommentState::Todo),
+            scoped_comment("remaining", None, CommentState::Todo),
+            scoped_comment("resolved", Some("session-a"), CommentState::Resolved),
+            scoped_comment("foreign", Some("session-b"), CommentState::Todo),
+        ];
+
+        let work = open_work(&session, &comments);
+        assert_eq!(work.action_items.len(), 1);
+        assert_eq!(work.action_items[0].item.id, "open");
+        assert_eq!(
+            work.action_items[0].linked_todo_comments[0].id,
+            "linked-open"
+        );
+        assert_eq!(
+            work.remaining_todo_comments
+                .iter()
+                .map(|comment| comment.id.as_str())
+                .collect::<Vec<_>>(),
+            ["linked-closed", "remaining"]
+        );
+        assert_eq!(list_action_items(&session).len(), 2);
     }
 }

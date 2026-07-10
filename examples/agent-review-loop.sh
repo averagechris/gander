@@ -12,18 +12,18 @@ comment_id=$(cargo run --quiet -- --state-file "$state" comments add \
   --kind issue \
   --action fix \
   --body "Clarify the first sentence for new users." | jq -r .id)
-task_id=$(cargo run --quiet -- --state-file "$state" tasks add \
+item_id=$(cargo run --quiet -- --state-file "$state" action-items add \
   --title "Clarify README opening" \
   --action fix \
   --comment "$comment_id" \
   --path README.md \
   --line 1 | jq -r .id)
 
-cargo run --quiet -- --state-file "$state" tasks list \
-  | jq -r '.tasks[] | select(.status == "open") | .id' \
+cargo run --quiet -- --state-file "$state" action-items list \
+  | jq -r '.action_items[] | select(.status == "open") | .id' \
   | while read -r id; do
-      cargo run --quiet -- --state-file "$state" tasks complete "$id" --summary "Completed in example loop"
+      cargo run --quiet -- --state-file "$state" action-items close "$id" --disposition completed --summary "Completed in example loop"
     done
 
 cargo run --quiet -- --state-file "$state" reviews show "$review_id" \
-  | jq --arg task_id "$task_id" '{review: .id, title, completed_task: $task_id, task_count: (.tasks | length)}'
+  | jq --arg item_id "$item_id" '{review: .id, title, completed_action_item: $item_id, action_item_count: (.action_items | length)}'

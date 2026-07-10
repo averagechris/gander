@@ -11,7 +11,7 @@ generated-file filters, `--state-file <path>`, and `--config <path>`. They are
 listed under a separate "Target & state (global)" heading in every
 subcommand's `--help`.
 
-Durable review objects (sessions, tasks, walkthroughs, and scoped comments) are keyed by the exact
+Durable review objects (sessions, action items, walkthroughs, and scoped comments) are keyed by the exact
 `base..rev` target. When a read command's target matches no open session but
 one exists for another target, Gander warns on stderr and names the session
 (`warning: no open review session matches 'trunk()..@'; open session "…"
@@ -42,13 +42,13 @@ gander reviews show <id>
   "target": { "revset": "trunk()..@", "base": "trunk()", "revision": "@", "repo": "/repo", "file": null, "line": null, "end_line": null, "symbol": null },
   "status": "open",
   "walkthroughs": [],
-  "tasks": [],
+  "action_items": [],
   "created_at": "2026-07-04T22:19:05.917185Z",
   "updated_at": "2026-07-04T22:19:05.917185Z"
 }
 ```
 
-`list` returns `{ "sessions": [...] }` with `task_count` and
+`list` returns `{ "sessions": [...] }` with `action_item_count` and
 `walkthrough_count`; `show` returns the full session object.
 
 ## Files and hunks
@@ -142,34 +142,56 @@ UUID-addressed reply with a timestamp and updates the parent comment's
 convenience for `set-state --state resolved`, and `--reply` first appends the
 given reply before resolving.
 
-## Tasks
+## Action items
 
 ```sh
-gander tasks add --title <title> [--body <text>] [--action none|fix|explain|test|follow-up] \
-  [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
-gander tasks list [--format json|text]
-gander tasks complete <id> [--summary <resolution>] [--format json|text]
-gander tasks reopen <id> [--format json|text]
-gander tasks edit <id> [--title <title>] [--body <text>] [--action none|fix|explain|test|follow-up] \
-  [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
-gander tasks delete <id> [--format json|text]
+gander action-items list [--format json|text]
+gander action-items show <id> [--format json|text]
+gander action-items add --title <title> [--body <text>] [--action none|fix|explain|test|follow-up] \
+  [--comment <comment-id>]... [--ticket <ref>]... [--path <path>] [--line <n>] [--format json|text]
+gander action-items edit <id> [--title <title>] [--body <text>] [--action none|fix|explain|test|follow-up] \
+  [--path <path>] [--line <n>] [--format json|text]
+gander action-items link-comment <id> --comment <comment-id> [--format json|text]
+gander action-items unlink-comment <id> --comment <comment-id> [--format json|text]
+gander action-items add-ticket <id> --ticket <ref> [--format json|text]
+gander action-items remove-ticket <id> --ticket <ref> [--format json|text]
+gander action-items close <id> --disposition completed|dismissed|deferred [--summary <resolution>] [--ticket <ref>] [--format json|text]
+gander action-items reopen <id> [--format json|text]
+gander action-items delete <id> [--format json|text]
 ```
 
-Tasks are review-state todos for humans or agents. Ids on `complete`,
-`reopen`, `edit`, and `delete` accept unambiguous prefixes; unknown or
-ambiguous prefixes are one-line errors. Comment-backed todo entries in
-`tasks list` always carry a string `title` (synthesized from the comment
-body's first line when the comment has no explicit title).
-Example `tasks list`:
-`--line` is a 1-indexed diff line anchor in the current jj diff and requires `--path` when adding a task. Editing patches the existing target: path-only preserves an existing line, line-only preserves an existing file, and line-only is rejected if the task has no target file. New side is
-preferred, old side only for removed-only lines. `--action` emits `follow-up`; legacy JSON or CLI input spelled
-`followup` is still accepted. `--comment` accepts a full comment id or
-unambiguous prefix and stores the canonical full id; unknown or ambiguous
-comment ids are rejected.
+Todo comments are Gander's primary implicit feedback: a `todo` comment is an
+open action request by itself. Ordinary comments (`draft` notes and resolved
+history) do not create action items. Durable action items are optional,
+higher-level coordination records for grouping many comments, tracking work that
+spans files, or carrying external ticket references; they are not required for
+simple line-level feedback. Linked todo comments are folded into their parent
+action item as evidence and are not duplicated as separate handoff bullets.
+Unlinked todo comments continue to appear as independent action items in list and
+handoff output.
+
+Action item ids accept unambiguous prefixes; unknown or ambiguous prefixes are
+one-line errors. `--comment` is repeatable on `add`; `link-comment` and
+`unlink-comment` add/remove individual evidence comments later. `--ticket` is
+repeatable on `add`, adds opaque external ticket references (for example a Linear
+or SourceHut issue URL/id), and never fetches from or posts to that system.
+`close --disposition deferred` requires at least one ticket reference to make the
+deferral actionable outside Gander. `completed` means the local work was done;
+`dismissed` means no work is needed; `deferred` means the item was moved to an
+external tracker.
+
+`--line` is a 1-indexed diff line anchor in the current jj diff and requires
+`--path` when adding an action item. Editing patches the existing target:
+path-only preserves an existing line, line-only preserves an existing file, and
+line-only is rejected if the action item has no target file. New side is
+preferred, old side only for removed-only lines. `--action` emits `follow-up`;
+legacy JSON input spelled `followup` is still accepted.
+
+Example `action-items list`:
 
 ```json
 {
-  "tasks": [
+  "action_items": [
     {
       "id": "57e87a50-e83a-4778-9cd6-b154d1a2caa5",
       "title": "Update intro",
@@ -177,7 +199,8 @@ comment ids are rejected.
       "target": { "file": "README.md", "line": 1, "end_line": null, "symbol": null, "revset": null, "base": null, "revision": null, "repo": null },
       "action": "fix",
       "status": "open",
-      "source_comment_id": null,
+      "linked_comment_ids": ["comment-id"],
+      "external_tickets": [],
       "resolution": null,
       "source": "session"
     }
@@ -286,7 +309,7 @@ the running TUI within a poll and survives the TUI's save/quit). Deletions
 made in the TUI are not resurrected by merges. Same-id comments use the newer
 `updated_at` value for body/state metadata and union append-only replies by
 reply id, so an external reply or resolution is not overwritten by a later TUI
-save. Tasks, walkthroughs, walkthrough steps, and sessions likewise use newer
+save. Action items, walkthroughs, walkthrough steps, and sessions likewise use newer
 `updated_at` values for same-id conflicts.
 
 ## Export/import and state utilities
@@ -304,22 +327,24 @@ gander summary
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
 defaults to action items first, walkthrough next, then reference hunks limited
 to files that carry action items or walkthrough stops. JSON uses the same
-default action-item selection: open tasks plus `todo` comments only. Drafts are
-saved/private/withheld, and resolved comments are history. Action
-items are deterministically ordered the same way in both formats: action
+default action-item selection: open durable action items plus unlinked `todo`
+comments only. Todo comments linked to an open action item are folded into that
+item as evidence and are not duplicated. Drafts are saved/private/withheld,
+ordinary comments do not become action items, and resolved comments are history.
+Action items are deterministically ordered the same way in both formats: action
 priority (fix > test > follow-up > other), then path, then line. `handoff
 --format json` is a stable action artifact shaped
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
-are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
-`end_line`, `excerpt`, `body`, `state`, and canonical linked task/comment ids.
+are action-item/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
+`end_line`, `excerpt`, `body`, `state`, canonical linked comment ids, and external ticket refs.
 `--output` writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
 wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
 when you need the full session artifact for archive/reference or broad
 automation: full exports include all comments (`draft`, `todo`, and
-`resolved`), all tasks, walkthroughs, replies, and excerpts when available (its
+`resolved`), all action items, walkthroughs, replies, and excerpts when available (its
 H1 is `# Review session export (agent profile)`; the two artifacts
 cross-reference each other). Import currently restores only matching
-viewed state and duplicate-safe comments; exported tasks and walkthroughs are
+viewed state and duplicate-safe comments; exported action items and walkthroughs are
 not restored by `gander import`.
 
 Humans read the durable review session directly in the TUI (and future web UI).
@@ -330,7 +355,7 @@ mutating review state or executing verification text:
 
 ```sh
 gander handoff --mode delegate \
-  --task <task-prefix> --include-comment <comment-prefix> \
+  --action-item <action-item-prefix> --include-comment <comment-prefix> \
   --to implementation-agent \
   --objective "Fix the parser finding and add coverage." \
   --constraint "Preserve the public API." \
@@ -340,12 +365,12 @@ gander handoff --mode delegate \
 ```
 
 Selectors accept full ids or unambiguous prefixes. With no selectors, delegate
-mode includes open durable tasks and actionable `todo` comments, folds linked
-source comments into task evidence, and excludes resolved comments and closed
-tasks. Draft comments are rejected when explicitly selected for delegation unless
+mode includes open durable action items and actionable unlinked `todo` comments,
+folds linked todo evidence into its parent action item, and excludes resolved
+comments and closed action items. Draft comments are rejected when explicitly selected for delegation unless
 they are first readied, and implicit delegation never selects them. Packets include source fingerprints, walkthrough context, relevant
-hunks, reply history, and concrete `comments resolve --reply` / `tasks complete
---summary` return commands. `--verify` is inert requested text; Gander never
+hunks, reply history, and concrete `comments resolve --reply` / `action-items close
+--disposition completed --summary` return commands. `--verify` is inert requested text; Gander never
 executes it.
 
 `export html` writes a self-contained static review page and rejects an explicitly supplied `--profile`; JSON and Markdown are the complete session artifact formats. `--profile agent` adds all raw hunks and comment excerpts for tools, including resolved comments as reference.
@@ -368,7 +393,7 @@ files unless `--force` is supplied. The harness-neutral default directory is
 The bundled `gander-review` skill teaches read-only review authoring. The
 `gander-address-review` skill teaches an implementation agent to consume the
 relevant review state, use the project's normal tools, and then record concise
-reply, resolution, and task-completion evidence in Gander.
+reply, resolution, and action-item closure evidence in Gander.
 
 ## MCP and ACP
 
@@ -392,13 +417,13 @@ rm -f "$state"
 review_id=$(gander --state-file "$state" reviews create --title "Agent pass" | jq -r .id)
 comment_id=$(gander --state-file "$state" comments add --path README.md --line 1 \
   --state todo --kind issue --action fix --body "Clarify the introduction." | jq -r .id)
-task_id=$(gander --state-file "$state" tasks add --title "Fix intro" \
+item_id=$(gander --state-file "$state" action-items add --title "Fix intro" \
   --action fix --comment "$comment_id" --path README.md --line 1 | jq -r .id)
-gander --state-file "$state" tasks list | jq -r '.tasks[] | select(.status == "open") | .id' |
+gander --state-file "$state" action-items list | jq -r '.action_items[] | select(.status == "open") | .id' |
   while read -r id; do
-    gander --state-file "$state" tasks complete "$id" --summary "Handled by agent"
+    gander --state-file "$state" action-items close "$id" --disposition completed --summary "Handled by agent"
   done
-gander --state-file "$state" reviews show "$review_id" | jq '{id, title, tasks}'
+gander --state-file "$state" reviews show "$review_id" | jq '{id, title, action_items}'
 ```
 ## `gander present`
 

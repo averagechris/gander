@@ -8,6 +8,7 @@
 //!
 //! This file owns the event loop, mode state machine, and event handling.
 
+mod action_items;
 mod chooser;
 mod chunks;
 mod comments;
@@ -21,7 +22,6 @@ mod outline;
 mod render;
 mod revset;
 mod search;
-mod tasks;
 mod view_options;
 mod walkthroughs;
 mod zen;
@@ -61,6 +61,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+use action_items::{OpenWorkListState, OpenWorkRow};
 use chooser::TargetChooserState;
 use comments::CommentListState;
 use drafts::DraftListState;
@@ -76,7 +77,6 @@ use render::{
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
-use tasks::TaskListState;
 use view_options::ViewOptionsState;
 use walkthroughs::WalkthroughListState;
 use zen::ZenState;
@@ -107,7 +107,7 @@ enum Mode {
     OperationPicker(OperationPickerState),
     JjHelpers(JjHelperState),
     FlagList(FlagListState),
-    TaskList(TaskListState),
+    OpenWork(OpenWorkListState),
     Activity(ActivityListState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
@@ -1058,7 +1058,7 @@ fn mode_label(mode: &Mode) -> &'static str {
         Mode::OperationPicker(_) => "operation picker",
         Mode::JjHelpers(_) => "jj helpers",
         Mode::FlagList(_) => "flag list",
-        Mode::TaskList(_) => "task list",
+        Mode::OpenWork(_) => "open work",
         Mode::Activity(_) => "activity",
         Mode::DraftList(_) => "draft list",
         Mode::FileSearch(_) => "file search",
@@ -1704,8 +1704,8 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
-        Mode::TaskList(list) => {
-            if handle_task_list_key(key, list, session, keymap, tui_state) {
+        Mode::OpenWork(list) => {
+            if handle_open_work_key(key, list, session, keymap) {
                 *mode = Mode::Normal;
             }
         }
@@ -1879,15 +1879,15 @@ fn handle_normal_action(
                 *mode = Mode::FlagList(FlagListState::new(session));
             }
         }
-        Action::TaskList => {
-            let tasks = TaskListState::new(session);
-            if tasks.comment_ids.is_empty() {
+        Action::OpenWork => {
+            let open_work = OpenWorkListState::new(session);
+            if open_work.rows.is_empty() {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: "no review tasks".to_owned(),
+                    message: "no open action items or todo feedback".to_owned(),
                 });
             } else {
-                *mode = Mode::TaskList(tasks);
+                *mode = Mode::OpenWork(open_work);
             }
         }
         Action::Activity => {
@@ -3357,12 +3357,11 @@ fn comment_kind_label(kind: crate::state::CommentKind) -> &'static str {
     }
 }
 
-fn handle_task_list_key(
+fn handle_open_work_key(
     key: KeyEvent,
-    list: &mut TaskListState,
+    list: &mut OpenWorkListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &mut TuiState,
 ) -> bool {
     if let Some(action) = keymap.target_picker_action_for(&key) {
         match action {
@@ -3376,8 +3375,8 @@ fn handle_task_list_key(
     match key.code {
         KeyCode::Esc => true,
         KeyCode::Enter => {
-            if let Some(id) = list.selected_comment_id() {
-                session.select_comment_by_id(id);
+            if let Some(row) = list.selected_row().cloned() {
+                enter_open_work_row(session, &row);
             }
             true
         }
@@ -3389,19 +3388,46 @@ fn handle_task_list_key(
             list.move_selection(-1);
             false
         }
-        KeyCode::Char('d') => {
-            if let Some(id) = list.selected_comment_id().map(str::to_owned)
-                && let Some(state) = session.cycle_comment_state(&id)
-            {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: format!("comment marked {}", state.label()),
-                });
-                list.refresh(session);
-            }
-            list.comment_ids.is_empty()
-        }
         _ => false,
+    }
+}
+
+fn enter_open_work_row(session: &mut ReviewSession, row: &OpenWorkRow) {
+    if let Some(comment_id) = row.comment_id() {
+        session.select_comment_by_id(comment_id);
+        return;
+    }
+    let OpenWorkRow::ActionItem { id, target, .. } = row else {
+        return;
+    };
+    if let Some(target) = target.as_ref()
+        && let Some(path) = target.file.as_ref()
+        && session.files.iter().any(|file| file.path == *path)
+    {
+        session.jump_to_chunk_part(&ChunkPart {
+            path: path.clone(),
+            start_line: target.line,
+            end_line: target.end_line,
+        });
+        return;
+    }
+    let linked_comment = session
+        .sessions
+        .iter()
+        .flat_map(|durable| durable.action_items.iter())
+        .find(|item| item.id == *id)
+        .and_then(|item| {
+            item.comment_ids.iter().find_map(|comment_id| {
+                session.comments.iter().find(|comment| {
+                    comment.id == *comment_id
+                        && comment.state == crate::state::CommentState::Todo
+                        && comment.has_location()
+                })
+            })
+        })
+        .map(|comment| comment.id.clone());
+    if let Some(comment_id) = linked_comment {
+        session.select_comment_by_id(&comment_id);
     }
 }
 
@@ -3708,7 +3734,7 @@ fn handle_mouse_event(
             | Mode::OperationPicker(_)
             | Mode::JjHelpers(_)
             | Mode::FlagList(_)
-            | Mode::TaskList(_)
+            | Mode::OpenWork(_)
             | Mode::Activity(_)
             | Mode::WalkthroughList(_)
             | Mode::DraftList(_)
@@ -3907,7 +3933,7 @@ mod tests {
     use std::{cell::RefCell, path::Path};
 
     use crate::jj::{JjBackend, JjChangeSummary, ReviewTarget};
-    use crate::state::{ActionIntent, Comment, CommentKind, CommentState, ReviewTask};
+    use crate::state::{ActionIntent, ActionItem, Comment, CommentKind, CommentState};
 
     struct MockJjBackend {
         calls: RefCell<Vec<ReviewTarget>>,
@@ -3965,12 +3991,12 @@ mod tests {
             ..Default::default()
         });
         ensure_tui_review_session(&mut session)
-            .tasks
-            .push(ReviewTask {
+            .action_items
+            .push(ActionItem {
                 id: "t1".to_owned(),
                 title: "do the thing".to_owned(),
-                action: ActionIntent::Fix,
-                ..ReviewTask::default()
+                action: Some(ActionIntent::Fix),
+                ..ActionItem::default()
             });
         let copied = RefCell::new(String::new());
         let mut tui_state = TuiState::default();
@@ -3989,6 +4015,78 @@ mod tests {
                 message: "handoff copied via OSC52 (/dev/tty) (1 todo comments included, 1 drafts withheld; 2 action items)".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn open_work_enter_prefers_an_action_item_target() {
+        let mut session = snapshot_session(
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let row = OpenWorkRow::ActionItem {
+            id: "item".into(),
+            title: "Go to b".into(),
+            action: Some(ActionIntent::Fix),
+            target: Box::new(Some(crate::state::ReviewTarget {
+                file: Some("src/b.rs".into()),
+                line: Some(1),
+                ..crate::state::ReviewTarget::default()
+            })),
+        };
+
+        enter_open_work_row(&mut session, &row);
+
+        assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
+        assert_eq!(session.focus, Focus::Diff);
+    }
+
+    #[test]
+    fn open_work_enter_uses_linked_location_and_comment_rows_enter_comments() {
+        let mut session = snapshot_session(
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.toggle_focus();
+        session.add_comment("first evidence".into());
+        session.add_comment("second feedback".into());
+        session.comments[0].id = "first".into();
+        session.comments[1].id = "second".into();
+        let durable_id = session.comments[0].session_id.clone().unwrap();
+        session
+            .sessions
+            .iter_mut()
+            .find(|durable| durable.id == durable_id)
+            .unwrap()
+            .action_items
+            .push(ActionItem {
+                id: "item".into(),
+                title: "Use evidence".into(),
+                comment_ids: vec!["first".into()],
+                ..ActionItem::default()
+            });
+
+        enter_open_work_row(
+            &mut session,
+            &OpenWorkRow::ActionItem {
+                id: "item".into(),
+                title: "Use evidence".into(),
+                action: None,
+                target: Box::new(None),
+            },
+        );
+        assert_eq!(session.selected_comment_index(), Some(0));
+
+        enter_open_work_row(
+            &mut session,
+            &OpenWorkRow::EvidenceComment {
+                id: "second".into(),
+            },
+        );
+        assert_eq!(session.selected_comment_index(), Some(1));
+
+        enter_open_work_row(
+            &mut session,
+            &OpenWorkRow::TodoComment { id: "first".into() },
+        );
+        assert_eq!(session.selected_comment_index(), Some(0));
     }
 
     #[test]

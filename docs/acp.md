@@ -109,7 +109,8 @@ within one poll tick.
 Durable comment state semantics match the CLI/MCP review-state tools: `draft`
 is saved/private/withheld, `todo` is ready/actionable and asks an agent to
 address it regardless of kind/action, and `resolved` is retained history. Prompt
-handoff selects only open tasks plus todo comments; full export includes all
+handoff selects open durable action items plus unlinked todo comments; linked
+todo evidence is folded into its parent action item, and full export includes all
 states. The older overlay `review/draft_comment` method always creates a
 triage draft; use CLI/MCP `comment_add` with an explicit state for durable
 ready comments or general comments.

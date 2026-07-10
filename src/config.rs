@@ -228,7 +228,10 @@ pub struct KeybindingsConfig {
     pub toggle_large_diff: Vec<String>,
     pub toggle_agent_order: Vec<String>,
     pub flag_list: Vec<String>,
-    pub task_list: Vec<String>,
+    /// Open work popup. `task-list` remains a deserialization alias for
+    /// configurations written before durable action items were renamed.
+    #[serde(alias = "task-list")]
+    pub open_work: Vec<String>,
     pub activity: Vec<String>,
     pub walkthrough_list: Vec<String>,
     pub zen: Vec<String>,
@@ -415,7 +418,8 @@ struct KeybindingsConfigPatch {
     toggle_large_diff: Option<Vec<String>>,
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
-    task_list: Option<Vec<String>>,
+    #[serde(alias = "task-list")]
+    open_work: Option<Vec<String>>,
     activity: Option<Vec<String>>,
     walkthrough_list: Option<Vec<String>>,
     /// Accepts the pre-0.4 name `tour` so existing configs keep working.
@@ -519,7 +523,7 @@ impl Default for KeybindingsConfig {
             toggle_large_diff: keys(["L"]),
             toggle_agent_order: keys(["A"]),
             flag_list: keys(["F"]),
-            task_list: keys(["X"]),
+            open_work: keys(["X"]),
             activity: keys(["ctrl-a"]),
             walkthrough_list: keys(["W"]),
             zen: keys(["T", "Z"]),
@@ -761,7 +765,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_large_diff, patch.toggle_large_diff);
         apply_optional(&mut self.toggle_agent_order, patch.toggle_agent_order);
         apply_optional(&mut self.flag_list, patch.flag_list);
-        apply_optional(&mut self.task_list, patch.task_list);
+        apply_optional(&mut self.open_work, patch.open_work);
         apply_optional(&mut self.activity, patch.activity);
         apply_optional(&mut self.walkthrough_list, patch.walkthrough_list);
         apply_optional(&mut self.zen, patch.zen);
@@ -1106,6 +1110,7 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.toggle_large_diff, ["L"]);
         assert_eq!(config.keybindings.toggle_agent_order, ["A"]);
         assert_eq!(config.keybindings.flag_list, ["F"]);
+        assert_eq!(config.keybindings.open_work, ["X"]);
         assert_eq!(config.keybindings.draft_list, ["D"]);
         assert_eq!(config.limits.max_diff_lines, 5000);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);
@@ -1121,6 +1126,21 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
         assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
+    }
+
+    #[test]
+    fn open_work_keybinding_accepts_legacy_task_list_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.toml");
+        fs::write(&path, "[keybindings]\ntask-list = [\"ctrl-x\"]\n").unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert_eq!(config.keybindings.open_work, ["ctrl-x"]);
     }
 
     #[test]

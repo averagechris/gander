@@ -46,7 +46,7 @@ pub(super) enum Action {
     ToggleLargeDiff,
     ToggleAgentOrder,
     FlagList,
-    TaskList,
+    OpenWork,
     Activity,
     WalkthroughList,
     Zen,
@@ -134,7 +134,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &config.toggle_agent_order,
         )?;
         add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
-        add_bindings(&mut bindings, Action::TaskList, &config.task_list)?;
+        add_bindings(&mut bindings, Action::OpenWork, &config.open_work)?;
         add_bindings(&mut bindings, Action::Activity, &config.activity)?;
         add_bindings(&mut bindings, Action::Zen, &config.zen)?;
         add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
@@ -499,7 +499,7 @@ mod tests {
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('X'))),
-            Some(Action::TaskList)
+            Some(Action::OpenWork)
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
@@ -538,7 +538,7 @@ mod tests {
             Some(Action::YankHandoff)
         );
         assert_eq!(keymap.hint(Action::ToggleAgentOrder), "A");
-        assert_eq!(keymap.hint(Action::TaskList), "X");
+        assert_eq!(keymap.hint(Action::OpenWork), "X");
         assert_eq!(keymap.hint(Action::Activity), "ctrl-a");
         assert_eq!(keymap.hint(Action::Help), "?");
         assert_eq!(keymap.hint(Action::YankHandoff), "ctrl-y");

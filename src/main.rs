@@ -52,8 +52,8 @@ use crate::{
     paths::{PathsEnv, WorkspacePaths},
     review::SessionTargetSpec,
     state::{
-        ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
-        StepArtifact, StepImportance, StepKind, WalkthroughStep,
+        ActionIntent, ActionItemStatus, ClosedDisposition, CommentKind, CommentState, ReviewState,
+        ReviewTarget as StateReviewTarget, StepArtifact, StepImportance, StepKind, WalkthroughStep,
     },
 };
 
@@ -67,8 +67,8 @@ enum ListFormat {
 #[command(
     version,
     about = "Durable guided review sessions over jj-visible work.",
-    long_about = "Gander is a local-first review workspace for jj-visible work. It reads code state and writes durable review state: viewed files, comments, tasks, walkthroughs, and artifacts. The CLI is the normal automation surface; MCP is optional. Run `gander tui` or omit a subcommand to launch the TUI.",
-    after_help = "First review loop:\n  gander reviews create --title 'Parser review'\n  gander files list --format text\n  gander comments add --path src/lib.rs --line 42 --body 'Check this invariant'\n  gander tasks add --title 'Add parser regression' --path src/lib.rs --line 42\n  gander walkthrough add-step --title 'Parser flow' --path src/lib.rs --line 42\n  gander handoff --copy"
+    long_about = "Gander is a local-first review workspace for jj-visible work. It reads code state and writes durable review state: viewed files, comments, action items, walkthroughs, and artifacts. The CLI is the normal automation surface; MCP is optional. Run `gander tui` or omit a subcommand to launch the TUI.",
+    after_help = "First review loop:\n  gander reviews create --title 'Parser review'\n  gander files list --format text\n  gander comments add --path src/lib.rs --line 42 --body 'Check this invariant'\n  gander action-items add --title 'Add parser regression' --path src/lib.rs --line 42\n  gander walkthrough add-step --title 'Parser flow' --path src/lib.rs --line 42\n  gander handoff --copy"
 )]
 struct Cli {
     /// Repository root. Defaults to the current directory.
@@ -184,8 +184,8 @@ enum Command {
     },
     /// Print or copy a prompt-style handoff for a coding agent.
     #[command(
-        long_about = "Print or copy an actionable handoff for a coding agent. Prompt mode renders compact prompt-ready Markdown or JSON from open action items, walkthrough stops, and relevant hunks. Delegate mode requires --mode delegate and emits a typed work packet selected by task/comment flags for external harnesses that understand delegation packets.",
-        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json\n      Emit structured open action items plus walkthrough and reference hunks.\n  gander handoff --mode delegate --task abc123 --to coder --objective 'Fix this task'\n      Emit a typed delegation packet for an external harness."
+        long_about = "Print or copy an actionable handoff for a coding agent. Prompt mode renders compact prompt-ready Markdown or JSON from open action items, walkthrough stops, and relevant hunks. Delegate mode requires --mode delegate and emits a typed work packet selected by action-item/comment flags for external harnesses that understand delegation packets.",
+        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json\n      Emit structured open action items plus walkthrough and reference hunks.\n  gander handoff --mode delegate --action-item abc123 --to coder --objective 'Address this action item'\n      Emit a typed delegation packet for an external harness."
     )]
     Handoff {
         /// Handoff mode: prompt is the legacy implementation prompt; delegate emits a typed work packet.
@@ -194,9 +194,9 @@ enum Command {
         /// Handoff output format. Action items are ordered by action priority (fix, test, follow-up, other), then path and line.
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
-        /// Delegate a specific task id. Repeat to include multiple tasks.
-        #[arg(long = "task", value_name = "ID")]
-        tasks: Vec<String>,
+        /// Delegate a specific action item id. Repeat to include multiple action items.
+        #[arg(long = "action-item", value_name = "ID")]
+        action_items: Vec<String>,
         /// Delegate a specific comment id. Repeat to include multiple comments.
         #[arg(long = "include-comment", value_name = "ID")]
         include_comments: Vec<String>,
@@ -281,13 +281,13 @@ enum Command {
         #[command(subcommand)]
         command: ReviewsCommand,
     },
-    /// Machine-readable task queries for the current review session.
+    /// Manage durable action items for the current review session.
     #[command(
-        after_help = "Examples:\n  gander tasks list --format text\n  gander tasks add --title 'Add regression coverage' --path src/lib.rs --line 42 --action test\n  gander tasks complete <id> --summary 'Added and ran the regression test'"
+        after_help = "Examples:\n  gander action-items list --format text\n  gander action-items add --title 'Add regression coverage' --path src/lib.rs --line 42 --action test --comment abc123\n  gander action-items close <id> --disposition completed --outcome 'Added and ran the regression test'"
     )]
-    Tasks {
+    ActionItems {
         #[command(subcommand)]
-        command: TasksCommand,
+        command: ActionItemsCommand,
     },
     /// Walkthrough queries and exports over persisted local review state.
     #[command(
@@ -466,7 +466,7 @@ enum CommentsCommand {
         /// Comment classification.
         #[arg(long, value_enum)]
         kind: Option<CommentKindArg>,
-        /// Suggested action intent for task/handoff output.
+        /// Suggested action intent for action-item and handoff output.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
         /// Initial lifecycle state; overrides [comments] initial-state.
@@ -585,67 +585,56 @@ enum ReviewsCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum TasksCommand {
-    /// List tasks as JSON or compact text, including comment-backed todo items.
+enum ActionItemsCommand {
+    /// List durable action items as JSON or compact text.
     List {
-        /// Output format for the task list.
+        /// Output format for the action item list.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Add a durable review task.
+    /// Show one durable action item by id or unique id prefix.
+    Show {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// Output format for the action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Add a durable action item.
     Add {
-        /// Task title.
+        /// Action item title.
         #[arg(long)]
         title: String,
-        /// Optional task details/body text.
+        /// Optional details/body text.
         #[arg(long)]
         body: Option<String>,
-        /// Action intent. Accepts none, fix, explain, test, follow-up, and legacy followup.
+        /// Action intent.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
-        /// Source comment id or unique id prefix to link.
-        #[arg(long = "comment")]
-        comment: Option<String>,
-        /// Changed file path this task targets. Alias: --file.
+        /// Comment id or unique id prefix to link. Repeat for multiple comments.
+        #[arg(long = "comment", value_name = "ID")]
+        comments: Vec<String>,
+        /// Changed file path this action item targets. Alias: --file.
         #[arg(long, alias = "file")]
         path: Option<String>,
-        /// 1-indexed new-side (post-image) line number this task targets.
+        /// 1-indexed new-side (post-image) line number this action item targets.
         #[arg(long, requires = "path")]
         line: Option<usize>,
-        /// Echo format for the added task.
+        /// Echo format for the added action item.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Mark a task done by id or unique id prefix.
-    Complete {
-        /// Task id or unique id prefix.
-        id: String,
-        /// Optional completion summary.
-        #[arg(long)]
-        summary: Option<String>,
-        /// Echo format for the completed task.
-        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
-        format: ListFormat,
-    },
-    /// Reopen a done task by id or unique id prefix.
-    Reopen {
-        /// Task id or unique id prefix.
-        id: String,
-        /// Echo format for the reopened task.
-        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
-        format: ListFormat,
-    },
-    /// Edit a durable review task by id or unique id prefix.
+    /// Edit a durable action item by id or unique id prefix.
     Edit {
-        /// Task id or unique id prefix.
+        /// Action item id or unique id prefix.
         id: String,
-        /// Replacement task title.
+        /// Replacement title.
         #[arg(long)]
         title: Option<String>,
-        /// Replacement task details/body text.
+        /// Replacement details/body text.
         #[arg(long)]
         body: Option<String>,
-        /// Replacement action intent.
+        /// Replacement action intent; use none to clear it.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
         /// Replacement changed file path. Alias: --file.
@@ -654,18 +643,86 @@ enum TasksCommand {
         /// Replacement 1-indexed new-side line.
         #[arg(long)]
         line: Option<usize>,
-        /// Replacement linked comment id or unique prefix.
-        #[arg(long = "comment")]
-        comment: Option<String>,
-        /// Echo format for the edited task.
+        /// Echo format for the edited action item.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Permanently delete a durable review task by id or unique id prefix.
-    Delete {
-        /// Task id or unique id prefix.
+    /// Link one or more comments to an action item.
+    LinkComment {
+        /// Action item id or unique id prefix.
         id: String,
-        /// Echo format for the deleted task.
+        /// Comment id or unique id prefix. Repeat for multiple comments.
+        #[arg(long = "comment", required = true, value_name = "ID")]
+        comments: Vec<String>,
+        /// Echo format for the updated action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Unlink one or more comments from an action item.
+    UnlinkComment {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// Comment id or unique id prefix. Repeat for multiple comments.
+        #[arg(long = "comment", required = true, value_name = "ID")]
+        comments: Vec<String>,
+        /// Echo format for the updated action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Add an external ticket reference to an action item.
+    AddTicket {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// External tracker name.
+        #[arg(long)]
+        tracker: String,
+        /// Opaque external ticket reference.
+        #[arg(long)]
+        reference: String,
+        /// Optional external ticket URL.
+        #[arg(long)]
+        url: Option<String>,
+        /// Echo format for the updated action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Remove an external ticket by full reference or unique reference prefix.
+    RemoveTicket {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// External ticket reference or unique prefix.
+        reference: String,
+        /// Echo format for the updated action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Close an action item with an explicit disposition.
+    Close {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// Why the item is being closed.
+        #[arg(long, value_enum)]
+        disposition: ClosedDispositionArg,
+        /// Optional closure outcome.
+        #[arg(long)]
+        outcome: Option<String>,
+        /// Echo format for the closed action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Reopen a closed action item.
+    Reopen {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// Echo format for the reopened action item.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Permanently delete a durable action item.
+    Delete {
+        /// Action item id or unique id prefix.
+        id: String,
+        /// Echo format for the deleted action item.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
@@ -758,6 +815,23 @@ enum ActionIntentArg {
     Test,
     #[value(alias = "followup")]
     FollowUp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ClosedDispositionArg {
+    Completed,
+    Dismissed,
+    Deferred,
+}
+
+impl From<ClosedDispositionArg> for ClosedDisposition {
+    fn from(value: ClosedDispositionArg) -> Self {
+        match value {
+            ClosedDispositionArg::Completed => Self::Completed,
+            ClosedDispositionArg::Dismissed => Self::Dismissed,
+            ClosedDispositionArg::Deferred => Self::Deferred,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1138,7 +1212,7 @@ fn run() -> color_eyre::Result<()> {
         Command::Handoff {
             mode,
             format,
-            tasks,
+            action_items,
             include_comments,
             to,
             objective,
@@ -1151,7 +1225,7 @@ fn run() -> color_eyre::Result<()> {
             let spec = session_target_spec(&repo, &session.target);
             warn_session_target_mismatch(&state, &spec);
             note_if_no_session_for_artifact(&state, &spec);
-            let delegate_flags = !tasks.is_empty()
+            let delegate_flags = !action_items.is_empty()
                 || !include_comments.is_empty()
                 || to.is_some()
                 || objective.is_some()
@@ -1176,9 +1250,9 @@ fn run() -> color_eyre::Result<()> {
                     }
                 }
                 HandoffMode::Delegate => {
-                    let durable = find_current_durable_session(&state, &spec)?;
+                    let durable = find_current_action_items_session(&state, &spec)?;
                     let objective = objective.unwrap_or_else(|| {
-                        "Address the selected Gander review tasks and comments.".to_owned()
+                        "Address the selected Gander review action items and comments.".to_owned()
                     });
                     let spec = DelegationSpec {
                         recipient: to,
@@ -1186,7 +1260,7 @@ fn run() -> color_eyre::Result<()> {
                         repeated_constraints: constraints,
                         acceptance_criteria: acceptance,
                         requested_verification: verification,
-                        task_selectors: tasks,
+                        action_item_selectors: action_items,
                         comment_selectors: include_comments,
                         hunk_context_lines: 3,
                     };
@@ -1194,7 +1268,7 @@ fn run() -> color_eyre::Result<()> {
                         .map_err(into_user_error)?;
                     if packet.action_items.is_empty() {
                         return Err(user_error(
-                            "delegation selected no open task or comment items",
+                            "delegation selected no open action item or comment items",
                         ));
                     }
                     match format {
@@ -1700,122 +1774,99 @@ fn run() -> color_eyre::Result<()> {
                 print_json(review::find_session(&state, &id).map_err(into_user_error)?)?
             }
         },
-        Command::Tasks { command } => match command {
-            TasksCommand::List { format } => {
+        Command::ActionItems { command } => match command {
+            ActionItemsCommand::List { format } => {
                 let spec = session_target_spec(&repo, &session.target);
                 warn_session_target_mismatch(&state, &spec);
-                let tasks = review::find_session_for_target(&state, &spec)
-                    .map(|rs| review::list_tasks(rs, &state.comments))
+                let action_items = review::find_session_for_target(&state, &spec)
+                    .map(review::list_action_items)
                     .unwrap_or_default();
                 match format {
-                    ListFormat::Json => print_json(&serde_json::json!({ "tasks": tasks }))?,
-                    ListFormat::Text => print!("{}", tasks_text(&tasks)),
+                    ListFormat::Json => {
+                        print_json(&serde_json::json!({ "action_items": action_items }))?
+                    }
+                    ListFormat::Text => print!("{}", action_items_text(&action_items)),
                 }
             }
-            TasksCommand::Add {
+            ActionItemsCommand::Show { id, format } => {
+                let spec = session_target_spec(&repo, &session.target);
+                warn_session_target_mismatch(&state, &spec);
+                let rs = find_current_action_items_session(&state, &spec)?;
+                let id = review::resolve_action_item_id(rs, &id).map_err(into_user_error)?;
+                print_listed_action_item(listed_action_item(rs, &id), format)?;
+            }
+            ActionItemsCommand::Add {
                 title,
                 body,
                 action,
-                comment,
+                comments,
                 path,
                 line,
                 format,
             } => {
-                if line.is_some() && path.is_none() {
-                    return Err(user_error("tasks add --line requires --path"));
-                }
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                 }
-                let comment = comment
-                    .as_deref()
-                    .map(|id| review::resolve_comment_id(&state.comments, id))
-                    .transpose()
-                    .map_err(into_user_error)?;
-                let spec = session_target_spec(&repo, &session.target);
-                note_if_creating_mismatched_session(&state, &spec);
-                let rs = review::ensure_session(&mut state, &spec, None);
                 let target = path.map(|file| StateReviewTarget {
                     file: Some(file),
                     line,
                     ..StateReviewTarget::default()
                 });
-                let task = review::add_task(
-                    rs,
-                    title,
-                    body,
-                    action.map(action_intent_arg).unwrap_or_default(),
-                    comment,
-                    target,
-                );
-                state.save(&state_path)?;
-                match format {
-                    ListFormat::Json => print_json(&task)?,
-                    ListFormat::Text => print!("{}", task_echo_text(&task)),
-                }
-            }
-            TasksCommand::Complete {
-                id,
-                summary,
-                format,
-            } => {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
-                let rs = review::ensure_session(&mut state, &spec, None);
-                let task = review::complete_task(rs, &id, summary).map_err(into_user_error)?;
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::add_action_item(
+                    &mut state.sessions[idx],
+                    &state.comments,
+                    review::NewActionItem {
+                        title,
+                        body,
+                        target,
+                        action: action.and_then(action_intent_arg_to_option),
+                        comment_selectors: comments,
+                        external_tickets: Vec::new(),
+                    },
+                )
+                .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                match format {
-                    ListFormat::Json => print_json(&task)?,
-                    ListFormat::Text => print!("{}", task_echo_text(&task)),
-                }
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
             }
-            TasksCommand::Reopen { id, format } => {
-                let spec = session_target_spec(&repo, &session.target);
-                note_if_creating_mismatched_session(&state, &spec);
-                let rs = review::ensure_session(&mut state, &spec, None);
-                let task = review::reopen_task(rs, &id).map_err(into_user_error)?;
-                state.save(&state_path)?;
-                match format {
-                    ListFormat::Json => print_json(&task)?,
-                    ListFormat::Text => print!("{}", task_echo_text(&task)),
-                }
-            }
-            TasksCommand::Edit {
+            ActionItemsCommand::Edit {
                 id,
                 title,
                 body,
                 action,
                 path,
                 line,
-                comment,
                 format,
             } => {
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                 }
-                let comment = comment
-                    .as_deref()
-                    .map(|id| review::resolve_comment_id(&state.comments, id))
-                    .transpose()
-                    .map_err(into_user_error)?;
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
-                let rs = review::ensure_session(&mut state, &spec, None);
-                let existing_task_id = review::resolve_task_id(rs, &id).map_err(into_user_error)?;
-                let existing_target = rs
-                    .tasks
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let canonical_id = review::resolve_action_item_id(&state.sessions[idx], &id)
+                    .map_err(into_user_error)?;
+                let existing_target = state.sessions[idx]
+                    .action_items
                     .iter()
-                    .find(|task| task.id == existing_task_id)
-                    .and_then(|task| task.target.clone());
+                    .find(|item| item.id == canonical_id)
+                    .and_then(|item| item.target.clone());
                 if line.is_some()
                     && path.is_none()
                     && existing_target
                         .as_ref()
-                        .and_then(|t| t.file.as_ref())
+                        .and_then(|target| target.file.as_ref())
                         .is_none()
                 {
                     return Err(user_error(
-                        "tasks edit --line requires --path or an existing target path",
+                        "action-items edit --line requires --path or an existing target path",
                     ));
                 }
                 let target = (path.is_some() || line.is_some()).then(|| {
@@ -1828,34 +1879,156 @@ fn run() -> color_eyre::Result<()> {
                     }
                     patched
                 });
-                let task = review::edit_task(
-                    rs,
-                    &id,
-                    review::TaskEdits {
+                let item = review::edit_action_item(
+                    &mut state.sessions[idx],
+                    &canonical_id,
+                    review::ActionItemEdits {
                         title,
-                        body,
-                        action: action.map(action_intent_arg),
-                        source_comment_id: comment,
+                        body: body.map(Some),
                         target: target.map(Some),
+                        action: action.map(action_intent_arg_to_option),
                     },
                 )
                 .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                match format {
-                    ListFormat::Json => print_json(&task)?,
-                    ListFormat::Text => print!("{}", task_echo_text(&task)),
-                }
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
             }
-            TasksCommand::Delete { id, format } => {
+            ActionItemsCommand::LinkComment {
+                id,
+                comments,
+                format,
+            } => {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
-                let rs = review::ensure_session(&mut state, &spec, None);
-                let task = review::delete_task(rs, &id).map_err(into_user_error)?;
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item =
+                    review::link_comment(&mut state.sessions[idx], &state.comments, &id, &comments)
+                        .map_err(into_user_error)?;
                 state.save(&state_path)?;
-                match format {
-                    ListFormat::Json => print_json(&task)?,
-                    ListFormat::Text => print!("{}", task_echo_text(&task)),
-                }
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::UnlinkComment {
+                id,
+                comments,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::unlink_comment(
+                    &mut state.sessions[idx],
+                    &state.comments,
+                    &id,
+                    &comments,
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::AddTicket {
+                id,
+                tracker,
+                reference,
+                url,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::add_ticket(
+                    &mut state.sessions[idx],
+                    &id,
+                    review::NewExternalTicket {
+                        tracker,
+                        reference,
+                        url,
+                    },
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::RemoveTicket {
+                id,
+                reference,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::remove_ticket(&mut state.sessions[idx], &id, &reference)
+                    .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::Close {
+                id,
+                disposition,
+                outcome,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::close_action_item(
+                    &mut state.sessions[idx],
+                    &id,
+                    disposition.into(),
+                    outcome,
+                )
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::Reopen { id, format } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let item = review::reopen_action_item(&mut state.sessions[idx], &id)
+                    .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                print_listed_action_item(
+                    listed_action_item(&state.sessions[idx], &item.id),
+                    format,
+                )?;
+            }
+            ActionItemsCommand::Delete { id, format } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let canonical_id = review::resolve_action_item_id(&state.sessions[idx], &id)
+                    .map_err(into_user_error)?;
+                let selector = listed_action_item(&state.sessions[idx], &canonical_id).selector;
+                let item = review::delete_action_item(&mut state.sessions[idx], &canonical_id)
+                    .map_err(into_user_error)?;
+                let listed = listed_action_item_from(item, selector);
+                state.save(&state_path)?;
+                print_listed_action_item(listed, format)?;
             }
         },
         Command::Walkthrough { command } => match command {
@@ -2067,7 +2240,7 @@ fn note_if_no_session_for_artifact(state: &ReviewState, spec: &review::SessionTa
         && review::open_session_for_other_target(state, spec).is_none()
     {
         eprintln!(
-            "note: no review session for '{}' — tasks/walkthrough sections will be empty",
+            "note: no review session for '{}' — action-item/walkthrough sections will be empty",
             target_spec_label(spec)
         );
     }
@@ -2136,12 +2309,14 @@ fn handle_skills(command: SkillsCommand) -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn find_current_durable_session<'a>(
+fn find_current_action_items_session<'a>(
     state: &'a ReviewState,
     spec: &SessionTargetSpec,
 ) -> color_eyre::Result<&'a state::ReviewSession> {
     review::find_session_for_target(state, spec).ok_or_else(|| {
-        user_error("no existing review session for this target; create tasks/comments first")
+        user_error(
+            "no existing review session for this target; create action items or comments first",
+        )
     })
 }
 
@@ -2587,15 +2762,6 @@ fn action_intent_arg_to_option(value: ActionIntentArg) -> Option<ActionIntent> {
     }
 }
 
-fn action_intent_arg(value: ActionIntentArg) -> ActionIntent {
-    match value {
-        ActionIntentArg::None => ActionIntent::None,
-        ActionIntentArg::Fix => ActionIntent::Fix,
-        ActionIntentArg::Explain => ActionIntent::Explain,
-        ActionIntentArg::Test => ActionIntent::Test,
-        ActionIntentArg::FollowUp => ActionIntent::FollowUp,
-    }
-}
 impl From<CommentStateArg> for CommentState {
     fn from(value: CommentStateArg) -> Self {
         match value {
@@ -2651,11 +2817,19 @@ fn kind_label(kind: Option<CommentKind>) -> &'static str {
         CommentKind::Praise => "praise",
     }
 }
-fn task_status_label(status: crate::state::ReviewTaskStatus) -> &'static str {
+fn action_item_status_label(status: ActionItemStatus) -> &'static str {
     match status {
-        crate::state::ReviewTaskStatus::Open => "open",
-        crate::state::ReviewTaskStatus::Done => "done",
-        crate::state::ReviewTaskStatus::Dismissed => "dismissed",
+        ActionItemStatus::Open => "open",
+        ActionItemStatus::Closed => "closed",
+    }
+}
+
+fn disposition_label(disposition: Option<ClosedDisposition>) -> &'static str {
+    match disposition {
+        Some(ClosedDisposition::Completed) => "completed",
+        Some(ClosedDisposition::Dismissed) => "dismissed",
+        Some(ClosedDisposition::Deferred) => "deferred",
+        None => "",
     }
 }
 
@@ -2745,25 +2919,27 @@ fn session_comments_text(session: &ReviewSession) -> String {
     out
 }
 
-fn tasks_text(tasks: &[review::ListedTask]) -> String {
+fn action_items_text(action_items: &[review::ListedActionItem]) -> String {
     let mut out = String::new();
-    for t in tasks {
-        let location = t
+    for item in action_items {
+        let location = item
             .target
             .as_ref()
             .and_then(|x| x.file.as_ref().map(|p| loc(p, x.line, x.end_line)))
             .unwrap_or_default();
-        let linked = t
-            .source_comment_id
-            .as_ref()
-            .map(|id| id[..id.len().min(8)].to_owned())
-            .unwrap_or_default();
+        let linked = item
+            .comment_ids
+            .iter()
+            .map(|id| &id[..id.len().min(8)])
+            .collect::<Vec<_>>()
+            .join(",");
         out.push_str(&format!(
-            "{:<8} {:<9} [{:<9}] {:<54} {:<32} {}\n",
-            &t.id[..t.id.len().min(8)],
-            task_status_label(t.status),
-            action_label_opt(t.action),
-            ellipsize(&t.title, 54),
+            "{:<12} {:<6} {:<10} [{:<9}] {:<48} {:<28} {}\n",
+            item.selector,
+            action_item_status_label(item.status),
+            disposition_label(item.disposition),
+            action_label_opt(item.action),
+            ellipsize(&item.title, 48),
             ellipsize(&location, 32),
             linked
         ));
@@ -2775,8 +2951,8 @@ fn reviews_text(state: &ReviewState) -> String {
     let mut out = String::new();
     for s in review::list_sessions(state) {
         out.push_str(&format!(
-            "{:<8} {:<9} {:<36} {:<28} {} task(s), {} walkthrough(s)\n",
-            &s.id[..s.id.len().min(8)],
+            "{:<12} {:<9} {:<36} {:<28} {} action item(s), {} walkthrough(s)\n",
+            s.selector,
             format!("{:?}", s.status).to_lowercase(),
             ellipsize(s.title.as_deref().unwrap_or("(untitled)"), 36),
             ellipsize(
@@ -2787,7 +2963,7 @@ fn reviews_text(state: &ReviewState) -> String {
                     .unwrap_or(""),
                 28
             ),
-            s.task_count,
+            s.action_item_count,
             s.walkthrough_count
         ));
     }
@@ -2829,13 +3005,55 @@ fn comment_echo_text(c: &crate::state::Comment) -> String {
     )
 }
 
-fn task_echo_text(t: &crate::state::ReviewTask) -> String {
-    let location = t
+fn listed_action_item(session: &state::ReviewSession, id: &str) -> review::ListedActionItem {
+    review::list_action_items(session)
+        .into_iter()
+        .find(|item| item.id == id)
+        .expect("listed action item must exist")
+}
+
+fn listed_action_item_from(
+    item: crate::state::ActionItem,
+    selector: String,
+) -> review::ListedActionItem {
+    review::ListedActionItem {
+        id: item.id,
+        selector,
+        title: item.title,
+        body: item.body,
+        status: item.status,
+        action: item.action,
+        target: item.target,
+        comment_ids: item.comment_ids,
+        external_tickets: item.external_tickets,
+        disposition: item.disposition,
+        outcome: item.outcome,
+        closed_at: item.closed_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+    }
+}
+
+fn print_listed_action_item(
+    item: review::ListedActionItem,
+    format: ListFormat,
+) -> color_eyre::Result<()> {
+    match format {
+        ListFormat::Json => print_json(&item),
+        ListFormat::Text => {
+            print!("{}", action_item_echo_text(&item));
+            Ok(())
+        }
+    }
+}
+
+fn action_item_echo_text(item: &review::ListedActionItem) -> String {
+    let location = item
         .target
         .as_ref()
         .and_then(|x| x.file.as_ref().map(|p| loc(p, x.line, x.end_line)))
         .unwrap_or_else(|| "(no anchor)".to_owned());
-    let body_line = t
+    let body_line = item
         .body
         .as_deref()
         .and_then(|body| body.lines().next())
@@ -2843,11 +3061,13 @@ fn task_echo_text(t: &crate::state::ReviewTask) -> String {
         .map(|line| format!("body: {}\n", ellipsize(line, 100)))
         .unwrap_or_default();
     format!(
-        "id: {}\nstatus/action: {}/{}\ntitle: {} ({})\n{}",
-        t.id,
-        task_status_label(t.status),
-        action_label_opt(Some(t.action)),
-        t.title,
+        "id: {}\nselector: {}\nstatus/disposition/action: {}/{}/{}\ntitle: {} ({})\n{}",
+        item.id,
+        item.selector,
+        action_item_status_label(item.status),
+        disposition_label(item.disposition),
+        action_label_opt(item.action),
+        item.title,
         location,
         body_line
     )
@@ -3030,30 +3250,6 @@ fn send_present_request(
     let mut response = String::new();
     std::io::BufReader::new(stream).read_line(&mut response)?;
     Ok(response.trim_end().to_owned())
-}
-
-#[cfg(test)]
-fn session_tasks_json(session: &ReviewSession) -> serde_json::Value {
-    let tasks = session
-        .comments
-        .iter()
-        .filter(|comment| comment.state == crate::state::CommentState::Todo)
-        .map(|comment| {
-            serde_json::json!({
-                "id": comment.id,
-                "source": "comment",
-                "comment_id": comment.id,
-                "path": comment.path,
-                "line": comment.line,
-                "end_line": comment.end_line,
-                "status": "open",
-                "kind": comment.kind,
-                "action": comment.action,
-                "body": comment.body,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::json!({ "tasks": tasks })
 }
 
 fn merge_generated(
@@ -3517,7 +3713,7 @@ mod tests {
         assert!(
             Cli::try_parse_from([
                 "gander",
-                "tasks",
+                "action-items",
                 "add",
                 "--title",
                 "fix",
@@ -3582,6 +3778,7 @@ mod tests {
         assert!(top.contains("First review loop:"));
         assert!(!top.contains("chunks"));
         assert!(!top.contains("briefs"));
+        assert!(!top.to_lowercase().contains("task"));
 
         for (path, needles) in [
             (
@@ -3598,7 +3795,7 @@ mod tests {
                 &["--path", "--end-line", "new-side"],
             ),
             (
-                &["tasks", "add"][..],
+                &["action-items", "add"][..],
                 &["--path", "--line", "Action intent"],
             ),
             (
@@ -3723,9 +3920,12 @@ mod tests {
     }
 
     #[test]
-    fn none_action_maps_to_a_real_task_action_but_clears_optional_comment_action() {
-        assert_eq!(action_intent_arg(ActionIntentArg::None), ActionIntent::None);
+    fn none_action_clears_optional_action_intent() {
         assert_eq!(action_intent_arg_to_option(ActionIntentArg::None), None);
+        assert_eq!(
+            action_intent_arg_to_option(ActionIntentArg::Fix),
+            Some(ActionIntent::Fix)
+        );
     }
 
     #[test]
@@ -3754,7 +3954,16 @@ mod tests {
                 "1",
             ]
             .as_slice(),
-            ["gander", "tasks", "add", "--title", "t", "--line", "1"].as_slice(),
+            [
+                "gander",
+                "action-items",
+                "add",
+                "--title",
+                "t",
+                "--line",
+                "1",
+            ]
+            .as_slice(),
             [
                 "gander",
                 "walkthrough",
@@ -3788,7 +3997,15 @@ mod tests {
         for command in [
             ["gander", "comments", "add", "--file", "p", "--body", "b"].as_slice(),
             [
-                "gander", "tasks", "add", "--title", "t", "--file", "p", "--line", "1",
+                "gander",
+                "action-items",
+                "add",
+                "--title",
+                "t",
+                "--file",
+                "p",
+                "--line",
+                "1",
             ]
             .as_slice(),
             ["gander", "hunks", "list", "--file", "p"].as_slice(),
@@ -3833,19 +4050,15 @@ mod tests {
             ],
             &["gander", "comments", "delete", "abc"],
             &[
-                "gander", "tasks", "add", "--title", "fix", "--action", "followup",
-            ],
-            &[
                 "gander",
-                "tasks",
+                "action-items",
                 "add",
                 "--title",
                 "fix",
                 "--action",
                 "follow-up",
             ],
-            &["gander", "tasks", "complete", "abc", "--summary", "done"],
-            &["gander", "tasks", "reopen", "abc"],
+            &["gander", "action-items", "reopen", "abc"],
             &[
                 "gander",
                 "walkthrough",
@@ -3871,8 +4084,168 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_chunks_and_briefs_commands_are_unknown() {
-        for command in [&["gander", "chunks"][..], &["gander", "briefs"][..]] {
+    fn action_items_cli_accepts_complete_public_surface() {
+        let commands: &[&[&str]] = &[
+            &["gander", "action-items", "list", "--format", "text"],
+            &["gander", "action-items", "show", "abc", "--format", "json"],
+            &[
+                "gander",
+                "action-items",
+                "add",
+                "--title",
+                "Coordinate fixes",
+                "--body",
+                "Handle both comments",
+                "--action",
+                "follow-up",
+                "--comment",
+                "comment-a",
+                "--comment",
+                "comment-b",
+                "--path",
+                "src/lib.rs",
+                "--line",
+                "12",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "edit",
+                "item-a",
+                "--title",
+                "Updated",
+                "--body",
+                "Updated body",
+                "--action",
+                "none",
+                "--path",
+                "src/main.rs",
+                "--line",
+                "20",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "link-comment",
+                "item-a",
+                "--comment",
+                "comment-a",
+                "--comment",
+                "comment-b",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "unlink-comment",
+                "item-a",
+                "--comment",
+                "comment-a",
+                "--comment",
+                "comment-b",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "add-ticket",
+                "item-a",
+                "--tracker",
+                "linear",
+                "--reference",
+                "ENG-123",
+                "--url",
+                "https://linear.example/ENG-123",
+            ],
+            &["gander", "action-items", "remove-ticket", "item-a", "ENG-1"],
+            &[
+                "gander",
+                "action-items",
+                "close",
+                "item-a",
+                "--disposition",
+                "completed",
+                "--outcome",
+                "Implemented and checked",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "close",
+                "item-a",
+                "--disposition",
+                "dismissed",
+            ],
+            &[
+                "gander",
+                "action-items",
+                "close",
+                "item-a",
+                "--disposition",
+                "deferred",
+            ],
+            &["gander", "action-items", "reopen", "item-a"],
+            &["gander", "action-items", "delete", "item-a"],
+        ];
+        for command in commands {
+            Cli::try_parse_from(*command)
+                .unwrap_or_else(|error| panic!("failed to parse {command:?}: {error}"));
+        }
+
+        let mut command = Cli::command();
+        let names = command
+            .find_subcommand_mut("action-items")
+            .unwrap()
+            .get_subcommands()
+            .map(clap::Command::get_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "list",
+                "show",
+                "add",
+                "edit",
+                "link-comment",
+                "unlink-comment",
+                "add-ticket",
+                "remove-ticket",
+                "close",
+                "reopen",
+                "delete",
+            ]
+        );
+    }
+
+    #[test]
+    fn action_item_required_flags_are_enforced() {
+        for command in [
+            &["gander", "action-items", "add"][..],
+            &["gander", "action-items", "link-comment", "item-a"][..],
+            &["gander", "action-items", "unlink-comment", "item-a"][..],
+            &[
+                "gander",
+                "action-items",
+                "add-ticket",
+                "item-a",
+                "--tracker",
+                "linear",
+            ][..],
+            &["gander", "action-items", "remove-ticket", "item-a"][..],
+            &["gander", "action-items", "close", "item-a"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(command).is_err(),
+                "unexpectedly parsed {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_public_commands_are_unknown() {
+        for command in [
+            &["gander", "chunks"][..],
+            &["gander", "briefs"][..],
+            &["gander", "tasks"][..],
+        ] {
             let error = Cli::try_parse_from(command).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         }
@@ -3909,6 +4282,33 @@ mod tests {
     #[test]
     fn handoff_only_open_flag_is_unknown() {
         let error = Cli::try_parse_from(["gander", "handoff", "--only-open"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn handoff_uses_repeatable_action_item_selectors_and_rejects_task_flag() {
+        let cli = Cli::try_parse_from([
+            "gander",
+            "handoff",
+            "--mode",
+            "delegate",
+            "--action-item",
+            "item-a",
+            "--action-item",
+            "item-b",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Handoff { action_items, .. } => {
+                assert_eq!(action_items, ["item-a", "item-b"]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let error = Cli::try_parse_from([
+            "gander", "handoff", "--mode", "delegate", "--task", "item-a",
+        ])
+        .unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
@@ -4121,6 +4521,32 @@ mod tests {
     }
 
     #[test]
+    fn action_item_text_uses_compact_unique_selectors() {
+        let session = state::ReviewSession {
+            action_items: vec![
+                crate::state::ActionItem {
+                    id: "abcdef12-0000".into(),
+                    title: "First durable item".into(),
+                    ..Default::default()
+                },
+                crate::state::ActionItem {
+                    id: "abcdef12-ffff".into(),
+                    title: "Second durable item".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let listed = review::list_action_items(&session);
+
+        assert_eq!(listed[0].selector, "abcdef12-0");
+        assert_eq!(listed[1].selector, "abcdef12-f");
+        let text = action_items_text(&listed);
+        assert!(text.starts_with("abcdef12-0"));
+        assert!(text.contains("abcdef12-f"));
+    }
+
+    #[test]
     fn hunks_json_can_list_and_show_by_id() {
         let session = sample_session();
         let list = session_hunks_json(&session, None);
@@ -4131,10 +4557,9 @@ mod tests {
     }
 
     #[test]
-    fn comments_and_tasks_json_use_existing_comment_state() {
+    fn comments_json_uses_existing_comment_state() {
         let session = sample_session();
 
         assert_eq!(session_comments_json(&session)["comments"][0]["id"], "c1");
-        assert_eq!(session_tasks_json(&session)["tasks"][0]["comment_id"], "c1");
     }
 }

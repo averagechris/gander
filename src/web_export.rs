@@ -1,14 +1,22 @@
+use std::collections::BTreeSet;
+
 use chrono::Utc;
 
 use crate::{
     app::ReviewSession,
     diff::DiffLineKind,
-    state::{Comment, ReviewSessionStatus, ReviewState, ReviewTarget},
+    state::{ActionItem, Comment, ReviewSessionStatus, ReviewState, ReviewTarget},
 };
 
 pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     let generated_at = Utc::now().to_rfc3339();
-    let active_session_id = active_session_id(session, state);
+    let active_session = active_durable_session(session, state);
+    let active_session_id = active_session.map(|durable| durable.id.as_str());
+    let linked_comment_ids = active_session
+        .into_iter()
+        .flat_map(|durable| durable.action_items.iter())
+        .flat_map(|item| item.comment_ids.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
     let mut out = String::from(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>gander review export</title>\n<style>",
     );
@@ -50,12 +58,13 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
         out.push_str("</small></a>");
     }
     out.push_str("</nav><main>\n");
-    render_walkthroughs(&mut out, state);
-    render_tasks(&mut out, state);
+    render_walkthroughs(&mut out, active_session);
+    render_action_items(&mut out, active_session, &state.comments);
     let general_comments = state
         .comments
         .iter()
         .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+        .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
         .filter(|comment| comment.path.is_none())
         .collect::<Vec<_>>();
     if !general_comments.is_empty() {
@@ -70,6 +79,7 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
             .comments
             .iter()
             .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+            .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
             .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
             .collect();
         out.push_str("<section class=\"card file\" id=\"");
@@ -119,16 +129,15 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     out
 }
 
-fn active_session_id<'a>(session: &ReviewSession, state: &'a ReviewState) -> Option<&'a str> {
-    state
-        .sessions
-        .iter()
-        .find(|durable| {
-            durable.status == ReviewSessionStatus::Open
-                && durable.target.base.as_deref() == Some(session.target.base.as_str())
-                && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
-        })
-        .map(|durable| durable.id.as_str())
+fn active_durable_session<'a>(
+    session: &ReviewSession,
+    state: &'a ReviewState,
+) -> Option<&'a crate::state::ReviewSession> {
+    state.sessions.iter().find(|durable| {
+        durable.status == ReviewSessionStatus::Open
+            && durable.target.base.as_deref() == Some(session.target.base.as_str())
+            && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
+    })
 }
 
 fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
@@ -137,10 +146,9 @@ fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bo
     })
 }
 
-fn render_walkthroughs(out: &mut String, state: &ReviewState) {
-    let steps: Vec<_> = state
-        .sessions
-        .iter()
+fn render_walkthroughs(out: &mut String, session: Option<&crate::state::ReviewSession>) {
+    let steps: Vec<_> = session
+        .into_iter()
         .flat_map(|session| session.walkthroughs.iter())
         .flat_map(|walkthrough| walkthrough.steps.iter())
         .collect();
@@ -168,35 +176,95 @@ fn render_walkthroughs(out: &mut String, state: &ReviewState) {
     out.push_str("</ol></section>");
 }
 
-fn render_tasks(out: &mut String, state: &ReviewState) {
-    let tasks: Vec<_> = state
-        .sessions
-        .iter()
-        .flat_map(|session| session.tasks.iter())
-        .collect();
-    if tasks.is_empty() {
+fn render_action_items(
+    out: &mut String,
+    session: Option<&crate::state::ReviewSession>,
+    comments: &[Comment],
+) {
+    let Some(session) = session else {
+        return;
+    };
+    if session.action_items.is_empty() {
         return;
     }
-    out.push_str("<section class=\"card\"><h2>Tasks</h2>");
-    for task in tasks {
-        out.push_str("<article class=\"task\"><div><span class=\"pill\">");
-        esc_to(out, &format!("{:?}", task.status).to_lowercase());
-        out.push_str("</span><span class=\"pill action\">");
-        esc_to(out, &format!("{:?}", task.action).to_lowercase());
-        out.push_str("</span></div><h3>");
-        esc_to(out, &task.title);
-        out.push_str("</h3>");
-        if let Some(body) = &task.body {
-            out.push_str("<p>");
-            esc_to(out, body);
-            out.push_str("</p>");
-        }
-        if let Some(target) = &task.target {
-            render_target_link(out, target);
-        }
-        out.push_str("</article>");
+    out.push_str("<section class=\"card\"><h2>Action items</h2>");
+    for item in &session.action_items {
+        render_action_item(out, item, session, comments);
     }
     out.push_str("</section>");
+}
+
+fn render_action_item(
+    out: &mut String,
+    item: &ActionItem,
+    session: &crate::state::ReviewSession,
+    comments: &[Comment],
+) {
+    out.push_str("<article class=\"comment action-item\"><div><span class=\"pill\">");
+    esc_to(out, &format!("{:?}", item.status).to_lowercase());
+    out.push_str("</span><span class=\"pill action\">");
+    esc_to(
+        out,
+        &item
+            .action
+            .map(|action| format!("{action:?}").to_lowercase())
+            .unwrap_or_else(|| "none".into()),
+    );
+    out.push_str("</span></div><h3>");
+    esc_to(out, &item.title);
+    out.push_str("</h3>");
+    if let Some(body) = &item.body {
+        out.push_str("<p>");
+        esc_to(out, body);
+        out.push_str("</p>");
+    }
+    if let Some(target) = &item.target {
+        render_target_link(out, target);
+    }
+    if let Some(disposition) = item.disposition {
+        out.push_str("<p><strong>Disposition:</strong> ");
+        esc_to(out, &format!("{disposition:?}").to_lowercase());
+        out.push_str("</p>");
+    }
+    if let Some(outcome) = &item.outcome {
+        out.push_str("<p><strong>Outcome:</strong> ");
+        esc_to(out, outcome);
+        out.push_str("</p>");
+    }
+    if let Some(closed_at) = item.closed_at {
+        out.push_str("<p><strong>Closed:</strong> ");
+        esc_to(out, &closed_at.to_rfc3339());
+        out.push_str("</p>");
+    }
+    for ticket in &item.external_tickets {
+        out.push_str("<p class=\"external-ticket\"><strong>External ticket:</strong> ");
+        esc_to(out, &ticket.tracker);
+        out.push(' ');
+        esc_to(out, &ticket.reference);
+        if let Some(url) = &ticket.url {
+            out.push_str(" (");
+            esc_to(out, url);
+            out.push(')');
+        }
+        out.push_str("</p>");
+    }
+    let linked_comments = item
+        .comment_ids
+        .iter()
+        .filter_map(|id| {
+            comments
+                .iter()
+                .find(|comment| comment.id == *id && comment.belongs_to_session(&session.id))
+        })
+        .collect::<Vec<_>>();
+    if !linked_comments.is_empty() {
+        out.push_str("<div class=\"comments evidence\"><h4>Evidence comments</h4>");
+        for comment in linked_comments {
+            render_comment(out, comment);
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("</article>");
 }
 
 fn render_comment(out: &mut String, comment: &Comment) {
@@ -289,7 +357,7 @@ fn esc_to(out: &mut String, text: &str) {
 }
 
 const CSS: &str = r#"
-:root{color-scheme:dark;--bg:#0f1117;--panel:#191724;--panel2:#1f1d2e;--text:#e6e1e8;--muted:#908caa;--rose:#eb6f92;--iris:#c4a7e7;--green:#3fb950;--red:#f85149;--line:#2a2837}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#26233a,#0f1117 34rem);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.hero{display:flex;justify-content:space-between;gap:2rem;padding:2rem 2.4rem;border-bottom:1px solid var(--line);background:rgba(15,17,23,.82);backdrop-filter:blur(10px)}h1,h2,h3,p{margin-top:0}.eyebrow{color:var(--rose);font-weight:700;text-transform:uppercase;letter-spacing:.12em}.summary{color:var(--muted);font-size:1.05rem}.meta{display:grid;gap:.7rem;min-width:18rem}.meta div,.card{border:1px solid var(--line);background:rgba(25,23,36,.88);border-radius:16px}.meta div{padding:.8rem 1rem}.meta span{display:block;color:var(--muted);font-size:.78rem}.layout{display:grid;grid-template-columns:18rem 1fr;gap:1.2rem;padding:1.2rem}.sidebar{position:sticky;top:1rem;align-self:start;padding:1rem;border:1px solid var(--line);border-radius:16px;background:rgba(25,23,36,.92)}.file-link{display:block;padding:.55rem .2rem;color:var(--text);text-decoration:none;border-top:1px solid #242133}.file-link small{display:block;color:var(--muted)}ins{color:var(--green);text-decoration:none}del{color:var(--red);text-decoration:none}em,.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.12rem .5rem;color:var(--iris);font-style:normal;font-size:.75rem}.card{margin-bottom:1rem;padding:1rem;box-shadow:0 16px 40px rgba(0,0,0,.28)}summary{cursor:pointer;display:flex;align-items:center;gap:.6rem}summary h2{display:inline;margin:0;flex:1}.stat{font-weight:700}.add{color:var(--green)}.del{color:var(--red)}.diff{width:100%;border-collapse:collapse;margin-top:1rem;overflow:hidden;border-radius:12px}.diff td{border-top:1px solid #242133}.ln{width:4.2rem;text-align:right;color:var(--muted);user-select:none;padding:.08rem .7rem;background:#15131f}.diff pre{margin:0;white-space:pre-wrap;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.diff .add td{background:rgba(46,160,67,.13)}.diff .del td{background:rgba(248,81,73,.13)}.diff .hunk td{padding:.42rem .8rem;color:var(--iris);background:#211f30;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.comment,.task{padding:1rem;margin:.75rem 0;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}.action{color:var(--rose)}.loc,.target{color:var(--muted);margin-left:.4rem}.target{display:inline-block;margin:.4rem 0 0 0}.why{color:#f6c177}@media(max-width:900px){.layout{display:block}.sidebar{position:static;margin-bottom:1rem}.hero{display:block}}"#;
+:root{color-scheme:dark;--bg:#0f1117;--panel:#191724;--panel2:#1f1d2e;--text:#e6e1e8;--muted:#908caa;--rose:#eb6f92;--iris:#c4a7e7;--green:#3fb950;--red:#f85149;--line:#2a2837}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#26233a,#0f1117 34rem);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.hero{display:flex;justify-content:space-between;gap:2rem;padding:2rem 2.4rem;border-bottom:1px solid var(--line);background:rgba(15,17,23,.82);backdrop-filter:blur(10px)}h1,h2,h3,p{margin-top:0}.eyebrow{color:var(--rose);font-weight:700;text-transform:uppercase;letter-spacing:.12em}.summary{color:var(--muted);font-size:1.05rem}.meta{display:grid;gap:.7rem;min-width:18rem}.meta div,.card{border:1px solid var(--line);background:rgba(25,23,36,.88);border-radius:16px}.meta div{padding:.8rem 1rem}.meta span{display:block;color:var(--muted);font-size:.78rem}.layout{display:grid;grid-template-columns:18rem 1fr;gap:1.2rem;padding:1.2rem}.sidebar{position:sticky;top:1rem;align-self:start;padding:1rem;border:1px solid var(--line);border-radius:16px;background:rgba(25,23,36,.92)}.file-link{display:block;padding:.55rem .2rem;color:var(--text);text-decoration:none;border-top:1px solid #242133}.file-link small{display:block;color:var(--muted)}ins{color:var(--green);text-decoration:none}del{color:var(--red);text-decoration:none}em,.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.12rem .5rem;color:var(--iris);font-style:normal;font-size:.75rem}.card{margin-bottom:1rem;padding:1rem;box-shadow:0 16px 40px rgba(0,0,0,.28)}summary{cursor:pointer;display:flex;align-items:center;gap:.6rem}summary h2{display:inline;margin:0;flex:1}.stat{font-weight:700}.add{color:var(--green)}.del{color:var(--red)}.diff{width:100%;border-collapse:collapse;margin-top:1rem;overflow:hidden;border-radius:12px}.diff td{border-top:1px solid #242133}.ln{width:4.2rem;text-align:right;color:var(--muted);user-select:none;padding:.08rem .7rem;background:#15131f}.diff pre{margin:0;white-space:pre-wrap;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.diff .add td{background:rgba(46,160,67,.13)}.diff .del td{background:rgba(248,81,73,.13)}.diff .hunk td{padding:.42rem .8rem;color:var(--iris);background:#211f30;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.comment,.action-item{padding:1rem;margin:.75rem 0;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}.action{color:var(--rose)}.loc,.target{color:var(--muted);margin-left:.4rem}.target{display:inline-block;margin:.4rem 0 0 0}.why{color:#f6c177}@media(max-width:900px){.layout{display:block}.sidebar{position:static;margin-bottom:1rem}.hero{display:block}}"#;
 
 #[cfg(test)]
 mod tests {
@@ -350,6 +418,17 @@ mod tests {
         });
         state.sessions.push(crate::state::ReviewSession {
             id: "s1".into(),
+            target: ReviewTarget {
+                base: Some("main".into()),
+                revision: Some("@".into()),
+                ..Default::default()
+            },
+            action_items: vec![crate::state::ActionItem {
+                id: "action-1".into(),
+                title: "Address comment".into(),
+                comment_ids: vec!["c1".into()],
+                ..Default::default()
+            }],
             walkthroughs: vec![Walkthrough {
                 id: "w1".into(),
                 title: None,
@@ -393,16 +472,13 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("comment body"));
         assert!(html.contains("Step title"));
+        assert!(html.contains("Address comment"));
+        assert_eq!(html.matches("comment body").count(), 1);
     }
 
     #[test]
     fn acceptance_html_renders_general_comments_and_scopes_session_comments_with_legacy_visible() {
         let (session, mut state) = fixture();
-        state.sessions[0].target = ReviewTarget {
-            base: Some("main".into()),
-            revision: Some("@".into()),
-            ..Default::default()
-        };
         state.comments.extend([
             Comment {
                 id: "general".into(),
@@ -437,5 +513,80 @@ mod tests {
         assert!(html.contains("matching body"));
         assert!(html.contains("comment body"));
         assert!(!html.contains("foreign body"));
+    }
+
+    #[test]
+    fn html_scopes_durable_action_items_and_walkthroughs_to_active_session() {
+        let (session, mut state) = fixture();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "other".into(),
+            action_items: vec![crate::state::ActionItem {
+                id: "foreign-action".into(),
+                title: "Foreign action item".into(),
+                ..Default::default()
+            }],
+            walkthroughs: vec![Walkthrough {
+                id: "foreign-walk".into(),
+                steps: vec![WalkthroughStep {
+                    id: "foreign-step".into(),
+                    title: Some("Foreign step".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("Address comment"));
+        assert!(html.contains("Step title"));
+        assert!(!html.contains("Foreign action item"));
+        assert!(!html.contains("Foreign step"));
+    }
+
+    #[test]
+    fn html_nests_linked_comments_and_suppresses_standalone_duplicates() {
+        let (session, mut state) = fixture();
+        state.comments.push(Comment {
+            id: "unlinked".into(),
+            session_id: Some("s1".into()),
+            path: Some("src/lib.rs".into()),
+            body: "unlinked body".into(),
+            state: CommentState::Todo,
+            ..Default::default()
+        });
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("<h4>Evidence comments</h4>"));
+        assert_eq!(html.matches("comment body").count(), 1);
+        assert_eq!(html.matches("unlinked body").count(), 1);
+    }
+
+    #[test]
+    fn html_renders_action_item_outcome_disposition_and_external_tickets() {
+        let (session, mut state) = fixture();
+        let item = &mut state.sessions[0].action_items[0];
+        item.status = crate::state::ActionItemStatus::Closed;
+        item.disposition = Some(crate::state::ClosedDisposition::Deferred);
+        item.outcome = Some("Moved out of the local review".into());
+        item.closed_at = Some(chrono::DateTime::UNIX_EPOCH);
+        item.external_tickets.push(crate::state::ExternalTicket {
+            tracker: "linear".into(),
+            reference: "GAN-42".into(),
+            url: Some("https://example.test/GAN-42?<unsafe>".into()),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            updated_at: chrono::DateTime::UNIX_EPOCH,
+        });
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("<strong>Disposition:</strong> deferred"));
+        assert!(html.contains("Moved out of the local review"));
+        assert!(html.contains("1970-01-01T00:00:00+00:00"));
+        assert!(html.contains("linear GAN-42"));
+        assert!(html.contains("https://example.test/GAN-42?&lt;unsafe&gt;"));
+        assert!(!html.contains("?<unsafe>"));
     }
 }

@@ -2,7 +2,7 @@
 
 gander is a fast, local-first jj (Jujutsu) review workspace: take a gander at
 jj-visible changes with durable review sessions, viewed-state, comments,
-walkthroughs, action-oriented review tasks, and exportable artifacts. Rust
+walkthroughs, optional durable action items, and exportable artifacts. Rust
 (edition 2024), ratatui + crossterm UI, tree-sitter syntax highlighting, and an
 rmcp-based MCP server. Canonical repo:
 [git.sr.ht/~averagechris/gander](https://git.sr.ht/~averagechris/gander).

@@ -232,15 +232,14 @@ impl Default for CommentReply {
 }
 
 /// Durable local review session over a jj-visible code state.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ReviewSession {
     pub id: String,
     pub title: Option<String>,
     pub target: ReviewTarget,
     pub status: ReviewSessionStatus,
     pub walkthroughs: Vec<Walkthrough>,
-    pub tasks: Vec<ReviewTask>,
+    pub action_items: Vec<ActionItem>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -334,29 +333,181 @@ pub enum StepArtifactKind {
     Note,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct ReviewTask {
+pub struct ActionItem {
     pub id: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<ReviewTarget>,
-    pub action: ActionIntent,
-    pub status: ReviewTaskStatus,
-    pub source_comment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionIntent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub comment_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub external_tickets: Vec<ExternalTicket>,
+    pub status: ActionItemStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ClosedDisposition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolution: Option<String>,
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ReviewTaskStatus {
+pub enum ActionItemStatus {
     #[default]
     Open,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClosedDisposition {
+    Completed,
+    Dismissed,
+    Deferred,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalTicket {
+    pub tracker: String,
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum CompatibleActionItemStatus {
+    #[default]
+    Open,
+    Closed,
     Done,
     Dismissed,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CompatibleActionItem {
+    id: String,
+    title: String,
+    body: Option<String>,
+    target: Option<ReviewTarget>,
+    action: Option<ActionIntent>,
+    comment_ids: Vec<String>,
+    source_comment_id: Option<String>,
+    external_tickets: Vec<ExternalTicket>,
+    status: CompatibleActionItemStatus,
+    disposition: Option<ClosedDisposition>,
+    outcome: Option<String>,
+    resolution: Option<String>,
+    closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl<'de> Deserialize<'de> for ActionItem {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let compatible = CompatibleActionItem::deserialize(deserializer)?;
+        let (status, legacy_disposition) = match compatible.status {
+            CompatibleActionItemStatus::Open => (ActionItemStatus::Open, None),
+            CompatibleActionItemStatus::Closed => {
+                (ActionItemStatus::Closed, Some(ClosedDisposition::Completed))
+            }
+            CompatibleActionItemStatus::Done => {
+                (ActionItemStatus::Closed, Some(ClosedDisposition::Completed))
+            }
+            CompatibleActionItemStatus::Dismissed => {
+                (ActionItemStatus::Closed, Some(ClosedDisposition::Dismissed))
+            }
+        };
+        let mut comment_ids = compatible.comment_ids;
+        if let Some(source_comment_id) = compatible.source_comment_id {
+            comment_ids.push(source_comment_id);
+        }
+        dedupe_strings(&mut comment_ids);
+
+        Ok(Self {
+            id: compatible.id,
+            title: compatible.title,
+            body: compatible.body,
+            target: compatible.target,
+            action: compatible.action,
+            comment_ids,
+            external_tickets: compatible.external_tickets,
+            status,
+            disposition: if status == ActionItemStatus::Closed {
+                compatible.disposition.or(legacy_disposition)
+            } else {
+                None
+            },
+            outcome: compatible.outcome.or(compatible.resolution),
+            closed_at: compatible.closed_at,
+            created_at: compatible.created_at,
+            updated_at: compatible.updated_at,
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CompatibleReviewSession {
+    id: String,
+    title: Option<String>,
+    target: ReviewTarget,
+    status: ReviewSessionStatus,
+    walkthroughs: Vec<Walkthrough>,
+    action_items: Vec<ActionItem>,
+    tasks: Vec<ActionItem>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl<'de> Deserialize<'de> for ReviewSession {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let compatible = CompatibleReviewSession::deserialize(deserializer)?;
+        let mut action_items = compatible.action_items;
+        let mut seen = BTreeSet::new();
+        action_items.retain(|item| seen.insert(item.id.clone()));
+        for item in compatible.tasks {
+            if seen.insert(item.id.clone()) {
+                action_items.push(item);
+            }
+        }
+
+        Ok(Self {
+            id: compatible.id,
+            title: compatible.title,
+            target: compatible.target,
+            status: compatible.status,
+            walkthroughs: compatible.walkthroughs,
+            action_items,
+            created_at: compatible.created_at,
+            updated_at: compatible.updated_at,
+        })
+    }
+}
+
+fn dedupe_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -423,6 +574,7 @@ impl ReviewState {
         let contents = fs::read_to_string(path)?;
         let mut state: Self = serde_json::from_str(&contents)?;
         state.normalize_legacy_file_state();
+        state.normalize_action_items();
         Ok(state)
     }
 
@@ -436,6 +588,7 @@ impl ReviewState {
         tmp.set_extension("json.tmp");
         let mut persisted = self.clone();
         persisted.meta.version = REVIEW_STATE_SCHEMA_VERSION;
+        persisted.normalize_action_items();
         fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
@@ -446,7 +599,7 @@ impl ReviewState {
 pub struct ReviewStateTombstones {
     pub comments: BTreeSet<String>,
     pub sessions: BTreeSet<String>,
-    pub tasks: BTreeSet<String>,
+    pub action_items: BTreeSet<String>,
     pub walkthroughs: BTreeSet<String>,
     pub walkthrough_steps: BTreeSet<String>,
 }
@@ -494,8 +647,8 @@ impl ReviewState {
                 }
             } else {
                 external_session
-                    .tasks
-                    .retain(|task| !tombstones.tasks.contains(&task.id));
+                    .action_items
+                    .retain(|item| !tombstones.action_items.contains(&item.id));
                 external_session
                     .walkthroughs
                     .retain(|walkthrough| !tombstones.walkthroughs.contains(&walkthrough.id));
@@ -516,9 +669,9 @@ fn merge_session_children(
     tombstones: &ReviewStateTombstones,
 ) {
     merge_vec_by_id(
-        &mut local.tasks,
-        external.tasks.clone(),
-        &tombstones.tasks,
+        &mut local.action_items,
+        external.action_items.clone(),
+        &tombstones.action_items,
         |local, external| prefer_external_by_updated_at(local.updated_at, external.updated_at),
     );
     merge_vec_by_id(
@@ -543,7 +696,7 @@ fn merge_session_children(
             );
         }
     }
-    external.tasks = local.tasks.clone();
+    external.action_items = local.action_items.clone();
     external.walkthroughs = local.walkthroughs.clone();
 }
 
@@ -618,7 +771,7 @@ impl Identified for ReviewSession {
     }
 }
 
-impl Identified for ReviewTask {
+impl Identified for ActionItem {
     fn id(&self) -> &str {
         &self.id
     }
@@ -666,6 +819,18 @@ impl ReviewState {
     pub fn normalize_legacy_file_state(&mut self) {
         for file in self.files.values_mut() {
             file.normalize_legacy();
+        }
+    }
+
+    pub fn normalize_action_items(&mut self) {
+        for session in &mut self.sessions {
+            let mut seen = BTreeSet::new();
+            session
+                .action_items
+                .retain(|item| seen.insert(item.id.clone()));
+            for item in &mut session.action_items {
+                dedupe_strings(&mut item.comment_ids);
+            }
         }
     }
 }
@@ -764,16 +929,16 @@ mod tests {
         }
     }
 
-    fn task(
+    fn action_item(
         id: &str,
         title: &str,
         updated_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> ReviewTask {
-        ReviewTask {
+    ) -> ActionItem {
+        ActionItem {
             id: id.to_owned(),
             title: title.to_owned(),
             updated_at,
-            ..ReviewTask::default()
+            ..ActionItem::default()
         }
     }
 
@@ -786,7 +951,7 @@ mod tests {
             .push(comment("external-comment", "external"));
         external.sessions.push(ReviewSession {
             id: "session".to_owned(),
-            tasks: vec![task("task", "external task", None)],
+            action_items: vec![action_item("item", "external item", None)],
             walkthroughs: vec![Walkthrough {
                 id: "walkthrough".to_owned(),
                 steps: vec![WalkthroughStep {
@@ -802,7 +967,7 @@ mod tests {
         local.merge_external(external, &ReviewStateTombstones::default());
 
         assert_eq!(local.comments[0].id, "external-comment");
-        assert_eq!(local.sessions[0].tasks[0].id, "task");
+        assert_eq!(local.sessions[0].action_items[0].id, "item");
         assert_eq!(local.sessions[0].walkthroughs[0].steps[0].id, "step");
     }
 
@@ -815,19 +980,19 @@ mod tests {
             .push(comment("deleted-comment", "external"));
         external.sessions.push(ReviewSession {
             id: "session".to_owned(),
-            tasks: vec![task("deleted-task", "external task", None)],
+            action_items: vec![action_item("deleted-item", "external item", None)],
             ..ReviewSession::default()
         });
         let tombstones = ReviewStateTombstones {
             comments: BTreeSet::from(["deleted-comment".to_owned()]),
-            tasks: BTreeSet::from(["deleted-task".to_owned()]),
+            action_items: BTreeSet::from(["deleted-item".to_owned()]),
             ..ReviewStateTombstones::default()
         };
 
         local.merge_external(external, &tombstones);
 
         assert!(local.comments.is_empty());
-        assert!(local.sessions[0].tasks.is_empty());
+        assert!(local.sessions[0].action_items.is_empty());
     }
 
     #[test]
@@ -837,7 +1002,7 @@ mod tests {
         let mut local = ReviewState {
             sessions: vec![ReviewSession {
                 id: "session".to_owned(),
-                tasks: vec![task("task", "old", Some(older))],
+                action_items: vec![action_item("item", "old", Some(older))],
                 updated_at: Some(older),
                 ..ReviewSession::default()
             }],
@@ -846,7 +1011,7 @@ mod tests {
         let external = ReviewState {
             sessions: vec![ReviewSession {
                 id: "session".to_owned(),
-                tasks: vec![task("task", "new", Some(newer))],
+                action_items: vec![action_item("item", "new", Some(newer))],
                 updated_at: Some(newer),
                 ..ReviewSession::default()
             }],
@@ -855,7 +1020,7 @@ mod tests {
 
         local.merge_external(external, &ReviewStateTombstones::default());
 
-        assert_eq!(local.sessions[0].tasks[0].title, "new");
+        assert_eq!(local.sessions[0].action_items[0].title, "new");
     }
 
     #[test]
@@ -1071,12 +1236,86 @@ mod tests {
 
         let session = &state.sessions[0];
         assert_eq!(session.status, ReviewSessionStatus::Open);
-        assert_eq!(session.tasks[0].action, ActionIntent::None);
-        assert_eq!(session.tasks[0].status, ReviewTaskStatus::Open);
+        assert_eq!(session.action_items[0].action, None);
+        assert_eq!(session.action_items[0].status, ActionItemStatus::Open);
         assert_eq!(
             session.walkthroughs[0].steps[0].target.file.as_deref(),
             Some("src/lib.rs")
         );
+    }
+
+    #[test]
+    fn legacy_tasks_normalize_to_canonical_action_items() {
+        let state: ReviewState = serde_json::from_str(
+            r#"{
+  "sessions": [{
+    "id": "review-1",
+    "tasks": [
+      {
+        "id": "done",
+        "title": "Ship fix",
+        "action": "fix",
+        "status": "done",
+        "source_comment_id": "comment-a",
+        "resolution": "landed"
+      },
+      {
+        "id": "dismissed",
+        "title": "Not needed",
+        "status": "dismissed",
+        "source_comment_id": "comment-b"
+      }
+    ]
+  }]
+}"#,
+        )
+        .unwrap();
+
+        let done = &state.sessions[0].action_items[0];
+        assert_eq!(done.status, ActionItemStatus::Closed);
+        assert_eq!(done.disposition, Some(ClosedDisposition::Completed));
+        assert_eq!(done.outcome.as_deref(), Some("landed"));
+        assert_eq!(done.comment_ids, ["comment-a"]);
+        let dismissed = &state.sessions[0].action_items[1];
+        assert_eq!(dismissed.disposition, Some(ClosedDisposition::Dismissed));
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"action_items\""));
+        assert!(!json.contains("\"tasks\""));
+        assert!(!json.contains("source_comment_id"));
+        assert!(!json.contains("resolution"));
+    }
+
+    #[test]
+    fn mixed_action_items_prefer_canonical_and_dedupe_ids_and_comment_ids() {
+        let state: ReviewState = serde_json::from_str(
+            r#"{
+  "sessions": [{
+    "id": "review-1",
+    "action_items": [
+      {
+        "id": "same",
+        "title": "canonical",
+        "comment_ids": ["one", "one", "two"],
+        "source_comment_id": "two"
+      },
+      { "id": "same", "title": "canonical duplicate" }
+    ],
+    "tasks": [
+      { "id": "same", "title": "legacy loses" },
+      { "id": "legacy-only", "title": "legacy retained" },
+      { "id": "legacy-only", "title": "legacy duplicate" }
+    ]
+  }]
+}"#,
+        )
+        .unwrap();
+
+        let items = &state.sessions[0].action_items;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "canonical");
+        assert_eq!(items[0].comment_ids, ["one", "two"]);
+        assert_eq!(items[1].title, "legacy retained");
     }
 
     #[test]
@@ -1135,7 +1374,10 @@ mod tests {
         assert_eq!(state.comments[0].action, Some(ActionIntent::Test));
         assert_eq!(state.comments[0].created_at, created_at);
         assert_eq!(state.sessions[0].status, ReviewSessionStatus::Completed);
-        assert_eq!(state.sessions[0].tasks[0].action, ActionIntent::Fix);
+        assert_eq!(
+            state.sessions[0].action_items[0].action,
+            Some(ActionIntent::Fix)
+        );
 
         let json = serde_json::to_string(&state).unwrap();
         let loaded: ReviewState = serde_json::from_str(&json).unwrap();
@@ -1150,8 +1392,8 @@ mod tests {
             Some("ReviewState")
         );
         assert_eq!(
-            loaded.sessions[0].tasks[0].source_comment_id.as_deref(),
-            Some("comment-1")
+            loaded.sessions[0].action_items[0].comment_ids,
+            ["comment-1"]
         );
     }
 

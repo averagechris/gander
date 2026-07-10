@@ -13,9 +13,9 @@ The baseline automation surface is the CLI, with MCP as an optional adapter
 
 Gander expects the change to already be visible to jj in the current
 workspace. A user or harness can fetch a teammate branch, prepare an agent
-workspace, post selected comments to a forge, or edit files in response to
-tasks. Gander itself should not fetch PRs, mutate code, or post remote reviews;
-it persists local review sessions, comments, tasks, walkthroughs, and exports.
+workspace, post selected comments to a forge, or edit files in response to todo
+comments/action items. Gander itself should not fetch PRs, mutate code, or post remote reviews;
+it persists local review sessions, comments, optional action items, walkthroughs, and exports.
 
 ## CLI-first automation
 
@@ -32,15 +32,16 @@ gander reviews show <id>
 gander comments add --path src/lib.rs --line 42 --kind issue --action fix --state todo --body "Check this invariant."
 gander comments add --general --state draft --body "Private reviewer note; not ready for handoff."
 gander comments ready --all-drafts
-gander tasks add --title "Tighten invariant" --action fix --comment <comment-id> --path src/lib.rs --line 42
+gander action-items add --title "Tighten invariant" --action fix --comment <comment-id> --path src/lib.rs --line 42
 gander walkthrough add-step --title "Start at the invariant" --path src/lib.rs --line 42 --why "This controls the rest of the change."
 gander walkthrough show
 gander handoff --copy
 gander hunks show <hunk-id>
 ```
 
-Review state schema 2 records optional comment `session_id` and `path` fields;
-artifact schema 6 and delegation schema 2 expose the corresponding shape.
+Review state schema remains 2 and records optional comment `session_id` and
+`path` fields plus normalized `action_items` when legacy `tasks` state is read.
+Artifact schema 7 and delegation schema 3 expose the action-item shape.
 State/artifact readers still accept older anchored comments unchanged. A legacy
 comment with no `session_id` remains visible in the active session, while a
 pathless comment is explicitly general to its owning session.
@@ -70,21 +71,24 @@ stacked PRs), `change_diff` (one change against its parent),
 prefer `walkthrough_*` for new curation, with optional stack `change_id`),
 `draft_comment`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
-`comment_*`, `task_*`/`tasks_list`, and `walkthrough_*`. Suggestions written through the mutating tools surface
-live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
-via `S` and zen mode `T`/`Z`, comments via `C`). MCP must preserve CLI
+`comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
+live in the reviewer's terminal (ordering via `A`, flags via `F`, walkthrough/zen
+mode via `T`/`Z`, comments via `C`, and open work via `X`). MCP must preserve CLI
 semantics: new comments honor the configured initial state unless an explicit
 state is supplied; draft comments are durable/private/withheld, todo comments
 are ready/actionable regardless of kind/action, resolved comments are history,
-and general comments have no file location or excerpt.
+and general comments have no file location or excerpt. Todo comments are the
+primary implicit feedback; ordinary comments are not action items. Durable action
+items are optional higher-level coordination objects and linked todo evidence is
+folded into its parent item.
 
 The CLI-parity state-file tools load and save the persisted review state
-directly, matching the corresponding `gander reviews`, `comments`, `tasks`,
+directly, matching the corresponding `gander reviews`, `comments`, `action-items`,
 and `walkthrough` commands. They are safe to use beside a live TUI: the TUI
 watches the state file and merges external additions/updates before saving, so
-CLI-added comments, tasks, and walkthrough steps survive TUI save/quit. Same-ID
+CLI-added comments, action items, and walkthrough steps survive TUI save/quit. Same-ID
 comment updates use the newer `updated_at` value for body/state metadata and
-union append-only replies by reply id; sessions, tasks, walkthroughs, and
+union append-only replies by reply id; sessions, action items, walkthroughs, and
 walkthrough steps likewise prefer the newer timestamp.
 
 ### MCP ⇄ CLI parity table
@@ -103,10 +107,17 @@ scriptable surface.
 | `comment_resolve` | `gander comments resolve <id> [--reply <text>]` |
 | `comment_set_state` | `gander comments set-state <id> --state draft|todo|resolved` |
 | `comment_ready` | `gander comments ready (<id>... \| --all-drafts)` |
-| `task_add` | `gander tasks add --title <title> [--body <text>] [--action ...] [--comment <id>] [--path <path>] [--line <n>]` |
-| `task_complete` | `gander tasks complete <id> [--summary <text>]` |
-| `task_reopen` | `gander tasks reopen <id>` |
-| `tasks_list` | `gander tasks list` |
+| `action_item_list` | `gander action-items list` |
+| `action_item_show` | `gander action-items show <id>` |
+| `action_item_add` | `gander action-items add --title <title> [--body <text>] [--action ...] [--comment <id>]... [--ticket <ref>]... [--path <path>] [--line <n>]` |
+| `action_item_edit` | `gander action-items edit <id> ...` |
+| `action_item_link_comment` | `gander action-items link-comment <id> --comment <comment-id>` |
+| `action_item_unlink_comment` | `gander action-items unlink-comment <id> --comment <comment-id>` |
+| `action_item_add_ticket` | `gander action-items add-ticket <id> --ticket <ref>` |
+| `action_item_remove_ticket` | `gander action-items remove-ticket <id> --ticket <ref>` |
+| `action_item_close` | `gander action-items close <id> --disposition completed|dismissed|deferred [--summary <text>] [--ticket <ref>]` |
+| `action_item_reopen` | `gander action-items reopen <id>` |
+| `action_item_delete` | `gander action-items delete <id>` |
 | `walkthrough_add_step` | `gander walkthrough add-step --title <title> [--file <path>] [--line <n>] [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]` |
 | `walkthrough_remove_step` | `gander walkthrough remove-step <id>` |
 | `walkthrough_move_step` | `gander walkthrough move-step <id> --to <zero-based-index>` |
@@ -250,4 +261,4 @@ agent how to reach the review session and what to do with it.
 - `gander export --profile agent`: a static JSON artifact with raw
   excerpts and stable anchors when you don't need a live session. It is an
   archive/reference artifact; import currently restores comments and matching
-  viewed state, not tasks or walkthroughs.
+  viewed state, not action items or walkthroughs.

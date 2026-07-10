@@ -12,7 +12,7 @@ north star, non-goals, and post-MVP milestone plan.
 - **Local artifacts are first-class.** JSON is for agents/tools; Markdown is for humans in Slack/email/docs.
 - **Gander reads code state and writes review state.** Users or external
   harnesses prepare/fetch work; Gander inspects jj state and persists review
-  sessions, comments, tasks, and walkthroughs without mutating the code
+  sessions, comments, optional action items, and walkthroughs without mutating the code
   workspace or posting to forges.
 - **CLI parity is required.** Anything available through MCP, the TUI, or a
   future web UI must have an equivalent scriptable CLI path over the same core
@@ -245,7 +245,7 @@ task, walkthrough, comment kind, and action-intent fields are now part of
 
 - [x] promote the durable session to Gander's core product object, above raw
   diff/artifact exports
-- [x] model comments, action-tagged review tasks, walkthrough steps, stable
+- [x] model comments, optional durable action items, walkthrough steps, stable
   targets, and migration-friendly defaults in the state layer
 - [ ] add reviewer/author metadata and richer session lifecycle commands
 - [x] keep existing viewed-state/comment/artifact behavior working through the
@@ -259,7 +259,7 @@ Status: mostly complete. Mutating session/comment/task/walkthrough commands,
 file and hunk queries, JSON/Markdown/HTML exports, and the CLI/MCP parity table
 have landed. Remaining work is a stable JSON contract audit.
 
-- [x] add scriptable commands for sessions, files, hunks, comments, tasks,
+- [x] add scriptable commands for sessions, files, hunks, comments, action items,
   walkthroughs, and exports
 - [x] provide initial stable JSON output suitable for harnesses and agents
 - [x] ensure every MCP capability has a documented CLI equivalent backed by the
@@ -276,7 +276,7 @@ walkthrough/session state.
 
 - [ ] make TUI state mutations call the same services as the CLI/MCP adapters
 - [x] add first-class key hunk and walkthrough editing affordances
-- [x] support action-tagged comments/tasks (`fix`, `explain`, `test`,
+- [x] support action-tagged comments/action items (`fix`, `explain`, `test`,
   `follow-up`) for agent handoff
 - [ ] keep zen/focused review modes as views over walkthrough/session state
 
@@ -319,11 +319,11 @@ Open items from the 2026-07 review-sessions push, consolidated so a future
 session can start here without re-deriving them:
 
 1. **Stable `--json` contract audit** (M12). The v1 JSON shapes shipped by
-   `reviews`/`comments`/`tasks`/`walkthrough`/`files`/`hunks` are captured in
+   `reviews`/`comments`/`action-items`/`walkthrough`/`files`/`hunks` are captured in
    docs/cli.md; audit them for consistency (naming, envelope objects,
    id-prefix semantics), fix inconsistencies once, then declare the contract
    stable and note versioning rules in docs/cli.md.
-2. **Reviewer/author metadata** (M11). Comments/sessions/tasks have no author
+2. **Reviewer/author metadata** (M11). Comments/sessions/action items have no author
    field yet. Add optional `author` (human name/handle or agent identifier)
    with serde defaults, thread it through `review.rs`, the CLI (`--author` or
    config default), MCP params, and exports.

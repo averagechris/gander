@@ -8,12 +8,12 @@ use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff},
     ids::shortest_unique_prefix,
     state::{
-        ActionIntent, Comment, CommentReply, CommentState, ReviewSession, ReviewState,
-        ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
+        ActionIntent, ActionItem, ActionItemStatus, Comment, CommentReply, CommentState,
+        ExternalTicket, ReviewSession, ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
     },
 };
 
-pub const DELEGATION_SCHEMA_VERSION: u8 = 2;
+pub const DELEGATION_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DelegationSpec {
@@ -22,7 +22,7 @@ pub struct DelegationSpec {
     pub repeated_constraints: Vec<String>,
     pub acceptance_criteria: Vec<String>,
     pub requested_verification: Vec<String>,
-    pub task_selectors: Vec<String>,
+    pub action_item_selectors: Vec<String>,
     pub comment_selectors: Vec<String>,
     pub hunk_context_lines: usize,
 }
@@ -62,7 +62,7 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceMeta {
     pub diff_file_count: usize,
-    pub task_count: usize,
+    pub action_item_count: usize,
     pub comment_count: usize,
     pub walkthrough_count: usize,
 }
@@ -97,15 +97,17 @@ pub struct DelegatedActionItem {
     pub source: ActionSource,
     pub title: String,
     pub body: Option<String>,
-    pub action: ActionIntent,
+    pub action: Option<ActionIntent>,
     pub target: Option<ReviewTarget>,
+    pub comment_ids: Vec<String>,
+    pub external_tickets: Vec<ExternalTicket>,
     pub evidence_comments: Vec<CommentEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionSource {
-    Task,
+    ActionItem,
     Comment,
 }
 
@@ -144,7 +146,8 @@ pub struct ReferenceHunk {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewStateReturnContract {
     pub summary_required: bool,
-    pub allowed_task_statuses: Vec<String>,
+    pub allowed_action_item_statuses: Vec<String>,
+    pub allowed_closed_dispositions: Vec<String>,
     pub allowed_comment_states: Vec<String>,
     pub commands: Vec<ReturnCommand>,
 }
@@ -170,7 +173,12 @@ pub fn build_delegation_packet(
     let return_contract = return_contract(&session.target, &selected);
     let paths = selected
         .iter()
-        .filter_map(|i| i.target.as_ref()?.file.clone())
+        .filter_map(|item| item.target.as_ref()?.file.clone())
+        .chain(selected.iter().flat_map(|item| {
+            item.evidence_comments
+                .iter()
+                .filter_map(|comment| comment.path.clone())
+        }))
         .collect::<BTreeSet<_>>();
     Ok(DelegationPacket {
         schema_version: DELEGATION_SCHEMA_VERSION,
@@ -194,7 +202,7 @@ pub fn build_delegation_packet(
         target: session.target.clone(),
         source: SourceMeta {
             diff_file_count: diff.files.len(),
-            task_count: session.tasks.len(),
+            action_item_count: session.action_items.len(),
             comment_count: session_comments.len(),
             walkthrough_count: session.walkthroughs.len(),
         },
@@ -220,33 +228,57 @@ fn select_action_items(
 ) -> Result<Vec<DelegatedActionItem>> {
     let comments_by_id = comments
         .iter()
-        .filter(|c| c.state == CommentState::Todo)
-        .map(|c| (c.id.as_str(), *c))
+        .filter(|comment| comment.state == CommentState::Todo)
+        .map(|comment| (comment.id.as_str(), *comment))
         .collect::<BTreeMap<_, _>>();
-    let mut items = Vec::new();
-    let explicit = !spec.task_selectors.is_empty() || !spec.comment_selectors.is_empty();
-    let tasks = resolve_tasks(&session.tasks, &spec.task_selectors, explicit)?;
-    let selected_task_comments = tasks
+    let explicit = !spec.action_item_selectors.is_empty() || !spec.comment_selectors.is_empty();
+    let selected_items =
+        resolve_action_items(&session.action_items, &spec.action_item_selectors, explicit)?;
+    let selected_ids = selected_items
         .iter()
-        .filter_map(|t| t.source_comment_id.as_deref())
-        .filter(|id| comments_by_id.contains_key(id))
+        .map(|item| item.id.as_str())
         .collect::<BTreeSet<_>>();
-    for task in tasks {
-        let mut evidence = Vec::new();
-        if let Some(id) = task
-            .source_comment_id
-            .as_deref()
-            .and_then(|id| comments_by_id.get(id).copied())
-        {
-            evidence.push(comment_evidence(id));
+
+    // The shared query owns the implicit folding policy. Explicit selection
+    // narrows that query without changing how linked todo evidence is nested.
+    let open_work = crate::review::open_work(
+        session,
+        &comments
+            .iter()
+            .map(|comment| (*comment).clone())
+            .collect::<Vec<_>>(),
+    );
+    let mut items = open_work
+        .action_items
+        .iter()
+        .filter(|entry| selected_ids.contains(entry.item.id.as_str()))
+        .map(|entry| {
+            action_item_entry(
+                &entry.item,
+                entry
+                    .linked_todo_comments
+                    .iter()
+                    .map(comment_evidence)
+                    .collect(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let selected_linked_comments = selected_items
+        .iter()
+        .flat_map(|item| item.comment_ids.iter())
+        .filter(|id| comments_by_id.contains_key(id.as_str()))
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let selected_comments = resolve_comments(comments, &spec.comment_selectors, explicit)?;
+    if explicit {
+        for comment in selected_comments {
+            if !selected_linked_comments.contains(comment.id.as_str()) {
+                items.push(comment_entry(comment));
+            }
         }
-        items.push(task_item(task, evidence));
-    }
-    for comment in resolve_comments(comments, &spec.comment_selectors, explicit)? {
-        if selected_task_comments.contains(comment.id.as_str()) {
-            continue;
-        }
-        items.push(comment_item(comment));
+    } else {
+        items.extend(open_work.remaining_todo_comments.iter().map(comment_entry));
     }
     items.sort_by_key(item_key);
     if items.is_empty() {
@@ -255,35 +287,39 @@ fn select_action_items(
     Ok(items)
 }
 
-fn resolve_tasks<'a>(
-    tasks: &'a [ReviewTask],
+fn resolve_action_items<'a>(
+    items: &'a [ActionItem],
     selectors: &[String],
     explicit: bool,
-) -> Result<Vec<&'a ReviewTask>> {
+) -> Result<Vec<&'a ActionItem>> {
     if !selectors.is_empty() {
         selectors
             .iter()
-            .map(|s| {
-                let task = one(
-                    tasks.iter().filter(|t| t.id.starts_with(s)).collect(),
-                    "task",
-                    s,
+            .map(|selector| {
+                let item = one(
+                    items
+                        .iter()
+                        .filter(|item| item.id.starts_with(selector))
+                        .collect(),
+                    "action item",
+                    selector,
                 )?;
-                if task.status != ReviewTaskStatus::Open {
-                    return Err(eyre!("task `{}` is not open", task.id));
+                if item.status != ActionItemStatus::Open {
+                    return Err(eyre!("action item `{}` is not open", item.id));
                 }
-                Ok(task)
+                Ok(item)
             })
             .collect()
     } else if explicit {
-        Ok(vec![])
+        Ok(Vec::new())
     } else {
-        Ok(tasks
+        Ok(items
             .iter()
-            .filter(|t| t.status == ReviewTaskStatus::Open)
+            .filter(|item| item.status == ActionItemStatus::Open)
             .collect())
     }
 }
+
 fn resolve_comments<'a>(
     comments: &[&'a Comment],
     selectors: &[String],
@@ -292,22 +328,22 @@ fn resolve_comments<'a>(
     if !selectors.is_empty() {
         selectors
             .iter()
-            .map(|s| {
+            .map(|selector| {
                 let comment = one(
                     comments
                         .iter()
                         .copied()
-                        .filter(|c| c.id.starts_with(s))
+                        .filter(|comment| comment.id.starts_with(selector))
                         .collect(),
                     "comment",
-                    s,
+                    selector,
                 )?;
                 if comment.state != CommentState::Todo {
                     return Err(match comment.state {
                         CommentState::Draft => eyre!(
                             "comment `{}` is still draft; run `gander comments ready {}` before delegating it",
                             comment.id,
-                            s
+                            selector
                         ),
                         CommentState::Resolved => {
                             eyre!("comment `{}` is already resolved", comment.id)
@@ -319,15 +355,16 @@ fn resolve_comments<'a>(
             })
             .collect()
     } else if explicit {
-        Ok(vec![])
+        Ok(Vec::new())
     } else {
         Ok(comments
             .iter()
             .copied()
-            .filter(|c| c.state == CommentState::Todo)
+            .filter(|comment| comment.state == CommentState::Todo)
             .collect())
     }
 }
+
 fn one<'a, T>(matches: Vec<&'a T>, kind: &str, selector: &str) -> Result<&'a T> {
     match matches.as_slice() {
         [one] => Ok(*one),
@@ -335,86 +372,104 @@ fn one<'a, T>(matches: Vec<&'a T>, kind: &str, selector: &str) -> Result<&'a T> 
         _ => Err(eyre!("ambiguous {kind} selector `{selector}`")),
     }
 }
-fn task_item(task: &ReviewTask, evidence_comments: Vec<CommentEvidence>) -> DelegatedActionItem {
+
+fn action_item_entry(
+    item: &ActionItem,
+    evidence_comments: Vec<CommentEvidence>,
+) -> DelegatedActionItem {
     DelegatedActionItem {
-        id: task.id.clone(),
-        selector: task.id.clone(),
-        source: ActionSource::Task,
-        title: task.title.clone(),
-        body: task.body.clone(),
-        action: task.action,
-        target: task.target.clone(),
+        id: item.id.clone(),
+        selector: item.id.clone(),
+        source: ActionSource::ActionItem,
+        title: item.title.clone(),
+        body: item.body.clone(),
+        action: item.action,
+        target: item.target.clone(),
+        comment_ids: item.comment_ids.clone(),
+        external_tickets: item.external_tickets.clone(),
         evidence_comments,
     }
 }
-fn comment_item(c: &Comment) -> DelegatedActionItem {
+
+fn comment_entry(comment: &Comment) -> DelegatedActionItem {
     DelegatedActionItem {
-        id: c.id.clone(),
-        selector: c.id.clone(),
+        id: comment.id.clone(),
+        selector: comment.id.clone(),
         source: ActionSource::Comment,
-        title: first_line(&c.body),
-        body: Some(c.body.clone()),
-        action: c.action.unwrap_or(ActionIntent::None),
-        target: c.path.as_ref().map(|path| ReviewTarget {
+        title: first_line(&comment.body),
+        body: Some(comment.body.clone()),
+        action: comment.action,
+        target: comment.path.as_ref().map(|path| ReviewTarget {
             file: Some(path.clone()),
-            line: c.line,
-            end_line: c.end_line,
+            line: comment.line,
+            end_line: comment.end_line,
             ..ReviewTarget::default()
         }),
-        evidence_comments: vec![comment_evidence(c)],
+        comment_ids: vec![comment.id.clone()],
+        external_tickets: Vec::new(),
+        evidence_comments: vec![comment_evidence(comment)],
     }
 }
-fn comment_evidence(c: &Comment) -> CommentEvidence {
+
+fn comment_evidence(comment: &Comment) -> CommentEvidence {
     CommentEvidence {
-        id: c.id.clone(),
-        selector: c.id.clone(),
-        path: c.path.clone(),
-        line: c.line,
-        end_line: c.end_line,
-        body: c.body.clone(),
-        action: c.action,
-        replies: c.replies.clone(),
+        id: comment.id.clone(),
+        selector: comment.id.clone(),
+        path: comment.path.clone(),
+        line: comment.line,
+        end_line: comment.end_line,
+        body: comment.body.clone(),
+        action: comment.action,
+        replies: comment.replies.clone(),
     }
 }
 
 fn with_action_selectors(mut items: Vec<DelegatedActionItem>) -> Vec<DelegatedActionItem> {
     let id_strings = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
     let ids = id_strings.iter().map(String::as_str).collect::<Vec<_>>();
-    let comment_id_strings = items
+    let evidence_id_strings = items
         .iter()
-        .flat_map(|item| item.evidence_comments.iter())
-        .map(|comment| comment.id.clone())
+        .flat_map(|item| {
+            item.evidence_comments
+                .iter()
+                .map(|comment| comment.id.clone())
+        })
         .collect::<Vec<_>>();
-    let comment_ids = comment_id_strings
+    let evidence_ids = evidence_id_strings
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
     for item in &mut items {
         item.selector = shortest_unique_prefix(&item.id, &ids);
         for comment in &mut item.evidence_comments {
-            comment.selector = shortest_unique_prefix(&comment.id, &comment_ids);
+            comment.selector = shortest_unique_prefix(&comment.id, &evidence_ids);
         }
     }
     items
 }
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("TODO").trim().to_owned()
+
+fn first_line(body: &str) -> String {
+    body.lines().next().unwrap_or("TODO").trim().to_owned()
 }
-fn item_key(i: &DelegatedActionItem) -> (u8, String, usize, String) {
+
+fn item_key(item: &DelegatedActionItem) -> (u8, String, usize, String) {
     (
-        match i.action {
-            ActionIntent::Fix => 0,
-            ActionIntent::Test => 1,
-            ActionIntent::FollowUp => 2,
-            ActionIntent::Explain => 3,
-            ActionIntent::None => 4,
+        match item.action {
+            Some(ActionIntent::Fix) => 0,
+            Some(ActionIntent::Test) => 1,
+            Some(ActionIntent::FollowUp) => 2,
+            Some(ActionIntent::Explain) => 3,
+            Some(ActionIntent::None) | None => 4,
         },
-        i.target
+        item.target
             .as_ref()
-            .and_then(|t| t.file.clone())
+            .and_then(|target| target.file.clone())
             .unwrap_or_default(),
-        i.target.as_ref().and_then(|t| t.line).unwrap_or(0),
-        i.id.clone(),
+        item.target
+            .as_ref()
+            .and_then(|target| target.line)
+            .unwrap_or(0),
+        item.id.clone(),
     )
 }
 
@@ -422,94 +477,102 @@ fn fingerprints(diff: &DiffSet) -> PacketFingerprints {
     let mut files = diff
         .files
         .iter()
-        .map(|f| FileFingerprint {
-            path: f.path.clone(),
-            old_path: f.old_path.clone(),
-            status: f.status.to_string(),
-            fingerprint: f.fingerprint.clone(),
+        .map(|file| FileFingerprint {
+            path: file.path.clone(),
+            old_path: file.old_path.clone(),
+            status: file.status.to_string(),
+            fingerprint: file.fingerprint.clone(),
         })
         .collect::<Vec<_>>();
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut h = Sha256::new();
-    for f in &files {
-        h.update(f.path.as_bytes());
-        h.update(f.fingerprint.as_bytes());
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut digest = Sha256::new();
+    for file in &files {
+        digest.update(file.path.as_bytes());
+        digest.update(file.fingerprint.as_bytes());
     }
     PacketFingerprints {
-        diff: format!("{:x}", h.finalize()),
+        diff: format!("{:x}", digest.finalize()),
         files,
     }
 }
-fn walkthrough_context(ws: &[Walkthrough]) -> Vec<DelegatedWalkthroughStep> {
-    let walkthrough_ids = ws.iter().map(|w| w.id.as_str()).collect::<Vec<_>>();
-    let step_ids = ws
+
+fn walkthrough_context(walkthroughs: &[Walkthrough]) -> Vec<DelegatedWalkthroughStep> {
+    let walkthrough_ids = walkthroughs
         .iter()
-        .flat_map(|w| w.steps.iter().map(|s| s.id.as_str()))
+        .map(|walkthrough| walkthrough.id.as_str())
         .collect::<Vec<_>>();
-    let mut out = ws
+    let step_ids = walkthroughs
         .iter()
-        .flat_map(|w| {
-            let walkthrough_selector = shortest_unique_prefix(&w.id, &walkthrough_ids);
+        .flat_map(|walkthrough| walkthrough.steps.iter().map(|step| step.id.as_str()))
+        .collect::<Vec<_>>();
+    let mut output = walkthroughs
+        .iter()
+        .flat_map(|walkthrough| {
+            let walkthrough_selector = shortest_unique_prefix(&walkthrough.id, &walkthrough_ids);
             let step_ids = &step_ids;
-            w.steps
+            walkthrough
+                .steps
                 .iter()
-                .map(move |s: &WalkthroughStep| DelegatedWalkthroughStep {
-                    walkthrough_id: w.id.clone(),
+                .map(move |step: &WalkthroughStep| DelegatedWalkthroughStep {
+                    walkthrough_id: walkthrough.id.clone(),
                     walkthrough_selector: walkthrough_selector.clone(),
-                    step_id: s.id.clone(),
-                    step_selector: shortest_unique_prefix(&s.id, step_ids),
-                    title: s.title.clone(),
-                    body: s.body.clone(),
-                    why: s.why.clone(),
-                    target: s.target.clone(),
+                    step_id: step.id.clone(),
+                    step_selector: shortest_unique_prefix(&step.id, step_ids),
+                    title: step.title.clone(),
+                    body: step.body.clone(),
+                    why: step.why.clone(),
+                    target: step.target.clone(),
                 })
         })
         .collect::<Vec<_>>();
-    out.sort_by(|a, b| {
-        a.walkthrough_id
-            .cmp(&b.walkthrough_id)
-            .then(a.step_id.cmp(&b.step_id))
+    output.sort_by(|left, right| {
+        left.walkthrough_id
+            .cmp(&right.walkthrough_id)
+            .then(left.step_id.cmp(&right.step_id))
     });
-    out
+    output
 }
+
 fn reference_hunks(diff: &DiffSet, paths: &BTreeSet<String>, limit: usize) -> Vec<ReferenceHunk> {
-    let mut out = Vec::new();
-    for f in sorted_files(&diff.files) {
-        if !paths.contains(&f.path) {
+    let mut output = Vec::new();
+    for file in sorted_files(&diff.files) {
+        if !paths.contains(&file.path) {
             continue;
         }
-        for h in &f.hunks {
-            out.push(ReferenceHunk {
-                path: f.path.clone(),
-                hunk_header: h.header.clone(),
-                fingerprint: h.content_fingerprint(),
-                lines: h
+        for hunk in &file.hunks {
+            output.push(ReferenceHunk {
+                path: file.path.clone(),
+                hunk_header: hunk.header.clone(),
+                fingerprint: hunk.content_fingerprint(),
+                lines: hunk
                     .lines
                     .iter()
                     .take(limit.max(1))
-                    .map(|l| {
+                    .map(|line| {
                         format!(
                             "{}{}",
-                            match l.kind {
+                            match line.kind {
                                 DiffLineKind::Context => ' ',
                                 DiffLineKind::Added => '+',
                                 DiffLineKind::Removed => '-',
                                 DiffLineKind::Meta => '\\',
                             },
-                            l.text
+                            line.text
                         )
                     })
                     .collect(),
             });
         }
     }
-    out
+    output
 }
+
 fn sorted_files(files: &[FileDiff]) -> Vec<&FileDiff> {
-    let mut v = files.iter().collect::<Vec<_>>();
-    v.sort_by(|a, b| a.path.cmp(&b.path));
-    v
+    let mut files = files.iter().collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files
 }
+
 fn return_contract(
     target: &ReviewTarget,
     items: &[DelegatedActionItem],
@@ -518,17 +581,14 @@ fn return_contract(
     let mut commands = Vec::new();
     let mut comment_ids = BTreeSet::new();
     for item in items {
-        match item.source {
-            ActionSource::Task => commands.push(ReturnCommand {
-                purpose: format!("mark delegated task {} complete", item.selector),
+        if item.source == ActionSource::ActionItem {
+            commands.push(ReturnCommand {
+                purpose: format!("close delegated action item {}", item.selector),
                 command: format!(
-                    "gander {globals} tasks complete {} --summary '<what changed and what was actually checked>'",
+                    "gander {globals} action-items close {} --disposition completed --outcome '<what changed and what was actually checked>'",
                     item.selector
                 ),
-            }),
-            ActionSource::Comment => {
-                comment_ids.insert(item.id.clone());
-            }
+            });
         }
         comment_ids.extend(
             item.evidence_comments
@@ -537,23 +597,30 @@ fn return_contract(
         );
     }
     let comment_ids = comment_ids.into_iter().collect::<Vec<_>>();
+    let all_comment_ids = comment_ids.iter().map(String::as_str).collect::<Vec<_>>();
     commands.extend(comment_ids.iter().map(|id| {
-        let all_comment_ids = comment_ids.iter().map(String::as_str).collect::<Vec<_>>();
         let selector = shortest_unique_prefix(id, &all_comment_ids);
         ReturnCommand {
-        purpose: format!("reply to and resolve addressed comment {selector}"),
-        command: format!(
-            "gander {globals} comments resolve {selector} --reply '<what changed and what was actually checked>'"
-        ),
-    }}));
+            purpose: format!("reply to and resolve addressed comment {selector}"),
+            command: format!(
+                "gander {globals} comments resolve {selector} --reply '<what changed and what was actually checked>'"
+            ),
+        }
+    }));
     commands.push(ReturnCommand {
         purpose: "add a follow-up comment".into(),
-        command: format!("gander {globals} comments add --path <path> --line <line> --kind issue --action follow-up --body '<body>'"),
+        command: format!(
+            "gander {globals} comments add --path <path> --line <line> --kind issue --action follow-up --body '<body>'"
+        ),
     });
-
     ReviewStateReturnContract {
         summary_required: true,
-        allowed_task_statuses: vec!["open".into(), "done".into(), "dismissed".into()],
+        allowed_action_item_statuses: vec!["open".into(), "closed".into()],
+        allowed_closed_dispositions: vec![
+            "completed".into(),
+            "dismissed".into(),
+            "deferred".into(),
+        ],
         allowed_comment_states: vec!["todo".into(), "resolved".into()],
         commands,
     }
@@ -578,102 +645,120 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
-    let mut out = format!(
+    let mut output = format!(
         "# Gander Delegation Packet\n\nSchema version: `{}`\nKind: `gander_delegation`\nSession: `{}`\n\n",
         packet.schema_version, packet.session.id
     );
-    if let Some(r) = &packet.brief.recipient {
-        out.push_str(&format!("Recipient: {r}\n\n"));
+    if let Some(recipient) = &packet.brief.recipient {
+        output.push_str(&format!("Recipient: {recipient}\n\n"));
     }
-    out.push_str("## Source snapshot\n\n");
+    output.push_str("## Source snapshot\n\n");
     if let Some(repo) = &packet.target.repo {
-        out.push_str(&format!("- Repository: `{repo}`\n"));
+        output.push_str(&format!("- Repository: `{repo}`\n"));
     }
     if let Some(base) = &packet.target.base {
-        out.push_str(&format!("- Base: `{base}`\n"));
+        output.push_str(&format!("- Base: `{base}`\n"));
     }
     if let Some(revision) = &packet.target.revision {
-        out.push_str(&format!("- Revision: `{revision}`\n"));
+        output.push_str(&format!("- Revision: `{revision}`\n"));
     }
-    out.push_str(&format!(
-        "- Diff fingerprint: `{}`\n\n",
-        packet.fingerprints.diff
+    output.push_str(&format!(
+        "- Diff fingerprint: `{}`\n- Durable action items: {}\n- Comments: {}\n\n",
+        packet.fingerprints.diff, packet.source.action_item_count, packet.source.comment_count
     ));
-    out.push_str(&format!("## Objective\n\n{}\n\n", packet.brief.objective));
-    list(&mut out, "Constraints", &packet.brief.repeated_constraints);
+    output.push_str(&format!("## Objective\n\n{}\n\n", packet.brief.objective));
     list(
-        &mut out,
+        &mut output,
+        "Constraints",
+        &packet.brief.repeated_constraints,
+    );
+    list(
+        &mut output,
         "Acceptance criteria",
         &packet.brief.acceptance_criteria,
     );
     list(
-        &mut out,
+        &mut output,
         "Requested verification (not executed by Gander)",
         &packet.brief.requested_verification,
     );
-    out.push_str("## Action items\n\n");
-    for (index, i) in packet.action_items.iter().enumerate() {
-        out.push_str(&format!(
-            "### {}. {} [`{:?}` / `{:?}`]\n\nID: `{}`\n",
+    output.push_str("## Action items\n\n");
+    for (index, item) in packet.action_items.iter().enumerate() {
+        output.push_str(&format!(
+            "### {}. {} [`{:?}` / `{}`]\n\nID: `{}`\n",
             index + 1,
-            i.title,
-            i.source,
-            i.action,
-            i.id
+            item.title,
+            item.source,
+            item.action
+                .map(|action| format!("{action:?}").to_lowercase())
+                .unwrap_or_else(|| "none".into()),
+            item.id
         ));
-        if let Some(target) = &i.target {
-            out.push_str(&format!("Location: {}\n", target_label(target)));
+        if let Some(target) = &item.target {
+            output.push_str(&format!("Location: {}\n", target_label(target)));
         }
-        if let Some(body) = &i.body
-            && body.trim() != i.title.trim()
+        if let Some(body) = &item.body
+            && body.trim() != item.title.trim()
         {
-            out.push_str(&format!("\n{}\n", body.trim()));
+            output.push_str(&format!("\n{}\n", body.trim()));
         }
-        for e in &i.evidence_comments {
-            out.push_str(&format!("\nReviewer comment `{}`", e.id));
-            if let Some(path) = &e.path {
-                out.push_str(" at `");
-                out.push_str(&path.replace('`', "\\`"));
-                out.push('`');
+        for ticket in &item.external_tickets {
+            output.push_str(&format!(
+                "\nExternal ticket: `{}` `{}`{}\n",
+                ticket.tracker,
+                ticket.reference,
+                ticket
+                    .url
+                    .as_deref()
+                    .map(|url| format!(" ({url})"))
+                    .unwrap_or_default()
+            ));
+        }
+        for evidence in &item.evidence_comments {
+            output.push_str(&format!("\nReviewer comment `{}`", evidence.id));
+            if let Some(path) = &evidence.path {
+                output.push_str(" at `");
+                output.push_str(&path.replace('`', "\\`"));
+                output.push('`');
             }
-            out.push_str(":\n\n> ");
-            out.push_str(&e.body.trim().replace('\n', "\n> "));
-            out.push('\n');
-            for reply in &e.replies {
-                out.push_str(&format!("\nReply `{}`: {}\n", reply.id, reply.body.trim()));
+            output.push_str(":\n\n> ");
+            output.push_str(&evidence.body.trim().replace('\n', "\n> "));
+            output.push('\n');
+            for reply in &evidence.replies {
+                output.push_str(&format!("\nReply `{}`: {}\n", reply.id, reply.body.trim()));
             }
         }
-        out.push('\n');
+        output.push('\n');
     }
     if !packet.walkthrough.is_empty() {
-        out.push_str("## Walkthrough context\n\n");
+        output.push_str("## Walkthrough context\n\n");
         for step in &packet.walkthrough {
-            out.push_str(&format!(
+            output.push_str(&format!(
                 "- `{}` {} — {}\n",
                 step.step_id,
                 step.title.as_deref().unwrap_or("Untitled step"),
                 target_label(&step.target)
             ));
             if let Some(why) = &step.why {
-                out.push_str(&format!("  Why: {}\n", why.trim()));
+                output.push_str(&format!("  Why: {}\n", why.trim()));
             }
         }
-        out.push('\n');
+        output.push('\n');
     }
-    out.push_str("## Reference hunks\n\n");
-    for h in &packet.reference_hunks {
-        out.push_str(&format!(
+    output.push_str("## Reference hunks\n\n");
+    for hunk in &packet.reference_hunks {
+        output.push_str(&format!(
             "### `{}` {}\n\n```diff\n{}\n```\n\n",
-            h.path,
-            h.hunk_header,
-            h.lines.join("\n")
+            hunk.path,
+            hunk.hunk_header,
+            hunk.lines.join("\n")
         ));
     }
-    out.push_str("## Return contract\n\n");
-    for c in &packet.return_contract.commands {
-        out.push_str(&format!("- {}: `{}`\n", c.purpose, c.command));
+    output.push_str("## Return contract\n\n");
+    for command in &packet.return_contract.commands {
+        output.push_str(&format!("- {}: `{}`\n", command.purpose, command.command));
     }
-    out
+    output
 }
 
 fn target_label(target: &ReviewTarget) -> String {
@@ -695,108 +780,85 @@ fn target_label(target: &ReviewTarget) -> String {
     }
     label
 }
-fn list(out: &mut String, title: &str, xs: &[String]) {
-    if !xs.is_empty() {
-        out.push_str(&format!("## {title}\n\n"));
-        for x in xs {
-            out.push_str(&format!("- {x}\n"));
+
+fn list(output: &mut String, title: &str, values: &[String]) {
+    if !values.is_empty() {
+        output.push_str(&format!("## {title}\n\n"));
+        for value in values {
+            output.push_str(&format!("- {value}\n"));
         }
-        out.push('\n');
+        output.push('\n');
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{CommentKind, ReviewSessionStatus, StepImportance};
-    fn comment(
-        id: &str,
-        state: CommentState,
-        kind: Option<CommentKind>,
-        action: Option<ActionIntent>,
-        path: &str,
-    ) -> Comment {
+    use crate::state::{ClosedDisposition, CommentKind, ReviewSessionStatus, StepImportance};
+
+    fn comment(id: &str, state: CommentState, path: Option<&str>) -> Comment {
         Comment {
             id: id.into(),
-            path: Some(path.into()),
-            session_id: None,
-            line: Some(10),
-            end_line: None,
-            anchor: None,
-            body: format!("fix {id}\nmore"),
-            kind,
-            action,
+            path: path.map(str::to_owned),
+            session_id: Some("session".into()),
+            line: path.map(|_| 10),
+            body: format!("feedback {id}\nmore"),
+            kind: Some(CommentKind::Issue),
+            action: Some(ActionIntent::Fix),
             state,
-            replies: Vec::new(),
-            created_at: chrono::DateTime::UNIX_EPOCH,
-            updated_at: None,
+            ..Default::default()
         }
     }
-    fn task(
+
+    fn action_item(
         id: &str,
-        status: ReviewTaskStatus,
-        source_comment_id: Option<&str>,
+        status: ActionItemStatus,
+        comment_ids: &[&str],
         path: &str,
-    ) -> ReviewTask {
-        ReviewTask {
+    ) -> ActionItem {
+        ActionItem {
             id: id.into(),
-            title: format!("task {id}"),
+            title: format!("action {id}"),
             body: Some("body".into()),
             target: Some(ReviewTarget {
                 file: Some(path.into()),
                 line: Some(2),
                 ..Default::default()
             }),
-            action: ActionIntent::Fix,
+            action: Some(ActionIntent::Fix),
             status,
-            source_comment_id: source_comment_id.map(str::to_owned),
+            disposition: (status == ActionItemStatus::Closed)
+                .then_some(ClosedDisposition::Completed),
+            comment_ids: comment_ids.iter().map(|id| (*id).to_owned()).collect(),
             ..Default::default()
         }
     }
+
     fn fixture() -> (ReviewState, ReviewSession, DiffSet) {
         let comments = vec![
-            comment(
-                "c-todo",
-                CommentState::Todo,
-                Some(CommentKind::Issue),
-                Some(ActionIntent::Fix),
-                "b.rs",
-            ),
-            comment(
-                "c-praise",
-                CommentState::Todo,
-                Some(CommentKind::Praise),
-                None,
-                "a.rs",
-            ),
-            comment(
-                "c-draft",
-                CommentState::Draft,
-                Some(CommentKind::Issue),
-                Some(ActionIntent::Fix),
-                "a.rs",
-            ),
-            comment(
-                "c-linked",
-                CommentState::Todo,
-                Some(CommentKind::Issue),
-                Some(ActionIntent::Fix),
-                "a.rs",
-            ),
+            comment("standalone", CommentState::Todo, Some("b.rs")),
+            comment("linked", CommentState::Todo, Some("a.rs")),
+            comment("draft", CommentState::Draft, Some("a.rs")),
         ];
         let session = ReviewSession {
-            id: "sess".into(),
-            title: Some("T".into()),
+            id: "session".into(),
+            title: Some("Review".into()),
             status: ReviewSessionStatus::Open,
-            tasks: vec![
-                task("t-open", ReviewTaskStatus::Open, Some("c-linked"), "a.rs"),
-                task("t-done", ReviewTaskStatus::Done, None, "z.rs"),
+            target: ReviewTarget {
+                repo: Some("/repo".into()),
+                base: Some("main".into()),
+                revision: Some("@".into()),
+                ..Default::default()
+            },
+            action_items: vec![
+                action_item("open-action", ActionItemStatus::Open, &["linked"], "a.rs"),
+                action_item("closed-action", ActionItemStatus::Closed, &[], "z.rs"),
             ],
             walkthroughs: vec![Walkthrough {
-                id: "w".into(),
+                id: "walk".into(),
                 steps: vec![WalkthroughStep {
-                    id: "s".into(),
-                    title: Some("step".into()),
+                    id: "step".into(),
+                    title: Some("Read this".into()),
                     importance: StepImportance::Glance,
                     target: ReviewTarget {
                         file: Some("a.rs".into()),
@@ -813,218 +875,160 @@ mod tests {
             sessions: vec![session.clone()],
             ..Default::default()
         };
-        let diff = DiffSet::parse("diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-olda\n+newa\n").unwrap();
+        let diff = DiffSet::parse(
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-olda\n+newa\n",
+        )
+        .unwrap();
         (state, session, diff)
     }
-    #[test]
-    fn acceptance_implicit_selection_uses_todo_state_across_all_kinds_and_actions() {
-        let (s, sess, d) = fixture();
-        let p = build_delegation_packet(&s, &sess, &d, &DelegationSpec::default()).unwrap();
-        assert_eq!(
-            p.action_items
-                .iter()
-                .map(|i| i.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["t-open", "c-todo", "c-praise"]
-        );
-        assert_eq!(p.action_items[0].evidence_comments[0].id, "c-linked");
-    }
-    #[test]
-    fn explicit_selection_and_errors() {
-        let (s, sess, d) = fixture();
-        let spec = DelegationSpec {
-            comment_selectors: vec!["c-to".into()],
-            ..Default::default()
-        };
-        assert_eq!(
-            build_delegation_packet(&s, &sess, &d, &spec)
-                .unwrap()
-                .action_items[0]
-                .id,
-            "c-todo"
-        );
-        let bad = DelegationSpec {
-            task_selectors: vec!["missing".into()],
-            ..Default::default()
-        };
-        assert!(
-            build_delegation_packet(&s, &sess, &d, &bad)
-                .unwrap_err()
-                .to_string()
-                .contains("unknown task")
-        );
-        let amb = DelegationSpec {
-            comment_selectors: vec!["c-".into()],
-            ..Default::default()
-        };
-        assert!(
-            build_delegation_packet(&s, &sess, &d, &amb)
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous comment")
-        );
 
-        let draft = DelegationSpec {
-            comment_selectors: vec!["c-draft".into()],
+    #[test]
+    fn implicit_selection_folds_linked_todo_evidence() {
+        let (state, session, diff) = fixture();
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+
+        assert_eq!(packet.action_items.len(), 2);
+        let durable = packet
+            .action_items
+            .iter()
+            .find(|item| item.source == ActionSource::ActionItem)
+            .unwrap();
+        assert_eq!(durable.id, "open-action");
+        assert_eq!(durable.evidence_comments[0].id, "linked");
+        assert!(packet.action_items.iter().all(|item| item.id != "linked"));
+        assert!(
+            packet
+                .action_items
+                .iter()
+                .any(|item| item.id == "standalone")
+        );
+    }
+
+    #[test]
+    fn explicit_action_item_selection_rejects_closed_and_unknown() {
+        let (state, session, diff) = fixture();
+        let closed = DelegationSpec {
+            action_item_selectors: vec!["closed".into()],
             ..Default::default()
         };
-        let error = build_delegation_packet(&s, &sess, &d, &draft)
+        assert!(
+            build_delegation_packet(&state, &session, &diff, &closed)
+                .unwrap_err()
+                .to_string()
+                .contains("not open")
+        );
+        let unknown = DelegationSpec {
+            action_item_selectors: vec!["missing".into()],
+            ..Default::default()
+        };
+        assert!(
+            build_delegation_packet(&state, &session, &diff, &unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown action item")
+        );
+    }
+
+    #[test]
+    fn explicit_comment_selection_preserves_readiness_errors() {
+        let (state, session, diff) = fixture();
+        let draft = DelegationSpec {
+            comment_selectors: vec!["draft".into()],
+            ..Default::default()
+        };
+        let error = build_delegation_packet(&state, &session, &diff, &draft)
             .unwrap_err()
             .to_string();
         assert!(error.contains("still draft"));
         assert!(error.contains("comments ready"));
     }
-    #[test]
-    fn deterministic_fingerprints_and_no_mutation() {
-        let (s, sess, d) = fixture();
-        let before = s.clone();
-        let p1 = build_delegation_packet(&s, &sess, &d, &DelegationSpec::default()).unwrap();
-        let p2 = build_delegation_packet(&s, &sess, &d, &DelegationSpec::default()).unwrap();
-        assert_eq!(p1.fingerprints, p2.fingerprints);
-        assert_eq!(s, before);
-        assert_eq!(
-            p1.fingerprints
-                .files
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a.rs", "b.rs"]
-        );
-    }
-    #[test]
-    fn json_shape_version_and_markdown_parity() {
-        let (s, sess, d) = fixture();
-        let spec = DelegationSpec {
-            recipient: Some("agent".into()),
-            objective: "do it".into(),
-            requested_verification: vec!["cargo test".into()],
-            ..Default::default()
-        };
-        let p = build_delegation_packet(&s, &sess, &d, &spec).unwrap();
-        let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["schema_version"], 2);
-        assert_eq!(v["kind"], "gander_delegation");
-        let md = render_delegation_markdown(&p);
-        assert!(md.contains("do it"));
-        assert!(md.contains("cargo test"));
-        assert!(md.contains("tasks complete t-open --summary"));
-        assert!(md.contains("comments resolve c-linked --reply"));
-        assert!(md.contains("comments resolve c-todo --reply"));
-    }
 
     #[test]
-    fn explicit_selection_rejects_closed_items() {
-        let (mut state, session, diff) = fixture();
-        state.comments.push(comment(
-            "c-resolved",
-            CommentState::Resolved,
-            Some(CommentKind::Issue),
-            Some(ActionIntent::Fix),
-            "a.rs",
-        ));
-
-        let done = DelegationSpec {
-            task_selectors: vec!["t-done".into()],
-            ..Default::default()
-        };
-        assert!(
-            build_delegation_packet(&state, &session, &diff, &done)
-                .unwrap_err()
-                .to_string()
-                .contains("not open")
-        );
-
-        let resolved = DelegationSpec {
-            comment_selectors: vec!["c-resolved".into()],
-            ..Default::default()
-        };
-        assert!(
-            build_delegation_packet(&state, &session, &diff, &resolved)
-                .unwrap_err()
-                .to_string()
-                .contains("already resolved")
-        );
-    }
-
-    #[test]
-    fn return_contract_uses_compact_task_selector() {
-        let (mut state, mut session, diff) = fixture();
-        session.tasks[0].id = "12345678-aaaa-bbbb-cccc-000000000000".into();
-        state.sessions = vec![session.clone()];
-
+    fn schema_three_uses_action_item_vocabulary_and_close_contract() {
+        let (state, session, diff) = fixture();
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
-        let task = packet
+        let value = serde_json::to_value(&packet).unwrap();
+        let json = serde_json::to_string(&value).unwrap();
+        let markdown = render_delegation_markdown(&packet);
+
+        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["source"]["action_item_count"], 2);
+        assert_eq!(value["action_items"][0]["source"], "action_item");
+        assert!(value["return_contract"]["allowed_action_item_statuses"].is_array());
+        assert!(json.contains("action-items close"));
+        assert!(markdown.contains("action-items close"));
+        assert!(markdown.contains("Reviewer comment `linked`"));
+    }
+
+    #[test]
+    fn compact_selector_is_used_by_return_contract() {
+        let (mut state, mut session, diff) = fixture();
+        session.action_items[0].id = "12345678-aaaa-bbbb-cccc-000000000000".into();
+        state.sessions = vec![session.clone()];
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let item = packet
             .action_items
             .iter()
-            .find(|item| item.source == ActionSource::Task)
+            .find(|item| item.source == ActionSource::ActionItem)
             .unwrap();
-        assert_eq!(task.selector, "12345678");
+
+        assert_eq!(item.selector, "12345678");
         assert!(packet.return_contract.commands.iter().any(|command| {
-            command
-                .command
-                .contains("tasks complete 12345678 --summary")
-                && !command.command.contains(&task.id)
+            command.command.contains("action-items close 12345678")
+                && !command.command.contains(&item.id)
         }));
     }
 
     #[test]
-    fn acceptance_general_todo_delegates_without_target_path_or_reference_hunks() {
-        let (mut state, mut session, diff) = fixture();
-        session.tasks.clear();
-        let mut general = comment(
-            "general",
-            CommentState::Todo,
-            Some(CommentKind::Praise),
-            None,
-            "unused.rs",
-        );
-        general.path = None;
-        general.line = None;
-        state.comments = vec![general];
+    fn linked_evidence_paths_contribute_reference_hunks() {
+        let (state, mut session, diff) = fixture();
+        session.action_items[0].target = None;
+        let mut state = state;
         state.sessions = vec![session.clone()];
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
 
+        assert!(
+            packet
+                .reference_hunks
+                .iter()
+                .any(|hunk| hunk.path == "a.rs")
+        );
+        assert!(
+            packet
+                .reference_hunks
+                .iter()
+                .any(|hunk| hunk.path == "b.rs")
+        );
+    }
+
+    #[test]
+    fn general_todo_has_no_target_or_reference_hunks() {
+        let (mut state, mut session, diff) = fixture();
+        session.action_items.clear();
+        state.comments = vec![comment("general", CommentState::Todo, None)];
+        state.sessions = vec![session.clone()];
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
 
         assert_eq!(packet.action_items.len(), 1);
-        assert_eq!(packet.action_items[0].action, ActionIntent::None);
         assert!(packet.action_items[0].target.is_none());
         assert!(packet.action_items[0].evidence_comments[0].path.is_none());
         assert!(packet.reference_hunks.is_empty());
-        let markdown = render_delegation_markdown(&packet);
-        assert!(markdown.contains("Reviewer comment `general`:\n"));
-        assert!(!markdown.contains("unused.rs"));
     }
 
     #[test]
-    fn acceptance_delegation_scopes_new_comments_to_session_and_keeps_legacy() {
+    fn comments_are_scoped_to_delegated_session_with_legacy_visible() {
         let (mut state, mut session, diff) = fixture();
-        session.tasks.clear();
-        let mut legacy = comment(
-            "legacy",
-            CommentState::Todo,
-            Some(CommentKind::Issue),
-            Some(ActionIntent::Fix),
-            "a.rs",
-        );
+        session.action_items.clear();
+        let mut legacy = comment("legacy", CommentState::Todo, Some("a.rs"));
         legacy.session_id = None;
-        let mut matching = comment(
-            "matching",
-            CommentState::Todo,
-            Some(CommentKind::Note),
-            Some(ActionIntent::Test),
-            "b.rs",
-        );
-        matching.session_id = Some(session.id.clone());
-        let mut foreign = comment(
-            "foreign",
-            CommentState::Todo,
-            Some(CommentKind::Issue),
-            Some(ActionIntent::Fix),
-            "a.rs",
-        );
-        foreign.session_id = Some("another-session".into());
+        let matching = comment("matching", CommentState::Todo, Some("b.rs"));
+        let mut foreign = comment("foreign", CommentState::Todo, Some("a.rs"));
+        foreign.session_id = Some("other".into());
         state.comments = vec![legacy, matching, foreign];
         state.sessions = vec![session.clone()];
 
@@ -1038,5 +1042,18 @@ mod tests {
 
         assert_eq!(ids, vec!["legacy", "matching"]);
         assert_eq!(packet.source.comment_count, 2);
+    }
+
+    #[test]
+    fn packet_build_is_deterministic_and_does_not_mutate_state() {
+        let (state, session, diff) = fixture();
+        let before = state.clone();
+        let first =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let second =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+
+        assert_eq!(first.fingerprints, second.fingerprints);
+        assert_eq!(state, before);
     }
 }

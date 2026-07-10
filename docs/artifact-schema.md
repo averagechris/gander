@@ -1,10 +1,10 @@
 # Review artifact schema
 
-Current schema version: `6`.
+Current schema version: `7`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
-durable review-session model described in docs/vision.md: comments, tasks, and
+durable review-session model described in docs/vision.md: comments, optional action items, and
 walkthroughs are local review state that external harnesses may consume or
 publish elsewhere.
 
@@ -30,7 +30,7 @@ config.
 
 ```json
 {
-  "version": 6,
+  "version": 7,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -93,8 +93,8 @@ config.
         "diff_fingerprint": "sha256..."
       },
       "body": "Comment body",
-      "state": "draft",
-      "linked_task_ids": ["task-id"],
+      "state": "todo",
+      "linked_action_item_ids": ["action-item-id"],
       "created_at": "2026-06-30T00:00:00Z",
       "updated_at": "2026-06-30T00:05:00Z",
       "replies": [
@@ -111,13 +111,15 @@ config.
       ]
     }
   ],
-  "tasks": [
+  "action_items": [
     {
-      "id": "task-id",
+      "id": "action-item-id",
       "title": "Fix the unchecked parse path",
       "status": "open",
+      "close_disposition": null,
       "action": "fix",
       "linked_comment_ids": ["stable-ish-id"],
+      "external_tickets": ["LIN-123"],
       "target": { "file": "src/main.rs", "line": 42, "end_line": null }
     }
   ],
@@ -148,12 +150,20 @@ Notes:
 - `comments[].session_id` identifies the durable session that owns a newly
   created comment. Version 5 and older comments omit it; those legacy unscoped
   comments remain visible in matching-session exports for compatibility.
-- `tasks` and `walkthroughs` are exported from the active durable session when
-  one is present. They are empty arrays otherwise. Task targets and walkthrough
+- `action_items` and `walkthroughs` are exported from the active durable session when
+  one is present. They are empty arrays otherwise. Action-item targets and walkthrough
   step targets include local file/line/symbol coordinates when recorded.
+- Todo comments are the primary implicit action feedback. A todo comment linked
+  to an open durable action item is folded into that item as evidence in handoff
+  output and is not duplicated as a separate action item. Ordinary comments
+  (`draft` notes and resolved history) are not action items.
+- Durable action items are optional higher-level coordination records. They can
+  link many comments via `linked_comment_ids` and carry opaque
+  `external_tickets` strings/URLs. Gander records those references only; it does
+  not fetch from or post to forges or ticket systems.
 - Export is broader than import: `gander import` currently restores only
   duplicate-safe comments and viewed files whose diff fingerprints still match
-  the current target. It does not restore `tasks` or `walkthroughs` from the
+  the current target. It does not restore `action_items` or `walkthroughs` from the
   artifact yet.
 - Line anchors are 1-indexed diff lines. New-side/post-image anchors are
   preferred; old-side coordinates are used only as a fallback for removed-only
@@ -170,8 +180,8 @@ Notes:
   artifacts written before version 4 and for persisted state written before
   `CommentState` existed.
 - Full exports include all comment states. Prompt handoff and delegation select
-  only open tasks plus `todo` comments by default; draft comments are rejected by
-  explicit delegate selectors unless first readied.
+  only open durable action items plus unlinked `todo` comments by default; draft
+  comments are rejected by explicit delegate selectors unless first readied.
 - `comments[].updated_at` and `comments[].replies` are emitted when present.
   Replies are append-only objects with stable UUID `id`, `body`, and
   `created_at`. Import merges same-id comments by timestamp and unions replies,
@@ -179,6 +189,10 @@ Notes:
 
 ## Version history
 
+- `7`: `tasks` is renamed to `action_items`, comment backrefs are
+  `linked_action_item_ids`, action items can link many comments and external
+  ticket refs, and closed action items record `completed`, `dismissed`, or
+  `deferred` disposition. Deferred items require at least one external ticket.
 - `6`: comments may carry a durable `session_id`, and `path` is optional so a
   comment can be general to its session. Version 5 anchored comments remain
   readable; missing `session_id` is treated as legacy-visible compatibility

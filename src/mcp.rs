@@ -264,21 +264,78 @@ pub struct CommentResolveParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct TaskAddParams {
-    /// Task title. Equivalent to `gander tasks add <title>`.
+pub struct ActionItemAddParams {
+    /// Action item title. Equivalent to `gander action-items add --title <title>`.
     pub title: String,
     pub body: Option<String>,
     pub action: Option<ActionIntent>,
-    pub comment_id: Option<String>,
+    /// Comment ids/prefixes to link. A todo comment may be linked to at most one open action item.
+    pub comments: Option<Vec<String>>,
     pub path: Option<String>,
     pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub symbol: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct TaskCompleteParams {
-    /// Full id or unambiguous id prefix. Equivalent to `gander tasks complete <id>`.
+pub struct ActionItemEditParams {
+    /// Full id or unambiguous id prefix.
     pub id: String,
-    pub summary: Option<String>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub clear_body: Option<bool>,
+    pub action: Option<ActionIntent>,
+    pub clear_action: Option<bool>,
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub symbol: Option<String>,
+    pub clear_target: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActionItemCommentsParams {
+    pub id: String,
+    pub comments: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActionItemTicketParams {
+    pub id: String,
+    pub tracker: String,
+    pub reference: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActionItemRemoveTicketParams {
+    pub id: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ActionItemCloseParams {
+    pub id: String,
+    pub disposition: McpClosedDisposition,
+    pub outcome: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum McpClosedDisposition {
+    Completed,
+    Dismissed,
+    Deferred,
+}
+
+impl From<McpClosedDisposition> for crate::state::ClosedDisposition {
+    fn from(value: McpClosedDisposition) -> Self {
+        match value {
+            McpClosedDisposition::Completed => Self::Completed,
+            McpClosedDisposition::Dismissed => Self::Dismissed,
+            McpClosedDisposition::Deferred => Self::Deferred,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -713,68 +770,219 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review task. Equivalent to `gander tasks add`; external additions merge into a running TUI."
+        description = "Add a durable action item. Equivalent to `gander action-items add`; external additions merge into a running TUI."
     )]
-    fn task_add(
+    fn action_item_add(
         &self,
-        Parameters(params): Parameters<TaskAddParams>,
+        Parameters(params): Parameters<ActionItemAddParams>,
     ) -> Result<CallToolResult, McpError> {
         if let Some(path) = params.path.as_deref() {
             self.ensure_diff_file(path)?;
         }
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
-            let comment_id = params
-                .comment_id
-                .as_deref()
-                .map(|id| review::resolve_comment_id(&state.comments, id))
-                .transpose()?;
-            Ok(review::add_task(
+            review::add_action_item(
                 &mut state.sessions[idx],
-                params.title,
-                params.body,
-                params.action.unwrap_or_default(),
-                comment_id,
-                params.path.map(|file| StateReviewTarget {
-                    file: Some(file),
-                    line: params.line,
-                    ..StateReviewTarget::default()
-                }),
-            ))
+                &state.comments,
+                review::NewActionItem {
+                    title: params.title,
+                    body: params.body,
+                    action: params.action,
+                    comment_selectors: params.comments.unwrap_or_default(),
+                    external_tickets: Vec::new(),
+                    target: params.path.map(|file| StateReviewTarget {
+                        file: Some(file),
+                        line: params.line,
+                        end_line: params.end_line,
+                        symbol: params.symbol,
+                        ..StateReviewTarget::default()
+                    }),
+                },
+            )
+        })
+    }
+
+    #[tool(description = "Edit a durable action item. Equivalent to `gander action-items edit`.")]
+    fn action_item_edit(
+        &self,
+        Parameters(params): Parameters<ActionItemEditParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(path) = params.path.as_deref() {
+            self.ensure_diff_file(path)?;
+        }
+        if params.clear_body.unwrap_or(false) && params.body.is_some() {
+            return Err(McpError::invalid_params(
+                "provide body or clear_body, not both",
+                None,
+            ));
+        }
+        if params.clear_action.unwrap_or(false) && params.action.is_some() {
+            return Err(McpError::invalid_params(
+                "provide action or clear_action, not both",
+                None,
+            ));
+        }
+        if params.clear_target.unwrap_or(false) && params.path.is_some() {
+            return Err(McpError::invalid_params(
+                "provide target fields or clear_target, not both",
+                None,
+            ));
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            let target = if params.clear_target.unwrap_or(false) {
+                Some(None)
+            } else {
+                params.path.map(|file| {
+                    Some(StateReviewTarget {
+                        file: Some(file),
+                        line: params.line,
+                        end_line: params.end_line,
+                        symbol: params.symbol,
+                        ..StateReviewTarget::default()
+                    })
+                })
+            };
+            review::edit_action_item(
+                &mut state.sessions[idx],
+                &params.id,
+                review::ActionItemEdits {
+                    title: params.title,
+                    body: params
+                        .clear_body
+                        .unwrap_or(false)
+                        .then_some(None)
+                        .or_else(|| params.body.map(Some)),
+                    action: params
+                        .clear_action
+                        .unwrap_or(false)
+                        .then_some(None)
+                        .or_else(|| params.action.map(Some)),
+                    target,
+                },
+            )
         })
     }
 
     #[tool(
-        description = "Complete a durable review task. Equivalent to `gander tasks complete <id>`; timestamped updates merge into a running TUI."
+        description = "Link comments to an action item. Equivalent to `gander action-items link-comment`."
     )]
-    fn task_complete(
+    fn action_item_link_comment(
         &self,
-        Parameters(params): Parameters<TaskCompleteParams>,
+        Parameters(params): Parameters<ActionItemCommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.comments.is_empty() {
+            return Err(McpError::invalid_params("comments must be non-empty", None));
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::link_comment(
+                &mut state.sessions[idx],
+                &state.comments,
+                &params.id,
+                &params.comments,
+            )
+        })
+    }
+
+    #[tool(
+        description = "Unlink comments from an action item. Equivalent to `gander action-items unlink-comment`."
+    )]
+    fn action_item_unlink_comment(
+        &self,
+        Parameters(params): Parameters<ActionItemCommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if params.comments.is_empty() {
+            return Err(McpError::invalid_params("comments must be non-empty", None));
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::unlink_comment(
+                &mut state.sessions[idx],
+                &state.comments,
+                &params.id,
+                &params.comments,
+            )
+        })
+    }
+
+    #[tool(description = "Add an external ticket reference to an action item.")]
+    fn action_item_add_ticket(
+        &self,
+        Parameters(params): Parameters<ActionItemTicketParams>,
     ) -> Result<CallToolResult, McpError> {
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
-            review::complete_task(&mut state.sessions[idx], &params.id, params.summary)
+            review::add_ticket(
+                &mut state.sessions[idx],
+                &params.id,
+                review::NewExternalTicket {
+                    tracker: params.tracker,
+                    reference: params.reference,
+                    url: params.url,
+                },
+            )
+        })
+    }
+
+    #[tool(description = "Remove an external ticket reference from an action item.")]
+    fn action_item_remove_ticket(
+        &self,
+        Parameters(params): Parameters<ActionItemRemoveTicketParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::remove_ticket(&mut state.sessions[idx], &params.id, &params.reference)
+        })
+    }
+
+    #[tool(description = "Close a durable action item. Equivalent to `gander action-items close`.")]
+    fn action_item_close(
+        &self,
+        Parameters(params): Parameters<ActionItemCloseParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::close_action_item(
+                &mut state.sessions[idx],
+                &params.id,
+                params.disposition.into(),
+                params.outcome,
+            )
         })
     }
 
     #[tool(
-        description = "Reopen a durable review task. Equivalent to `gander tasks reopen <id>`; timestamped updates merge into a running TUI."
+        description = "Reopen a durable action item. Equivalent to `gander action-items reopen`."
     )]
-    fn task_reopen(
+    fn action_item_reopen(
         &self,
         Parameters(params): Parameters<IdParams>,
     ) -> Result<CallToolResult, McpError> {
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
-            review::reopen_task(&mut state.sessions[idx], &params.id)
+            review::reopen_action_item(&mut state.sessions[idx], &params.id)
         })
     }
 
-    #[tool(description = "List durable review tasks. Equivalent to `gander tasks list`.")]
-    fn tasks_list(&self) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Delete a durable action item. Equivalent to `gander action-items delete`."
+    )]
+    fn action_item_delete(
+        &self,
+        Parameters(params): Parameters<IdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            review::delete_action_item(&mut state.sessions[idx], &params.id)
+        })
+    }
+
+    #[tool(description = "List durable action items. Equivalent to `gander action-items list`.")]
+    fn action_items_list(&self) -> Result<CallToolResult, McpError> {
         let mut state = self.load_state()?;
         let session = review::ensure_session(&mut state, &self.target, None).clone();
-        json_result(json!({ "tasks": review::list_tasks(&session, &state.comments) }))
+        json_result(json!({ "action_items": review::list_action_items(&session) }))
     }
 
     #[tool(
@@ -1269,33 +1477,40 @@ mod tests {
     }
 
     #[test]
-    fn task_complete_sets_resolution() {
+    fn action_item_close_sets_disposition_and_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let server = server(dir.path());
-        let task = result_json(
+        let item = result_json(
             &server
-                .task_add(Parameters(TaskAddParams {
+                .action_item_add(Parameters(ActionItemAddParams {
                     title: "Fix it".to_owned(),
                     body: None,
                     action: Some(ActionIntent::Fix),
-                    comment_id: None,
+                    comments: None,
                     path: None,
                     line: None,
+                    end_line: None,
+                    symbol: None,
                 }))
                 .unwrap(),
         );
 
-        let done = result_json(
+        let closed = result_json(
             &server
-                .task_complete(Parameters(TaskCompleteParams {
-                    id: task["id"].as_str().unwrap().to_owned(),
-                    summary: Some("done".to_owned()),
+                .action_item_close(Parameters(ActionItemCloseParams {
+                    id: item["id"].as_str().unwrap().to_owned(),
+                    disposition: McpClosedDisposition::Completed,
+                    outcome: Some("done".to_owned()),
                 }))
                 .unwrap(),
         );
 
-        assert_eq!(done["status"], "done");
-        assert_eq!(done["resolution"], "done");
+        assert_eq!(closed["status"], "closed");
+        assert_eq!(closed["disposition"], "completed");
+        assert_eq!(closed["outcome"], "done");
+
+        let listed = result_json(&server.action_items_list().unwrap());
+        assert_eq!(listed["action_items"][0]["id"], item["id"]);
     }
 
     #[test]

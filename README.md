@@ -7,7 +7,8 @@ actionable review sessions for humans and agents.
 Gander's product direction is documented in [docs/vision.md](docs/vision.md):
 it reads jj-visible code state, writes review state, and stays forge-agnostic.
 Users or external harnesses prepare the workspace and can post/export results;
-Gander focuses on review sessions, comments, tasks, walkthroughs, TUI/CLI
+Gander focuses on review sessions, comments, optional durable action items,
+walkthroughs, TUI/CLI
 automation, and optional MCP access over the same core logic.
 
 ![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
@@ -37,10 +38,10 @@ This repo is intentionally early, but the first vertical slice is in place:
 - tracks comment states (draft saved/private/withheld, todo ready/actionable,
   resolved history), kinds (note/issue/question/praise), and action tags
   (fix/explain/test/follow-up) with a comment list pane (`C`, then `s`/`a`/`K`)
-- persists durable review sessions with review tasks and maintainer-authored
+- persists durable review sessions with optional higher-level action items and maintainer-authored
   walkthrough steps over the shared CLI/MCP/TUI review core
 - exposes scriptable CLI groups for `reviews`, `files`, `hunks`, `comments`,
-  `tasks`, and `walkthrough`; see [docs/cli.md](docs/cli.md)
+  `action-items`, and `walkthrough`; see [docs/cli.md](docs/cli.md)
 - exports review artifacts as JSON, Markdown, or self-contained HTML, including an agent profile
   with raw hunks and comment excerpts (`--profile agent`)
 - reviews arbitrary revsets (`R`), steps through stacks change-by-change
@@ -53,7 +54,7 @@ This repo is intentionally early, but the first vertical slice is in place:
   the session, curate walkthroughs (`W`/`T`), suggest ordering (`A`), flag
   critical sections (`F`), and draft comments the human triages (`D`)
 - offers optional MCP (`gander mcp`) with live-session tools plus CLI-parity
-  tools for reviews, comments, tasks, and walkthroughs; see
+  tools for reviews, comments, action items, and walkthroughs; see
   [docs/harness-setup.md](docs/harness-setup.md)
 - syntax-highlights common languages with a built-in tree-sitter registry
 - makes changes obvious at a glance: word-level change highlights, added/
@@ -430,7 +431,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | `L` | render/hide a diff that exceeds the large-diff threshold |
 | `A` | toggle agent-suggested review ordering |
 | `F` | agent-flagged sections popup |
-| `X` | review tasks popup (jump to task-backed comments, cycle state) |
+| `X` | open work popup for action items and todo comments (jump to linked evidence, cycle state) |
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
 | `T` / `Z` | zen mode: focused walkthrough of authored steps (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
@@ -469,7 +470,7 @@ Mouse support:
 The durable session is the product surface humans read in the TUI (and future
 web UI). Prompt handoff and delegation packets are outbound adapters for
 transferring selected work to external agents or harnesses. The normal agent
-automation path is CLI-first (`gander reviews`, `comments`, `tasks`,
+automation path is CLI-first (`gander reviews`, `comments`, `action-items`,
 `walkthrough`, `handoff`) or typed MCP (`gander mcp`) when a harness benefits
 from tool schemas and live focus. `gander acp` is the lower-level
 line-delimited JSON-RPC bridge used by MCP and live presentation plumbing, not
@@ -479,7 +480,7 @@ the interface most agents need to hand-author:
 cargo run -- acp
 ```
 
-Agents can read the diff, comments, and viewed state, and write review state or
+Agents can read the diff, comments, action items, and viewed state, and write review state or
 suggestions: durable walkthrough steps/chapters, a review ordering, flagged
 critical sections, live overlay curation, and comments. New durable comments are
 todo by default; set `[comments].initial-state = "draft"` or pass `--state draft`
@@ -492,9 +493,12 @@ state/overlay and surfaces suggestions live; overlay draft dispositions are
 written back so agents observe the outcome.
 
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
-It prints an implementation prompt with open tasks and todo comments first, then
-walkthrough context, and reference hunks limited to files that carry action items
-or walkthrough stops. Drafts are withheld; resolved comments are history. Use
+It prints an implementation prompt with todo comments as the primary implicit
+feedback, plus any open durable action items for higher-level coordination.
+Ordinary draft/general notes are not action items unless readied as `todo` or
+linked from an action item. Walkthrough context follows, with reference hunks
+limited to files that carry action items or walkthrough stops. Drafts are
+withheld; resolved comments are history. Use
 `gander handoff --format json` for the legacy structured action schema
 (`session`, `action_items`, `walkthrough`, trailing `reference.hunks`).
 
@@ -502,12 +506,12 @@ For typed delegation, use the read-only outbound adapter. This is orchestration
 for harnesses, not a mode humans must use to read review state:
 
 ```sh
-gander handoff --mode delegate --task <task-prefix> --include-comment <comment-prefix> \
+gander handoff --mode delegate --action-item <action-item-prefix> --include-comment <comment-prefix> \
   --to "build agent" --objective "Address the selected review feedback" \
   --constraint "Do not mutate unrelated files" \
-  --accept "All selected tasks are completed" \
+  --accept "All selected action items are completed" \
   --verify "nix run .#ci-test" --format markdown
-gander handoff --mode delegate --task <task-prefix> --format json --output delegate.json
+gander handoff --mode delegate --action-item <action-item-prefix> --format json --output delegate.json
 ```
 
 Verification strings are recorded as instructions only; Gander does not execute
@@ -527,7 +531,7 @@ gander skills show gander-review --format markdown
 gander skills install --dir ~/.agents/skills --force --format json
 ```
 Current import restores duplicate-safe comments and matching viewed state only;
-tasks and walkthroughs are exported for reference but are not restored by
+action items and walkthroughs are exported for reference but are not restored by
 `gander import`.
 
 While the TUI is running it also serves the same protocol on a Unix socket
@@ -628,10 +632,10 @@ the `jj` CLI boundary instead of embedding `jj-lib` for now.
 See [`docs/vision.md`](docs/vision.md) and [`docs/roadmap.md`](docs/roadmap.md)
 for the longer product plan. Highest-value next steps:
 
-1. first-class durable review sessions with comments, action-tagged tasks, and
+1. first-class durable review sessions with comments, action-tagged optional action items, and
    walkthroughs
 2. complete CLI automation with stable JSON output and parity with MCP/TUI
-3. TUI affordances for key hunks, walkthrough editing, and agent-action tasks
+3. TUI affordances for key hunks, walkthrough editing, and open action-item work
 4. static web walkthrough export after the session model stabilizes
 
 ## License
