@@ -8,6 +8,7 @@ use crate::{
     anchor::CommentAnchor,
     app::{ReviewFile, ReviewSession},
     diff::{DiffLineKind, Hunk},
+    ids::shortest_unique_prefix,
     state::{
         ActionIntent, Comment, CommentKind, CommentState, ReviewState, ReviewTarget,
         ReviewTaskStatus, StepArtifact, StepImportance, StepKind,
@@ -297,13 +298,23 @@ pub fn render_handoff_json(
 ) -> Result<String> {
     options.only_open = true;
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
+    let task_ids = artifact
+        .tasks
+        .iter()
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let comment_ids = artifact
+        .comments
+        .iter()
+        .map(|comment| comment.comment.id.as_str())
+        .collect::<Vec<_>>();
     let mut items = Vec::new();
     for item in ordered_action_items(&artifact) {
         match item {
             OrderedActionItem::Task(task) => {
                 let linked = task.linked_comment_ids.clone();
                 items.push(serde_json::json!({
-                    "id": task.id, "source": "task", "kind": null, "action": task.action,
+                    "id": task.id, "selector": shortest_unique_prefix(task.id, &task_ids), "short_id": shortest_unique_prefix(task.id, &task_ids), "source": "task", "kind": null, "action": task.action,
                     "path": task.target.as_ref().and_then(|t| t.file), "line": task.target.as_ref().and_then(|t| t.line), "end_line": task.target.as_ref().and_then(|t| t.end_line),
                     "excerpt": null, "body": task.body.unwrap_or(task.title), "title": task.title,
                     "state": task.status, "linked_comment_ids": linked, "linked_task_ids": Vec::<&str>::new(),
@@ -321,7 +332,7 @@ pub fn render_handoff_json(
                     .map(|task| task.id)
                     .collect::<Vec<_>>();
                 items.push(serde_json::json!({
-                    "id": comment.comment.id, "source": "comment", "kind": comment.comment.kind, "action": comment.comment.action,
+                    "id": comment.comment.id, "selector": shortest_unique_prefix(&comment.comment.id, &comment_ids), "short_id": shortest_unique_prefix(&comment.comment.id, &comment_ids), "source": "comment", "kind": comment.comment.kind, "action": comment.comment.action,
                     "path": comment.comment.path, "line": comment.comment.line, "end_line": comment.comment.end_line, "excerpt": comment.excerpt, "body": comment.comment.body,
                     "state": comment.comment.state, "linked_comment_ids": Vec::<&str>::new(), "linked_task_ids": linked_tasks,
                 }));
@@ -339,6 +350,7 @@ pub fn render_handoff_json(
                 .map(move |(index, step)| {
                     serde_json::json!({
                         "id": step.id,
+                        "selector": step.id.get(..8).unwrap_or(step.id),
                         "order": index + 1,
                         "kind": step.kind,
                         "importance": step.importance,
@@ -759,19 +771,50 @@ fn write_agent_header(artifact: &ReviewArtifact<'_>, out: &mut String) {
     ));
 }
 
+fn handoff_globals(artifact: &ReviewArtifact<'_>) -> String {
+    [
+        Some(format!(
+            "--repo {}",
+            shell_quote(&artifact.repo.display().to_string())
+        )),
+        Some(format!("--base {}", shell_quote(artifact.base))),
+        Some(format!("--rev {}", shell_quote(artifact.revision))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
     out.push_str("## Action items\n\n");
     out.push_str(
         "Ordered by action priority (fix, test, follow-up, other), then path and line.\n\n",
     );
     let mut wrote = false;
+    let globals = handoff_globals(artifact);
+    let task_ids = artifact
+        .tasks
+        .iter()
+        .map(|task| task.id)
+        .collect::<Vec<_>>();
+    let comment_ids = artifact
+        .comments
+        .iter()
+        .map(|comment| comment.comment.id.as_str())
+        .collect::<Vec<_>>();
     for item in ordered_action_items(artifact) {
         match item {
             OrderedActionItem::Task(task) => {
                 wrote = true;
                 out.push_str(&format!(
-                    "- [task][{}] {}",
+                    "- [task][{}][{}] {}",
                     action_label(task.action),
+                    shortest_unique_prefix(task.id, &task_ids),
                     task.title
                 ));
                 if let Some(target) = &task.target {
@@ -801,9 +844,10 @@ fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
                     out.push_str("; linked to task ");
                     out.push_str(&linked_tasks.join(", "));
                 }
+                let selector = shortest_unique_prefix(&comment.comment.id, &comment_ids);
                 out.push_str(&format!(
-                    "\n  ID: `{}`; reply: `gander comments reply {} --body <text>`; resolve: `gander comments resolve {} --reply <text>`\n",
-                    comment.comment.id, comment.comment.id, comment.comment.id
+                    "\n  ID: `{}`; reply: `gander {globals} comments reply {selector} --body <text>`; resolve: `gander {globals} comments resolve {selector} --reply <text>`\n",
+                    comment.comment.id,
                 ));
                 write_comment_replies(out, comment.comment);
                 write_excerpt(out, comment.excerpt.as_deref());

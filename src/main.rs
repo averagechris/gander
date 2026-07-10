@@ -10,6 +10,7 @@ mod diff;
 mod file_tree;
 mod fuzzy;
 mod generated;
+mod ids;
 mod jj;
 mod mcp;
 mod paths;
@@ -907,7 +908,11 @@ fn run() -> color_eyre::Result<()> {
     if let Some(command) = take_skills_command(&mut cli.command) {
         return handle_skills(command);
     }
-    let repo = cli.repo.unwrap_or(std::env::current_dir()?);
+    let repo = cli
+        .repo
+        .unwrap_or(std::env::current_dir()?)
+        .canonicalize()
+        .wrap_err("failed to canonicalize repository path")?;
     let config = Config::load(&repo, cli.config.as_deref())?;
     warn_deprecated_config_layer(&repo);
     let workspace_paths = WorkspacePaths::resolve(&repo, &PathsEnv::from_env())?;

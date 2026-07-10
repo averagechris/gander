@@ -6,6 +6,7 @@
 use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
 
+use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession,
     ReviewSessionStatus, ReviewState, ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough,
@@ -30,6 +31,7 @@ pub fn validate_body(body: &str, label: &str) -> Result<()> {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
+    pub selector: String,
     pub title: Option<String>,
     pub target: ReviewTarget,
     pub status: ReviewSessionStatus,
@@ -42,6 +44,7 @@ pub struct SessionSummary {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListedTask {
     pub id: String,
+    pub selector: String,
     pub source: String,
     pub title: String,
     pub body: Option<String>,
@@ -110,6 +113,7 @@ pub fn list_sessions(state: &ReviewState) -> Vec<SessionSummary> {
 pub fn session_summary(session: &ReviewSession) -> SessionSummary {
     SessionSummary {
         id: session.id.clone(),
+        selector: shortest_unique_prefix(&session.id, &[session.id.as_str()]),
         title: session.title.clone(),
         target: session.target.clone(),
         status: session.status,
@@ -121,29 +125,15 @@ pub fn session_summary(session: &ReviewSession) -> SessionSummary {
 }
 
 pub fn find_session<'a>(state: &'a ReviewState, prefix: &str) -> Result<&'a ReviewSession> {
-    let matches = state
-        .sessions
-        .iter()
-        .filter(|session| session.id.starts_with(prefix))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [session] => Ok(session),
-        [] => Err(eyre!("unknown review session `{prefix}`")),
-        _ => Err(eyre!("ambiguous review session prefix `{prefix}`")),
-    }
+    resolve_unique_prefix(&state.sessions, prefix, "review session", |s| s.id.as_str())
 }
 
 pub fn resolve_comment_id(comments: &[Comment], prefix: &str) -> Result<String> {
-    let matches = comments
-        .iter()
-        .filter(|comment| comment.id.starts_with(prefix))
-        .map(|comment| comment.id.as_str())
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [id] => Ok((*id).to_owned()),
-        [] => Err(eyre!("unknown comment `{prefix}`")),
-        _ => Err(eyre!("ambiguous comment prefix `{prefix}`")),
-    }
+    Ok(
+        resolve_unique_prefix(comments, prefix, "comment", |c| c.id.as_str())?
+            .id
+            .clone(),
+    )
 }
 
 #[allow(dead_code)]
@@ -392,11 +382,17 @@ pub fn reopen_task(session: &mut ReviewSession, id: &str) -> Result<ReviewTask> 
 }
 
 pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTask> {
+    let task_ids = session
+        .tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<Vec<_>>();
     let mut tasks = session
         .tasks
         .iter()
         .map(|task| ListedTask {
             id: task.id.clone(),
+            selector: shortest_unique_prefix(&task.id, &task_ids),
             source: "session".to_owned(),
             title: task.title.clone(),
             body: task.body.clone(),
@@ -413,6 +409,13 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
             .filter(|c| c.state == CommentState::Todo)
             .map(|c| ListedTask {
                 id: c.id.clone(),
+                selector: shortest_unique_prefix(
+                    &c.id,
+                    &comments
+                        .iter()
+                        .map(|comment| comment.id.as_str())
+                        .collect::<Vec<_>>(),
+                ),
                 source: "comment".to_owned(),
                 title: title_from_comment(c),
                 body: Some(c.body.clone()),
@@ -443,17 +446,11 @@ fn title_from_comment(comment: &Comment) -> String {
 }
 
 pub fn resolve_task_id(session: &ReviewSession, id: &str) -> Result<String> {
-    let matches = session
-        .tasks
-        .iter()
-        .filter(|task| task.id.starts_with(id))
-        .map(|task| task.id.clone())
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [] => Err(eyre!("unknown task `{id}`")),
-        [only] => Ok(only.clone()),
-        _ => Err(eyre!("ambiguous task id prefix `{id}`")),
-    }
+    Ok(
+        resolve_unique_prefix(&session.tasks, id, "task id", |task| task.id.as_str())?
+            .id
+            .clone(),
+    )
 }
 
 pub struct TaskEdits {
@@ -598,20 +595,13 @@ pub fn remove_walkthrough_step(
     session: &mut ReviewSession,
     step_id: &str,
 ) -> Result<WalkthroughStep> {
-    for walkthrough in &mut session.walkthroughs {
-        if let Some(index) = walkthrough
-            .steps
-            .iter()
-            .position(|step| step.id.starts_with(step_id))
-        {
-            let mut step = walkthrough.steps.remove(index);
-            step.updated_at = Some(chrono::Utc::now());
-            walkthrough.updated_at = step.updated_at;
-            touch(session);
-            return Ok(step);
-        }
-    }
-    Err(eyre!("unknown walkthrough step `{step_id}`"))
+    let (walkthrough_index, index) = resolve_walkthrough_step_index(session, step_id)?;
+    let walkthrough = &mut session.walkthroughs[walkthrough_index];
+    let mut step = walkthrough.steps.remove(index);
+    step.updated_at = Some(chrono::Utc::now());
+    walkthrough.updated_at = step.updated_at;
+    touch(session);
+    Ok(step)
 }
 
 pub fn move_walkthrough_step(
@@ -619,22 +609,42 @@ pub fn move_walkthrough_step(
     step_id: &str,
     new_index: usize,
 ) -> Result<WalkthroughStep> {
-    for walkthrough in &mut session.walkthroughs {
-        if let Some(index) = walkthrough
-            .steps
-            .iter()
-            .position(|step| step.id.starts_with(step_id))
-        {
-            let mut step = walkthrough.steps.remove(index);
-            step.updated_at = Some(chrono::Utc::now());
-            let to = new_index.min(walkthrough.steps.len());
-            walkthrough.steps.insert(to, step.clone());
-            walkthrough.updated_at = step.updated_at;
-            touch(session);
-            return Ok(step);
-        }
+    let (walkthrough_index, index) = resolve_walkthrough_step_index(session, step_id)?;
+    let walkthrough = &mut session.walkthroughs[walkthrough_index];
+    let mut step = walkthrough.steps.remove(index);
+    step.updated_at = Some(chrono::Utc::now());
+    let to = new_index.min(walkthrough.steps.len());
+    walkthrough.steps.insert(to, step.clone());
+    walkthrough.updated_at = step.updated_at;
+    touch(session);
+    Ok(step)
+}
+
+fn resolve_walkthrough_step_index(
+    session: &ReviewSession,
+    step_id: &str,
+) -> Result<(usize, usize)> {
+    let matches = session
+        .walkthroughs
+        .iter()
+        .enumerate()
+        .flat_map(|(walkthrough_index, walkthrough)| {
+            walkthrough
+                .steps
+                .iter()
+                .enumerate()
+                .filter_map(move |(step_index, step)| {
+                    step.id
+                        .starts_with(step_id)
+                        .then_some((walkthrough_index, step_index))
+                })
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [only] => Ok(*only),
+        [] => Err(eyre!("unknown walkthrough step `{step_id}`")),
+        _ => Err(eyre!("ambiguous walkthrough step prefix `{step_id}`")),
     }
-    Err(eyre!("unknown walkthrough step `{step_id}`"))
 }
 
 fn touch(session: &mut ReviewSession) {

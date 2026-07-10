@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff},
+    ids::shortest_unique_prefix,
     state::{
         ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession, ReviewState,
         ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
@@ -51,6 +52,7 @@ pub enum DelegationPacketKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMeta {
     pub id: String,
+    pub selector: String,
     pub title: Option<String>,
     pub status: String,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -91,6 +93,7 @@ pub struct DelegationBrief {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegatedActionItem {
     pub id: String,
+    pub selector: String,
     pub source: ActionSource,
     pub title: String,
     pub body: Option<String>,
@@ -109,6 +112,7 @@ pub enum ActionSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommentEvidence {
     pub id: String,
+    pub selector: String,
     pub path: String,
     pub line: Option<usize>,
     pub end_line: Option<usize>,
@@ -120,7 +124,9 @@ pub struct CommentEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DelegatedWalkthroughStep {
     pub walkthrough_id: String,
+    pub walkthrough_selector: String,
     pub step_id: String,
+    pub step_selector: String,
     pub title: Option<String>,
     pub body: Option<String>,
     pub why: Option<String>,
@@ -156,7 +162,7 @@ pub fn build_delegation_packet(
     spec: &DelegationSpec,
 ) -> Result<DelegationPacket> {
     let selected = select_action_items(session, &state.comments, spec)?;
-    let return_contract = return_contract(&selected);
+    let return_contract = return_contract(&session.target, &selected);
     let paths = selected
         .iter()
         .filter_map(|i| i.target.as_ref()?.file.clone())
@@ -167,6 +173,7 @@ pub fn build_delegation_packet(
         generated_at: chrono::Utc::now(),
         session: SessionMeta {
             id: session.id.clone(),
+            selector: shortest_unique_prefix(&session.id, &[session.id.as_str()]),
             title: session.title.clone(),
             status: format!("{:?}", session.status).to_lowercase(),
             created_at: session.created_at,
@@ -187,7 +194,7 @@ pub fn build_delegation_packet(
             acceptance_criteria: spec.acceptance_criteria.clone(),
             requested_verification: spec.requested_verification.clone(),
         },
-        action_items: selected,
+        action_items: with_action_selectors(selected),
         walkthrough: walkthrough_context(&session.walkthroughs),
         reference_hunks: reference_hunks(diff, &paths, spec.hunk_context_lines),
         return_contract,
@@ -306,6 +313,7 @@ fn one<'a, T>(matches: Vec<&'a T>, kind: &str, selector: &str) -> Result<&'a T> 
 fn task_item(task: &ReviewTask, evidence_comments: Vec<CommentEvidence>) -> DelegatedActionItem {
     DelegatedActionItem {
         id: task.id.clone(),
+        selector: task.id.clone(),
         source: ActionSource::Task,
         title: task.title.clone(),
         body: task.body.clone(),
@@ -317,6 +325,7 @@ fn task_item(task: &ReviewTask, evidence_comments: Vec<CommentEvidence>) -> Dele
 fn comment_item(c: &Comment) -> DelegatedActionItem {
     DelegatedActionItem {
         id: c.id.clone(),
+        selector: c.id.clone(),
         source: ActionSource::Comment,
         title: first_line(&c.body),
         body: Some(c.body.clone()),
@@ -333,6 +342,7 @@ fn comment_item(c: &Comment) -> DelegatedActionItem {
 fn comment_evidence(c: &Comment) -> CommentEvidence {
     CommentEvidence {
         id: c.id.clone(),
+        selector: c.id.clone(),
         path: c.path.clone(),
         line: c.line,
         end_line: c.end_line,
@@ -340,6 +350,27 @@ fn comment_evidence(c: &Comment) -> CommentEvidence {
         action: c.action,
         replies: c.replies.clone(),
     }
+}
+
+fn with_action_selectors(mut items: Vec<DelegatedActionItem>) -> Vec<DelegatedActionItem> {
+    let id_strings = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+    let ids = id_strings.iter().map(String::as_str).collect::<Vec<_>>();
+    for item in &mut items {
+        item.selector = shortest_unique_prefix(&item.id, &ids);
+        let comment_id_strings = item
+            .evidence_comments
+            .iter()
+            .map(|comment| comment.id.clone())
+            .collect::<Vec<_>>();
+        let comment_ids = comment_id_strings
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        for comment in &mut item.evidence_comments {
+            comment.selector = shortest_unique_prefix(&comment.id, &comment_ids);
+        }
+    }
+    items
 }
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("TODO").trim().to_owned()
@@ -385,14 +416,23 @@ fn fingerprints(diff: &DiffSet) -> PacketFingerprints {
     }
 }
 fn walkthrough_context(ws: &[Walkthrough]) -> Vec<DelegatedWalkthroughStep> {
+    let walkthrough_ids = ws.iter().map(|w| w.id.as_str()).collect::<Vec<_>>();
+    let step_ids = ws
+        .iter()
+        .flat_map(|w| w.steps.iter().map(|s| s.id.as_str()))
+        .collect::<Vec<_>>();
     let mut out = ws
         .iter()
         .flat_map(|w| {
+            let walkthrough_selector = shortest_unique_prefix(&w.id, &walkthrough_ids);
+            let step_ids = &step_ids;
             w.steps
                 .iter()
                 .map(move |s: &WalkthroughStep| DelegatedWalkthroughStep {
                     walkthrough_id: w.id.clone(),
+                    walkthrough_selector: walkthrough_selector.clone(),
                     step_id: s.id.clone(),
+                    step_selector: shortest_unique_prefix(&s.id, step_ids),
                     title: s.title.clone(),
                     body: s.body.clone(),
                     why: s.why.clone(),
@@ -446,16 +486,20 @@ fn sorted_files(files: &[FileDiff]) -> Vec<&FileDiff> {
     v.sort_by(|a, b| a.path.cmp(&b.path));
     v
 }
-fn return_contract(items: &[DelegatedActionItem]) -> ReviewStateReturnContract {
+fn return_contract(
+    target: &ReviewTarget,
+    items: &[DelegatedActionItem],
+) -> ReviewStateReturnContract {
+    let globals = return_globals(target);
     let mut commands = Vec::new();
     let mut comment_ids = BTreeSet::new();
     for item in items {
         match item.source {
             ActionSource::Task => commands.push(ReturnCommand {
-                purpose: format!("mark delegated task {} complete", item.id),
+                purpose: format!("mark delegated task {} complete", item.selector),
                 command: format!(
-                    "gander tasks complete {} --summary '<what changed and how it was verified>'",
-                    item.id
+                    "gander {globals} tasks complete {} --summary '<what changed and what was actually checked>'",
+                    item.selector
                 ),
             }),
             ActionSource::Comment => {
@@ -468,15 +512,19 @@ fn return_contract(items: &[DelegatedActionItem]) -> ReviewStateReturnContract {
                 .map(|comment| comment.id.clone()),
         );
     }
-    commands.extend(comment_ids.into_iter().map(|id| ReturnCommand {
-        purpose: format!("reply to and resolve addressed comment {id}"),
+    let comment_ids = comment_ids.into_iter().collect::<Vec<_>>();
+    commands.extend(comment_ids.iter().map(|id| {
+        let all_comment_ids = comment_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let selector = shortest_unique_prefix(id, &all_comment_ids);
+        ReturnCommand {
+        purpose: format!("reply to and resolve addressed comment {selector}"),
         command: format!(
-            "gander comments resolve {id} --reply '<what changed and how it was verified>'"
+            "gander {globals} comments resolve {selector} --reply '<what changed and what was actually checked>'"
         ),
-    }));
+    }}));
     commands.push(ReturnCommand {
         purpose: "add a follow-up comment".into(),
-        command: "gander comments add --path <path> --line <line> --kind issue --action follow-up --body '<body>'".into(),
+        command: format!("gander {globals} comments add --path <path> --line <line> --kind issue --action follow-up --body '<body>'"),
     });
 
     ReviewStateReturnContract {
@@ -485,6 +533,24 @@ fn return_contract(items: &[DelegatedActionItem]) -> ReviewStateReturnContract {
         allowed_comment_states: vec!["todo".into(), "resolved".into()],
         commands,
     }
+}
+
+fn return_globals(target: &ReviewTarget) -> String {
+    let mut args = Vec::new();
+    if let Some(repo) = &target.repo {
+        args.push(format!("--repo {}", shell_quote(repo)));
+    }
+    if let Some(base) = &target.base {
+        args.push(format!("--base {}", shell_quote(base)));
+    }
+    if let Some(revision) = &target.revision {
+        args.push(format!("--rev {}", shell_quote(revision)));
+    }
+    args.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
@@ -803,9 +869,9 @@ mod tests {
         let md = render_delegation_markdown(&p);
         assert!(md.contains("do it"));
         assert!(md.contains("cargo test"));
-        assert!(md.contains("gander tasks complete t-open --summary"));
-        assert!(md.contains("gander comments resolve c-linked --reply"));
-        assert!(md.contains("gander comments resolve c-todo --reply"));
+        assert!(md.contains("tasks complete t-open --summary"));
+        assert!(md.contains("comments resolve c-linked --reply"));
+        assert!(md.contains("comments resolve c-todo --reply"));
     }
 
     #[test]

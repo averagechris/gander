@@ -1,56 +1,27 @@
 ---
 name: gander-address-review
-description: Address a Gander review handoff by editing and testing code externally, then updating durable Gander replies, resolutions, tasks, and refreshed handoff without overstating verification.
+description: Address Gander review comments or tasks by editing code externally, then updating durable Gander review state.
 ---
 
-# Gander Address Review
+# Address a Gander Review
 
-Use when a review handoff, delegation, or local Gander session asks you to address findings. Code edits happen outside Gander; Gander stores review state.
+Use when a Gander handoff, delegation packet, or local session asks you to fix review feedback. Gander stores review state; use the reviewed project's normal tools to edit and check code.
 
-## Workflow
-
-1. Read the handoff/delegation and verify the target:
-
+1. **Target the reviewed workspace.** If you are operating from another cwd, pass `--repo <reviewed-workspace>` to Gander commands. If a packet supplies repository/base/revision, preserve those global options (`--repo`, `--base`, `--rev`) in return commands. `--state-file` only selects review-state storage; it does not select the code workspace.
+2. **Read the relevant open items.** Commands accept compact unique ID prefixes (minimum 8 chars, longer only on collisions). Use the packet/handoff selectors or list state:
    ```bash
-   gander summary
-   gander reviews list --format json
-   gander comments list --format json
-   gander tasks list --format json
+   gander --repo <reviewed-workspace> comments list
+   gander --repo <reviewed-workspace> tasks list
+   ```
+3. **Make the code/docs changes** with the project's usual edit, build, and test workflow.
+4. **Update Gander state concisely.** Reply/resolve comments and complete tasks with what changed and what was actually checked:
+   ```bash
+   gander --repo <reviewed-workspace> comments resolve <comment-prefix> --reply '<what changed; what was checked>'
+   gander --repo <reviewed-workspace> tasks complete <task-prefix> --summary '<what changed; what was checked>'
+   ```
+5. **If follow-up remains, record it** instead of claiming it is done:
+   ```bash
+   gander --repo <reviewed-workspace> comments add --path <path> --line <line> --kind issue --action follow-up --body '<follow-up>'
    ```
 
-   Match repo, revision/range, files, and task IDs before changing code. If the handoff is ambiguous or stale, ask for clarification.
-
-2. Edit code with normal project tools, not through Gander. Keep changes scoped to the requested findings. Run the relevant tests/checks externally:
-
-   ```bash
-   cargo test <name>
-   cargo clippy --all-targets -- -D warnings
-   ```
-
-   Use the project's actual commands when they differ.
-
-3. Update durable review state after each addressed item:
-
-   ```bash
-   gander comments reply <id> --body "Implemented with a regression test."
-   gander comments resolve <id> --reply "Fixed and verified with cargo test."
-   gander tasks complete <id> --summary "Added the missing parser regression."
-   gander tasks add --title "Follow up" --body "Revisit broader cleanup separately."
-   ```
-
-   Explain what changed and cite tests that actually ran. If verification was not run or failed, say so and leave the item unresolved or add a follow-up task.
-
-4. Rerun the handoff for the next reviewer/agent:
-
-   ```bash
-   gander handoff --format markdown
-   gander handoff --format json
-   gander handoff --mode delegate --task <id> --format json
-   ```
-
-## Guardrails
-
-- Do not claim verification prematurely. Distinguish edited, compiled, tested, and manually inspected.
-- Do not resolve comments or complete tasks until the code change and evidence support it.
-- Do not post to forges from this skill; use Gander replies/resolutions/tasks for local durable state.
-- Avoid deprecated chunk/brief/stale-flag workflows; rely on comments, tasks, walkthroughs, and handoffs.
+Honesty rule: report what changed and what you actually checked; do not imply broader verification than you performed.

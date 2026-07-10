@@ -460,7 +460,10 @@ Mouse support:
 
 ## Agent-collaborative review
 
-The normal agent path is CLI-first (`gander reviews`, `comments`, `tasks`,
+The durable session is the product surface humans read in the TUI (and future
+web UI). Prompt handoff and delegation packets are outbound adapters for
+transferring selected work to external agents or harnesses. The normal agent
+automation path is CLI-first (`gander reviews`, `comments`, `tasks`,
 `walkthrough`, `handoff`) or typed MCP (`gander mcp`) when a harness benefits
 from tool schemas and live focus. `gander acp` is the lower-level
 line-delimited JSON-RPC bridge used by MCP and live presentation plumbing, not
@@ -483,19 +486,23 @@ walkthrough stops. Use `gander handoff --format json` for the legacy structured
 action schema (`session`, `action_items`, `walkthrough`, trailing
 `reference.hunks`).
 
-For typed delegation, use the read-only delegation adapter:
+For typed delegation, use the read-only outbound adapter. This is orchestration
+for harnesses, not a mode humans must use to read review state:
 
 ```sh
-gander handoff --mode delegate --task TASK_ID --include-comment COMMENT_ID \
+gander handoff --mode delegate --task <task-prefix> --include-comment <comment-prefix> \
   --to "build agent" --objective "Address the selected review feedback" \
   --constraint "Do not mutate unrelated files" \
   --accept "All selected tasks are completed" \
   --verify "nix run .#ci-test" --format markdown
-gander handoff --mode delegate --task TASK_ID --format json --output delegate.json
+gander handoff --mode delegate --task <task-prefix> --format json --output delegate.json
 ```
 
 Verification strings are recorded as instructions only; Gander does not execute
-them. Delegate-only flags intentionally fail unless `--mode delegate` is set.
+them. Delegate return commands include `--repo`, `--base`, and `--rev` from the
+packet so they work from a different cwd; `--state-file` selects storage only,
+not the code workspace. Delegate-only flags intentionally fail unless `--mode
+delegate` is set.
 Use `gander export markdown --profile agent` or `gander export json --profile
 agent` for a fuller archive/reference artifact with all hunks and resolved
 comments.
