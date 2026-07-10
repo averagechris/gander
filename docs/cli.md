@@ -216,13 +216,7 @@ must include a non-empty `change_id`.
 File-anchor commands accept both `--path` and `--file` for compatibility. The
 canonical form in docs and JSON remains `--path`.
 
-## Deprecated curation shims (chunks, briefs) and drafts
-
-`chunks set` and `briefs set` write through to durable walkthroughs for
-compatibility, but they refuse to replace an existing authored walkthrough unless
-you pass `--replace`. Prefer `walkthrough set` for intentional full replacement;
-`chunks update` still upserts by chunk id, and `briefs set` upserts chapter steps
-by `change_id`.
+## Drafts
 
 ## Tour slide deck
 
@@ -242,21 +236,11 @@ final “At a glance” slide; otherwise the tour falls back to changed files.
 gander drafts list|add [--file <spec>]|remove --id <id>
 ```
 
-`chunks` and `briefs` are deprecated compatibility shims: chunk specs are
-translated into durable walkthrough steps and brief specs into chapter steps;
-the overlay is retained for ordering, flags, and drafts. Specs are JSON files or
-stdin. `chunks lines` still prints the exact line ranges the validator accepts
-(per change with `--change`), closing the line-space guessing loop. Validation
-is all-or-nothing with per-part reasons; line-range errors echo the valid ranges
-for the failing path. Unknown spec fields warn
-(typos never silently degrade to defaults). A live TUI on the same workspace
-picks up overlay writes within a poll; the CLI warns when the live session is
-reviewing a different target.
-
-Chunk line numbers use the same 1-indexed diff-line semantics as walkthrough
-targets: new side preferred, old side only for removed-only lines, in the
-session diff or in `<change_id>`'s own diff when the chunk carries a
-`change_id` — see `docs/acp.md` for the shared semantics.
+Drafts remain a supported overlay-backed CLI surface. Specs are JSON files or
+stdin, and a live TUI on the same workspace picks up overlay writes within a
+poll. Public `chunks` and `briefs` commands have been removed; use
+`walkthrough` for durable tour curation. ACP/MCP agents may still provide live
+overlay chunks and change briefs, which Gander adapts into walkthrough/zen views.
 
 ## Live state and the TUI
 
@@ -291,8 +275,7 @@ priority (fix > test > follow-up > other), then path, then line. `handoff
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
 are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
 `end_line`, `excerpt`, `body`, `state`, and canonical linked task/comment ids.
-The hidden `--only-open` flag is accepted for compatibility and matches the default; `--output`
-writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
+`--output` writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
 wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
 when you need the full session artifact for archive/reference or broad
 automation (its H1 is `# Review session export (agent profile)`; the two

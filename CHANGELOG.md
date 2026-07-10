@@ -24,10 +24,12 @@
 
 - Zen/tour mode now presents a polished full-screen slide deck with full-bleed
   chapter, spotlight, and at-a-glance slides instead of framed floating cards.
-- Walkthroughs and the zen tour now share one durable model; legacy
-  chunks/briefs authoring is treated as a deprecated compatibility shim.
-- `gander handoff --only-open` remains accepted for compatibility but is hidden
-  from help; the default prompt handoff remains backward compatible.
+- Removed the deprecated public `gander chunks` and `gander briefs` command
+  groups, plus the TUI `S` chunk-list popup and `chunk-list` keybinding. Durable
+  walkthroughs, zen/tour mode, drafts, and active ACP/MCP agent-overlay curation
+  remain supported.
+- Removed the hidden compatibility `gander handoff --only-open` flag; prompt
+  handoff continues to include only open action items by default.
 - CLI/help text now describes Gander as local-first durable review state over
   jj-visible work, hides deprecated chunks/briefs from generated help, and
   rejects explicit HTML artifact profiles instead of ignoring them.
@@ -41,9 +43,9 @@
   deletes to the start of the current line, Ctrl+K deletes to the end,
   Ctrl+W deletes the previous word, Ctrl+A/Ctrl+E move to line
   boundaries, and Alt+B/Alt+F or Ctrl+Left/Ctrl+Right move by word.
-- Deprecated `chunks set` and `briefs set` shims no longer silently clobber
-  authored walkthroughs; replacing mixed-author content now requires
-  `--replace` or the explicit `walkthrough set` command.
+- Removed the deprecated chunks/briefs shim conversion path in favor of the
+  explicit `walkthrough` commands for durable curation; internal overlay chunks
+  and briefs still adapt into walkthrough/zen views.
 - Walkthrough authoring validates unknown fields, chapter `change_id`s, and
   target line ranges against the diff line space, and repeated
   `walkthrough set` runs preserve stable step ids.

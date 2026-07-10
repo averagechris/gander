@@ -23,7 +23,6 @@ use crate::{
 use super::{
     ActivityListState, CommentInputTarget, Mode, TuiState, UiNotice, UiNoticeLevel,
     chooser::TargetChooserState,
-    chunks::ChunkListState,
     comments::CommentListState,
     drafts::DraftListState,
     editor::CommentEditor,
@@ -151,7 +150,6 @@ pub(super) fn draw(
         Mode::WalkthroughList(list) => {
             draw_walkthrough_list_popup(frame, frame.area(), session, list)
         }
-        Mode::ChunkList(list) => draw_chunk_list_popup(frame, frame.area(), list),
         Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
         Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
         Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
@@ -1309,7 +1307,6 @@ fn draw_footer(
         Mode::WalkthroughList(_) => {
             "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
         }
-        Mode::ChunkList(_) => "review chunks · j/k move · enter jump · esc close".to_owned(),
         Mode::DraftList(_) => {
             "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
         }
@@ -1603,7 +1600,6 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::YankHandoff], "copy agent handoff markdown"),
         entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
         entry(&[Action::FlagList], "agent-flagged sections"),
-        entry(&[Action::ChunkList], "agent review chunks"),
         entry(&[Action::Zen], "zen briefing (focus stops + glance)"),
         entry(&[Action::DraftList], "agent draft comments"),
         section("badges"),
@@ -1933,107 +1929,6 @@ fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagL
     );
 }
 
-fn draw_chunk_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &ChunkListState) {
-    let popup = centered_rect(82, 60, area);
-    frame.render_widget(Clear, popup);
-
-    let inner_height = popup.height.saturating_sub(2) as usize;
-    // Header + spacer + live preview + key hints. The operation list must
-    // shrink before these footer lines disappear at side-pane heights.
-    let fixed_lines = 4usize;
-    let list_height = inner_height.saturating_sub(fixed_lines).max(1);
-    let visible_window = picker_visible_window(list.selected, list.rows.len(), list_height);
-
-    let mut lines = vec![Line::from(Span::styled(
-        "Agent-suggested review units (can span or subdivide files)",
-        Style::default().fg(Color::DarkGray),
-    ))];
-    if list.rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  no chunks",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        if visible_window.hidden_above > 0 {
-            lines.push(Line::from(Span::styled(
-                format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        lines.extend(
-            list.rows
-                .iter()
-                .enumerate()
-                .skip(visible_window.start)
-                .take(visible_window.end.saturating_sub(visible_window.start))
-                .map(|(index, row)| {
-                    let selected = index == list.selected;
-                    let marker = if selected { "›" } else { " " };
-                    let style = if selected {
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    };
-                    let position = row
-                        .part_position
-                        .map(|(part, total)| format!(" ({part}/{total})"))
-                        .unwrap_or_default();
-                    let location = chunk_row_location(row);
-                    let rationale = row
-                        .rationale
-                        .as_deref()
-                        .map(|rationale| format!(" — {rationale}"))
-                        .unwrap_or_default();
-                    let mut spans = vec![
-                        Span::styled(format!("{marker} {}{position} ", row.title), style),
-                        Span::styled(
-                            format!("[{}] ", row.importance.label()),
-                            if row.importance == crate::agent::ChunkImportance::Spotlight {
-                                Style::default().fg(Color::Magenta)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            },
-                        ),
-                        Span::styled(location, Style::default().fg(Color::Cyan)),
-                        Span::styled(rationale, Style::default().fg(Color::DarkGray)),
-                    ];
-                    if let Some(reason) = &row.invalid_reason {
-                        spans.push(Span::styled(" [invalid]", Style::default().fg(Color::Red)));
-                        spans.push(Span::styled(
-                            format!(" {reason}"),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    Line::from(spans)
-                }),
-        );
-        if visible_window.hidden_below > 0 {
-            lines.push(Line::from(Span::styled(
-                format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · esc close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("review chunks"),
-            )
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
 /// A compact bottom-anchored panel (not a modal popup): the diff pane stays
 /// visible and follows the current stop while the panel shows progress,
 /// location, the agent's rationale, and flags in the stop's file — the
@@ -2178,11 +2073,7 @@ fn draw_zen_panel(
     );
 }
 
-fn chunk_row_location(row: &super::chunks::ChunkRow) -> String {
-    chunk_row_location_raw(row)
-}
-
-fn chunk_row_location_width(row: &super::chunks::ChunkRow, max_width: usize) -> String {
+fn chunk_row_location_width(row: &super::chunks::WalkthroughRow, max_width: usize) -> String {
     match (&row.change_id, &row.part) {
         (Some(change_id), Some(part)) => {
             let location = match (part.start_line, part.end_line) {
@@ -2202,7 +2093,7 @@ fn chunk_row_location_width(row: &super::chunks::ChunkRow, max_width: usize) -> 
     }
 }
 
-fn chunk_row_location_raw(row: &super::chunks::ChunkRow) -> String {
+fn chunk_row_location_raw(row: &super::chunks::WalkthroughRow) -> String {
     let location = match &row.part {
         Some(part) => match (part.start_line, part.end_line) {
             (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
@@ -2544,7 +2435,10 @@ fn derived_summary(lines: &[String]) -> String {
     format!("{churn}{symbols}")
 }
 
-fn zen_stop_comment_lines(session: &ReviewSession, stop: &super::chunks::ChunkRow) -> Vec<String> {
+fn zen_stop_comment_lines(
+    session: &ReviewSession,
+    stop: &super::chunks::WalkthroughRow,
+) -> Vec<String> {
     super::zen::comments_for_stop(&session.comments, stop)
         .into_iter()
         .map(|comment| {
@@ -2565,7 +2459,7 @@ fn draw_zen_stop(
     area: Rect,
     session: &ReviewSession,
     zen: &ZenState,
-    stop: &super::chunks::ChunkRow,
+    stop: &super::chunks::WalkthroughRow,
 ) {
     frame.render_widget(Clear, area);
     let initial_inner = slide_inner(area);
@@ -2777,7 +2671,10 @@ fn draw_zen_stop(
 }
 
 /// Header lines for the focus card backdrop: the progress dots.
-fn zen_focus_header_lines(zen: &ZenState, stop: &super::chunks::ChunkRow) -> Vec<Line<'static>> {
+fn zen_focus_header_lines(
+    zen: &ZenState,
+    stop: &super::chunks::WalkthroughRow,
+) -> Vec<Line<'static>> {
     let position = stop
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
@@ -2803,14 +2700,14 @@ fn zen_focus_header_lines(zen: &ZenState, stop: &super::chunks::ChunkRow) -> Vec
 
 fn sibling_parts_line(
     zen: &ZenState,
-    stop: &super::chunks::ChunkRow,
+    stop: &super::chunks::WalkthroughRow,
     max_width: usize,
 ) -> Option<String> {
     let parts = zen
         .stops
         .iter()
         .filter_map(|candidate| match candidate {
-            ZenStop::Chunk(row) if row.chunk_id == stop.chunk_id && row.part != stop.part => {
+            ZenStop::Chunk(row) if row.source_id == stop.source_id && row.part != stop.part => {
                 Some(format!(
                     "{}{}",
                     chunk_row_location_width(row, 40),
@@ -2859,7 +2756,7 @@ fn zen_progress_line(zen: &ZenState) -> Line<'static> {
 /// Indices into the selected file's diff rows.
 fn zen_excerpt_indices(
     rows: &[DiffRow],
-    stop: &super::chunks::ChunkRow,
+    stop: &super::chunks::WalkthroughRow,
     max_rows: usize,
     cursor: Option<usize>,
 ) -> (Vec<usize>, bool, Option<(usize, usize)>) {
@@ -3208,10 +3105,10 @@ fn draw_zen_glance(
 
 struct GlanceGroup<'a> {
     indices: Vec<usize>,
-    rows: Vec<&'a super::chunks::ChunkRow>,
+    rows: Vec<&'a super::chunks::WalkthroughRow>,
 }
 
-fn grouped_glance_rows(rows: &[super::chunks::ChunkRow]) -> Vec<GlanceGroup<'_>> {
+fn grouped_glance_rows(rows: &[super::chunks::WalkthroughRow]) -> Vec<GlanceGroup<'_>> {
     let mut groups: Vec<GlanceGroup<'_>> = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         if row.part_position.is_some()
@@ -3219,7 +3116,7 @@ fn grouped_glance_rows(rows: &[super::chunks::ChunkRow]) -> Vec<GlanceGroup<'_>>
                 group
                     .rows
                     .first()
-                    .is_some_and(|first| first.chunk_id == row.chunk_id)
+                    .is_some_and(|first| first.source_id == row.source_id)
             })
         {
             group.indices.push(index);
@@ -3234,7 +3131,10 @@ fn grouped_glance_rows(rows: &[super::chunks::ChunkRow]) -> Vec<GlanceGroup<'_>>
     groups
 }
 
-fn glance_auto_role_lines(rows: &[&super::chunks::ChunkRow], max_width: usize) -> Vec<String> {
+fn glance_auto_role_lines(
+    rows: &[&super::chunks::WalkthroughRow],
+    max_width: usize,
+) -> Vec<String> {
     let mut by_role = std::collections::BTreeMap::<String, Vec<String>>::new();
     for row in rows {
         let path = row
@@ -4899,49 +4799,6 @@ diff --git a/README.md b/README.md
         );
     }
 
-    #[test]
-    fn tui_snapshot_chunk_list() {
-        let mut session = snapshot_session(
-            r#"diff --git a/src/app.rs b/src/app.rs
---- a/src/app.rs
-+++ b/src/app.rs
-@@ -1,4 +1,5 @@
- fn main() {
--    old();
-+    new();
-+    extra();
- }
-"#,
-        );
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "core change".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                explanation: None,
-                rationale: Some("start here".to_owned()),
-                artifacts: Vec::new(),
-                parts: vec![
-                    crate::agent::ChunkPart {
-                        path: "src/app.rs".to_owned(),
-                        start_line: Some(2),
-                        end_line: Some(3),
-                    },
-                    crate::agent::ChunkPart {
-                        path: "src/app.rs".to_owned(),
-                        start_line: Some(4),
-                        end_line: None,
-                    },
-                ],
-            }],
-            ..Default::default()
-        });
-        let mode = Mode::ChunkList(ChunkListState::new(&session));
-
-        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
-    }
-
     fn zen_snapshot_session() -> (ReviewSession, ZenState) {
         let mut session = snapshot_session(
             r#"diff --git a/src/app.rs b/src/app.rs
@@ -5212,8 +5069,8 @@ diff --git a/Cargo.toml b/Cargo.toml
 
     #[test]
     fn chunk_row_location_names_the_anchored_change() {
-        let mut row = crate::tui::chunks::ChunkRow {
-            chunk_id: "c1".to_owned(),
+        let mut row = crate::tui::chunks::WalkthroughRow {
+            source_id: "c1".to_owned(),
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
@@ -5228,10 +5085,10 @@ diff --git a/Cargo.toml b/Cargo.toml
             part_position: None,
             invalid_reason: None,
         };
-        assert_eq!(chunk_row_location(&row), "src/app.rs:3-9");
+        assert_eq!(chunk_row_location_raw(&row), "src/app.rs:3-9");
 
         row.change_id = Some("xyzkwqrs".to_owned());
-        assert_eq!(chunk_row_location(&row), "[xyzkwqrs] src/app.rs:3-9");
+        assert_eq!(chunk_row_location_raw(&row), "[xyzkwqrs] src/app.rs:3-9");
     }
 
     #[test]
@@ -5246,8 +5103,8 @@ diff --git a/Cargo.toml b/Cargo.toml
 
     #[test]
     fn glance_rows_group_multi_part_chunks() {
-        let row = |path: &str, pos| crate::tui::chunks::ChunkRow {
-            chunk_id: "c1".to_owned(),
+        let row = |path: &str, pos| crate::tui::chunks::WalkthroughRow {
+            source_id: "c1".to_owned(),
             title: "shared".to_owned(),
             importance: crate::agent::ChunkImportance::Glance,
             change_id: None,
@@ -5280,8 +5137,8 @@ diff --git a/Cargo.toml b/Cargo.toml
         let mut session = snapshot_session(&body);
         session.focus = Focus::Diff;
         let rows = session.diff_rows_for_selected_file().to_vec();
-        let stop = crate::tui::chunks::ChunkRow {
-            chunk_id: "c1".to_owned(),
+        let stop = crate::tui::chunks::WalkthroughRow {
+            source_id: "c1".to_owned(),
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
@@ -5327,7 +5184,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         // At tiny prose-first heights, do not spend the whole budget on
         // leading context: start at the target range and still report the
         // clipped range trailer.
-        let stop = crate::tui::chunks::ChunkRow {
+        let stop = crate::tui::chunks::WalkthroughRow {
             part: Some(crate::agent::ChunkPart {
                 path: "big.txt".to_owned(),
                 start_line: Some(10),

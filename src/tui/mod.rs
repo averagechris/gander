@@ -62,7 +62,6 @@ use crate::{
 use serde_json::{Value, json};
 
 use chooser::TargetChooserState;
-use chunks::ChunkListState;
 use comments::CommentListState;
 use drafts::DraftListState;
 use editor::CommentEditor;
@@ -110,7 +109,6 @@ enum Mode {
     FlagList(FlagListState),
     TaskList(TaskListState),
     Activity(ActivityListState),
-    ChunkList(ChunkListState),
     DraftList(DraftListState),
     FileSearch(FileSearchState),
     SymbolOutline(SymbolOutlineState),
@@ -515,7 +513,7 @@ fn seed_zen_tour(
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: match zen.source {
-                    zen::ZenSource::Chunks => format!(
+                    zen::ZenSource::Curated => format!(
                         "zen: {} chapter(s), {} focus stop(s), {} at a glance",
                         zen.chapter_count(),
                         zen.chunk_stop_count(),
@@ -1049,7 +1047,6 @@ fn mode_label(mode: &Mode) -> &'static str {
         Mode::FlagList(_) => "flag list",
         Mode::TaskList(_) => "task list",
         Mode::Activity(_) => "activity",
-        Mode::ChunkList(_) => "chunk list",
         Mode::DraftList(_) => "draft list",
         Mode::FileSearch(_) => "file search",
         Mode::SymbolOutline(_) => "symbol outline",
@@ -1134,7 +1131,7 @@ fn apply_present_command(
                 return Err((-32002, "tour is not active".to_owned()));
             };
             let Some(index) = zen.stops.iter().position(|stop| match stop {
-                zen::ZenStop::Chunk(row) => row.chunk_id == step_id,
+                zen::ZenStop::Chunk(row) => row.source_id == step_id,
                 zen::ZenStop::Chapter(_) => false,
             }) else {
                 tui_state.zen = Some(zen);
@@ -1566,7 +1563,7 @@ fn reapply_agent_overlay(
 
 fn invalid_chunk_notice(count: usize) -> String {
     format!(
-        "{count} curated chunk part(s) no longer match the diff — run 'gander chunks lines' and update the spec"
+        "{count} curated walkthrough part(s) no longer match the diff; update the agent overlay or durable walkthrough targets"
     )
 }
 
@@ -1706,11 +1703,6 @@ fn handle_key_event(
         }
         Mode::WalkthroughList(list) => {
             if handle_walkthrough_list_key(key, list, session, keymap, tui_state) {
-                *mode = Mode::Normal;
-            }
-        }
-        Mode::ChunkList(list) => {
-            if handle_chunk_list_key(key, list, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1877,19 +1869,6 @@ fn handle_normal_action(
                 });
             } else {
                 *mode = Mode::WalkthroughList(walkthroughs);
-            }
-        }
-        Action::ChunkList => {
-            if session.review_chunks.is_empty() {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "no review chunks suggested".to_owned(),
-                });
-            } else {
-                *mode = Mode::ChunkList(ChunkListState::new_with_invalid(
-                    session,
-                    &tui_state.invalid_chunk_parts,
-                ));
             }
         }
         Action::Zen => {
@@ -2676,74 +2655,6 @@ fn handle_flag_list_key(
         KeyCode::Enter => {
             if let Some(flag) = list.selected_flag().cloned() {
                 session.jump_to_flag(&flag);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            list.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            list.move_selection(-1);
-            false
-        }
-        _ => false,
-    }
-}
-
-fn handle_chunk_list_key(
-    key: KeyEvent,
-    list: &mut ChunkListState,
-    session: &mut ReviewSession,
-    keymap: &KeyMap,
-    review_loader: &ReviewLoader<'_>,
-    tui_state: &mut TuiState,
-) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
-        match action {
-            Action::TargetPickerMoveDown => list.move_selection(1),
-            Action::TargetPickerMoveUp => list.move_selection(-1),
-            _ => {}
-        }
-        return false;
-    }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(row) = list.selected_row().cloned() {
-                if let Some(reason) = row.invalid_reason {
-                    tui_state.notice = Some(UiNotice {
-                        level: UiNoticeLevel::Info,
-                        message: format!("invalid chunk part: {reason}"),
-                    });
-                    return true;
-                }
-                // A change-anchored chunk lives in its own change's diff;
-                // load it before jumping so line anchors line up. This is a
-                // user retarget (an active zen walkthrough ends).
-                let desired = zen::row_target(&row, &session.target.clone());
-                if session.target != desired {
-                    match review_loader.load(session, desired.clone()) {
-                        Ok(()) => {
-                            reapply_agent_overlay(session, review_loader, tui_state);
-                            tui_state.notice = Some(UiNotice {
-                                level: UiNoticeLevel::Info,
-                                message: format!("loaded {desired}"),
-                            });
-                        }
-                        Err(error) => {
-                            tui_state.notice = Some(UiNotice {
-                                level: UiNoticeLevel::Error,
-                                message: format!("failed to load {desired}: {error:?}"),
-                            });
-                            return true;
-                        }
-                    }
-                }
-                if let Some(part) = &row.part {
-                    session.jump_to_chunk_part(part);
-                }
             }
             true
         }
@@ -3759,7 +3670,6 @@ fn handle_mouse_event(
             | Mode::TaskList(_)
             | Mode::Activity(_)
             | Mode::WalkthroughList(_)
-            | Mode::ChunkList(_)
             | Mode::DraftList(_)
             | Mode::FileSearch(_)
             | Mode::SymbolOutline(_)
@@ -4211,14 +4121,14 @@ mod tests {
                 .as_ref()
                 .map(|notice| notice.message.as_str()),
             Some(
-                "1 curated chunk part(s) no longer match the diff — run 'gander chunks lines' and update the spec"
+                "1 curated walkthrough part(s) no longer match the diff; update the agent overlay or durable walkthrough targets"
             )
         );
         assert!(
             tui_state
                 .activity
                 .back()
-                .is_some_and(|event| event.message.contains("curated chunk part"))
+                .is_some_and(|event| event.message.contains("curated walkthrough part"))
         );
     }
 
@@ -6222,35 +6132,6 @@ diff --git a/b.rs b/b.rs
         assert!(notice.message.contains("bbb"));
     }
 
-    #[test]
-    fn chunk_list_enter_retargets_to_a_change_anchored_chunk() {
-        let mut session = stacked_zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-        let mut list = ChunkListState::new(&session);
-        list.move_selection(1); // the bbb-anchored row
-
-        assert!(handle_chunk_list_key(
-            KeyEvent::from(KeyCode::Enter),
-            &mut list,
-            &mut session,
-            &keymap,
-            &loader,
-            &mut tui_state,
-        ));
-
-        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("loaded bbb-..bbb")
-        );
-    }
-
     const REFRESHED_DIFF: &str = r#"diff --git a/a.rs b/a.rs
 --- a/a.rs
 +++ b/a.rs
@@ -6488,7 +6369,7 @@ diff --git a/c.rs b/c.rs
         // The walkthrough survived the reload: stops rebuilt from the
         // reapplied overlay chunks, position kept, staleness key updated.
         let zen = tui_state.zen.as_ref().unwrap();
-        assert_eq!(zen.source, zen::ZenSource::Chunks);
+        assert_eq!(zen.source, zen::ZenSource::Curated);
         assert_eq!(zen.index, 2);
         assert!(!zen.is_stale(&session));
         assert!(!session.review_chunks.is_empty());

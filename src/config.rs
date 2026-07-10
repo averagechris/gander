@@ -204,7 +204,6 @@ pub struct KeybindingsConfig {
     pub task_list: Vec<String>,
     pub activity: Vec<String>,
     pub walkthrough_list: Vec<String>,
-    pub chunk_list: Vec<String>,
     pub zen: Vec<String>,
     pub draft_list: Vec<String>,
     pub target_picker_down: Vec<String>,
@@ -385,7 +384,6 @@ struct KeybindingsConfigPatch {
     task_list: Option<Vec<String>>,
     activity: Option<Vec<String>>,
     walkthrough_list: Option<Vec<String>>,
-    chunk_list: Option<Vec<String>>,
     /// Accepts the pre-0.4 name `tour` so existing configs keep working.
     #[serde(alias = "tour")]
     zen: Option<Vec<String>>,
@@ -490,7 +488,6 @@ impl Default for KeybindingsConfig {
             task_list: keys(["X"]),
             activity: keys(["ctrl-a"]),
             walkthrough_list: keys(["W"]),
-            chunk_list: keys(["S"]),
             zen: keys(["T", "Z"]),
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
@@ -729,7 +726,6 @@ impl KeybindingsConfig {
         apply_optional(&mut self.task_list, patch.task_list);
         apply_optional(&mut self.activity, patch.activity);
         apply_optional(&mut self.walkthrough_list, patch.walkthrough_list);
-        apply_optional(&mut self.chunk_list, patch.chunk_list);
         apply_optional(&mut self.zen, patch.zen);
         apply_optional(&mut self.draft_list, patch.draft_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
@@ -1072,7 +1068,6 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.toggle_large_diff, ["L"]);
         assert_eq!(config.keybindings.toggle_agent_order, ["A"]);
         assert_eq!(config.keybindings.flag_list, ["F"]);
-        assert_eq!(config.keybindings.chunk_list, ["S"]);
         assert_eq!(config.keybindings.draft_list, ["D"]);
         assert_eq!(config.limits.max_diff_lines, 5000);
         assert_eq!(config.keybindings.target_picker_down, ["down", "ctrl-j"]);

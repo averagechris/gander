@@ -1,27 +1,27 @@
-//! Review chunks: agent-defined reviewable units that can span or subdivide
-//! files. The popup lists every chunk part and jumps to its location.
+//! Walkthrough/tour rows adapted from active agent overlay curation and durable
+//! walkthrough steps. Agent overlay chunks remain an internal live-curation input.
 
 use crate::{
-    agent::{Artifact, ArtifactKind, ChunkImportance, ChunkPart, InvalidChunkPart, ReviewChunk},
+    agent::{Artifact, ArtifactKind, ChunkImportance, ChunkPart, ReviewChunk},
     app::ReviewSession,
     state::{ReviewTarget, StepArtifact, StepArtifactKind, StepImportance, WalkthroughStep},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ChunkListState {
-    pub(super) rows: Vec<ChunkRow>,
+pub(super) struct WalkthroughRowList {
+    pub(super) rows: Vec<WalkthroughRow>,
     pub(super) selected: usize,
 }
 
-/// One selectable row: a part of a chunk (or a part-less chunk itself).
+/// One selectable row: a tour stop target (or an untargeted stop itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ChunkRow {
-    /// Stable review chunk id. Multi-part chunks share this id so zen can
+pub(super) struct WalkthroughRow {
+    /// Stable source curation id. Multi-target stops share this id so zen can
     /// group their glance entry and cross-reference sibling stops.
-    pub(super) chunk_id: String,
+    pub(super) source_id: String,
     pub(super) title: String,
     pub(super) importance: ChunkImportance,
-    /// The jj change the chunk is anchored to, when the review spans a
+    /// The jj change the walkthrough stop is anchored to, when the review spans a
     /// stack; jumping to this row retargets the review to that change.
     pub(super) change_id: Option<String>,
     pub(super) rationale: Option<String>,
@@ -31,59 +31,29 @@ pub(super) struct ChunkRow {
     /// artifact viewer.
     pub(super) artifacts: Vec<Artifact>,
     pub(super) part: Option<ChunkPart>,
-    /// Position of this part within its chunk, e.g. (1, 3) for "part 1/3".
+    /// Position of this part within its stop, e.g. (1, 3) for "part 1/3".
     pub(super) part_position: Option<(usize, usize)>,
     pub(super) invalid_reason: Option<String>,
 }
 
-impl ChunkListState {
+impl WalkthroughRowList {
     #[allow(dead_code)]
     pub(super) fn new(session: &ReviewSession) -> Self {
         Self {
-            rows: session.review_chunks.iter().flat_map(chunk_rows).collect(),
+            rows: session
+                .review_chunks
+                .iter()
+                .flat_map(overlay_chunk_rows)
+                .collect(),
             selected: 0,
         }
     }
-
-    pub(super) fn new_with_invalid(session: &ReviewSession, invalid: &[InvalidChunkPart]) -> Self {
-        let mut rows: Vec<_> = session.review_chunks.iter().flat_map(chunk_rows).collect();
-        rows.extend(invalid.iter().map(|part| ChunkRow {
-            chunk_id: part.chunk_id.clone(),
-            title: part.chunk_title.clone(),
-            importance: ChunkImportance::Glance,
-            change_id: None,
-            rationale: None,
-            explanation: None,
-            artifacts: Vec::new(),
-            part: Some(ChunkPart {
-                path: part.path.clone(),
-                start_line: None,
-                end_line: None,
-            }),
-            part_position: Some((part.part_index, part.part_index)),
-            invalid_reason: Some(part.reason.clone()),
-        }));
-        Self { rows, selected: 0 }
-    }
-
-    pub(super) fn move_selection(&mut self, delta: isize) {
-        if self.rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = self.rows.len() as isize - 1;
-        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
-    }
-
-    pub(super) fn selected_row(&self) -> Option<&ChunkRow> {
-        self.rows.get(self.selected)
-    }
 }
 
-pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
+pub(super) fn overlay_chunk_rows(chunk: &ReviewChunk) -> Vec<WalkthroughRow> {
     if chunk.parts.is_empty() {
-        return vec![ChunkRow {
-            chunk_id: chunk.id.clone(),
+        return vec![WalkthroughRow {
+            source_id: chunk.id.clone(),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -100,8 +70,8 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         .parts
         .iter()
         .enumerate()
-        .map(|(index, part)| ChunkRow {
-            chunk_id: chunk.id.clone(),
+        .map(|(index, part)| WalkthroughRow {
+            source_id: chunk.id.clone(),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -115,7 +85,7 @@ pub(super) fn chunk_rows(chunk: &ReviewChunk) -> Vec<ChunkRow> {
         .collect()
 }
 
-pub(super) fn walkthrough_step_rows(step: &WalkthroughStep) -> Vec<ChunkRow> {
+pub(super) fn durable_walkthrough_rows(step: &WalkthroughStep) -> Vec<WalkthroughRow> {
     let parts: Vec<_> = std::iter::once(&step.target)
         .chain(step.extra_targets.iter())
         .filter_map(target_to_part)
@@ -130,8 +100,8 @@ pub(super) fn walkthrough_step_rows(step: &WalkthroughStep) -> Vec<ChunkRow> {
         .unwrap_or_else(|| "Walkthrough step".to_owned());
     let artifacts = step.artifacts.iter().map(step_artifact_to_agent).collect();
     if parts.is_empty() {
-        return vec![ChunkRow {
-            chunk_id: step.id.clone(),
+        return vec![WalkthroughRow {
+            source_id: step.id.clone(),
             title,
             importance,
             change_id: step.change_id.clone(),
@@ -147,8 +117,8 @@ pub(super) fn walkthrough_step_rows(step: &WalkthroughStep) -> Vec<ChunkRow> {
     parts
         .into_iter()
         .enumerate()
-        .map(|(index, part)| ChunkRow {
-            chunk_id: step.id.clone(),
+        .map(|(index, part)| WalkthroughRow {
+            source_id: step.id.clone(),
             title: title.clone(),
             importance,
             change_id: step.change_id.clone(),
@@ -226,16 +196,16 @@ mod tests {
             ..Default::default()
         });
 
-        let state = ChunkListState::new(&session);
+        let state = WalkthroughRowList::new(&session);
 
         assert_eq!(state.rows.len(), 3);
         assert_eq!(state.rows[0].title, "auth flow");
-        assert_eq!(state.rows[0].chunk_id, "c1");
-        assert_eq!(state.rows[1].chunk_id, "c1");
+        assert_eq!(state.rows[0].source_id, "c1");
+        assert_eq!(state.rows[1].source_id, "c1");
         assert_eq!(state.rows[0].part_position, Some((1, 2)));
         assert_eq!(state.rows[1].part.as_ref().unwrap().path, "b.rs");
         assert_eq!(state.rows[2].title, "docs only");
-        assert_eq!(state.rows[2].chunk_id, "c2");
+        assert_eq!(state.rows[2].source_id, "c2");
         assert!(state.rows[2].part.is_none());
     }
 
@@ -255,11 +225,9 @@ mod tests {
             }],
             ..Default::default()
         });
-        let mut state = ChunkListState::new(&session);
-
-        state.move_selection(9);
+        let state = WalkthroughRowList::new(&session);
         assert_eq!(state.selected, 0);
-        assert_eq!(state.selected_row().unwrap().title, "single");
-        assert_eq!(state.selected_row().unwrap().part_position, None);
+        assert_eq!(state.rows[0].title, "single");
+        assert_eq!(state.rows[0].part_position, None);
     }
 }

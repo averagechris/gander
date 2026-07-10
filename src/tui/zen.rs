@@ -25,14 +25,14 @@ use crate::diff::{DiffLineKind, FileDiff, Hunk};
 use crate::jj::{JjChangeSummary, ReviewTarget};
 use crate::state::{Comment, ReviewSessionStatus, StepArtifactKind, StepKind, WalkthroughStep};
 
-use super::chunks::{ChunkRow, walkthrough_step_rows};
+use super::chunks::{WalkthroughRow, durable_walkthrough_rows};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ZenState {
     pub(super) stops: Vec<ZenStop>,
     /// Rows intentionally left out of the stop-by-stop tour: glance chunks
     /// plus files no chunk covers. Skimmed in bulk on the glance board.
-    pub(super) glance_rows: Vec<ChunkRow>,
+    pub(super) glance_rows: Vec<WalkthroughRow>,
     pub(super) index: usize,
     /// Which zen surface is showing.
     pub(super) phase: ZenPhase,
@@ -60,7 +60,7 @@ pub(super) struct ZenState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ZenStop {
     Chapter(ChapterCard),
-    Chunk(ChunkRow),
+    Chunk(WalkthroughRow),
 }
 
 /// The intro card that opens a chapter: what the human should know about a
@@ -162,7 +162,7 @@ fn durable_walkthrough_steps(session: &ReviewSession) -> Vec<&WalkthroughStep> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ZenSource {
-    Chunks,
+    Curated,
     Files,
 }
 
@@ -199,9 +199,9 @@ impl ZenState {
             let (stops, glance) = fallback_rows(session, stack);
             (stops, glance, ZenSource::Files)
         } else {
-            let rows: Vec<ChunkRow> = content_steps
+            let rows: Vec<WalkthroughRow> = content_steps
                 .iter()
-                .flat_map(|step| walkthrough_step_rows(step))
+                .flat_map(|step| durable_walkthrough_rows(step))
                 .collect();
             let (spotlight, glance): (Vec<_>, Vec<_>) = rows
                 .into_iter()
@@ -215,7 +215,7 @@ impl ZenState {
                 spotlight
             };
             glance_rows.extend(uncovered_file_rows(session, &walkthrough_steps));
-            (stops, glance_rows, ZenSource::Chunks)
+            (stops, glance_rows, ZenSource::Curated)
         };
         let stops = chaptered_stops(chunk_stops, &walkthrough_steps, session, stack);
         (!stops.is_empty()).then(|| Self {
@@ -237,7 +237,7 @@ impl ZenState {
     pub(super) fn curation_state(&self, session: &ReviewSession) -> ZenCurationState {
         let has_walkthrough = !durable_walkthrough_steps(session).is_empty();
         match (self.source, has_walkthrough) {
-            (ZenSource::Chunks, _) => ZenCurationState::Curated,
+            (ZenSource::Curated, _) => ZenCurationState::Curated,
             (ZenSource::Files, true) => ZenCurationState::PartiallyCurated,
             (ZenSource::Files, false) => ZenCurationState::Uncurated,
         }
@@ -329,7 +329,7 @@ impl ZenState {
         self.glance_selected = (self.glance_selected as isize + delta).clamp(0, max) as usize;
     }
 
-    pub(super) fn selected_glance(&self) -> Option<&ChunkRow> {
+    pub(super) fn selected_glance(&self) -> Option<&WalkthroughRow> {
         self.glance_rows.get(self.glance_selected)
     }
 
@@ -354,12 +354,12 @@ pub(super) fn stop_artifacts(stop: &ZenStop) -> &[Artifact] {
 /// runs (and the chunkless fallback) open with a card for the home target,
 /// so every walkthrough starts with the big picture.
 fn chaptered_stops(
-    chunk_stops: Vec<ChunkRow>,
+    chunk_stops: Vec<WalkthroughRow>,
     walkthrough_steps: &[&WalkthroughStep],
     session: &ReviewSession,
     stack: &[JjChangeSummary],
 ) -> Vec<ZenStop> {
-    let mut groups: Vec<(Option<String>, Vec<ChunkRow>)> = Vec::new();
+    let mut groups: Vec<(Option<String>, Vec<WalkthroughRow>)> = Vec::new();
     for row in chunk_stops {
         match groups.last_mut() {
             Some((anchor, rows)) if *anchor == row.change_id => rows.push(row),
@@ -542,7 +542,7 @@ fn chapter_card(
 /// we omit derived facts rather than repeating global numbers on every card.
 fn chapter_file_scope<'a>(
     session: &'a ReviewSession,
-    rows: &[ChunkRow],
+    rows: &[WalkthroughRow],
     total_chapters: usize,
 ) -> Option<Vec<&'a FileDiff>> {
     if let Some(change_id) = rows.iter().find_map(|row| row.change_id.as_deref())
@@ -717,7 +717,7 @@ fn home_change<'a>(
 fn fallback_rows(
     session: &ReviewSession,
     stack: &[JjChangeSummary],
-) -> (Vec<ChunkRow>, Vec<ChunkRow>) {
+) -> (Vec<WalkthroughRow>, Vec<WalkthroughRow>) {
     let mut emitted_questions = std::collections::BTreeSet::new();
     let fallback_stack = if let Some(change) = home_change(session, stack) {
         vec![change]
@@ -900,7 +900,7 @@ fn covered_file_paths<'a>(
     covered
 }
 
-fn uncovered_file_rows(session: &ReviewSession, steps: &[&WalkthroughStep]) -> Vec<ChunkRow> {
+fn uncovered_file_rows(session: &ReviewSession, steps: &[&WalkthroughStep]) -> Vec<WalkthroughRow> {
     let covered = covered_file_paths(session, steps);
     session
         .ordered_visible_file_paths()
@@ -932,7 +932,7 @@ fn fallback_file_row(
     change_id: Option<String>,
     change_description: Option<&str>,
     emitted_questions: &mut std::collections::BTreeSet<&'static str>,
-) -> ChunkRow {
+) -> WalkthroughRow {
     let hunk = largest_hunk(file);
     let (adds, dels) = hunk
         .map(hunk_churn)
@@ -974,8 +974,8 @@ fn fallback_file_row(
     } else {
         format!(" · {}", facts.join(" · "))
     };
-    ChunkRow {
-        chunk_id: format!("file:{}", file.path),
+    WalkthroughRow {
+        source_id: format!("file:{}", file.path),
         title: format!("{} · {}", file.path, file_role(&file.path).label()),
         importance: ChunkImportance::Glance,
         change_id,
@@ -1004,7 +1004,10 @@ fn fallback_file_row(
     }
 }
 
-pub(super) fn comments_for_stop<'a>(comments: &'a [Comment], stop: &ChunkRow) -> Vec<&'a Comment> {
+pub(super) fn comments_for_stop<'a>(
+    comments: &'a [Comment],
+    stop: &WalkthroughRow,
+) -> Vec<&'a Comment> {
     let Some(part) = &stop.part else {
         return Vec::new();
     };
@@ -1135,9 +1138,9 @@ fn hunk_churn(h: &Hunk) -> (usize, usize) {
     )
 }
 
-fn whole_file_row(path: String, rationale: Option<String>) -> ChunkRow {
-    ChunkRow {
-        chunk_id: format!("file:{path}"),
+fn whole_file_row(path: String, rationale: Option<String>) -> WalkthroughRow {
+    WalkthroughRow {
+        source_id: format!("file:{path}"),
         title: path.clone(),
         importance: ChunkImportance::Glance,
         change_id: None,
@@ -1278,7 +1281,7 @@ fn symbols_touching_hunk(
 /// The review target a zen row wants loaded: a change-anchored row reviews
 /// that change against its parent (stacked-PR style); anything else reads
 /// within the walkthrough's home target.
-pub(super) fn row_target(row: &ChunkRow, home: &ReviewTarget) -> ReviewTarget {
+pub(super) fn row_target(row: &WalkthroughRow, home: &ReviewTarget) -> ReviewTarget {
     match &row.change_id {
         Some(change_id) => ReviewTarget::new(format!("{change_id}-"), change_id.clone()),
         None => home.clone(),
@@ -1362,7 +1365,7 @@ pub(super) fn mark_glance_viewed(session: &mut ReviewSession, zen: &ZenState) {
 }
 
 /// True when every file a glance row touches is already viewed.
-pub(super) fn glance_row_viewed(session: &ReviewSession, row: &ChunkRow) -> bool {
+pub(super) fn glance_row_viewed(session: &ReviewSession, row: &WalkthroughRow) -> bool {
     row.part.as_ref().is_some_and(|part| {
         session
             .files
@@ -1519,7 +1522,7 @@ diff --git a/b.rs b/b.rs
         ]
     }
 
-    fn chunk_stop(zen: &ZenState, index: usize) -> &ChunkRow {
+    fn chunk_stop(zen: &ZenState, index: usize) -> &WalkthroughRow {
         match &zen.stops[index] {
             ZenStop::Chunk(row) => row,
             ZenStop::Chapter(chapter) => panic!("stop {index} is a chapter: {chapter:?}"),
@@ -1592,8 +1595,8 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn comments_match_stop_line_ranges_and_file_level_stops() {
-        let row = ChunkRow {
-            chunk_id: "file:src/retry.rs".to_owned(),
+        let row = WalkthroughRow {
+            source_id: "file:src/retry.rs".to_owned(),
             title: "retry".to_owned(),
             importance: ChunkImportance::Spotlight,
             change_id: None,
@@ -1779,7 +1782,7 @@ diff --git a/src/queue.rs b/src/queue.rs
         let session = session_with_chunks();
         let zen = ZenState::new(&session, &[]).unwrap();
 
-        assert_eq!(zen.source, ZenSource::Chunks);
+        assert_eq!(zen.source, ZenSource::Curated);
         assert_eq!(zen.stops.len(), 3);
         assert_eq!(zen.chunk_stop_count(), 2);
         assert!(matches!(zen.current(), Some(ZenStop::Chapter(_))));

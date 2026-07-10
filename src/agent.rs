@@ -162,15 +162,6 @@ pub enum ChunkImportance {
     Glance,
 }
 
-impl ChunkImportance {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Spotlight => "spotlight",
-            Self::Glance => "glance",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkPart {
     pub path: String,
@@ -206,7 +197,7 @@ fn new_chunk_id() -> String {
 }
 
 pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
-    let mut message = invalid
+    invalid
         .iter()
         .map(|part| {
             format!(
@@ -215,14 +206,7 @@ pub fn invalid_chunk_parts_message(invalid: &[InvalidChunkPart]) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("; ");
-    if invalid
-        .iter()
-        .any(|part| part.reason.contains("line range outside diff line space"))
-    {
-        message.push_str("; run 'gander chunks lines' to list accepted ranges");
-    }
-    message
+        .join("; ")
 }
 
 pub fn brief_without_spotlight_warnings(
@@ -648,7 +632,7 @@ mod validation_tests {
         );
         assert!(invalid[0].reason.contains("outside diff line space"));
         assert!(invalid[0].reason.contains("valid ranges for a.rs: 1-1"));
-        assert!(invalid_chunk_parts_message(&invalid).contains("gander chunks lines"));
+        assert!(invalid_chunk_parts_message(&invalid).contains("valid ranges for a.rs: 1-1"));
     }
 
     #[test]

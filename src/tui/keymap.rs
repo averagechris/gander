@@ -49,7 +49,6 @@ pub(super) enum Action {
     TaskList,
     Activity,
     WalkthroughList,
-    ChunkList,
     Zen,
     DraftList,
     TargetPickerMoveDown,
@@ -137,7 +136,6 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::FlagList, &config.flag_list)?;
         add_bindings(&mut bindings, Action::TaskList, &config.task_list)?;
         add_bindings(&mut bindings, Action::Activity, &config.activity)?;
-        add_bindings(&mut bindings, Action::ChunkList, &config.chunk_list)?;
         add_bindings(&mut bindings, Action::Zen, &config.zen)?;
         add_bindings(&mut bindings, Action::DraftList, &config.draft_list)?;
         add_bindings(
@@ -506,10 +504,6 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             Some(Action::Activity)
-        );
-        assert_eq!(
-            keymap.action_for(&KeyEvent::from(KeyCode::Char('S'))),
-            Some(Action::ChunkList)
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('T'))),

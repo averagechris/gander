@@ -34,12 +34,7 @@ use color_eyre::eyre::{Context, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{
-        AgentDraft, AgentOverlay, ChangeBrief, ChangeDiffContext, ChunkImportance,
-        ChunkValidationContext, DraftState, ReviewChunk, brief_without_spotlight_warnings,
-        chunk_line_space, invalid_chunk_parts_message, remove_review_chunks, replace_review_chunks,
-        update_review_chunks,
-    },
+    agent::{AgentDraft, AgentOverlay, DraftState, chunk_line_space},
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
@@ -57,7 +52,7 @@ use crate::{
     review::SessionTargetSpec,
     state::{
         ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
-        StepArtifact, StepArtifactKind, StepImportance, StepKind, WalkthroughStep,
+        StepArtifact, StepImportance, StepKind, WalkthroughStep,
     },
 };
 
@@ -198,9 +193,6 @@ enum Command {
         /// Handoff output format. Action items are ordered by action priority (fix, test, follow-up, other), then path and line.
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
-        /// Include only unresolved comments and open tasks (the default for handoff formats).
-        #[arg(long, hide = true)]
-        only_open: bool,
         /// Delegate a specific task id. Repeat to include multiple tasks.
         #[arg(long = "task", value_name = "ID")]
         tasks: Vec<String>,
@@ -304,24 +296,6 @@ enum Command {
         #[command(subcommand)]
         command: WalkthroughCommand,
     },
-    /// Deprecated compatibility: author agent-curated review chunks from JSON specs.
-    #[command(hide = true)]
-    #[command(
-        long_about = "Author agent-curated review chunks. Specs are JSON objects like {\"chunks\":[{\"title\":\"Parser flow\",\"importance\":\"spotlight\",\"parts\":[{\"path\":\"src/lib.rs\",\"start_line\":10,\"end_line\":20}]}]}. id is optional for set/update and generated when omitted. Use --file - (or omit --file) to read stdin."
-    )]
-    Chunks {
-        #[command(subcommand)]
-        command: ChunksCommand,
-    },
-    /// Deprecated compatibility: author per-change briefs from JSON specs.
-    #[command(hide = true)]
-    #[command(
-        long_about = "Author per-change briefs. Specs are JSON objects like {\"briefs\":[{\"change_id\":\"abc\",\"summary\":\"Explains the parser groundwork.\"}]}. Use --file - (or omit --file) to read stdin."
-    )]
-    Briefs {
-        #[command(subcommand)]
-        command: BriefsCommand,
-    },
     /// Author agent draft comments from JSON specs.
     #[command(
         long_about = "Author draft comments. Add specs match review/draft_comment params, either one object like {\"path\":\"src/lib.rs\",\"line\":12,\"body\":\"Consider naming this after the invariant.\"} or {\"drafts\":[...]}. Use --file - (or omit --file) to read stdin."
@@ -346,67 +320,6 @@ enum TourCommand {
         #[arg(long)]
         slide: Option<usize>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum ChunksCommand {
-    /// List current overlay chunks as pretty JSON.
-    List,
-    /// List valid chunk line ranges for the current diff (or one change diff) as pretty JSON.
-    Lines {
-        /// jj change id whose change-scoped diff line space should be listed.
-        #[arg(long)]
-        change: Option<String>,
-        /// Restrict output to one file path.
-        #[arg(long)]
-        path: Option<String>,
-    },
-    /// Replace all chunks from a JSON spec file (or stdin with --file - / omitted).
-    Set {
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-        /// Replace non-chunk authored walkthrough steps too.
-        #[arg(long)]
-        replace: bool,
-    },
-    /// Upsert chunks from a JSON spec file (or stdin with --file - / omitted).
-    Update {
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-    },
-    /// Remove chunks by id. Repeat --id for multiple chunks.
-    Remove {
-        #[arg(long = "id", required = true)]
-        ids: Vec<String>,
-    },
-    /// Empty the chunk list.
-    Clear,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChunksSpec {
-    chunks: Vec<ReviewChunk>,
-}
-
-#[derive(Debug, Subcommand)]
-enum BriefsCommand {
-    /// List current overlay briefs as pretty JSON.
-    List,
-    /// Replace all briefs from a JSON spec file (or stdin with --file - / omitted).
-    Set {
-        #[arg(short, long)]
-        file: Option<PathBuf>,
-        /// Replace existing walkthrough chapters not present in this spec.
-        #[arg(long)]
-        replace: bool,
-    },
-    /// Empty the brief list.
-    Clear,
-}
-
-#[derive(Debug, Deserialize)]
-struct BriefsSpec {
-    briefs: Vec<ChangeBrief>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1182,7 +1095,6 @@ fn run() -> color_eyre::Result<()> {
         Command::Handoff {
             mode,
             format,
-            only_open,
             tasks,
             include_comments,
             to,
@@ -1212,11 +1124,12 @@ fn run() -> color_eyre::Result<()> {
                     }
                     match format {
                         HandoffFormat::Json => {
-                            render_handoff_json(&session, ArtifactBuildOptions { only_open })?
+                            render_handoff_json(&session, ArtifactBuildOptions { only_open: true })?
                         }
-                        HandoffFormat::Markdown => {
-                            render_handoff_markdown(&session, ArtifactBuildOptions { only_open })?
-                        }
+                        HandoffFormat::Markdown => render_handoff_markdown(
+                            &session,
+                            ArtifactBuildOptions { only_open: true },
+                        )?,
                     }
                 }
                 HandoffMode::Delegate => {
@@ -1399,26 +1312,6 @@ fn run() -> color_eyre::Result<()> {
                     deletions = file.deletions
                 );
             }
-        }
-        Command::Chunks { command } => {
-            warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_chunks_command(
-                command,
-                &session,
-                &jj,
-                &workspace_paths.overlay_file(),
-                &state_path,
-            )?
-        }
-        Command::Briefs { command } => {
-            warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_briefs_command(
-                command,
-                &session,
-                &jj,
-                &workspace_paths.overlay_file(),
-                &state_path,
-            )?
         }
         Command::Drafts { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
@@ -2151,222 +2044,7 @@ fn find_current_durable_session<'a>(
     })
 }
 
-fn handle_chunks_command(
-    command: ChunksCommand,
-    session: &ReviewSession,
-    jj: &dyn JjBackend,
-    overlay_path: &std::path::Path,
-    state_path: &std::path::Path,
-) -> color_eyre::Result<()> {
-    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
-    match command {
-        ChunksCommand::List => print_json(&overlay.chunks)?,
-        ChunksCommand::Lines { change, path } => {
-            let files = if let Some(change_id) = change {
-                let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
-                let raw = jj.diff(&session.repo, &target).map_err(|error| {
-                    user_error(format!(
-                        "failed to read change diff for {change_id}: {error}"
-                    ))
-                })?;
-                DiffSet::parse(&raw)
-                    .map_err(|error| user_error(format!("failed to parse change diff: {error}")))?
-                    .files
-            } else {
-                session
-                    .files
-                    .iter()
-                    .map(|file| file.diff.clone())
-                    .collect::<Vec<_>>()
-            };
-            print_json(&chunk_line_space(&files, path.as_deref()))?;
-        }
-        ChunksCommand::Set { file, replace } => {
-            eprintln!("warning: chunks commands are deprecated; writing durable walkthrough steps");
-            let spec = read_chunks_spec(file.as_ref())?;
-            let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
-            let chunks = spec.chunks;
-            replace_review_chunks(&mut overlay.chunks, chunks.clone(), &context).map_err(
-                |invalid| {
-                    user_error(format!(
-                        "invalid chunk part(s): {}",
-                        invalid_chunk_parts_message(&invalid)
-                    ))
-                },
-            )?;
-            write_chunk_steps_to_state(state_path, session, chunks, false, replace)?;
-            overlay.chunks.clear();
-            overlay.save(overlay_path)?;
-            println!("Set walkthrough steps from chunks");
-        }
-        ChunksCommand::Update { file } => {
-            eprintln!("warning: chunks commands are deprecated; writing durable walkthrough steps");
-            let spec = read_chunks_spec(file.as_ref())?;
-            let context = chunk_validation_context_for_cli(session, jj, &spec.chunks)?;
-            let chunks = spec.chunks;
-            let summary = update_review_chunks(&mut overlay.chunks, chunks.clone(), &context)
-                .map_err(|invalid| {
-                    user_error(format!(
-                        "invalid chunk part(s): {}",
-                        invalid_chunk_parts_message(&invalid)
-                    ))
-                })?;
-            write_chunk_steps_to_state(state_path, session, chunks, true, false)?;
-            overlay.chunks.clear();
-            overlay.save(overlay_path)?;
-            println!(
-                "Updated {} chunks, added {}; total {}",
-                summary.updated, summary.added, summary.chunks
-            );
-        }
-        ChunksCommand::Remove { ids } => {
-            eprintln!(
-                "warning: chunks commands are deprecated; removing durable walkthrough steps"
-            );
-            let summary = remove_review_chunks(&mut overlay.chunks, &ids).map_err(|unknown| {
-                user_error(format!("unknown chunk id(s): {}", unknown.join(", ")))
-            })?;
-            remove_walkthrough_steps_from_state(state_path, session, &ids)?;
-            overlay.save(overlay_path)?;
-            println!("Removed {}; remaining {}", summary.removed, summary.chunks);
-        }
-        ChunksCommand::Clear => {
-            eprintln!(
-                "warning: chunks commands are deprecated; clearing durable walkthrough steps"
-            );
-            overlay.chunks.clear();
-            clear_walkthrough_kind_from_state(state_path, session, StepKind::Step)?;
-            overlay.save(overlay_path)?;
-            println!("Cleared chunks");
-        }
-    }
-    Ok(())
-}
-
-fn read_chunks_spec(file: Option<&PathBuf>) -> color_eyre::Result<ChunksSpec> {
-    let contents = read_spec_contents(file, "chunk")?;
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
-        for warning in chunks_spec_unknown_fields(&value) {
-            eprintln!("warning: {warning}");
-        }
-    }
-    serde_json::from_str(&contents)
-        .map_err(|error| user_error(format!("failed to parse chunk spec JSON: {error}")))
-}
-
-fn walkthrough_session_mut<'a>(
-    state: &'a mut ReviewState,
-    session: &ReviewSession,
-) -> &'a mut crate::state::ReviewSession {
-    let spec = session_target_spec(&session.repo, &session.target);
-    review::ensure_session(state, &spec, None)
-}
-
-fn write_chunk_steps_to_state(
-    state_path: &std::path::Path,
-    session: &ReviewSession,
-    chunks: Vec<ReviewChunk>,
-    append: bool,
-    replace: bool,
-) -> color_eyre::Result<()> {
-    let mut state = ReviewState::load_or_default(state_path)?;
-    let rs = walkthrough_session_mut(&mut state, session);
-    let new_steps: Vec<_> = chunks.into_iter().map(chunk_to_walkthrough_step).collect();
-    if append {
-        for step in new_steps {
-            review::add_walkthrough_step(rs, step);
-        }
-    } else {
-        let existing_steps = rs
-            .walkthroughs
-            .first()
-            .map(|walkthrough| walkthrough.steps.len())
-            .unwrap_or(0);
-        if existing_steps > 0 && !replace {
-            return Err(user_error(format!(
-                "walkthrough has {existing_steps} steps; use walkthrough set, or pass --replace"
-            )));
-        }
-        review::set_walkthrough_preserve_ids(rs, Some("Walkthrough".to_owned()), new_steps);
-    }
-    state.save(state_path)?;
-    Ok(())
-}
-
-fn remove_walkthrough_steps_from_state(
-    state_path: &std::path::Path,
-    session: &ReviewSession,
-    ids: &[String],
-) -> color_eyre::Result<()> {
-    let mut state = ReviewState::load_or_default(state_path)?;
-    let rs = walkthrough_session_mut(&mut state, session);
-    for id in ids {
-        let _ = review::remove_walkthrough_step(rs, id);
-    }
-    state.save(state_path)?;
-    Ok(())
-}
-
-fn clear_walkthrough_kind_from_state(
-    state_path: &std::path::Path,
-    session: &ReviewSession,
-    kind: StepKind,
-) -> color_eyre::Result<()> {
-    let mut state = ReviewState::load_or_default(state_path)?;
-    let rs = walkthrough_session_mut(&mut state, session);
-    for walkthrough in &mut rs.walkthroughs {
-        walkthrough.steps.retain(|step| step.kind != kind);
-    }
-    state.save(state_path)?;
-    Ok(())
-}
-
-fn write_brief_chapters_to_state(
-    state_path: &std::path::Path,
-    session: &ReviewSession,
-    briefs: Vec<ChangeBrief>,
-    replace: bool,
-) -> color_eyre::Result<()> {
-    let mut state = ReviewState::load_or_default(state_path)?;
-    let rs = walkthrough_session_mut(&mut state, session);
-    if rs.walkthroughs.is_empty() {
-        review::set_walkthrough(rs, Some("Walkthrough".to_owned()), Vec::new());
-    }
-    if replace {
-        rs.walkthroughs[0]
-            .steps
-            .retain(|step| step.kind != StepKind::Chapter);
-    }
-    for brief in briefs {
-        let step = brief_to_walkthrough_step(brief);
-        if let Some(change_id) = step.change_id.as_deref()
-            && let Some(existing) = rs.walkthroughs[0].steps.iter_mut().find(|existing| {
-                existing.kind == StepKind::Chapter
-                    && existing.change_id.as_deref() == Some(change_id)
-            })
-        {
-            *existing = step;
-            continue;
-        }
-        review::add_walkthrough_step(rs, step);
-    }
-    state.save(state_path)?;
-    Ok(())
-}
-
-const CHUNK_SPEC_KEYS: &[&str] = &[
-    "id",
-    "title",
-    "importance",
-    "change_id",
-    "rationale",
-    "explanation",
-    "artifacts",
-    "parts",
-];
-const CHUNK_PART_KEYS: &[&str] = &["path", "start_line", "end_line"];
 const ARTIFACT_KEYS: &[&str] = &["title", "kind", "body"];
-const BRIEF_KEYS: &[&str] = &["change_id", "summary", "artifacts"];
 const DRAFT_KEYS: &[&str] = &["path", "line", "body"];
 const WALKTHROUGH_KEYS: &[&str] = &["title", "steps"];
 const WALKTHROUGH_STEP_KEYS: &[&str] = &[
@@ -2423,54 +2101,6 @@ fn artifact_unknown_field_warnings(
             ARTIFACT_KEYS,
         );
     }
-}
-
-fn chunks_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
-    let mut warnings = Vec::new();
-    push_unknown_field_warnings(&mut warnings, value, "spec root", &["chunks"]);
-    for (index, chunk) in value
-        .get("chunks")
-        .and_then(|chunks| chunks.as_array())
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        let at = format!("chunks[{index}]");
-        push_unknown_field_warnings(&mut warnings, chunk, &at, CHUNK_SPEC_KEYS);
-        artifact_unknown_field_warnings(&mut warnings, chunk, &at);
-        for (part_index, part) in chunk
-            .get("parts")
-            .and_then(|parts| parts.as_array())
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            push_unknown_field_warnings(
-                &mut warnings,
-                part,
-                &format!("{at}.parts[{part_index}]"),
-                CHUNK_PART_KEYS,
-            );
-        }
-    }
-    warnings
-}
-
-fn briefs_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
-    let mut warnings = Vec::new();
-    push_unknown_field_warnings(&mut warnings, value, "spec root", &["briefs"]);
-    for (index, brief) in value
-        .get("briefs")
-        .and_then(|briefs| briefs.as_array())
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        let at = format!("briefs[{index}]");
-        push_unknown_field_warnings(&mut warnings, brief, &at, BRIEF_KEYS);
-        artifact_unknown_field_warnings(&mut warnings, brief, &at);
-    }
-    warnings
 }
 
 fn walkthrough_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
@@ -2534,44 +2164,6 @@ fn drafts_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
         push_unknown_field_warnings(&mut warnings, value, "spec root", DRAFT_KEYS);
     }
     warnings
-}
-
-fn handle_briefs_command(
-    command: BriefsCommand,
-    session: &ReviewSession,
-    jj: &dyn JjBackend,
-    overlay_path: &std::path::Path,
-    state_path: &std::path::Path,
-) -> color_eyre::Result<()> {
-    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
-    match command {
-        BriefsCommand::List => print_json(&overlay.briefs)?,
-        BriefsCommand::Set { file, replace } => {
-            eprintln!(
-                "warning: briefs commands are deprecated; writing durable walkthrough chapters"
-            );
-            let spec: BriefsSpec = read_json_spec(file.as_ref(), "brief")?;
-            validate_briefs_for_cli(session, jj, &spec.briefs)?;
-            write_brief_chapters_to_state(state_path, session, spec.briefs.clone(), replace)?;
-            overlay.briefs.clear();
-            let warnings = brief_without_spotlight_warnings(&overlay.briefs, &overlay.chunks);
-            overlay.save(overlay_path)?;
-            for warning in &warnings {
-                eprintln!("warning: {warning}");
-            }
-            println!("Set {} briefs", overlay.briefs.len());
-        }
-        BriefsCommand::Clear => {
-            eprintln!(
-                "warning: briefs commands are deprecated; clearing durable walkthrough chapters"
-            );
-            overlay.briefs.clear();
-            clear_walkthrough_kind_from_state(state_path, session, StepKind::Chapter)?;
-            overlay.save(overlay_path)?;
-            println!("Cleared briefs");
-        }
-    }
-    Ok(())
 }
 
 fn handle_drafts_command(
@@ -2655,7 +2247,6 @@ fn read_json_spec<T: for<'de> Deserialize<'de>>(
     let contents = read_spec_contents(file, spec_name)?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
         let warnings = match spec_name {
-            "brief" => briefs_spec_unknown_fields(&value),
             "draft" => drafts_spec_unknown_fields(&value),
             "walkthrough" => walkthrough_spec_unknown_fields(&value),
             _ => Vec::new(),
@@ -2666,38 +2257,6 @@ fn read_json_spec<T: for<'de> Deserialize<'de>>(
     }
     serde_json::from_str(&contents)
         .map_err(|error| user_error(format!("failed to parse {spec_name} spec JSON: {error}")))
-}
-
-fn validate_briefs_for_cli(
-    session: &ReviewSession,
-    jj: &dyn JjBackend,
-    briefs: &[ChangeBrief],
-) -> color_eyre::Result<()> {
-    let changes = jj.stack_changes(&session.repo, &session.target)?;
-    let invalid = briefs
-        .iter()
-        .filter_map(|brief| {
-            if brief.change_id.trim().is_empty() {
-                Some("change_id must not be empty".to_owned())
-            } else if brief.summary.trim().is_empty() {
-                Some(format!("{}: summary must not be empty", brief.change_id))
-            } else if !changes
-                .iter()
-                .any(|change| change.change_id == brief.change_id.trim())
-            {
-                Some(format!("{}: unknown change id", brief.change_id))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    if !invalid.is_empty() {
-        return Err(user_error(format!(
-            "invalid brief(s): {}",
-            invalid.join("; ")
-        )));
-    }
-    Ok(())
 }
 
 fn validate_change_ids_for_cli(
@@ -2728,64 +2287,6 @@ fn parse_step_artifacts(values: &[String]) -> color_eyre::Result<Vec<StepArtifac
                 .map_err(|error| user_error(format!("invalid artifact JSON: {error}")))
         })
         .collect()
-}
-
-fn chunk_to_walkthrough_step(chunk: ReviewChunk) -> WalkthroughStep {
-    let mut targets = chunk.parts.into_iter().map(|part| StateReviewTarget {
-        file: Some(part.path),
-        line: part.start_line,
-        end_line: part.end_line,
-        ..Default::default()
-    });
-    WalkthroughStep {
-        id: chunk.id,
-        title: Some(chunk.title),
-        importance: match chunk.importance {
-            ChunkImportance::Spotlight => StepImportance::Spotlight,
-            ChunkImportance::Glance => StepImportance::Glance,
-        },
-        kind: StepKind::Step,
-        change_id: chunk.change_id,
-        why: chunk.rationale,
-        body: chunk.explanation,
-        artifacts: chunk
-            .artifacts
-            .into_iter()
-            .map(agent_artifact_to_step)
-            .collect(),
-        target: targets.next().unwrap_or_default(),
-        extra_targets: targets.collect(),
-        ..Default::default()
-    }
-}
-
-fn brief_to_walkthrough_step(brief: ChangeBrief) -> WalkthroughStep {
-    WalkthroughStep {
-        id: format!("chapter-{}", brief.change_id),
-        title: Some(brief.change_id.clone()),
-        kind: StepKind::Chapter,
-        change_id: Some(brief.change_id),
-        body: Some(brief.summary),
-        artifacts: brief
-            .artifacts
-            .into_iter()
-            .map(agent_artifact_to_step)
-            .collect(),
-        ..Default::default()
-    }
-}
-
-fn agent_artifact_to_step(artifact: crate::agent::Artifact) -> StepArtifact {
-    StepArtifact {
-        title: artifact.title,
-        kind: match artifact.kind {
-            crate::agent::ArtifactKind::Example => StepArtifactKind::Example,
-            crate::agent::ArtifactKind::Output => StepArtifactKind::Output,
-            crate::agent::ArtifactKind::Diagram => StepArtifactKind::Diagram,
-            crate::agent::ArtifactKind::Note => StepArtifactKind::Note,
-        },
-        body: artifact.body,
-    }
 }
 
 fn warn_walkthrough_set_issues(
@@ -2922,45 +2423,6 @@ fn merge_draft_dispositions_from_disk(overlay: &mut AgentOverlay, overlay_path: 
             }
         }
     }
-}
-
-fn chunk_validation_context_for_cli(
-    session: &ReviewSession,
-    jj: &dyn JjBackend,
-    chunks: &[ReviewChunk],
-) -> color_eyre::Result<ChunkValidationContext<'static>> {
-    let session_files = session
-        .files
-        .iter()
-        .map(|file| file.diff.clone())
-        .collect::<Vec<_>>();
-    let mut parsed_changes = Vec::new();
-    for change_id in chunks.iter().filter_map(|chunk| chunk.change_id.as_ref()) {
-        if parsed_changes
-            .iter()
-            .any(|(existing, _): &(String, DiffSet)| existing == change_id)
-        {
-            continue;
-        }
-        let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
-        if let Ok(raw) = jj.diff(&session.repo, &target)
-            && let Ok(diff) = DiffSet::parse(&raw)
-        {
-            parsed_changes.push((change_id.clone(), diff));
-        }
-    }
-    let leaked_session = Box::leak(session_files.into_boxed_slice());
-    let leaked_changes: &'static [(String, DiffSet)] = Box::leak(parsed_changes.into_boxed_slice());
-    Ok(ChunkValidationContext {
-        session_files: leaked_session,
-        change_diffs: leaked_changes
-            .iter()
-            .map(|(change_id, diff)| ChangeDiffContext {
-                change_id: change_id.clone(),
-                files: &diff.files,
-            })
-            .collect(),
-    })
 }
 
 fn is_broken_pipe_report(error: &color_eyre::Report) -> bool {
@@ -3674,81 +3136,7 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    fn chunk_spec_allowed_keys_match_struct_serialization() {
-        let chunk = ReviewChunk {
-            id: "c1".into(),
-            title: "t".into(),
-            importance: crate::agent::ChunkImportance::Glance,
-            change_id: Some("abc".into()),
-            rationale: Some("r".into()),
-            explanation: Some("e".into()),
-            artifacts: vec![crate::agent::Artifact {
-                title: "a".into(),
-                kind: Default::default(),
-                body: "b".into(),
-            }],
-            parts: vec![crate::agent::ChunkPart {
-                path: "src/lib.rs".into(),
-                start_line: Some(1),
-                end_line: Some(2),
-            }],
-        };
-        let value = serde_json::to_value(&chunk).unwrap();
-        for key in value.as_object().unwrap().keys() {
-            assert!(
-                CHUNK_SPEC_KEYS.contains(&key.as_str()),
-                "ReviewChunk gained field '{key}' — update CHUNK_SPEC_KEYS"
-            );
-        }
-        let part = serde_json::to_value(&chunk.parts[0]).unwrap();
-        for key in part.as_object().unwrap().keys() {
-            assert!(
-                CHUNK_PART_KEYS.contains(&key.as_str()),
-                "ChunkPart gained field '{key}' — update CHUNK_PART_KEYS"
-            );
-        }
-        let artifact = serde_json::to_value(&chunk.artifacts[0]).unwrap();
-        for key in artifact.as_object().unwrap().keys() {
-            assert!(
-                ARTIFACT_KEYS.contains(&key.as_str()),
-                "Artifact gained field '{key}' — update ARTIFACT_KEYS"
-            );
-        }
-        let brief = serde_json::to_value(crate::agent::ChangeBrief {
-            change_id: "abc".into(),
-            summary: "s".into(),
-            artifacts: vec![chunk.artifacts[0].clone()],
-        })
-        .unwrap();
-        for key in brief.as_object().unwrap().keys() {
-            assert!(
-                BRIEF_KEYS.contains(&key.as_str()),
-                "ChangeBrief gained field '{key}' — update BRIEF_KEYS"
-            );
-        }
-    }
-
-    #[test]
-    fn chunk_spec_typo_field_is_warned_not_silent() {
-        let value: serde_json::Value = serde_json::from_str(
-            r#"{"chunks":[{"id":"c1","title":"t","role":"glance","parts":[{"path":"src/lib.rs","start_line":1,"end_line":2}]}]}"#,
-        )
-        .unwrap();
-        let warnings = chunks_spec_unknown_fields(&value);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unknown field 'role' at chunks[0]"));
-        assert!(warnings[0].contains("importance"));
-    }
-
-    #[test]
-    fn brief_and_draft_spec_unknown_fields_are_warned() {
-        let brief_value: serde_json::Value =
-            serde_json::from_str(r#"{"briefs":[{"change_id":"x","summary":"s","risk":"high"}]}"#)
-                .unwrap();
-        let warnings = briefs_spec_unknown_fields(&brief_value);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unknown field 'risk' at briefs[0]"));
-
+    fn draft_spec_unknown_fields_are_warned() {
         let draft_value: serde_json::Value = serde_json::from_str(
             r#"{"drafts":[{"path":"src/lib.rs","line":3,"body":"b","severity":"major"}]}"#,
         )
@@ -3756,80 +3144,6 @@ mod tests {
         let warnings = drafts_spec_unknown_fields(&draft_value);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("unknown field 'severity' at drafts[0]"));
-
-        let valid: serde_json::Value = serde_json::from_str(
-            r#"{"chunks":[{"title":"t","importance":"spotlight","parts":[{"path":"a","start_line":1,"end_line":2}]}]}"#,
-        )
-        .unwrap();
-        assert!(chunks_spec_unknown_fields(&valid).is_empty());
-    }
-
-    struct BriefsTestJj;
-
-    impl JjBackend for BriefsTestJj {
-        fn snapshot_working_copy(&self, _: &std::path::Path) -> color_eyre::Result<()> {
-            Ok(())
-        }
-
-        fn diff(&self, _: &std::path::Path, _: &ReviewTarget) -> color_eyre::Result<String> {
-            Ok(String::new())
-        }
-
-        fn change_summaries(
-            &self,
-            _: &std::path::Path,
-        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
-            Ok(Vec::new())
-        }
-
-        fn stack_changes(
-            &self,
-            _: &std::path::Path,
-            _: &crate::jj::ReviewTarget,
-        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
-            Ok(vec![crate::jj::JjChangeSummary {
-                change_id: "abc".to_owned(),
-                bookmarks: String::new(),
-                description: "test".to_owned(),
-            }])
-        }
-
-        fn change_fingerprint(
-            &self,
-            _: &std::path::Path,
-            _: &ReviewTarget,
-        ) -> color_eyre::Result<String> {
-            Ok(String::new())
-        }
-
-        fn operations(
-            &self,
-            _: &std::path::Path,
-        ) -> color_eyre::Result<Vec<crate::jj::JjOperationSummary>> {
-            Ok(Vec::new())
-        }
-
-        fn diff_at_operation(
-            &self,
-            _: &std::path::Path,
-            _: &ReviewTarget,
-            _: &str,
-        ) -> color_eyre::Result<String> {
-            Ok(String::new())
-        }
-
-        fn file_contents(
-            &self,
-            _: &std::path::Path,
-            _: &str,
-            _: &str,
-        ) -> color_eyre::Result<String> {
-            Ok(String::new())
-        }
-
-        fn run_command(&self, _: &std::path::Path, _: &[String]) -> color_eyre::Result<String> {
-            Ok(String::new())
-        }
     }
 
     #[test]
@@ -3850,34 +3164,6 @@ mod tests {
             report.downcast_ref::<UserError>().map(ToString::to_string),
             Some("unknown draft id(s): nope".to_owned())
         );
-    }
-
-    #[test]
-    fn briefs_cli_validates_change_ids() {
-        let repo = tempfile::tempdir().unwrap();
-        let session = ReviewSession::new(
-            repo.path().to_path_buf(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet {
-                raw_header: Vec::new(),
-                files: Vec::new(),
-            },
-            ReviewState::default(),
-        );
-        let valid = vec![ChangeBrief {
-            change_id: "abc".to_owned(),
-            summary: "Summary".to_owned(),
-            artifacts: Vec::new(),
-        }];
-        assert!(validate_briefs_for_cli(&session, &BriefsTestJj, &valid).is_ok());
-
-        let invalid = vec![ChangeBrief {
-            change_id: "missing".to_owned(),
-            summary: "Summary".to_owned(),
-            artifacts: Vec::new(),
-        }];
-        let error = validate_briefs_for_cli(&session, &BriefsTestJj, &invalid).unwrap_err();
-        assert!(error.to_string().contains("missing: unknown change id"));
     }
 
     #[test]
@@ -4369,12 +3655,6 @@ mod tests {
             &["gander", "walkthrough", "remove-step", "abc"],
             &["gander", "walkthrough", "move-step", "abc", "--to", "0"],
             &["gander", "reviews", "create", "--title", "Review"],
-            &["gander", "chunks", "set", "--file", "-"],
-            &["gander", "chunks", "update", "--file", "-"],
-            &["gander", "chunks", "remove", "--id", "abc"],
-            &["gander", "chunks", "clear"],
-            &["gander", "briefs", "set", "--file", "-"],
-            &["gander", "briefs", "clear"],
             &["gander", "drafts", "add", "--file", "-"],
             &["gander", "drafts", "remove", "--id", "abc"],
         ];
@@ -4386,13 +3666,20 @@ mod tests {
     }
 
     #[test]
-    fn handoff_command_parses_format_only_open_output_and_copy() {
+    fn deprecated_chunks_and_briefs_commands_are_unknown() {
+        for command in [&["gander", "chunks"][..], &["gander", "briefs"][..]] {
+            let error = Cli::try_parse_from(command).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
+    }
+
+    #[test]
+    fn handoff_command_parses_format_output_and_copy() {
         let cli = Cli::try_parse_from([
             "gander",
             "handoff",
             "--format",
             "json",
-            "--only-open",
             "--output",
             "/tmp/handoff.json",
             "--copy",
@@ -4402,18 +3689,22 @@ mod tests {
         match cli.command.unwrap() {
             Command::Handoff {
                 format,
-                only_open,
                 output,
                 copy,
                 ..
             } => {
                 assert_eq!(format, HandoffFormat::Json);
-                assert!(only_open);
                 assert_eq!(output, Some(PathBuf::from("/tmp/handoff.json")));
                 assert!(copy);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn handoff_only_open_flag_is_unknown() {
+        let error = Cli::try_parse_from(["gander", "handoff", "--only-open"]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

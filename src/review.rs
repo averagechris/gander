@@ -529,17 +529,6 @@ pub fn set_walkthrough(
     session.walkthroughs[0].clone()
 }
 
-pub fn set_walkthrough_preserve_ids(
-    session: &mut ReviewSession,
-    title: Option<String>,
-    steps: Vec<WalkthroughStep>,
-) -> Walkthrough {
-    ensure_default_walkthrough(session);
-    let prior = session.walkthroughs[0].steps.clone();
-    let steps = preserve_walkthrough_step_ids(&prior, steps);
-    set_walkthrough(session, title, steps)
-}
-
 pub fn preserve_walkthrough_step_ids(
     prior: &[WalkthroughStep],
     mut steps: Vec<WalkthroughStep>,

@@ -224,7 +224,6 @@ toggle-agent-order = ["A"]
 flag-list = ["F"]
 task-list = ["X"]
 walkthrough-list = ["W"]
-chunk-list = ["S"]
 zen = ["T", "Z"]
 draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
@@ -429,7 +428,6 @@ full grouped keymap; the footer only shows the everyday hints.
 | `F` | agent-flagged sections popup |
 | `X` | review tasks popup (jump to task-backed comments, cycle state) |
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
-| `S` | deprecated agent chunks popup (compatibility view for walkthrough-backed curation) |
 | `T` / `Z` | zen mode: focused walkthrough of authored steps (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `h` | hide/show generated/noisy files in the TUI |
@@ -474,7 +472,7 @@ cargo run -- acp
 
 Agents can read the diff, comments, and viewed state, and write review state or
 suggestions: durable walkthrough steps/chapters, a review ordering, flagged
-critical sections, compatibility chunks, and draft comments. A running TUI polls
+critical sections, live overlay curation, and draft comments. A running TUI polls
 the persisted state/overlay and surfaces suggestions live; draft dispositions
 (accept/edit/discard) are written back so agents observe the outcome.
 
@@ -545,7 +543,7 @@ Tools: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (what the human is looking at right now), `stack_changes`
 and `change_diff` (the jj stack and one change's own diff, for
 stacked-PR-style reviews), `set_ordering`, `flag_section`, `set_chunks`
-(chunks can anchor to a stack change via `change_id`), `draft_comment`,
+(internal live-curation inputs that can anchor to a stack change via `change_id`), `draft_comment`,
 and `list_reviews` (every
 running review instance). Spawned in a workspace, each tool call routes to
 that workspace's live gander TUI through the instance registry — with
@@ -574,8 +572,9 @@ then press `T` (or `Z`) for **zen mode** — a focused walkthrough of authored
 steps and chapters. The file pane hides, rows outside the current stop dim, and
 a bottom panel shows progress and rationale; advancing (Enter/`n`) marks the
 file viewed. Without walkthrough steps, zen walks the files in review order
-instead. `chunks`/`briefs` remain compatibility shims that write through toward
-walkthrough curation; prefer `gander walkthrough ...` for new automation. Every
+instead. Public `chunks`/`briefs` commands have been removed; use
+`gander walkthrough ...` for durable automation, while ACP/MCP overlay chunks and
+briefs remain active internal curation inputs. Every
 normal review key (comments, flags, context expansion, view toggles) keeps
 working mid-walkthrough; Esc returns to free navigation.
 
