@@ -23,9 +23,9 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
    ```bash
    gander files list --format json
    gander hunks list --path <path> --format json
-   gander comments list --json
-   gander tasks list --json
-   gander walkthrough show --json
+   gander comments list --format json
+   gander tasks list --format json
+   gander walkthrough show
    ```
 
    Prefer targeted file/diff reads over broad scans. Use the TUI for navigation, but keep automatable CLI steps as the source of truth.
@@ -33,9 +33,9 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
 3. Record durable review state as you go:
 
    ```bash
-   gander comments add --path <path> --line <n> --body -
-   gander tasks add --title "Follow up" --path <path> --line <n> --body -
-   gander walkthrough add-step --path <path> --line <n> --body - --title "Why this matters"
+   gander comments add --path <path> --line <n> --body "Check this invariant."
+   gander tasks add --title "Follow up" --path <path> --line <n> --body "Add a regression test."
+   gander walkthrough add-step --path <path> --line <n> --title "Why this matters" --body "Start here before reading callers."
    ```
 
    Anchor comments/tasks to the smallest useful location. Mark actionable follow-ups as tasks; use walkthroughs for reading order or handoff context.

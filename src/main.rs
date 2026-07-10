@@ -68,7 +68,12 @@ enum ListFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about = "Durable guided review sessions over jj-visible work.",
+    long_about = "Gander is a local-first review workspace for jj-visible work. It reads code state, writes durable review state (viewed files, comments, tasks, walkthroughs, and artifacts), and keeps CLI automation at parity with the TUI and agent harnesses. No command launches the TUI unless you explicitly run `gander tui` or omit a subcommand.",
+    after_help = "First review loop:\n  gander comments add --path src/lib.rs --line 42 --body 'Check this invariant'\n  gander tasks add --title 'Add parser regression' --path src/lib.rs --line 42\n  gander walkthrough add-step --title 'Parser flow' --path src/lib.rs --line 42\n  gander handoff --copy"
+)]
 struct Cli {
     /// Repository root. Defaults to the current directory.
     #[arg(long, global = true, help_heading = "Target & state (global)")]
@@ -166,25 +171,25 @@ enum Command {
         #[command(subcommand)]
         command: TourCommand,
     },
-    /// Export the current review as JSON or Markdown.
+    /// Export the current review as JSON, Markdown, or HTML.
     #[command(
         after_help = "Examples:\n  gander export markdown --profile agent --output review.md\n      Complete session artifact with all comments and full raw hunks.\n  gander handoff --copy\n      Compact implementation prompt with action items and trimmed reference hunks."
     )]
     Export {
-        /// Artifact format to export (json or markdown). Defaults to markdown.
+        /// Artifact format to export (json, markdown, or html). Defaults to configured format or markdown.
         #[arg(value_enum)]
         format: Option<OutputFormat>,
         /// Write output to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Artifact profile; agent adds raw hunks and comment excerpts.
+        /// Artifact profile; agent adds raw hunks and comment excerpts. Not supported with html.
         #[arg(short, long, value_enum)]
         profile: Option<OutputProfile>,
     },
     /// Print or copy a prompt-style handoff for a coding agent.
     #[command(
-        long_about = "Print or copy a one-shot actionable handoff for a coding agent. Markdown is prompt-ready and compact: action items, walkthrough, then hunks limited to files with action items or walkthrough stops. JSON is a stable action artifact shaped as { session, action_items, walkthrough, reference }: session has repo/base/rev/generated_at; action_items are first-class open task/unresolved comment objects with id, source, kind/action, path/line, excerpt, body, state, and canonical linked ids; reference.hunks comes last for diff context.",
-        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export markdown --profile agent --output review.md\n      Use export for the complete session artifact with all comments and full hunks."
+        long_about = "Print or copy an actionable handoff for a coding agent. Prompt mode renders compact prompt-ready Markdown or JSON from open action items, walkthrough stops, and relevant hunks. Delegate mode requires --mode delegate and emits a typed work packet selected by task/comment flags for external harnesses that understand delegation packets.",
+        after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json\n      Emit structured open action items plus walkthrough and reference hunks.\n  gander handoff --mode delegate --task abc123 --to coder --objective 'Fix this task'\n      Emit a typed delegation packet for an external harness."
     )]
     Handoff {
         /// Handoff mode: prompt is the legacy implementation prompt; delegate emits a typed work packet.
@@ -238,10 +243,7 @@ enum Command {
     MarkViewed,
     /// Mark generated/noisy files as viewed without opening the TUI.
     MarkGeneratedViewed,
-    /// Serve the review session to agents over line-delimited JSON-RPC on
-    /// stdio (ACP). Bridges to a running TUI's live session when one is
-    /// serving this workspace's ACP socket; otherwise serves a snapshot
-    /// directly. See docs/acp.md.
+    /// Low-level/internal ACP bridge for debugging live review integrations.
     Acp,
     /// Drive the tour/view in a live TUI via its ACP socket (defaults to status).
     #[command(
@@ -254,9 +256,7 @@ enum Command {
         #[arg(long)]
         pid: Option<u32>,
     },
-    /// Serve the review session to agent harnesses as MCP tools on stdio
-    /// (rmcp SDK). Routes each tool call to this workspace's live TUI
-    /// instance via the instance registry; without one, serves a snapshot.
+    /// Optional typed/live MCP harness integration on stdio; CLI remains normal automation.
     Mcp,
     /// Print resolved state/runtime/config locations for this workspace.
     Paths,
@@ -277,7 +277,7 @@ enum Command {
         #[command(subcommand)]
         command: CommentsCommand,
     },
-    /// Durable review session lifecycle commands.
+    /// Create and inspect durable review sessions.
     Reviews {
         #[command(subcommand)]
         command: ReviewsCommand,
@@ -292,7 +292,8 @@ enum Command {
         #[command(subcommand)]
         command: WalkthroughCommand,
     },
-    /// Author agent-curated review chunks from JSON specs.
+    /// Deprecated compatibility: author agent-curated review chunks from JSON specs.
+    #[command(hide = true)]
     #[command(
         long_about = "Author agent-curated review chunks. Specs are JSON objects like {\"chunks\":[{\"title\":\"Parser flow\",\"importance\":\"spotlight\",\"parts\":[{\"path\":\"src/lib.rs\",\"start_line\":10,\"end_line\":20}]}]}. id is optional for set/update and generated when omitted. Use --file - (or omit --file) to read stdin."
     )]
@@ -300,7 +301,8 @@ enum Command {
         #[command(subcommand)]
         command: ChunksCommand,
     },
-    /// Author per-change briefs from JSON specs.
+    /// Deprecated compatibility: author per-change briefs from JSON specs.
+    #[command(hide = true)]
     #[command(
         long_about = "Author per-change briefs. Specs are JSON objects like {\"briefs\":[{\"change_id\":\"abc\",\"summary\":\"Explains the parser groundwork.\"}]}. Use --file - (or omit --file) to read stdin."
     )]
@@ -322,10 +324,13 @@ enum Command {
 enum TourCommand {
     /// Render tour slides using the production TUI draw path.
     Render {
-        #[arg(long, default_value_t = 100)]
+        /// Render width in terminal columns.
+        #[arg(long, default_value_t = 100, value_name = "COLUMNS")]
         width: u16,
-        #[arg(long, default_value_t = 30)]
+        /// Render height in terminal rows.
+        #[arg(long, default_value_t = 30, value_name = "ROWS")]
         height: u16,
+        /// One-based slide number to render. Omit to render all slides.
         #[arg(long)]
         slide: Option<usize>,
     },
@@ -442,16 +447,23 @@ enum PresentCommand {
     Prev,
     /// Jump to a slide by zero-based index or durable step id.
     Goto {
-        #[arg(long, conflicts_with = "step")]
+        /// Zero-based slide index (compatibility behavior).
+        #[arg(
+            long,
+            conflicts_with = "step",
+            required_unless_present = "step",
+            value_name = "INDEX"
+        )]
         index: Option<usize>,
-        #[arg(long)]
+        /// Durable walkthrough step id to jump to.
+        #[arg(long, required_unless_present = "index", value_name = "STEP_ID")]
         step: Option<String>,
     },
     /// Spotlight a diff location in the normal review view.
     Focus {
-        #[arg(long)]
+        #[arg(long, value_name = "PATH")]
         path: String,
-        #[arg(long)]
+        #[arg(long, value_name = "LINE")]
         line: u32,
         #[arg(long)]
         end_line: Option<u32>,
@@ -508,11 +520,11 @@ enum CommentsCommand {
         /// Changed file path to comment on. Alias: --file.
         #[arg(long, alias = "file")]
         path: String,
-        /// 1-indexed new-side (post-image) line number to anchor to.
+        /// 1-indexed new-side line number; old-side fallback is used only for removed-only lines.
         #[arg(long)]
         line: Option<usize>,
         /// 1-indexed inclusive new-side (post-image) end line for a range anchor.
-        #[arg(long = "end-line")]
+        #[arg(long = "end-line", requires = "line")]
         end_line: Option<usize>,
         /// Comment body text.
         #[arg(long)]
@@ -568,10 +580,10 @@ enum CommentsCommand {
         /// Comment id or unique id prefix.
         id: String,
         /// New changed file path. Alias: --file.
-        #[arg(long, alias = "file")]
+        #[arg(long, visible_alias = "file")]
         path: Option<String>,
         /// New 1-indexed new-side (post-image) line number.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "start_line")]
         line: Option<usize>,
         /// New 1-indexed inclusive new-side (post-image) start line for a range.
         #[arg(long = "start-line")]
@@ -582,6 +594,12 @@ enum CommentsCommand {
         /// Replacement comment body text.
         #[arg(long)]
         body: Option<String>,
+        /// Replacement comment classification.
+        #[arg(long, value_enum)]
+        kind: Option<CommentKindArg>,
+        /// Replacement suggested action intent; use none to clear it.
+        #[arg(long, value_enum)]
+        action: Option<ActionIntentArg>,
         /// Echo format for the edited comment.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
@@ -643,7 +661,7 @@ enum TasksCommand {
         #[arg(long, alias = "file")]
         path: Option<String>,
         /// 1-indexed new-side (post-image) line number this task targets.
-        #[arg(long)]
+        #[arg(long, requires = "path")]
         line: Option<usize>,
         /// Echo format for the added task.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
@@ -717,10 +735,10 @@ enum WalkthroughCommand {
         #[arg(long = "path", alias = "file")]
         file: Option<String>,
         /// 1-indexed new-side (post-image) line number this step targets.
-        #[arg(long)]
+        #[arg(long, requires = "file")]
         line: Option<usize>,
         /// 1-indexed inclusive new-side (post-image) end line for a range target.
-        #[arg(long = "end-line")]
+        #[arg(long = "end-line", requires = "line")]
         end_line: Option<usize>,
         /// Symbol/function/class name this step targets.
         #[arg(long)]
@@ -785,6 +803,7 @@ enum CommentKindArg {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum ActionIntentArg {
+    None,
     Fix,
     Explain,
     Test,
@@ -1083,13 +1102,18 @@ fn run() -> color_eyre::Result<()> {
                 height,
                 slide,
             } => {
+                if slide == Some(0) {
+                    return Err(user_error(
+                        "tour render --slide is one-based; pass 1 or greater",
+                    ));
+                }
                 let rendered = tui::render_tour_text(
                     &mut session,
                     &config.keybindings,
                     &jj,
                     width,
                     height,
-                    slide,
+                    slide.map(|n| n - 1),
                 )?;
                 print!("{rendered}");
             }
@@ -1099,6 +1123,11 @@ fn run() -> color_eyre::Result<()> {
             output,
             profile,
         } => {
+            if matches!(format, Some(OutputFormat::Html)) && profile.is_some() {
+                return Err(user_error(
+                    "export --profile is not supported with html output",
+                ));
+            }
             let (format, destination, profile) =
                 resolve_export_options(&repo, &config, format, output, profile);
             let spec = session_target_spec(&repo, &session.target);
@@ -1287,12 +1316,24 @@ fn run() -> color_eyre::Result<()> {
             }
             #[cfg(unix)]
             {
+                let command = command.unwrap_or(PresentCommand::Status);
+                if let PresentCommand::Focus {
+                    line,
+                    end_line: Some(end_line),
+                    ..
+                } = &command
+                    && end_line < line
+                {
+                    return Err(user_error(
+                        "present focus --end-line must be greater than or equal to --line",
+                    ));
+                }
                 let instance = select_present_instance(
                     &workspace_paths.registry_dir,
                     &workspace_paths.workspace_root,
                     pid,
                 )?;
-                let request = present_request_json(command.unwrap_or(PresentCommand::Status));
+                let request = present_request_json(command);
                 let response = send_present_request(&instance.socket_path, &request)?;
                 println!("{response}");
             }
@@ -1411,6 +1452,13 @@ fn run() -> color_eyre::Result<()> {
                 action,
                 format,
             } => {
+                if let (Some(start), Some(end)) = (line, end_line)
+                    && end < start
+                {
+                    return Err(user_error(
+                        "comments add --end-line must be greater than or equal to --line",
+                    ));
+                }
                 ensure_diff_file(&session, &path)?;
                 let anchor = session
                     .files
@@ -1432,7 +1480,7 @@ fn run() -> color_eyre::Result<()> {
                         anchor,
                         body,
                         kind: kind.map(Into::into),
-                        action: action.map(Into::into),
+                        action: action.and_then(action_intent_arg_to_option),
                     },
                 );
                 state.save(&state_path)?;
@@ -1526,6 +1574,8 @@ fn run() -> color_eyre::Result<()> {
                 start_line,
                 end_line,
                 body,
+                kind,
+                action,
                 format,
             } => {
                 let canonical_id =
@@ -1537,6 +1587,19 @@ fn run() -> color_eyre::Result<()> {
                     .cloned()
                     .expect("resolved comment id must exist");
                 let new_line = start_line.or(line);
+                if end_line.is_some() && new_line.or(existing.line).is_none() {
+                    return Err(user_error(
+                        "comments edit --end-line requires an existing or supplied start line",
+                    ));
+                }
+                if let (Some(start), Some(end)) =
+                    (new_line.or(existing.line), end_line.or(existing.end_line))
+                    && end < start
+                {
+                    return Err(user_error(
+                        "comments edit end line must be greater than or equal to start line",
+                    ));
+                }
                 let effective_path = if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                     path.to_owned()
@@ -1577,6 +1640,8 @@ fn run() -> color_eyre::Result<()> {
                         end_line: end_line.map(Some),
                         anchor,
                         body,
+                        kind: kind.map(|k| Some(k.into())),
+                        action: action.map(action_intent_arg_to_option),
                     },
                 )
                 .map_err(into_user_error)?;
@@ -1641,6 +1706,9 @@ fn run() -> color_eyre::Result<()> {
                 line,
                 format,
             } => {
+                if line.is_some() && path.is_none() {
+                    return Err(user_error("tasks add --line requires --path"));
+                }
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                 }
@@ -1661,7 +1729,9 @@ fn run() -> color_eyre::Result<()> {
                     rs,
                     title,
                     body,
-                    action.map(Into::into).unwrap_or_default(),
+                    action
+                        .and_then(action_intent_arg_to_option)
+                        .unwrap_or_default(),
                     comment,
                     target,
                 );
@@ -1718,10 +1788,32 @@ fn run() -> color_eyre::Result<()> {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let target = (path.is_some() || line.is_some()).then(|| StateReviewTarget {
-                    file: path,
-                    line,
-                    ..StateReviewTarget::default()
+                let existing_task_id = review::resolve_task_id(rs, &id).map_err(into_user_error)?;
+                let existing_target = rs
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == existing_task_id)
+                    .and_then(|task| task.target.clone());
+                if line.is_some()
+                    && path.is_none()
+                    && existing_target
+                        .as_ref()
+                        .and_then(|t| t.file.as_ref())
+                        .is_none()
+                {
+                    return Err(user_error(
+                        "tasks edit --line requires --path or an existing target path",
+                    ));
+                }
+                let target = (path.is_some() || line.is_some()).then(|| {
+                    let mut patched = existing_target.unwrap_or_default();
+                    if let Some(path) = path {
+                        patched.file = Some(path);
+                    }
+                    if line.is_some() {
+                        patched.line = line;
+                    }
+                    patched
                 });
                 let task = review::edit_task(
                     rs,
@@ -1729,9 +1821,9 @@ fn run() -> color_eyre::Result<()> {
                     review::TaskEdits {
                         title,
                         body,
-                        action: action.map(Into::into),
+                        action: action.and_then(action_intent_arg_to_option),
                         source_comment_id: comment,
-                        target,
+                        target: target.map(Some),
                     },
                 )
                 .map_err(into_user_error)?;
@@ -1776,6 +1868,13 @@ fn run() -> color_eyre::Result<()> {
                 change_id,
                 artifacts,
             } => {
+                if let (Some(start), Some(end)) = (line, end_line)
+                    && end < start
+                {
+                    return Err(user_error(
+                        "walkthrough add-step --end-line must be greater than or equal to --line",
+                    ));
+                }
                 if let Some(file) = file.as_deref() {
                     ensure_diff_file(&session, file)?;
                     warn_target_line_space(&session, "new step", file, line)?;
@@ -2886,14 +2985,13 @@ impl From<CommentKindArg> for CommentKind {
         }
     }
 }
-impl From<ActionIntentArg> for ActionIntent {
-    fn from(value: ActionIntentArg) -> Self {
-        match value {
-            ActionIntentArg::Fix => Self::Fix,
-            ActionIntentArg::Explain => Self::Explain,
-            ActionIntentArg::Test => Self::Test,
-            ActionIntentArg::FollowUp => Self::FollowUp,
-        }
+fn action_intent_arg_to_option(value: ActionIntentArg) -> Option<ActionIntent> {
+    match value {
+        ActionIntentArg::None => None,
+        ActionIntentArg::Fix => Some(ActionIntent::Fix),
+        ActionIntentArg::Explain => Some(ActionIntent::Explain),
+        ActionIntentArg::Test => Some(ActionIntent::Test),
+        ActionIntentArg::FollowUp => Some(ActionIntent::FollowUp),
     }
 }
 impl From<CommentStateArg> for CommentState {
@@ -3441,6 +3539,11 @@ fn resolve_tui_artifact_options(
         .map(TuiArtifactOnQuitConfig::from)
         .unwrap_or(config.artifact.on_tui_quit);
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
+    if matches!(format, OutputFormat::Html) && cli_profile.is_some() {
+        return Err(user_error(
+            "tui --artifact-profile is not supported with html artifacts",
+        ));
+    }
     let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
     Ok(match mode {
         TuiArtifactOnQuitConfig::Never => None,
@@ -3980,6 +4083,168 @@ mod tests {
     #[test]
     fn full_cli_debug_asserts() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_contains_stable_cli_consistency_text() {
+        fn help_for(path: &[&str]) -> String {
+            let mut cmd = Cli::command();
+            let mut current = &mut cmd;
+            for name in path {
+                current = current.find_subcommand_mut(name).unwrap();
+            }
+            current.render_long_help().to_string()
+        }
+
+        let top = help_for(&[]);
+        assert!(top.contains("local-first review workspace for jj-visible work"));
+        assert!(top.contains("No command launches the TUI unless you explicitly run `gander tui`"));
+        assert!(top.contains("First review loop:"));
+        assert!(!top.contains("chunks"));
+        assert!(!top.contains("briefs"));
+
+        for (path, needles) in [
+            (
+                &["handoff"][..],
+                &["Prompt mode", "Delegate mode"] as &[&str],
+            ),
+            (
+                &["skills"][..],
+                &["List bundled skills", "Show one bundled skill"],
+            ),
+            (&["present", "goto"][..], &["zero-based", "STEP_ID"]),
+            (
+                &["comments", "add"][..],
+                &["--path", "--end-line", "new-side"],
+            ),
+            (
+                &["tasks", "add"][..],
+                &["--path", "--line", "Action intent"],
+            ),
+            (
+                &["walkthrough", "add-step"][..],
+                &["--path", "--end-line", "Symbol"],
+            ),
+            (
+                &["tour", "render"][..],
+                &["COLUMNS", "ROWS", "One-based slide"],
+            ),
+        ] {
+            let help = help_for(path);
+            for needle in needles {
+                assert!(
+                    help.contains(needle),
+                    "{path:?} help missing {needle:?}\n{help}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_skill_literals_are_not_canonical_or_parseable() {
+        let skills = [
+            include_str!("../skills/gander-review/SKILL.md"),
+            include_str!("../skills/gander-address-review/SKILL.md"),
+        ]
+        .join("\n");
+        for stale in [
+            "comments list --json",
+            "tasks list --json",
+            "walkthrough show --json",
+            "--state ",
+            "gander review ",
+            "--revset",
+            "gander chunks",
+            "gander briefs",
+            "--body -",
+        ] {
+            assert!(
+                !skills.contains(stale),
+                "stale literal still present: {stale}"
+            );
+        }
+        for command in [
+            ["gander", "comments", "list", "--json"].as_slice(),
+            ["gander", "tasks", "list", "--json"].as_slice(),
+            ["gander", "walkthrough", "show", "--json"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+    }
+
+    #[test]
+    fn cli_requires_conflicts_and_legacy_aliases_parse() {
+        for command in [
+            [
+                "gander",
+                "comments",
+                "add",
+                "--path",
+                "p",
+                "--end-line",
+                "2",
+                "--body",
+                "b",
+            ]
+            .as_slice(),
+            [
+                "gander",
+                "comments",
+                "edit",
+                "id",
+                "--line",
+                "1",
+                "--start-line",
+                "1",
+            ]
+            .as_slice(),
+            ["gander", "tasks", "add", "--title", "t", "--line", "1"].as_slice(),
+            [
+                "gander",
+                "walkthrough",
+                "add-step",
+                "--title",
+                "t",
+                "--line",
+                "1",
+            ]
+            .as_slice(),
+            [
+                "gander",
+                "walkthrough",
+                "add-step",
+                "--title",
+                "t",
+                "--path",
+                "p",
+                "--end-line",
+                "2",
+            ]
+            .as_slice(),
+            ["gander", "present", "goto"].as_slice(),
+            ["gander", "present", "goto", "--index", "0", "--step", "abc"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(command).is_err(),
+                "expected reject: {command:?}"
+            );
+        }
+        for command in [
+            ["gander", "comments", "add", "--file", "p", "--body", "b"].as_slice(),
+            [
+                "gander", "tasks", "add", "--title", "t", "--file", "p", "--line", "1",
+            ]
+            .as_slice(),
+            ["gander", "hunks", "list", "--file", "p"].as_slice(),
+            ["gander", "present", "goto", "--index", "0"].as_slice(),
+            ["gander", "present", "goto", "--step", "abc"].as_slice(),
+            ["gander", "comments", "edit", "id", "--action", "none"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(command).is_ok(),
+                "expected accept: {command:?}"
+            );
+        }
     }
 
     #[test]

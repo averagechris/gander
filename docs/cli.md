@@ -5,7 +5,7 @@ state (the `--state-file` file or the XDG state path shown by `gander paths`). T
 commands inspect jj-visible code, but mutation commands do **not** edit the code
 workspace, fetch from forges, or post reviews remotely.
 
-Global options accepted by all commands include `--repo <path>`, `--rev <revset>`
+Global options accepted by all commands include `--repo <path>`, `--rev <rev>`
 (default `@`), `--base <revset>` (default `trunk()`), repeated `--ignore`,
 generated-file filters, `--state-file <path>`, and `--config <path>`. They are
 listed under a separate "Target & state (global)" heading in every
@@ -53,13 +53,13 @@ gander reviews show <id>
 
 ```sh
 gander files list [--format json|text]
-gander hunks list [<path>] [--file <path>] [--format json|text]
+gander hunks list [<path>] [--path <path>] [--format json|text]
 gander hunks show <path:index> [--format json|diff|text]
 ```
 
 These are read-only queries over the current jj diff. `hunks list` returns
 hunk ids suitable for `hunks show` and accepts the file as a positional or
-`--file`. `hunks show --format diff` (alias `text`) prints a unified diff.
+`--path` (`--file` remains a hidden compatibility alias). `hunks show --format diff` (alias `text`) prints a unified diff.
 
 ## Comments
 
@@ -72,11 +72,11 @@ gander comments reply <id> --body <text> [--resolve] [--format json|text]
 gander comments resolve <id> [--reply <text>] [--format json|text]
 gander comments set-state <id> --state draft|todo|resolved [--format json|text]
 gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
-  [--body <text>] [--format json|text]
+  [--body <text>] [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] [--format json|text]
 gander comments delete <id> [--format json|text]
 ```
 
-`add` creates a persisted comment. `--line`, `--start-line`, and `--end-line`
+`add` creates a persisted comment. `--end-line` requires `--line`; `edit --line` conflicts with `--start-line`, and `edit --end-line` needs either a supplied start or an existing anchored start. End lines must be greater than or equal to their start. `--line`, `--start-line`, and `--end-line`
 are 1-indexed diff line anchors, preferring the new side (post-image). For a
 removed-only line with no new-side coordinate, Gander falls back to the old-side
 line in the current jj diff. Omitting them creates a file-level anchor. `edit`
@@ -109,12 +109,12 @@ given reply before resolving.
 ## Tasks
 
 ```sh
-gander tasks add --title <title> [--body <text>] [--action fix|explain|test|follow-up] \
+gander tasks add --title <title> [--body <text>] [--action none|fix|explain|test|follow-up] \
   [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
 gander tasks list [--format json|text]
 gander tasks complete <id> [--summary <resolution>] [--format json|text]
 gander tasks reopen <id> [--format json|text]
-gander tasks edit <id> [--title <title>] [--body <text>] [--action <action>] \
+gander tasks edit <id> [--title <title>] [--body <text>] [--action none|fix|explain|test|follow-up] \
   [--comment <comment-id>] [--path <path>] [--line <n>] [--format json|text]
 gander tasks delete <id> [--format json|text]
 ```
@@ -125,7 +125,7 @@ ambiguous prefixes are one-line errors. Comment-backed todo entries in
 `tasks list` always carry a string `title` (synthesized from the comment
 body's first line when the comment has no explicit title).
 Example `tasks list`:
-`--line` is a 1-indexed diff line anchor in the current jj diff: new side
+`--line` is a 1-indexed diff line anchor in the current jj diff and requires `--path` when adding a task. Editing patches the existing target: path-only preserves an existing line, line-only preserves an existing file, and line-only is rejected if the task has no target file. New side is
 preferred, old side only for removed-only lines. `--action` emits `follow-up`; legacy JSON or CLI input spelled
 `followup` is still accepted. `--comment` accepts a full comment id or
 unambiguous prefix and stores the canonical full id; unknown or ambiguous
@@ -239,13 +239,6 @@ become slides, chapter steps become intro slides, and glance steps appear on the
 final “At a glance” slide; otherwise the tour falls back to changed files.
 
 ```sh
-gander chunks list
-gander chunks lines [--change <change-id>] [--path <path>]
-gander chunks set [--file <spec.json|->]
-gander chunks update [--file <spec.json|->]
-gander chunks remove --id <id> [--id <id> ...]
-gander chunks clear
-gander briefs list|set [--file <spec>]|clear
 gander drafts list|add [--file <spec>]|remove --id <id>
 ```
 
@@ -280,7 +273,7 @@ same-id conflicts.
 ## Export/import and state utilities
 
 ```sh
-gander handoff [--format markdown|json] [--only-open] [--output <path>] [--copy]
+gander handoff [--format markdown|json] [--output <path>] [--copy]
 gander export [json|markdown|html] [--profile human|agent] [--output <path>]
 gander import <json-artifact>
 gander mark-viewed
@@ -299,7 +292,7 @@ priority (fix > test > follow-up > other), then path, then line. `handoff
 as `{ "session", "action_items", "walkthrough", "reference" }`: action items
 are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
 `end_line`, `excerpt`, `body`, `state`, and canonical linked task/comment ids.
-`--only-open` is accepted for compatibility and matches the default; `--output`
+The hidden `--only-open` flag is accepted for compatibility and matches the default; `--output`
 writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
 wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
 when you need the full session artifact for archive/reference or broad
@@ -308,9 +301,7 @@ artifacts cross-reference each other). Import currently restores only matching
 viewed state and duplicate-safe comments; exported tasks and walkthroughs are
 not restored by `gander import`.
 
-`export html` writes a self-contained static review page. JSON and Markdown are
-the complete session artifact formats; `--profile agent` adds all raw hunks and
-comment excerpts for tools, including resolved comments as reference.
+`export html` writes a self-contained static review page and rejects an explicitly supplied `--profile`; JSON and Markdown are the complete session artifact formats. `--profile agent` adds all raw hunks and comment excerpts for tools, including resolved comments as reference.
 
 ## MCP and ACP
 
@@ -319,8 +310,7 @@ gander mcp
 gander acp
 ```
 
-`mcp` exposes typed tools for harnesses, including CLI-parity state tools.
-`acp` is the line-delimited JSON-RPC bridge for live-session curation: it
+Normal automation should use the CLI directly. `mcp` is optional typed/live harness integration, including CLI-parity state tools. `acp` is a low-level/internal line-delimited JSON-RPC bridge for debugging live-session curation: it
 bridges to a running TUI on the same workspace when one exists (announcing
 `bridged to live TUI session` vs `serving snapshot` on stderr, and a `mode`
 field in the `initialize` response). See `docs/acp.md`.

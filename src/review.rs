@@ -187,6 +187,8 @@ pub struct CommentEdits {
     pub end_line: Option<Option<usize>>,
     pub anchor: Option<Option<crate::anchor::CommentAnchor>>,
     pub body: Option<String>,
+    pub kind: Option<Option<CommentKind>>,
+    pub action: Option<Option<ActionIntent>>,
 }
 
 pub fn add_comment(
@@ -302,6 +304,12 @@ pub fn edit_comment(
     if let Some(body) = edits.body {
         validate_body(&body, "comment body")?;
         comment.body = body;
+    }
+    if let Some(kind) = edits.kind {
+        comment.kind = kind;
+    }
+    if let Some(action) = edits.action {
+        comment.action = action;
     }
     comment.updated_at = Some(chrono::Utc::now());
     touch(session);
@@ -453,7 +461,7 @@ pub struct TaskEdits {
     pub body: Option<String>,
     pub action: Option<ActionIntent>,
     pub source_comment_id: Option<String>,
-    pub target: Option<ReviewTarget>,
+    pub target: Option<Option<ReviewTarget>>,
 }
 
 pub fn edit_task(session: &mut ReviewSession, id: &str, edits: TaskEdits) -> Result<ReviewTask> {
@@ -475,8 +483,8 @@ pub fn edit_task(session: &mut ReviewSession, id: &str, edits: TaskEdits) -> Res
     if edits.source_comment_id.is_some() {
         task.source_comment_id = edits.source_comment_id;
     }
-    if edits.target.is_some() {
-        task.target = edits.target;
+    if let Some(target) = edits.target {
+        task.target = target;
     }
     task.updated_at = Some(chrono::Utc::now());
     let out = task.clone();
@@ -762,6 +770,71 @@ mod tests {
             resolve_task_id(&session, "abc").unwrap_err().to_string(),
             "ambiguous task id prefix `abc`"
         );
+    }
+
+    #[test]
+    fn edit_task_patches_target_instead_of_replacing_partial_fields() {
+        let mut session = ReviewSession::default();
+        let task = add_task(
+            &mut session,
+            "fix".into(),
+            None,
+            ActionIntent::Fix,
+            None,
+            Some(ReviewTarget {
+                file: Some("src/lib.rs".into()),
+                line: Some(10),
+                ..ReviewTarget::default()
+            }),
+        );
+
+        let edited = edit_task(
+            &mut session,
+            &task.id,
+            TaskEdits {
+                title: None,
+                body: None,
+                action: None,
+                source_comment_id: None,
+                target: Some(Some(ReviewTarget {
+                    file: Some("src/main.rs".into()),
+                    line: Some(10),
+                    ..ReviewTarget::default()
+                })),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            edited.target.as_ref().unwrap().file.as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(edited.target.as_ref().unwrap().line, Some(10));
+    }
+
+    #[test]
+    fn edit_comment_updates_kind_and_clears_action() {
+        let mut session = ReviewSession::default();
+        let mut comments = vec![Comment {
+            id: "abcdef00".into(),
+            body: "body".into(),
+            kind: Some(CommentKind::Note),
+            action: Some(ActionIntent::Fix),
+            ..Default::default()
+        }];
+
+        let edited = edit_comment(
+            &mut session,
+            &mut comments,
+            "abc",
+            CommentEdits {
+                kind: Some(Some(CommentKind::Issue)),
+                action: Some(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(edited.kind, Some(CommentKind::Issue));
+        assert_eq!(edited.action, None);
     }
 
     #[test]

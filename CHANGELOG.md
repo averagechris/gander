@@ -25,6 +25,9 @@
   chunks/briefs authoring is treated as a deprecated compatibility shim.
 - `gander handoff --only-open` remains accepted for compatibility but is hidden
   from help; the default prompt handoff remains backward compatible.
+- CLI/help text now describes Gander as local-first durable review state over
+  jj-visible work, hides deprecated chunks/briefs from generated help, and
+  rejects explicit HTML artifact profiles instead of ignoring them.
 
 ### Fixed
 
@@ -41,6 +44,9 @@
 - Walkthrough authoring validates unknown fields, chapter `change_id`s, and
   target line ranges against the diff line space, and repeated
   `walkthrough set` runs preserve stable step ids.
+- Bundled skills no longer contain stale flags or stdin-body examples, and CLI
+  parsing/handler validation now enforces comment/task/walkthrough range and
+  target invariants consistently.
 
 ## v0.6.1 - 2026-07-05
 

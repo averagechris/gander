@@ -32,10 +32,10 @@ Use when a review handoff, delegation, or local Gander session asks you to addre
 3. Update durable review state after each addressed item:
 
    ```bash
-   gander comments reply <id> --body -
-   gander comments resolve <id>
-   gander tasks complete <id> --body -
-   gander tasks add --title "Follow up" --body -
+   gander comments reply <id> --body "Implemented with a regression test."
+   gander comments resolve <id> --reply "Fixed and verified with cargo test."
+   gander tasks complete <id> --summary "Added the missing parser regression."
+   gander tasks add --title "Follow up" --body "Revisit broader cleanup separately."
    ```
 
    Explain what changed and cite tests that actually ran. If verification was not run or failed, say so and leave the item unresolved or add a follow-up task.
