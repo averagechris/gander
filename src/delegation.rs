@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-pub const DELEGATION_SCHEMA_VERSION: u8 = 3;
+pub const DELEGATION_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DelegationSpec {
@@ -120,6 +120,8 @@ pub struct CommentEvidence {
     pub end_line: Option<usize>,
     pub body: String,
     pub action: Option<ActionIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::provenance::CommentObservation>,
     pub replies: Vec<CommentReply>,
 }
 
@@ -420,6 +422,7 @@ fn comment_evidence(comment: &Comment) -> CommentEvidence {
         end_line: comment.end_line,
         body: comment.body.clone(),
         action: comment.action,
+        observation: comment.observation.clone(),
         replies: comment.replies.clone(),
     }
 }
@@ -485,6 +488,8 @@ fn fingerprints(diff: &DiffSet) -> PacketFingerprints {
         })
         .collect::<Vec<_>>();
     files.sort_by(|left, right| left.path.cmp(&right.path));
+    // Preserve the delegation v3 aggregate contract. Comment provenance has
+    // its own independently versioned review-scope aggregate.
     let mut digest = Sha256::new();
     for file in &files {
         digest.update(file.path.as_bytes());
@@ -724,8 +729,47 @@ pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
             output.push_str(":\n\n> ");
             output.push_str(&evidence.body.trim().replace('\n', "\n> "));
             output.push('\n');
+            match &evidence.observation {
+                Some(observation) => output.push_str(&format!(
+                    "\nObservation snapshot: `{}` (scope v{}).\n",
+                    observation.snapshot.scope.aggregate, observation.snapshot.scope.version
+                )),
+                None => output.push_str(
+                    "\nObservation snapshot unavailable (legacy comment; target labels are not proof).\n",
+                ),
+            }
             for reply in &evidence.replies {
                 output.push_str(&format!("\nReply `{}`: {}\n", reply.id, reply.body.trim()));
+                match &reply.result {
+                    Some(result) => output.push_str(&format!(
+                        "Result snapshot: `{}`; {}; relation: {}; portable patch changed: {}.\n",
+                        result.snapshot.scope.aggregate,
+                        result
+                            .observation_aggregate_fingerprint
+                            .as_deref()
+                            .map(|fingerprint| format!("against observation: `{fingerprint}`"))
+                            .unwrap_or_else(|| {
+                                "against observation unavailable (legacy comment)".into()
+                            }),
+                        match &result.related {
+                            crate::provenance::RelatedTransition::SamePath { path } =>
+                                format!("same_path `{path}`"),
+                            crate::provenance::RelatedTransition::RenamedFrom {
+                                old_path,
+                                path,
+                            } => format!("renamed_from `{old_path}` to `{path}`"),
+                            crate::provenance::RelatedTransition::NotInDiff { path } => path
+                                .as_deref()
+                                .map(|path| format!("not_in_diff `{path}`"))
+                                .unwrap_or_else(|| "not_in_diff (general)".into()),
+                        },
+                        result
+                            .portable_patch_changed
+                            .map(|changed| if changed { "yes" } else { "no" })
+                            .unwrap_or("unknown")
+                    )),
+                    None => output.push_str("Result snapshot unavailable (legacy reply).\n"),
+                }
             }
         }
         output.push('\n');
@@ -906,6 +950,75 @@ mod tests {
     }
 
     #[test]
+    fn delegation_four_carries_provenance_and_honest_missing_language() {
+        let (mut state, session, diff) = fixture();
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            "session",
+            session.target.clone(),
+            diff.files.iter(),
+        );
+        let observation = crate::provenance::CommentObservation::new(
+            snapshot.clone(),
+            Some(crate::anchor::CommentAnchor::File {
+                path: "a.rs".into(),
+                old_path: None,
+                diff_fingerprint: diff
+                    .files
+                    .iter()
+                    .find(|file| file.path == "a.rs")
+                    .unwrap()
+                    .fingerprint
+                    .clone(),
+            }),
+        );
+        let linked = state
+            .comments
+            .iter_mut()
+            .find(|comment| comment.id == "linked")
+            .unwrap();
+        linked.observation = Some(observation.clone());
+        linked.replies.push(CommentReply {
+            id: "reply".into(),
+            body: "addressed".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            result: Some(crate::provenance::CommentReplyResult::compare(
+                "linked",
+                Some(&observation),
+                Some("a.rs"),
+                snapshot,
+            )),
+        });
+        linked.replies.push(CommentReply {
+            id: "legacy-a".into(),
+            body: "legacy observation".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            result: Some(crate::provenance::CommentReplyResult::compare(
+                "linked",
+                None,
+                Some("a.rs"),
+                crate::provenance::SnapshotEvidence::capture(
+                    chrono::DateTime::UNIX_EPOCH,
+                    "session",
+                    session.target.clone(),
+                    diff.files.iter(),
+                ),
+            )),
+        });
+
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        assert_eq!(packet.schema_version, 4);
+        let json = serde_json::to_value(&packet).unwrap();
+        assert!(json.to_string().contains("portable_patch_changed"));
+        let markdown = render_delegation_markdown(&packet);
+        assert!(markdown.contains("Observation snapshot:"));
+        assert!(markdown.contains("Result snapshot:"));
+        assert!(markdown.contains("Observation snapshot unavailable (legacy comment"));
+        assert!(markdown.contains("against observation unavailable (legacy comment)"));
+    }
+
+    #[test]
     fn explicit_action_item_selection_rejects_closed_and_unknown() {
         let (state, session, diff) = fixture();
         let closed = DelegationSpec {
@@ -945,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_uses_action_item_vocabulary_and_close_contract() {
+    fn schema_four_uses_action_item_vocabulary_and_close_contract() {
         let (state, session, diff) = fixture();
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
@@ -953,13 +1066,70 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
         let markdown = render_delegation_markdown(&packet);
 
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], DELEGATION_SCHEMA_VERSION);
         assert_eq!(value["source"]["action_item_count"], 2);
         assert_eq!(value["action_items"][0]["source"], "action_item");
         assert!(value["return_contract"]["allowed_action_item_statuses"].is_array());
         assert!(json.contains("action-items close"));
         assert!(markdown.contains("action-items close"));
         assert!(markdown.contains("Reviewer comment `linked`"));
+    }
+
+    #[test]
+    fn schema_four_preserves_top_level_diff_fingerprint_algorithm() {
+        let (state, session, diff) = fixture();
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let mut files = diff.files.iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut digest = Sha256::new();
+        for file in files {
+            digest.update(file.path.as_bytes());
+            digest.update(file.fingerprint.as_bytes());
+        }
+
+        assert_eq!(packet.fingerprints.diff, format!("{:x}", digest.finalize()));
+    }
+
+    #[test]
+    fn delegation_three_reply_without_provenance_deserializes() {
+        let (mut state, session, diff) = fixture();
+        state
+            .comments
+            .iter_mut()
+            .find(|comment| comment.id == "linked")
+            .unwrap()
+            .replies
+            .push(CommentReply {
+                id: "legacy-reply".into(),
+                body: "legacy".into(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: None,
+            });
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let mut value = serde_json::to_value(packet).unwrap();
+        value["schema_version"] = serde_json::json!(3);
+        for item in value["action_items"].as_array_mut().unwrap() {
+            for evidence in item["evidence_comments"].as_array_mut().unwrap() {
+                evidence.as_object_mut().unwrap().remove("observation");
+                for reply in evidence["replies"].as_array_mut().unwrap() {
+                    reply.as_object_mut().unwrap().remove("result");
+                }
+            }
+        }
+
+        let legacy: DelegationPacket = serde_json::from_value(value).unwrap();
+
+        assert_eq!(legacy.schema_version, 3);
+        let evidence = legacy
+            .action_items
+            .iter()
+            .flat_map(|item| &item.evidence_comments)
+            .find(|comment| comment.id == "linked")
+            .unwrap();
+        assert!(evidence.observation.is_none());
+        assert!(evidence.replies[0].result.is_none());
     }
 
     #[test]

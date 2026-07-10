@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{app::ReviewFile, diff::DiffLineKind};
+use crate::{
+    app::ReviewFile,
+    diff::{DiffLineKind, FileDiff},
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -112,7 +115,15 @@ pub fn line_anchor_for_diff_row(
     hunk_index: usize,
     line_index: usize,
 ) -> Option<CommentAnchor> {
-    let hunk = file.diff.hunks.get(hunk_index)?;
+    line_anchor_for_file_diff(&file.diff, hunk_index, line_index)
+}
+
+pub fn line_anchor_for_file_diff(
+    file: &FileDiff,
+    hunk_index: usize,
+    line_index: usize,
+) -> Option<CommentAnchor> {
+    let hunk = file.hunks.get(hunk_index)?;
     let line = hunk.lines.get(line_index)?;
     let (side, line_number) = match line.kind {
         DiffLineKind::Added => (DiffSide::New, line.new_lineno?),
@@ -152,6 +163,14 @@ pub fn comment_anchor_for_file_lines(
     line: Option<usize>,
     end_line: Option<usize>,
 ) -> Option<CommentAnchor> {
+    comment_anchor_for_file_diff(&file.diff, line, end_line)
+}
+
+pub fn comment_anchor_for_file_diff(
+    file: &FileDiff,
+    line: Option<usize>,
+    end_line: Option<usize>,
+) -> Option<CommentAnchor> {
     let Some(line) = line else {
         return Some(CommentAnchor::File {
             path: file.path.clone(),
@@ -168,7 +187,7 @@ pub fn comment_anchor_for_file_lines(
     }
 }
 
-fn anchors_in_line_range(file: &ReviewFile, start: usize, end: usize) -> Vec<CommentAnchor> {
+fn anchors_in_line_range(file: &FileDiff, start: usize, end: usize) -> Vec<CommentAnchor> {
     let (start, end) = if start <= end {
         (start, end)
     } else {
@@ -185,8 +204,8 @@ fn anchors_in_line_range(file: &ReviewFile, start: usize, end: usize) -> Vec<Com
     anchors
 }
 
-fn find_line_anchor(file: &ReviewFile, wanted: usize, new_side: bool) -> Option<CommentAnchor> {
-    for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
+fn find_line_anchor(file: &FileDiff, wanted: usize, new_side: bool) -> Option<CommentAnchor> {
+    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
         for (line_index, line) in hunk.lines.iter().enumerate() {
             let matches = if new_side {
                 line.new_lineno == Some(wanted)
@@ -194,17 +213,14 @@ fn find_line_anchor(file: &ReviewFile, wanted: usize, new_side: bool) -> Option<
                 line.old_lineno == Some(wanted)
             };
             if matches {
-                return line_anchor_for_diff_row(file, hunk_index, line_index);
+                return line_anchor_for_file_diff(file, hunk_index, line_index);
             }
         }
     }
     None
 }
 
-fn range_anchor_from_lines(
-    file: &ReviewFile,
-    anchors: Vec<CommentAnchor>,
-) -> Option<CommentAnchor> {
+fn range_anchor_from_lines(file: &FileDiff, anchors: Vec<CommentAnchor>) -> Option<CommentAnchor> {
     let mut range_lines = Vec::new();
     for (row_index, anchor) in anchors.into_iter().enumerate() {
         if let CommentAnchor::Line {

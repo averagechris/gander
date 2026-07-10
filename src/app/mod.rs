@@ -629,10 +629,20 @@ impl ReviewSession {
 
     fn refresh_comment_anchors_for_current_diff(&mut self) {
         for comment in &mut self.comments {
-            let Some(path) = comment.path.as_deref() else {
+            let Some(path) = comment.path.clone() else {
                 continue;
             };
-            let Some(file) = self.files.iter().find(|file| file.path == path) else {
+            let file = self
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .or_else(|| {
+                    self.files.iter().find(|file| {
+                        file.status == FileStatus::Renamed
+                            && file.old_path.as_deref() == Some(path.as_str())
+                    })
+                });
+            let Some(file) = file else {
                 continue;
             };
             let Some(anchor) = comment_anchor_for_file_lines(file, comment.line, comment.end_line)
@@ -643,6 +653,7 @@ impl ReviewSession {
             comment.end_line = anchor
                 .end_line()
                 .filter(|end_line| Some(*end_line) != anchor.line());
+            comment.path = Some(file.path.clone());
             comment.anchor = Some(anchor);
         }
     }
@@ -937,7 +948,7 @@ impl ReviewSession {
             return;
         }
         let target = StateReviewTarget {
-            repo: Some(self.repo.display().to_string()),
+            repo: Some(review::canonical_repo_identity(&self.repo)),
             base: Some(self.target.base.clone()),
             revision: Some(self.target.rev.clone()),
             ..Default::default()
@@ -1957,6 +1968,10 @@ impl ReviewSession {
     pub fn add_comment_with_anchor(&mut self, body: String, anchor: CommentAnchor) {
         let index = self.ensure_active_review_session_index();
         let session_id = self.sessions[index].id.clone();
+        let observation = crate::provenance::CommentObservation::new(
+            self.provenance_snapshot(index),
+            Some(anchor.clone()),
+        );
         let _ = review::add_comment(
             &mut self.sessions[index],
             &mut self.comments,
@@ -1968,6 +1983,7 @@ impl ReviewSession {
                     .end_line()
                     .filter(|end_line| Some(*end_line) != anchor.line()),
                 anchor: Some(anchor),
+                observation: Some(observation),
                 body,
                 kind: None,
                 action: None,
@@ -1979,6 +1995,8 @@ impl ReviewSession {
     pub fn add_general_comment(&mut self, body: String) {
         let index = self.ensure_active_review_session_index();
         let session_id = self.sessions[index].id.clone();
+        let observation =
+            crate::provenance::CommentObservation::new(self.provenance_snapshot(index), None);
         let _ = review::add_comment(
             &mut self.sessions[index],
             &mut self.comments,
@@ -1988,6 +2006,7 @@ impl ReviewSession {
                 line: None,
                 end_line: None,
                 anchor: None,
+                observation: Some(observation),
                 body,
                 kind: None,
                 action: None,
@@ -1996,17 +2015,31 @@ impl ReviewSession {
         );
     }
 
+    fn provenance_snapshot(&self, session_index: usize) -> crate::provenance::SnapshotEvidence {
+        let durable = &self.sessions[session_index];
+        crate::provenance::SnapshotEvidence::capture(
+            chrono::Utc::now(),
+            durable.id.clone(),
+            durable.target.clone(),
+            self.files.iter().map(|file| &file.diff),
+        )
+    }
+
     pub fn ready_all_draft_comments(&mut self) -> review::ReadyCommentsResult {
         let index = self.ensure_active_review_session_index();
         review::ready_all_drafts(&mut self.sessions[index], &mut self.comments).unwrap_or_default()
     }
 
     fn ensure_active_review_session_index(&mut self) -> usize {
-        if let Some(index) = self.sessions.iter().position(|session| {
-            session.status == ReviewSessionStatus::Open
-                && session.target.base.as_deref() == Some(self.target.base.as_str())
-                && session.target.revision.as_deref() == Some(self.target.rev.as_str())
-        }) {
+        if let Some(id) = review::active_session_for_loaded_review(
+            &self.sessions,
+            &self.repo,
+            &self.target.base,
+            &self.target.rev,
+        )
+        .map(|session| session.id.clone())
+            && let Some(index) = self.sessions.iter().position(|session| session.id == id)
+        {
             return index;
         }
         let mut state = ReviewState {
@@ -2014,7 +2047,7 @@ impl ReviewSession {
             ..ReviewState::default()
         };
         let spec = review::SessionTargetSpec {
-            repo: Some(self.repo.display().to_string()),
+            repo: Some(review::canonical_repo_identity(&self.repo)),
             base: Some(self.target.base.clone()),
             revision: Some(self.target.rev.clone()),
             revset: None,
@@ -2104,7 +2137,7 @@ impl ReviewSession {
                 version: REVIEW_STATE_SCHEMA_VERSION,
                 base: Some(self.target.base.clone()),
                 revision: Some(self.target.rev.clone()),
-                repo: Some(self.repo.display().to_string()),
+                repo: Some(review::canonical_repo_identity(&self.repo)),
                 saved_at: Some(Utc::now()),
             },
             files: {
@@ -2259,6 +2292,123 @@ diff --git a/README.md b/README.md
             diff,
             ReviewState::default(),
         )
+    }
+
+    #[test]
+    fn tui_comments_capture_loaded_snapshot_and_refresh_preserves_observation() {
+        let mut session = session();
+        session.add_file_comment("file concern".into());
+        session.add_general_comment("overall concern".into());
+
+        let located = session.comments[0].clone();
+        let observation = located.observation.clone().expect("captured observation");
+        assert_eq!(observation.snapshot.files.len(), 2);
+        assert_eq!(observation.anchor, located.anchor);
+        assert!(session.comments[1].is_general());
+        assert!(
+            session.comments[1]
+                .observation
+                .as_ref()
+                .unwrap()
+                .anchor
+                .is_none()
+        );
+        assert!(session.update_comment_body(&located.id, "edited concern".into()));
+        assert_eq!(session.comments[0].observation.as_ref(), Some(&observation));
+
+        let refreshed = DiffSet::parse(
+            "diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -2 +2 @@\n-old\n+newer",
+        )
+        .unwrap();
+        session.replace_diff(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert_eq!(session.comments[0].observation.as_ref(), Some(&observation));
+        assert_ne!(session.comments[0].anchor, observation.anchor);
+    }
+
+    #[test]
+    fn comment_capture_does_not_reuse_same_target_session_from_another_repo() {
+        let diff = DiffSet::parse(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new",
+        )
+        .unwrap();
+        let state = ReviewState {
+            sessions: vec![crate::state::ReviewSession {
+                id: "wrong-repo".into(),
+                target: crate::state::ReviewTarget {
+                    repo: Some("/wrong".into()),
+                    base: Some("trunk()".into()),
+                    revision: Some("@".into()),
+                    ..Default::default()
+                },
+                status: ReviewSessionStatus::Open,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut session = ReviewSession::new(
+            "/right".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            state,
+        );
+
+        session.add_file_comment("right repo".into());
+
+        assert_eq!(session.sessions.len(), 2);
+        assert_ne!(
+            session.comments[0].session_id.as_deref(),
+            Some("wrong-repo")
+        );
+        let owner = session
+            .sessions
+            .iter()
+            .find(|durable| durable.id == session.comments[0].session_id.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(owner.target.repo.as_deref(), Some("/right"));
+    }
+
+    #[test]
+    fn refresh_reanchor_follows_rename_but_not_copy_and_preserves_observation() {
+        let original = DiffSet::parse(
+            "diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ b/old.rs\n@@ -1 +1 @@\n-old\n+new",
+        )
+        .unwrap();
+        let mut renamed = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::trunk_to_current(),
+            original.clone(),
+            ReviewState::default(),
+        );
+        renamed.add_file_comment("follow rename".into());
+        let observation = renamed.comments[0].observation.clone();
+        renamed.replace_diff(
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs",
+            )
+            .unwrap(),
+        );
+        assert_eq!(renamed.comments[0].path.as_deref(), Some("new.rs"));
+        assert_eq!(renamed.comments[0].observation, observation);
+
+        let mut copied = ReviewSession::new(
+            "/repo".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        copied.add_file_comment("do not follow copy".into());
+        let observation = copied.comments[0].observation.clone();
+        copied.replace_diff(
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/old.rs b/copy.rs\nsimilarity index 100%\ncopy from old.rs\ncopy to copy.rs",
+            )
+            .unwrap(),
+        );
+        assert_eq!(copied.comments[0].path.as_deref(), Some("old.rs"));
+        assert_eq!(copied.comments[0].observation, observation);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Durable walkthrough-step popup state.
 
-use crate::{app::ReviewSession, state::ReviewSessionStatus};
+use crate::{app::ReviewSession, review};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WalkthroughListState {
@@ -48,19 +48,17 @@ impl WalkthroughListState {
 }
 
 fn walkthrough_step_ids(session: &ReviewSession) -> Vec<String> {
-    session
-        .sessions
-        .iter()
-        .filter(|durable| {
-            durable.status == ReviewSessionStatus::Open
-                && durable.target.repo.as_deref() == Some(&session.repo.display().to_string())
-                && durable.target.base.as_deref() == Some(&session.target.base)
-                && durable.target.revision.as_deref() == Some(&session.target.rev)
-        })
-        .flat_map(|durable| durable.walkthroughs.iter())
-        .flat_map(|walkthrough| walkthrough.steps.iter())
-        .map(|step| step.id.clone())
-        .collect()
+    review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
+    .into_iter()
+    .flat_map(|durable| durable.walkthroughs.iter())
+    .flat_map(|walkthrough| walkthrough.steps.iter())
+    .map(|step| step.id.clone())
+    .collect()
 }
 
 #[cfg(test)]

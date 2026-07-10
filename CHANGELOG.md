@@ -4,6 +4,14 @@
 
 ### Added
 
+- Comments now freeze an optional creation observation and replies capture a
+  current result snapshot from the already-loaded diff. Evidence includes
+  durable session/target identity, exact and portable per-file fingerprints,
+  deterministic aggregate identity, rename/not-in-diff transitions, and a
+  portable patch changed signal without additional jj queries or mutations.
+  Rename lineage follows shared `old_path` across successive full diffs, binary
+  rename/copy structure remains distinct from portable comparability, and
+  observed general comments cannot acquire provenance from a later location.
 - Documented the ready-comment workflow: durable private drafts, actionable
   todos, resolved history, configurable comment initial state, `comments ready`,
   general comments, handoff/delegate selection, TUI keys, MCP parity, and schema
@@ -30,10 +38,12 @@
 
 ### Changed
 
-- Review state schema remains 2 and normalizes legacy serialized `tasks` into
-  `action_items` on save. Artifact schema 7 and delegation schema 3 carry the
+- Review state schema 3 normalizes legacy serialized `tasks` into
+  `action_items` on save. Artifact schema 8 and delegation schema 4 carry the
   action-item shape, while legacy anchored/unscoped comments still deserialize
-  unchanged and remain visible for compatibility.
+  unchanged and remain visible for compatibility. Delegation's pre-existing
+  top-level diff fingerprint algorithm remains unchanged; comment evidence uses
+  its independently versioned review-scope aggregate.
 - Public docs now use `action-items` CLI/MCP terminology (`list/show/add/edit`,
   `link-comment`/`unlink-comment`, `add-ticket`/`remove-ticket`,
   `close`/`reopen`/`delete`, repeatable `--comment`, and handoff

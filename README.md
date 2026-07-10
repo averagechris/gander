@@ -492,6 +492,16 @@ separate pending, pre-acceptance concept. A running TUI polls the persisted
 state/overlay and surfaces suggestions live; overlay draft dispositions are
 written back so agents observe the outcome.
 
+New CLI, TUI, and MCP comments also freeze a compact observation of the diff
+already loaded at creation. CLI/MCP replies capture a current result snapshot,
+link it to the original aggregate fingerprint when available, report same-path,
+rename, or no-longer-in-diff status, and compare a portable ordered
+line-kind/text patch fingerprint. This adds no jj query or workspace mutation.
+The evidence travels in artifacts, handoffs, delegation packets, and static
+HTML; legacy records say when snapshots are unavailable. It is provenance, not
+an outcome attestation: labels and unchanged fingerprints do not prove a fix or
+test result.
+
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
 It prints an implementation prompt with todo comments as the primary implicit
 feedback, plus any open durable action items for higher-level coordination.

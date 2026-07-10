@@ -26,6 +26,7 @@ use crate::{
     acp::AcpHandler,
     app::ReviewSession,
     config::InitialCommentState,
+    diff::FileDiff,
     jj::{JjBackend, ReviewTarget as JjReviewTarget},
     registry, review,
     state::{
@@ -58,6 +59,14 @@ pub struct GanderMcpParams {
     pub target: JjReviewTarget,
     pub diff_files: Vec<String>,
     pub initial_comment_state: CommentState,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SelectedReviewContext {
+    repo: PathBuf,
+    base: String,
+    revision: String,
+    files: Vec<FileDiff>,
 }
 
 struct SnapshotRequest {
@@ -648,9 +657,10 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentAddParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
         let general = params.general.unwrap_or(false);
         match (params.path.as_deref(), general) {
-            (Some(path), false) => self.ensure_diff_file(path)?,
+            (Some(path), false) => Self::ensure_selected_diff_file(&context, path)?,
             (None, true) => {}
             _ => {
                 return Err(McpError::invalid_params(
@@ -660,8 +670,25 @@ impl GanderMcp {
             }
         }
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
+            let idx = this.ensure_session_index_for_context(state, &context);
             let session_id = state.sessions[idx].id.clone();
+            let anchor = params.path.as_deref().and_then(|path| {
+                context
+                    .files
+                    .iter()
+                    .find(|file| file.path == path)
+                    .and_then(|file| {
+                        crate::anchor::comment_anchor_for_file_diff(
+                            file,
+                            params.line,
+                            params.end_line,
+                        )
+                    })
+            });
+            let observation = crate::provenance::CommentObservation::new(
+                Self::provenance_snapshot(&context, &state.sessions[idx]),
+                anchor.clone(),
+            );
             review::add_comment(
                 &mut state.sessions[idx],
                 &mut state.comments,
@@ -670,8 +697,8 @@ impl GanderMcp {
                     path: params.path,
                     line: params.line,
                     end_line: params.end_line,
-                    // TODO(M14): derive anchors once MCP loads full diff context; see docs/dogfood.md W3.
-                    anchor: None,
+                    anchor,
+                    observation: Some(observation),
                     body: params.body,
                     kind: params.kind,
                     action: params.action,
@@ -716,15 +743,28 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentResolveParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = params
+            .reply
+            .as_ref()
+            .map(|_| self.selected_review_context())
+            .transpose()?;
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
+            let idx = match &context {
+                Some(context) => this.ensure_session_index_for_context(state, context),
+                None => this.ensure_session_index(state),
+            };
             if let Some(reply) = params.reply {
+                let snapshot = Self::provenance_snapshot(
+                    context.as_ref().expect("reply context captured"),
+                    &state.sessions[idx],
+                );
                 review::reply_and_maybe_resolve_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
                     &params.id,
                     reply,
                     true,
+                    snapshot,
                 )
             } else {
                 review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &params.id)
@@ -739,14 +779,17 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentReplyParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let snapshot = Self::provenance_snapshot(&context, &state.sessions[idx]);
             review::reply_and_maybe_resolve_comment(
                 &mut state.sessions[idx],
                 &mut state.comments,
                 &params.id,
                 params.body,
                 params.resolve.unwrap_or(false),
+                snapshot,
             )
         })
     }
@@ -1060,10 +1103,7 @@ impl GanderMcp {
             "params": params,
         })
         .to_string();
-        let response = match self.call_live(&request) {
-            Some(response) => response?,
-            None => self.call_snapshot(&request)?,
-        };
+        let response = self.dispatch_selected(&request)?;
         if let Some(error) = response.get("error") {
             let message = error
                 .get("message")
@@ -1074,6 +1114,39 @@ impl GanderMcp {
             )]));
         }
         json_result(response.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    fn dispatch_selected(&self, request: &str) -> Result<Value, McpError> {
+        match self.call_live(request) {
+            Some(response) => response,
+            None => self.call_snapshot(request),
+        }
+    }
+
+    fn selected_review_context(&self) -> Result<SelectedReviewContext, McpError> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "review/provenance_context",
+            "params": Value::Null,
+        })
+        .to_string();
+        let response = self.dispatch_selected(&request)?;
+        if let Some(error) = response.get("error") {
+            return Err(McpError::internal_error(
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed to read selected review context")
+                    .to_owned(),
+                None,
+            ));
+        }
+        let mut context: SelectedReviewContext =
+            serde_json::from_value(response.get("result").cloned().unwrap_or(Value::Null))
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        context.repo = context.repo.canonicalize().unwrap_or(context.repo);
+        Ok(context)
     }
 
     /// `None` when no live instance serves this workspace; the caller then
@@ -1159,6 +1232,25 @@ impl GanderMcp {
             .unwrap()
     }
 
+    fn ensure_session_index_for_context(
+        &self,
+        state: &mut ReviewState,
+        context: &SelectedReviewContext,
+    ) -> usize {
+        let target = review::SessionTargetSpec {
+            repo: Some(context.repo.display().to_string()),
+            base: Some(context.base.clone()),
+            revision: Some(context.revision.clone()),
+            revset: Some(format!("{}..{}", context.base, context.revision)),
+        };
+        let id = review::ensure_session(state, &target, None).id.clone();
+        state
+            .sessions
+            .iter()
+            .position(|session| session.id == id)
+            .unwrap()
+    }
+
     fn ensure_diff_file(&self, path: &str) -> Result<(), McpError> {
         if self.diff_files.iter().any(|file| file == path) {
             Ok(())
@@ -1168,6 +1260,32 @@ impl GanderMcp {
                 None,
             ))
         }
+    }
+
+    fn ensure_selected_diff_file(
+        context: &SelectedReviewContext,
+        path: &str,
+    ) -> Result<(), McpError> {
+        if context.files.iter().any(|file| file.path == path) {
+            Ok(())
+        } else {
+            Err(McpError::invalid_params(
+                format!("`{path}` is not a file in the current diff"),
+                None,
+            ))
+        }
+    }
+
+    fn provenance_snapshot(
+        context: &SelectedReviewContext,
+        session: &crate::state::ReviewSession,
+    ) -> crate::provenance::SnapshotEvidence {
+        crate::provenance::SnapshotEvidence::capture(
+            chrono::Utc::now(),
+            session.id.clone(),
+            session.target.clone(),
+            context.files.iter(),
+        )
     }
 }
 
@@ -1275,7 +1393,7 @@ mod tests {
                 registry_dir: dir.join("registry"),
                 workspace_root: dir.to_path_buf(),
                 target: ReviewTarget::trunk_to_current(),
-                diff_files: vec!["src/app.rs".to_owned()],
+                diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
             },
         )
@@ -1437,6 +1555,150 @@ mod tests {
         assert_eq!(state.comments.len(), 1);
         assert_eq!(state.comments[0].id, comment["id"]);
         assert_eq!(state.comments[0].body, "persist me");
+        let observation = state.comments[0]
+            .observation
+            .as_ref()
+            .expect("MCP captures its loaded diff");
+        assert_eq!(observation.snapshot.files[0].path, "src/app.rs");
+        assert!(matches!(
+            observation.anchor.as_ref(),
+            Some(crate::anchor::CommentAnchor::Line { line: 1, .. })
+        ));
+        assert_eq!(
+            state.comments[0].anchor.as_ref(),
+            observation.anchor.as_ref()
+        );
+    }
+
+    #[test]
+    fn comment_add_freezes_range_anchor_from_selected_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let server = GanderMcp::new(
+            move || {
+                ReviewSession::new(
+                    root,
+                    ReviewTarget::trunk_to_current(),
+                    DiffSet::parse(
+                        "diff --git a/src/app.rs b/src/app.rs\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two",
+                    )
+                    .unwrap(),
+                    ReviewState::default(),
+                )
+            },
+            None,
+            GanderMcpParams {
+                overlay_path: dir.path().join("agent.json"),
+                state_path: dir.path().join("state.json"),
+                registry_dir: dir.path().join("registry"),
+                workspace_root: dir.path().to_path_buf(),
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".into()],
+                initial_comment_state: CommentState::Todo,
+            },
+        )
+        .unwrap();
+
+        server
+            .comment_add(Parameters(CommentAddParams {
+                path: Some("src/app.rs".into()),
+                general: None,
+                line: Some(1),
+                end_line: Some(2),
+                body: "range".into(),
+                kind: None,
+                action: None,
+                state: None,
+            }))
+            .unwrap();
+        server
+            .comment_add(Parameters(CommentAddParams {
+                path: Some("src/app.rs".into()),
+                general: None,
+                line: None,
+                end_line: None,
+                body: "file".into(),
+                kind: None,
+                action: None,
+                state: None,
+            }))
+            .unwrap();
+
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        let observation = state.comments[0].observation.as_ref().unwrap();
+        assert!(matches!(
+            observation.anchor.as_ref(),
+            Some(crate::anchor::CommentAnchor::Range {
+                start_line: 1,
+                end_line: 2,
+                ..
+            })
+        ));
+        assert_eq!(
+            state.comments[0].anchor.as_ref(),
+            observation.anchor.as_ref()
+        );
+        assert!(matches!(
+            state.comments[1]
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.anchor.as_ref()),
+            Some(crate::anchor::CommentAnchor::File { .. })
+        ));
+    }
+
+    #[test]
+    fn reply_and_resolve_capture_results_but_plain_resolve_does_not_add_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let add = |body: &str| {
+            result_json(
+                &server
+                    .comment_add(Parameters(CommentAddParams {
+                        path: Some("src/app.rs".into()),
+                        general: None,
+                        line: Some(1),
+                        end_line: None,
+                        body: body.into(),
+                        kind: None,
+                        action: None,
+                        state: None,
+                    }))
+                    .unwrap(),
+            )
+        };
+        let plain = add("plain");
+        let resolved = result_json(
+            &server
+                .comment_resolve(Parameters(CommentResolveParams {
+                    id: plain["id"].as_str().unwrap().into(),
+                    reply: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(resolved["state"], "resolved");
+        assert!(resolved.get("replies").is_none_or(Value::is_null));
+
+        let replied = add("reply");
+        let replied = result_json(
+            &server
+                .comment_reply(Parameters(CommentReplyParams {
+                    id: replied["id"].as_str().unwrap().into(),
+                    body: "fixed".into(),
+                    resolve: Some(true),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(replied["state"], "resolved");
+        assert_eq!(
+            replied["replies"][0]["result"]["parent_comment_id"],
+            replied["id"]
+        );
+        assert!(replied["replies"][0]["result"]["observation_aggregate_fingerprint"].is_string());
+        assert_eq!(
+            replied["replies"][0]["result"]["portable_patch_changed"],
+            false
+        );
     }
 
     #[test]
@@ -1595,7 +1857,7 @@ mod tests {
                 registry_dir,
                 workspace_root: workspace,
                 target: ReviewTarget::trunk_to_current(),
-                diff_files: vec!["src/app.rs".to_owned()],
+                diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
             },
         )
@@ -1605,5 +1867,119 @@ mod tests {
 
         assert_eq!(summary["summary"], "live");
         responder.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn comment_capture_uses_selected_live_context_not_stale_startup_context() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().canonicalize().unwrap();
+        let socket_path = dir.path().join("acp-live-context.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let live_diff = DiffSet::parse(
+            "diff --git a/live.rs b/live.rs\n--- a/live.rs\n+++ b/live.rs\n@@ -7 +7 @@\n-old\n+live",
+        )
+        .unwrap();
+        let response_repo = workspace.clone();
+        let response_files = live_diff.files.clone();
+        let responder = std::thread::spawn(move || {
+            loop {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "review/provenance_context");
+                let mut stream = stream;
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "repo": response_repo,
+                            "base": "live-base",
+                            "revision": "live-rev",
+                            "files": response_files,
+                        }
+                    })
+                )
+                .unwrap();
+                break;
+            }
+        });
+        let registry_dir = dir.path().join("registry");
+        let _registration = registry::InstanceRegistration::register(
+            &registry_dir,
+            registry::InstanceInfo {
+                pid: 10,
+                workspace_root: workspace.clone(),
+                base: "live-base".into(),
+                rev: "live-rev".into(),
+                summary: "live target".into(),
+                socket_path,
+                started_at: chrono::Utc::now(),
+                last_input_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
+        let startup_root = workspace.clone();
+        let server = GanderMcp::new(
+            move || session(&startup_root),
+            None,
+            GanderMcpParams {
+                overlay_path: dir.path().join("agent.json"),
+                state_path: dir.path().join("state.json"),
+                registry_dir,
+                workspace_root: workspace.clone(),
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".into()],
+                initial_comment_state: CommentState::Todo,
+            },
+        )
+        .unwrap();
+
+        server
+            .comment_add(Parameters(CommentAddParams {
+                path: Some("live.rs".into()),
+                general: None,
+                line: Some(7),
+                end_line: None,
+                body: "live observation".into(),
+                kind: None,
+                action: None,
+                state: None,
+            }))
+            .unwrap();
+        responder.join().unwrap();
+
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        let observation = state.comments[0].observation.as_ref().unwrap();
+        assert_eq!(
+            observation.snapshot.identity.target.base.as_deref(),
+            Some("live-base")
+        );
+        assert_eq!(
+            observation.snapshot.identity.target.revision.as_deref(),
+            Some("live-rev")
+        );
+        assert_eq!(observation.snapshot.files[0].path, "live.rs");
+        assert!(matches!(
+            observation.anchor.as_ref(),
+            Some(crate::anchor::CommentAnchor::Line { line: 7, .. })
+        ));
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].target.base.as_deref(), Some("live-base"));
+        assert_eq!(
+            state.sessions[0].target.repo.as_deref(),
+            Some(workspace.to_str().unwrap())
+        );
     }
 }

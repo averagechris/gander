@@ -22,7 +22,7 @@ item_id=$(cargo run --quiet -- --state-file "$state" action-items add \
 cargo run --quiet -- --state-file "$state" action-items list \
   | jq -r '.action_items[] | select(.status == "open") | .id' \
   | while read -r id; do
-      cargo run --quiet -- --state-file "$state" action-items close "$id" --disposition completed --summary "Completed in example loop"
+      cargo run --quiet -- --state-file "$state" action-items close "$id" --disposition completed --outcome "Completed in example loop"
     done
 
 cargo run --quiet -- --state-file "$state" reviews show "$review_id" \

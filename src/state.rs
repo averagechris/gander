@@ -7,11 +7,14 @@ use std::{
 use color_eyre::eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 
-use crate::anchor::CommentAnchor;
+use crate::{
+    anchor::CommentAnchor,
+    provenance::{CommentObservation, CommentReplyResult},
+};
 
-/// Current on-disk review-state schema. Version 2 adds session-scoped and
-/// general comments while preserving version 0/1 anchored comments on read.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 2;
+/// Current on-disk review-state schema. Version 3 adds optional immutable
+/// comment observations and reply results while preserving legacy comments.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -79,6 +82,8 @@ pub struct Comment {
     pub end_line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<CommentAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<CommentObservation>,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<CommentKind>,
@@ -102,6 +107,7 @@ impl Default for Comment {
             line: None,
             end_line: None,
             anchor: None,
+            observation: None,
             body: String::new(),
             kind: None,
             action: None,
@@ -219,6 +225,8 @@ pub struct CommentReply {
     pub id: String,
     pub body: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<CommentReplyResult>,
 }
 
 impl Default for CommentReply {
@@ -227,6 +235,7 @@ impl Default for CommentReply {
             id: String::new(),
             body: String::new(),
             created_at: chrono::Utc::now(),
+            result: None,
         }
     }
 }
@@ -720,6 +729,11 @@ fn merge_comments(local: &mut Vec<Comment>, external: Vec<Comment>, tombstones: 
             .iter_mut()
             .find(|comment| comment.id == external_comment.id)
         {
+            merge_optional_evidence(
+                &mut local_comment.observation,
+                &external_comment.observation,
+            );
+            external_comment.observation = local_comment.observation.clone();
             merge_comment_replies(local_comment, &external_comment);
             external_comment.replies = local_comment.replies.clone();
             if *local_comment != external_comment
@@ -736,16 +750,23 @@ fn merge_comments(local: &mut Vec<Comment>, external: Vec<Comment>, tombstones: 
     }
 }
 
-fn merge_comment_replies(local: &mut Comment, external: &Comment) {
+pub(crate) fn merge_comment_replies(local: &mut Comment, external: &Comment) {
     for external_reply in &external.replies {
         if let Some(local_reply) = local
             .replies
             .iter_mut()
             .find(|reply| reply.id == external_reply.id)
         {
-            if external_reply.created_at > local_reply.created_at {
+            let mut result = local_reply.result.clone();
+            merge_optional_evidence(&mut result, &external_reply.result);
+            let replace = external_reply.created_at > local_reply.created_at
+                || (external_reply.created_at == local_reply.created_at
+                    && canonical_reply_metadata(external_reply)
+                        < canonical_reply_metadata(local_reply));
+            if replace {
                 *local_reply = external_reply.clone();
             }
+            local_reply.result = result;
         } else {
             local.replies.push(external_reply.clone());
         }
@@ -753,6 +774,36 @@ fn merge_comment_replies(local: &mut Comment, external: &Comment) {
     local
         .replies
         .sort_by_key(|reply| (reply.created_at, reply.id.clone()));
+}
+
+fn canonical_reply_metadata(reply: &CommentReply) -> String {
+    let mut metadata = reply.clone();
+    metadata.result = None;
+    serde_json::to_string(&metadata).expect("reply metadata must serialize")
+}
+
+pub(crate) fn merge_comment_observation(local: &mut Comment, external: &Comment) {
+    merge_optional_evidence(&mut local.observation, &external.observation);
+}
+
+/// Fill missing immutable evidence. If independently written values conflict,
+/// choose the lexicographically smaller canonical JSON value so merge/import
+/// order cannot change the winner.
+fn merge_optional_evidence<T>(local: &mut Option<T>, external: &Option<T>)
+where
+    T: Clone + Serialize + PartialEq,
+{
+    match (&*local, external) {
+        (None, Some(value)) => *local = Some(value.clone()),
+        (Some(left), Some(right)) if left != right => {
+            let left_json = serde_json::to_string(left).expect("evidence must serialize");
+            let right_json = serde_json::to_string(right).expect("evidence must serialize");
+            if right_json < left_json {
+                *local = Some(right.clone());
+            }
+        }
+        _ => {}
+    }
 }
 
 trait Identified {
@@ -1119,6 +1170,7 @@ mod tests {
             id: "local-reply".into(),
             body: "local".into(),
             created_at: chrono::Utc::now(),
+            result: None,
         });
         let mut external = ReviewState {
             comments: vec![comment("comment", "external")],
@@ -1129,6 +1181,7 @@ mod tests {
             id: "external-reply".into(),
             body: "external".into(),
             created_at: chrono::Utc::now(),
+            result: None,
         });
 
         local.merge_external(external, &ReviewStateTombstones::default());
@@ -1146,6 +1199,63 @@ mod tests {
                 .iter()
                 .any(|reply| reply.id == "external-reply")
         );
+    }
+
+    fn reply_result(session_id: &str) -> crate::provenance::CommentReplyResult {
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            session_id,
+            ReviewTarget::default(),
+            std::iter::empty(),
+        );
+        crate::provenance::CommentReplyResult::compare("comment", None, None, snapshot)
+    }
+
+    #[test]
+    fn same_id_reply_merge_enriches_result_and_resolves_conflicts_deterministically() {
+        let reply = CommentReply {
+            id: "reply".into(),
+            body: "done".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            result: None,
+        };
+        let mut local = ReviewState {
+            comments: vec![Comment {
+                id: "comment".into(),
+                replies: vec![reply.clone()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut external = local.clone();
+        external.comments[0].replies[0].result = Some(reply_result("enriched"));
+        external.comments[0].observation = Some(crate::provenance::CommentObservation::new(
+            external.comments[0].replies[0]
+                .result
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .clone(),
+            None,
+        ));
+        local.merge_external(external, &ReviewStateTombstones::default());
+        assert!(local.comments[0].replies[0].result.is_some());
+        assert!(local.comments[0].observation.is_some());
+
+        let mut left = local.clone();
+        left.comments[0].replies[0].body = "z metadata".into();
+        left.comments[0].replies[0].result = Some(reply_result("left"));
+        let mut right = local;
+        right.comments[0].replies[0].body = "a metadata".into();
+        right.comments[0].replies[0].result = Some(reply_result("right"));
+        let mut left_first = left.clone();
+        left_first.merge_external(right.clone(), &ReviewStateTombstones::default());
+        right.merge_external(left, &ReviewStateTombstones::default());
+        assert_eq!(
+            left_first.comments[0].replies[0],
+            right.comments[0].replies[0]
+        );
+        assert_eq!(left_first.comments[0].replies[0].body, "a metadata");
     }
 
     #[test]
@@ -1208,6 +1318,31 @@ mod tests {
         assert!(state.comments[0].action.is_none());
         assert!(state.sessions.is_empty());
         assert_eq!(state.meta.version, 0);
+    }
+
+    #[test]
+    fn state_two_reply_without_provenance_loads_unchanged() {
+        let state: ReviewState = serde_json::from_str(
+            r#"{
+  "meta": { "version": 2 },
+  "comments": [{
+    "id": "comment",
+    "path": "src/lib.rs",
+    "body": "legacy comment",
+    "created_at": "2026-06-30T00:00:00Z",
+    "replies": [{
+      "id": "reply",
+      "body": "legacy reply",
+      "created_at": "2026-06-30T00:01:00Z"
+    }]
+  }]
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(state.meta.version, 2);
+        assert!(state.comments[0].observation.is_none());
+        assert!(state.comments[0].replies[0].result.is_none());
     }
 
     #[test]

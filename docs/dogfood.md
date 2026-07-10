@@ -222,10 +222,10 @@ Follow-ups from the post-W1 recheck (scored 4/5; polish, not blockers):
       parts stay listed with an `[invalid]` badge and reason; overlay
       re-applies after refresh now validate like the initial load.
       *(2026-07-05)*
-- [ ] MCP `comment_add` still stores `anchor: None` (it never loads full
-      diff context), so MCP-created comments lack excerpts in agent
-      exports. Derive anchors once MCP loads diff context (M14 parity;
-      `TODO(M14)` marker in `src/mcp.rs`).
+- [x] MCP durable comment capture uses the same selected live/snapshot
+      session and already-loaded parsed diff as MCP reads, derives shared
+      file/line/range anchors, and freezes them in the observation without
+      another jj query. *(2026-07-10)*
 - [x] Round-2 recheck gap: change briefs and comment drafts still
       require raw JSON-RPC — landed `gander briefs list/set/clear` and
       `gander drafts list/add/remove` over the same validated spec-file

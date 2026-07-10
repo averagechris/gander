@@ -14,6 +14,7 @@ mod ids;
 mod jj;
 mod mcp;
 mod paths;
+mod provenance;
 mod registry;
 mod review;
 mod skills;
@@ -1520,6 +1521,10 @@ fn run() -> color_eyre::Result<()> {
                 note_if_creating_mismatched_session(&state, &spec);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
+                let observation = crate::provenance::CommentObservation::new(
+                    provenance_snapshot(&session, &state.sessions[idx]),
+                    anchor.clone(),
+                );
                 let comment = review::add_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
@@ -1529,6 +1534,7 @@ fn run() -> color_eyre::Result<()> {
                         line,
                         end_line,
                         anchor,
+                        observation: Some(observation),
                         body,
                         kind: kind.map(Into::into),
                         action: action.and_then(action_intent_arg_to_option),
@@ -1578,12 +1584,14 @@ fn run() -> color_eyre::Result<()> {
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
                 let comment = if let Some(reply) = reply {
+                    let snapshot = provenance_snapshot(&session, &state.sessions[idx]);
                     review::reply_and_maybe_resolve_comment(
                         &mut state.sessions[idx],
                         &mut state.comments,
                         &id,
                         reply,
                         true,
+                        snapshot,
                     )
                 } else {
                     review::resolve_comment(&mut state.sessions[idx], &mut state.comments, &id)
@@ -1605,6 +1613,7 @@ fn run() -> color_eyre::Result<()> {
                 note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let snapshot = provenance_snapshot(&session, &state.sessions[idx]);
                 let comment = if resolve {
                     review::reply_and_maybe_resolve_comment(
                         &mut state.sessions[idx],
@@ -1612,6 +1621,7 @@ fn run() -> color_eyre::Result<()> {
                         &id,
                         body,
                         true,
+                        snapshot,
                     )
                 } else {
                     review::reply_to_comment(
@@ -1619,6 +1629,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         body,
+                        snapshot,
                     )
                 }
                 .map_err(into_user_error)?;
@@ -2720,6 +2731,18 @@ fn session_target_spec(repo: &std::path::Path, target: &ReviewTarget) -> Session
         revision: Some(target.rev.clone()),
         revset: Some(target.to_string()),
     }
+}
+
+fn provenance_snapshot(
+    session: &ReviewSession,
+    durable: &crate::state::ReviewSession,
+) -> crate::provenance::SnapshotEvidence {
+    crate::provenance::SnapshotEvidence::capture(
+        chrono::Utc::now(),
+        durable.id.clone(),
+        durable.target.clone(),
+        session.files.iter().map(|file| &file.diff),
+    )
 }
 
 fn ensure_diff_file(session: &ReviewSession, path: &str) -> color_eyre::Result<()> {
@@ -4365,6 +4388,7 @@ mod tests {
                 line: Some(3),
                 end_line: None,
                 anchor,
+                observation: None,
                 body: "explain this".to_owned(),
                 kind: None,
                 action: None,
@@ -4423,6 +4447,30 @@ mod tests {
     }
 
     #[test]
+    fn cli_provenance_uses_loaded_session_without_backend_work() {
+        let session = sample_session();
+        let spec = session_target_spec(&session.repo, &session.target);
+        let mut state = ReviewState::default();
+        let id = review::ensure_session(&mut state, &spec, None).id.clone();
+        let durable = state
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+            .unwrap();
+
+        let snapshot = provenance_snapshot(&session, durable);
+        let observation = crate::provenance::CommentObservation::new(snapshot.clone(), None);
+
+        assert_eq!(snapshot.identity.session_id, id);
+        assert_eq!(snapshot.files.len(), session.files.len());
+        assert_eq!(
+            snapshot.files[0].diff_fingerprint,
+            session.files[0].fingerprint
+        );
+        assert_eq!(observation.snapshot, snapshot);
+    }
+
+    #[test]
     fn cli_range_comment_anchor_exports_agent_excerpt() {
         let mut session = sample_session();
         let file = session
@@ -4448,6 +4496,7 @@ mod tests {
                 line: Some(3),
                 end_line: Some(4),
                 anchor,
+                observation: None,
                 body: "explain this range".to_owned(),
                 kind: None,
                 action: None,

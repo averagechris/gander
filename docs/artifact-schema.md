@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `7`.
+Current schema version: `8`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -30,7 +30,7 @@ config.
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -94,6 +94,51 @@ config.
       },
       "body": "Comment body",
       "state": "todo",
+      "observation": {
+        "snapshot": {
+          "captured_at": "2026-06-30T00:00:00Z",
+          "identity": {
+            "session_id": "review-session-id",
+            "target": {
+              "revset": null,
+              "base": "trunk()",
+              "revision": "@",
+              "repo": "/path/to/repo",
+              "file": null,
+              "line": null,
+              "end_line": null,
+              "symbol": null
+            }
+          },
+          "scope": { "version": 1, "aggregate": "sha256..." },
+          "files": [{
+            "path": "src/main.rs",
+            "status": "Modified",
+            "diff_fingerprint": "sha256-exact...",
+            "portable_patch_fingerprint": "sha256-portable..."
+          }]
+        },
+        "anchor": {
+          "type": "line",
+          "path": "src/main.rs",
+          "old_path": null,
+          "side": "new",
+          "line": 42,
+          "old_line": 41,
+          "new_line": 42,
+          "hunk_header": "@@ -39,6 +39,7 @@ fn render() {",
+          "hunk_old_start": 39,
+          "hunk_old_len": 6,
+          "hunk_new_start": 39,
+          "hunk_new_len": 7,
+          "hunk_index": 0,
+          "line_index": 4,
+          "line_kind": "added",
+          "line_text": "    new_call();",
+          "line_fingerprint": "sha256...",
+          "diff_fingerprint": "sha256-exact..."
+        }
+      },
       "linked_action_item_ids": ["action-item-id"],
       "created_at": "2026-06-30T00:00:00Z",
       "updated_at": "2026-06-30T00:05:00Z",
@@ -101,7 +146,36 @@ config.
         {
           "id": "reply-uuid",
           "body": "Acknowledged; resolving after the fix.",
-          "created_at": "2026-06-30T00:05:00Z"
+          "created_at": "2026-06-30T00:05:00Z",
+          "result": {
+            "parent_comment_id": "stable-ish-id",
+            "observation_aggregate_fingerprint": "sha256...",
+            "snapshot": {
+              "captured_at": "2026-06-30T00:05:00Z",
+              "identity": {
+                "session_id": "review-session-id",
+                "target": {
+                  "revset": null,
+                  "base": "trunk()",
+                  "revision": "@",
+                  "repo": "/path/to/repo",
+                  "file": null,
+                  "line": null,
+                  "end_line": null,
+                  "symbol": null
+                }
+              },
+              "scope": { "version": 1, "aggregate": "sha256-current..." },
+              "files": [{
+                "path": "src/main.rs",
+                "status": "Modified",
+                "diff_fingerprint": "sha256-current-exact...",
+                "portable_patch_fingerprint": "sha256-current-portable..."
+              }]
+            },
+            "related": { "kind": "same_path", "path": "src/main.rs" },
+            "portable_patch_changed": false
+          }
         }
       ],
       "excerpt": [
@@ -116,11 +190,16 @@ config.
       "id": "action-item-id",
       "title": "Fix the unchecked parse path",
       "status": "open",
-      "close_disposition": null,
       "action": "fix",
-      "linked_comment_ids": ["stable-ish-id"],
-      "external_tickets": ["LIN-123"],
-      "target": { "file": "src/main.rs", "line": 42, "end_line": null }
+      "comment_ids": ["stable-ish-id"],
+      "external_tickets": [{
+        "tracker": "linear",
+        "reference": "LIN-123",
+        "url": "https://linear.app/example/issue/LIN-123",
+        "created_at": "2026-06-30T00:00:00Z",
+        "updated_at": "2026-06-30T00:00:00Z"
+      }],
+      "target": { "file": "src/main.rs", "line": 42 }
     }
   ],
   "walkthroughs": [
@@ -130,9 +209,17 @@ config.
       "steps": [
         {
           "id": "step-id",
+          "kind": "step",
+          "importance": "spotlight",
+          "change_id": "change-id",
           "title": "Start with the renderer",
           "why": "This establishes the new data shape.",
           "body": "Confirm the serialized fields before reading callers.",
+          "artifacts": [{
+            "title": "Expected output",
+            "kind": "output",
+            "body": "rendered output"
+          }],
           "target": { "file": "src/main.rs", "line": 42, "symbol": "render" }
         }
       ]
@@ -158,9 +245,11 @@ Notes:
   output and is not duplicated as a separate action item. Ordinary comments
   (`draft` notes and resolved history) are not action items.
 - Durable action items are optional higher-level coordination records. They can
-  link many comments via `linked_comment_ids` and carry opaque
-  `external_tickets` strings/URLs. Gander records those references only; it does
-  not fetch from or post to forges or ticket systems.
+  link many comments via `comment_ids` and carry structured `external_tickets`
+  (`tracker`, `reference`, optional `url`, and timestamps). Open items omit
+  `disposition`, `outcome`, and `closed_at`; closed items emit those fields when
+  recorded. Gander records ticket references only; it does not fetch from or
+  post to forges or ticket systems.
 - Export is broader than import: `gander import` currently restores only
   duplicate-safe comments and viewed files whose diff fingerprints still match
   the current target. It does not restore `action_items` or `walkthroughs` from the
@@ -186,9 +275,37 @@ Notes:
   Replies are append-only objects with stable UUID `id`, `body`, and
   `created_at`. Import merges same-id comments by timestamp and unions replies,
   so newer reply/state data is not dropped as a duplicate.
+- `comments[].observation` is immutable evidence captured from the diff already
+  loaded when the comment was created. It records capture time, durable
+  session/target labels, a versioned aggregate fingerprint, per-file
+  path/old-path/status, the exact existing raw-diff fingerprint, a portable
+  patch fingerprint (null for binary/non-comparable patches), and the original
+  anchor when one existed. General comments have no anchor but still carry a
+  review-scope snapshot; that missing anchor is
+  meaningful, so a later mutable location cannot turn their reply relation into
+  a located comparison.
+- Snapshot file `status` uses the serialized `FileStatus` variant names
+  (`Added`, `Modified`, `Deleted`, `Renamed`, `Copied`, `Binary`, `Unknown`);
+  binary renames/copies keep `Renamed`/`Copied` structural status while their
+  portable fingerprint is null;
+  `old_path` is omitted when absent, while a non-comparable
+  `portable_patch_fingerprint` is explicitly null.
+- `replies[].result` records the current loaded snapshot, parent comment ID,
+  the original observation aggregate (null for legacy comments), path relation
+  (`same_path`, `renamed_from`, or `not_in_diff`), and whether the related
+  portable patch changed. Portable fingerprints hash ordered parsed line kind
+  and text, excluding headers and line coordinates. They are evidence of patch
+  equality, not proof that a requested outcome was implemented or verified.
+- Older state/artifacts remain readable. Missing observations/results are
+  rendered explicitly as unavailable; current target labels must not be treated
+  as proof of what a legacy reviewer saw. Import/merge enrich missing evidence
+  on same-ID replies and use a deterministic canonical-JSON tie break if two
+  non-empty immutable values conflict.
 
 ## Version history
 
+- `8`: optional immutable comment observations and reply results add portable
+  A→B patch provenance while preserving legacy comments/replies.
 - `7`: `tasks` is renamed to `action_items`, comment backrefs are
   `linked_action_item_ids`, action items can link many comments and external
   ticket refs, and closed action items record `completed`, `dismissed`, or
@@ -203,9 +320,15 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
+Review-state schema `3` introduces the optional persisted observation/result
+fields. Delegation schema `4` carries the same comment evidence and reply
+results. Delegation's existing top-level `fingerprints.diff` retains its v3
+path-plus-exact-file-fingerprint algorithm; provenance uses the separate
+versioned `observation.snapshot.scope.aggregate`. Both remain backward-readable
+through serde defaults.
+
 ## Planned schema additions
 
-- explicit artifact `source` block with jj operation/change IDs
 - per-file ignored/collapsed metadata
 - reviewer identity/profile metadata
 - review disposition/intent (`comment`, `approve`, `needs-work`, etc.) as

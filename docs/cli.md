@@ -140,7 +140,14 @@ are changed. `reply` appends an immutable
 UUID-addressed reply with a timestamp and updates the parent comment's
 `updated_at`; `--resolve` also marks the parent resolved. `resolve` is a
 convenience for `set-state --state resolved`, and `--reply` first appends the
-given reply before resolving.
+given reply before resolving. New CLI comments freeze an `observation` from the
+diff already loaded for the command. New replies embed a current `result`
+snapshot, reference the original aggregate when available, classify the path as
+`same_path`, `renamed_from`, or `not_in_diff`, and compare portable patch
+fingerprints. Plain resolve creates no synthetic reply/result. Legacy records
+remain null/missing, and target labels or fingerprint equality are evidence—not
+proof that an outcome was implemented or verified. Capture performs no extra jj
+query and never snapshots or mutates the working copy.
 
 ## Action items
 
@@ -155,7 +162,7 @@ gander action-items link-comment <id> --comment <comment-id> [--format json|text
 gander action-items unlink-comment <id> --comment <comment-id> [--format json|text]
 gander action-items add-ticket <id> --ticket <ref> [--format json|text]
 gander action-items remove-ticket <id> --ticket <ref> [--format json|text]
-gander action-items close <id> --disposition completed|dismissed|deferred [--summary <resolution>] [--ticket <ref>] [--format json|text]
+gander action-items close <id> --disposition completed|dismissed|deferred [--outcome <resolution>] [--format json|text]
 gander action-items reopen <id> [--format json|text]
 gander action-items delete <id> [--format json|text]
 ```
@@ -178,7 +185,8 @@ or SourceHut issue URL/id), and never fetches from or posts to that system.
 `close --disposition deferred` requires at least one ticket reference to make the
 deferral actionable outside Gander. `completed` means the local work was done;
 `dismissed` means no work is needed; `deferred` means the item was moved to an
-external tracker.
+external tracker. Add that reference first with `action-items add-ticket`; close
+does not create a ticket reference implicitly.
 
 `--line` is a 1-indexed diff line anchor in the current jj diff and requires
 `--path` when adding an action item. Editing patches the existing target:
@@ -308,7 +316,8 @@ the state file and merges external changes (a CLI-added comment appears in
 the running TUI within a poll and survives the TUI's save/quit). Deletions
 made in the TUI are not resurrected by merges. Same-id comments use the newer
 `updated_at` value for body/state metadata and union append-only replies by
-reply id, so an external reply or resolution is not overwritten by a later TUI
+reply id, enriching a missing same-ID reply result with deterministic conflict
+handling, so an external reply or resolution is not overwritten by a later TUI
 save. Action items, walkthroughs, walkthrough steps, and sessions likewise use newer
 `updated_at` values for same-id conflicts.
 
@@ -370,7 +379,7 @@ folds linked todo evidence into its parent action item, and excludes resolved
 comments and closed action items. Draft comments are rejected when explicitly selected for delegation unless
 they are first readied, and implicit delegation never selects them. Packets include source fingerprints, walkthrough context, relevant
 hunks, reply history, and concrete `comments resolve --reply` / `action-items close
---disposition completed --summary` return commands. `--verify` is inert requested text; Gander never
+--disposition completed --outcome` return commands. `--verify` is inert requested text; Gander never
 executes it.
 
 `export html` writes a self-contained static review page and rejects an explicitly supplied `--profile`; JSON and Markdown are the complete session artifact formats. `--profile agent` adds all raw hunks and comment excerpts for tools, including resolved comments as reference.
@@ -421,7 +430,7 @@ item_id=$(gander --state-file "$state" action-items add --title "Fix intro" \
   --action fix --comment "$comment_id" --path README.md --line 1 | jq -r .id)
 gander --state-file "$state" action-items list | jq -r '.action_items[] | select(.status == "open") | .id' |
   while read -r id; do
-    gander --state-file "$state" action-items close "$id" --disposition completed --summary "Handled by agent"
+    gander --state-file "$state" action-items close "$id" --disposition completed --outcome "Handled by agent"
   done
 gander --state-file "$state" reviews show "$review_id" | jq '{id, title, action_items}'
 ```

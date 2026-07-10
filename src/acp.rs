@@ -258,6 +258,8 @@ impl AcpHandler {
                         "path": comment.path,
                         "line": comment.line,
                         "end_line": comment.end_line,
+                        "anchor": comment.anchor,
+                        "observation": comment.observation,
                         "body": comment.body,
                         "kind": comment.kind,
                         "action": comment.action,
@@ -268,6 +270,15 @@ impl AcpHandler {
                     }))
                     .collect::<Vec<_>>()
             )),
+            // Internal compact handoff used by MCP durable comment mutations.
+            // It guarantees capture comes from the same selected live/snapshot
+            // session as MCP reads, without another jj query.
+            "review/provenance_context" => Ok(json!({
+                "repo": session.repo,
+                "base": session.target.base,
+                "revision": session.target.rev,
+                "files": session.files.iter().map(|file| &file.diff).collect::<Vec<_>>(),
+            })),
             "review/overlay" => {
                 serde_json::to_value(&self.overlay).map_err(|error| error.to_string())
             }
@@ -1227,6 +1238,17 @@ diff --git a/README.md b/README.md
         assert_eq!(comments[0]["state"], "draft");
         assert!(comments[0]["session_id"].as_str().is_some());
         assert_eq!(comments[0]["path"], "src/app.rs");
+
+        let context = call(&mut server, "review/provenance_context", Value::Null);
+        assert_eq!(context["base"], "trunk()");
+        assert_eq!(context["revision"], "@");
+        assert_eq!(context["files"][0]["path"], "src/app.rs");
+        assert!(
+            context["files"][0]["raw"]
+                .as_str()
+                .unwrap()
+                .contains("+new")
+        );
     }
 
     #[test]

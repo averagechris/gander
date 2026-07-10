@@ -2098,7 +2098,7 @@ fn ensure_tui_review_session(session: &mut ReviewSession) -> &mut crate::state::
         ..ReviewState::default()
     };
     let spec = review::SessionTargetSpec {
-        repo: Some(session.repo.display().to_string()),
+        repo: Some(review::canonical_repo_identity(&session.repo)),
         base: Some(session.target.base.clone()),
         revision: Some(session.target.rev.clone()),
         revset: None,
@@ -2116,7 +2116,7 @@ fn walkthrough_target_from_selection(
         .or_else(|| session.selected_line_anchor())?;
     let line = anchor.line()?;
     Some(crate::state::ReviewTarget {
-        repo: Some(session.repo.display().to_string()),
+        repo: Some(review::canonical_repo_identity(&session.repo)),
         base: Some(session.target.base.clone()),
         revision: Some(session.target.rev.clone()),
         file: Some(anchor.path().to_owned()),
@@ -3936,6 +3936,7 @@ mod tests {
     use crate::state::{ActionIntent, ActionItem, Comment, CommentKind, CommentState};
 
     struct MockJjBackend {
+        snapshot_calls: RefCell<usize>,
         calls: RefCell<Vec<ReviewTarget>>,
         diff_text: Result<String, String>,
         diff_queue: RefCell<Vec<Result<String, String>>>,
@@ -3952,6 +3953,7 @@ mod tests {
     impl MockJjBackend {
         fn with_diff(diff_text: Result<String, String>) -> Self {
             Self {
+                snapshot_calls: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
                 diff_text,
                 diff_queue: RefCell::new(Vec::new()),
@@ -4375,6 +4377,7 @@ mod tests {
 
     impl JjBackend for MockJjBackend {
         fn snapshot_working_copy(&self, _repo: &Path) -> Result<()> {
+            *self.snapshot_calls.borrow_mut() += 1;
             Ok(())
         }
 
@@ -4441,6 +4444,43 @@ mod tests {
                 None => bail!("no file contents configured"),
             }
         }
+    }
+
+    #[test]
+    fn comment_capture_uses_loaded_diff_without_backend_queries_or_mutations() {
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new",
+        );
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::CommentInput {
+            editor: CommentEditor {
+                text: "observed".into(),
+                cursor: "observed".len(),
+            },
+            target: CommentInputTarget::New,
+        };
+
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut TuiState::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(mode, Mode::Normal));
+        assert!(session.comments[0].observation.is_some());
+        assert_eq!(*backend.snapshot_calls.borrow(), 0);
+        assert!(backend.calls.borrow().is_empty());
+        assert!(backend.commands.borrow().is_empty());
     }
 
     #[test]

@@ -67,3 +67,6 @@ Use when reviewing local jj-visible work with Gander. Durable review state is th
 - Do not delegate drafts: implicit delegate selects todo comments only, and an
   explicit draft selector should be readied first or rejected.
 - Report what you reviewed and what you actually checked; do not overstate verification.
+- Observation/reply provenance is evidence about the already-loaded review diff,
+  not an outcome attestation. A target label or unchanged portable patch does
+  not prove correctness or testing, and legacy records may have no snapshot.

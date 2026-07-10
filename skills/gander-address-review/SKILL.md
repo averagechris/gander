@@ -17,7 +17,7 @@ Use when a Gander handoff, delegation packet, or local session asks you to fix r
 4. **Update Gander state concisely.** Reply/resolve comments and close action items with what changed and what was actually checked:
    ```bash
    gander --repo <reviewed-workspace> comments resolve <comment-prefix> --reply '<what changed; what was checked>'
-   gander --repo <reviewed-workspace> action-items close <item-prefix> --disposition completed --summary '<what changed; what was checked>'
+    gander --repo <reviewed-workspace> action-items close <item-prefix> --disposition completed --outcome '<what changed; what was checked>'
    ```
 5. **If follow-up remains, record it** instead of claiming it is done. New
    comments default to the reviewer's configured initial state; pass `--state
@@ -27,4 +27,4 @@ Use when a Gander handoff, delegation packet, or local session asks you to fix r
    gander --repo <reviewed-workspace> comments add --path <path> --line <line> --state todo --kind issue --action follow-up --body '<follow-up>'
    ```
 
-Honesty rule: report what changed and what you actually checked; do not imply broader verification than you performed.
+Honesty rule: report what changed and what you actually checked; do not imply broader verification than you performed. Comment/reply snapshots only show which loaded patch was observed and whether its portable line-kind/text fingerprint changed. An unchanged fingerprint, target label, or `portable_patch_changed: false` is not proof that the requested outcome is correct. Legacy comments/replies may explicitly say their snapshot is unavailable.

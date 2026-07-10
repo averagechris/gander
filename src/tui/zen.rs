@@ -23,7 +23,7 @@ use crate::agent::{Artifact, ChunkImportance, ChunkPart};
 use crate::app::{Focus, ReviewSession, ZenFocus};
 use crate::diff::{DiffLineKind, FileDiff, Hunk};
 use crate::jj::{JjChangeSummary, ReviewTarget};
-use crate::state::{Comment, ReviewSessionStatus, StepArtifactKind, StepKind, WalkthroughStep};
+use crate::state::{Comment, StepArtifactKind, StepKind, WalkthroughStep};
 
 use super::chunks::{WalkthroughRow, durable_walkthrough_rows};
 
@@ -146,18 +146,16 @@ pub(super) enum ZenPhase {
 }
 
 fn durable_walkthrough_steps(session: &ReviewSession) -> Vec<&WalkthroughStep> {
-    session
-        .sessions
-        .iter()
-        .filter(|durable| {
-            durable.status == ReviewSessionStatus::Open
-                && durable.target.repo.as_deref() == Some(&session.repo.display().to_string())
-                && durable.target.base.as_deref() == Some(&session.target.base)
-                && durable.target.revision.as_deref() == Some(&session.target.rev)
-        })
-        .flat_map(|durable| durable.walkthroughs.iter())
-        .flat_map(|walkthrough| walkthrough.steps.iter())
-        .collect()
+    crate::review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
+    .into_iter()
+    .flat_map(|durable| durable.walkthroughs.iter())
+    .flat_map(|walkthrough| walkthrough.steps.iter())
+    .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1553,7 +1551,7 @@ diff --git a/b.rs b/b.rs
 
         session.sessions.push(crate::state::ReviewSession {
             target: crate::state::ReviewTarget {
-                repo: Some(session.repo.display().to_string()),
+                repo: Some(crate::review::canonical_repo_identity(&session.repo)),
                 base: Some(session.target.base.clone()),
                 revision: Some(session.target.rev.clone()),
                 ..Default::default()

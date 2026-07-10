@@ -5,7 +5,7 @@ use chrono::Utc;
 use crate::{
     app::ReviewSession,
     diff::DiffLineKind,
-    state::{ActionItem, Comment, ReviewSessionStatus, ReviewState, ReviewTarget},
+    state::{ActionItem, Comment, ReviewState, ReviewTarget},
 };
 
 pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
@@ -133,11 +133,12 @@ fn active_durable_session<'a>(
     session: &ReviewSession,
     state: &'a ReviewState,
 ) -> Option<&'a crate::state::ReviewSession> {
-    state.sessions.iter().find(|durable| {
-        durable.status == ReviewSessionStatus::Open
-            && durable.target.base.as_deref() == Some(session.target.base.as_str())
-            && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
-    })
+    crate::review::active_session_for_loaded_review(
+        &state.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
 }
 
 fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
@@ -290,11 +291,67 @@ fn render_comment(out: &mut String, comment: &Comment) {
     esc_to(out, &line_range(comment.line, comment.end_line));
     out.push_str("</span></div><p>");
     esc_to(out, &comment.body);
+    out.push_str("</p><p class=\"provenance\"><strong>Observation:</strong> ");
+    match &comment.observation {
+        Some(observation) => {
+            esc_to(
+                out,
+                short_fingerprint(&observation.snapshot.scope.aggregate),
+            );
+        }
+        None => out.push_str("snapshot unavailable (legacy; target label is not proof)"),
+    }
     for reply in &comment.replies {
         out.push_str("</p><p class=\"reply\"><strong>Reply:</strong> ");
         esc_to(out, &reply.body);
+        out.push_str(" <span class=\"provenance\">");
+        match &reply.result {
+            Some(result) => {
+                out.push_str("snapshot ");
+                esc_to(out, short_fingerprint(&result.snapshot.scope.aggregate));
+                out.push_str("; against observation: ");
+                match result.observation_aggregate_fingerprint.as_deref() {
+                    Some(fingerprint) => esc_to(out, short_fingerprint(fingerprint)),
+                    None => out.push_str("unavailable (legacy comment)"),
+                }
+                out.push_str("; relation: ");
+                match &result.related {
+                    crate::provenance::RelatedTransition::SamePath { path } => {
+                        out.push_str("same_path ");
+                        esc_to(out, path);
+                    }
+                    crate::provenance::RelatedTransition::RenamedFrom { old_path, path } => {
+                        out.push_str("renamed_from ");
+                        esc_to(out, old_path);
+                        out.push_str(" to ");
+                        esc_to(out, path);
+                    }
+                    crate::provenance::RelatedTransition::NotInDiff { path } => {
+                        out.push_str("not_in_diff");
+                        if let Some(path) = path {
+                            out.push(' ');
+                            esc_to(out, path);
+                        } else {
+                            out.push_str(" (general comment)");
+                        }
+                    }
+                }
+                out.push_str("; portable patch changed: ");
+                out.push_str(match result.portable_patch_changed {
+                    Some(true) => "yes",
+                    Some(false) => "no",
+                    None => "unknown",
+                });
+            }
+            None => out.push_str("result snapshot unavailable (legacy)"),
+        }
+        out.push_str("</span>");
     }
     out.push_str("</p></article>");
+}
+
+fn short_fingerprint(value: &str) -> &str {
+    value.get(..12).unwrap_or(value)
 }
 
 fn render_target_link(out: &mut String, target: &ReviewTarget) {
@@ -419,6 +476,7 @@ mod tests {
         state.sessions.push(crate::state::ReviewSession {
             id: "s1".into(),
             target: ReviewTarget {
+                repo: Some("/repo".into()),
                 base: Some("main".into()),
                 revision: Some("@".into()),
                 ..Default::default()
@@ -473,7 +531,106 @@ mod tests {
         assert!(html.contains("comment body"));
         assert!(html.contains("Step title"));
         assert!(html.contains("Address comment"));
+        assert!(html.contains("snapshot unavailable (legacy; target label is not proof)"));
         assert_eq!(html.matches("comment body").count(), 1);
+    }
+
+    #[test]
+    fn html_concisely_renders_embedded_observation_and_reply_result() {
+        let (session, mut state) = fixture();
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            "s1",
+            state.sessions[0].target.clone(),
+            session.files.iter().map(|file| &file.diff),
+        );
+        let observation = crate::provenance::CommentObservation::new(
+            snapshot.clone(),
+            Some(crate::anchor::CommentAnchor::File {
+                path: "src/lib.rs".into(),
+                old_path: None,
+                diff_fingerprint: session.files[0].fingerprint.clone(),
+            }),
+        );
+        state.comments[0].observation = Some(observation.clone());
+        state.comments[0].replies.push(crate::state::CommentReply {
+            id: "reply".into(),
+            body: "done".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            result: Some(crate::provenance::CommentReplyResult::compare(
+                "c1",
+                Some(&observation),
+                Some("src/lib.rs"),
+                snapshot,
+            )),
+        });
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("<strong>Observation:</strong>"));
+        assert!(html.contains("portable patch changed: no"));
+        assert!(html.contains("done"));
+    }
+
+    #[test]
+    fn html_renders_rename_not_in_diff_and_missing_a_b_language() {
+        let (session, mut state) = fixture();
+        let renamed = DiffSet::parse(
+            "diff --git a/src/lib.rs b/src/new.rs\nsimilarity index 100%\nrename from src/lib.rs\nrename to src/new.rs",
+        )
+        .unwrap();
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            "s1",
+            state.sessions[0].target.clone(),
+            renamed.files.iter(),
+        );
+        state.comments[0].replies.extend([
+            crate::state::CommentReply {
+                id: "rename".into(),
+                body: "renamed".into(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: Some(crate::provenance::CommentReplyResult {
+                    parent_comment_id: "c1".into(),
+                    observation_aggregate_fingerprint: Some("abcdef1234567890".into()),
+                    snapshot: snapshot.clone(),
+                    related: crate::provenance::RelatedTransition::RenamedFrom {
+                        old_path: "src/lib.rs".into(),
+                        path: "src/new.rs".into(),
+                    },
+                    portable_patch_changed: None,
+                }),
+            },
+            crate::state::CommentReply {
+                id: "missing-a".into(),
+                body: "gone".into(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: Some(crate::provenance::CommentReplyResult {
+                    parent_comment_id: "c1".into(),
+                    observation_aggregate_fingerprint: None,
+                    snapshot,
+                    related: crate::provenance::RelatedTransition::NotInDiff {
+                        path: Some("src/lib.rs".into()),
+                    },
+                    portable_patch_changed: None,
+                }),
+            },
+            crate::state::CommentReply {
+                id: "missing-b".into(),
+                body: "legacy reply".into(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: None,
+            },
+        ]);
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("against observation: abcdef123456"));
+        assert!(html.contains("relation: renamed_from src/lib.rs to src/new.rs"));
+        assert!(html.contains("against observation: unavailable (legacy comment)"));
+        assert!(html.contains("relation: not_in_diff src/lib.rs"));
+        assert!(html.contains("result snapshot unavailable (legacy)"));
+        assert!(html.contains("snapshot unavailable (legacy; target label is not proof)"));
     }
 
     #[test]
@@ -543,6 +700,21 @@ mod tests {
         assert!(html.contains("Step title"));
         assert!(!html.contains("Foreign action item"));
         assert!(!html.contains("Foreign step"));
+    }
+
+    #[test]
+    fn html_active_session_requires_matching_repo_identity() {
+        let (session, mut state) = fixture();
+        let mut wrong = state.sessions[0].clone();
+        wrong.id = "wrong-repo".into();
+        wrong.target.repo = Some("/other-repo".into());
+        wrong.action_items[0].title = "Wrong repo action".into();
+        state.sessions.insert(0, wrong);
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("Address comment"));
+        assert!(!html.contains("Wrong repo action"));
     }
 
     #[test]

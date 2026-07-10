@@ -5,6 +5,7 @@
 
 use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
+use std::path::Path;
 
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
@@ -110,6 +111,31 @@ fn target_matches(actual: &ReviewTarget, spec: &SessionTargetSpec) -> bool {
     actual.repo == spec.repo && actual.base == spec.base && actual.revision == spec.revision
 }
 
+pub fn canonical_repo_identity(repo: &Path) -> String {
+    repo.canonicalize()
+        .unwrap_or_else(|_| repo.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// Locate the active durable session for an already-loaded review. All
+/// renderers and TUI open-work surfaces must use the same repo/base/revision
+/// identity so a same-shaped target from another repository cannot leak in.
+pub fn active_session_for_loaded_review<'a>(
+    sessions: &'a [ReviewSession],
+    repo: &Path,
+    base: &str,
+    revision: &str,
+) -> Option<&'a ReviewSession> {
+    let repo = canonical_repo_identity(repo);
+    sessions.iter().find(|session| {
+        session.status == ReviewSessionStatus::Open
+            && session.target.repo.as_deref() == Some(repo.as_str())
+            && session.target.base.as_deref() == Some(base)
+            && session.target.revision.as_deref() == Some(revision)
+    })
+}
+
 pub fn list_sessions(state: &ReviewState) -> Vec<SessionSummary> {
     state.sessions.iter().map(session_summary).collect()
 }
@@ -172,6 +198,8 @@ pub struct NewComment {
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub anchor: Option<crate::anchor::CommentAnchor>,
+    /// Immutable evidence of the already-loaded review scope at creation.
+    pub observation: Option<crate::provenance::CommentObservation>,
     pub body: String,
     pub kind: Option<CommentKind>,
     pub action: Option<ActionIntent>,
@@ -217,6 +245,7 @@ pub fn add_comment(
         line: new.line,
         end_line: new.end_line,
         anchor: new.anchor,
+        observation: new.observation,
         body: new.body,
         kind: new.kind,
         action: new.action,
@@ -364,8 +393,9 @@ pub fn reply_to_comment(
     comments: &mut [Comment],
     id: &str,
     body: String,
+    snapshot: crate::provenance::SnapshotEvidence,
 ) -> Result<Comment> {
-    reply_and_maybe_resolve_comment(session, comments, id, body, false)
+    reply_and_maybe_resolve_comment(session, comments, id, body, false, snapshot)
 }
 
 pub fn reply_and_maybe_resolve_comment(
@@ -374,6 +404,7 @@ pub fn reply_and_maybe_resolve_comment(
     id: &str,
     body: String,
     resolve: bool,
+    snapshot: crate::provenance::SnapshotEvidence,
 ) -> Result<Comment> {
     validate_body(&body, "reply body")?;
     let canonical_id = resolve_comment_id(comments, id)?;
@@ -383,10 +414,17 @@ pub fn reply_and_maybe_resolve_comment(
         .expect("resolved comment id must exist");
     ensure_comment_belongs_to_session(comment, session)?;
     let now = chrono::Utc::now();
+    let result = crate::provenance::CommentReplyResult::compare(
+        comment.id.clone(),
+        comment.observation.as_ref(),
+        comment.path.as_deref(),
+        snapshot,
+    );
     comment.replies.push(CommentReply {
         id: uuid::Uuid::new_v4().to_string(),
         body,
         created_at: now,
+        result: Some(result),
     });
     if resolve {
         comment.state = CommentState::Resolved;
@@ -1087,6 +1125,14 @@ fn touch_at(session: &mut ReviewSession, now: chrono::DateTime<chrono::Utc>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn snapshot() -> crate::provenance::SnapshotEvidence {
+        crate::provenance::SnapshotEvidence::capture(
+            chrono::Utc::now(),
+            "session",
+            ReviewTarget::default(),
+            std::iter::empty(),
+        )
+    }
     fn spec() -> SessionTargetSpec {
         SessionTargetSpec {
             repo: Some("r".into()),
@@ -1328,10 +1374,24 @@ mod tests {
             ..Default::default()
         }];
 
-        let replied = reply_to_comment(&mut session, &mut comments, "abc", "done".into()).unwrap();
+        let replied = reply_to_comment(
+            &mut session,
+            &mut comments,
+            "abc",
+            "done".into(),
+            snapshot(),
+        )
+        .unwrap();
         assert_eq!(replied.replies.len(), 1);
         assert_eq!(replied.state, CommentState::Draft);
         assert!(replied.updated_at.is_some());
+        let legacy_result = replied.replies[0].result.as_ref().unwrap();
+        assert_eq!(legacy_result.observation_aggregate_fingerprint, None);
+        assert_eq!(legacy_result.portable_patch_changed, None);
+        assert_eq!(
+            legacy_result.related,
+            crate::provenance::RelatedTransition::NotInDiff { path: None }
+        );
 
         let resolved = reply_and_maybe_resolve_comment(
             &mut session,
@@ -1339,11 +1399,14 @@ mod tests {
             "abc",
             "fixed".into(),
             true,
+            snapshot(),
         )
         .unwrap();
         assert_eq!(resolved.replies.len(), 2);
         assert_eq!(resolved.state, CommentState::Resolved);
-        assert!(reply_to_comment(&mut session, &mut comments, "abc", "  ".into()).is_err());
+        assert!(
+            reply_to_comment(&mut session, &mut comments, "abc", "  ".into(), snapshot()).is_err()
+        );
     }
 
     fn scoped_comment(id: &str, session_id: Option<&str>, state: CommentState) -> Comment {
@@ -1374,6 +1437,7 @@ mod tests {
                 line: None,
                 end_line: None,
                 anchor: None,
+                observation: None,
                 body: "Overall concern".into(),
                 kind: Some(CommentKind::Issue),
                 action: Some(ActionIntent::Explain),
@@ -1398,6 +1462,7 @@ mod tests {
                 line: None,
                 end_line: None,
                 anchor: None,
+                observation: None,
                 body: "body".into(),
                 kind: None,
                 action: None,
@@ -1561,7 +1626,16 @@ mod tests {
             )
             .is_err()
         );
-        assert!(reply_to_comment(&mut session, &mut comments, "foreign-", "reply".into()).is_err());
+        assert!(
+            reply_to_comment(
+                &mut session,
+                &mut comments,
+                "foreign-",
+                "reply".into(),
+                snapshot(),
+            )
+            .is_err()
+        );
         assert!(delete_comment(&mut session, &mut comments, "foreign-").is_err());
         assert_eq!(comments, vec![foreign]);
         assert!(session.updated_at.is_none());

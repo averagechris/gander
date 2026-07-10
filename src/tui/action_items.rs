@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crate::{
     app::ReviewSession,
     review,
-    state::{ActionIntent, CommentState, ReviewSessionStatus, ReviewTarget},
+    state::{ActionIntent, CommentState, ReviewTarget},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,11 +62,12 @@ impl OpenWorkListState {
 }
 
 fn open_work_rows(session: &ReviewSession) -> Vec<OpenWorkRow> {
-    let durable = session.sessions.iter().find(|durable| {
-        durable.status == ReviewSessionStatus::Open
-            && durable.target.base.as_deref() == Some(session.target.base.as_str())
-            && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
-    });
+    let durable = review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    );
     let mut rows = Vec::new();
     let mut nested_comment_ids = BTreeSet::new();
 
@@ -198,6 +199,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn open_work_requires_matching_repo_identity() {
+        let mut session = open_work_session();
+        let mut wrong = session.sessions[0].clone();
+        wrong.id = "wrong-repo".into();
+        wrong.target.repo = Some("/other-repo".into());
+        wrong.action_items[0].title = "Wrong repo action".into();
+        session.sessions.insert(0, wrong);
+
+        let state = OpenWorkListState::new(&session);
+
+        assert!(state.rows.iter().any(|row| matches!(
+            row,
+            OpenWorkRow::ActionItem { title, .. } if title == "Open durable item"
+        )));
+        assert!(!state.rows.iter().any(|row| matches!(
+            row,
+            OpenWorkRow::ActionItem { title, .. } if title == "Wrong repo action"
+        )));
     }
 
     #[test]

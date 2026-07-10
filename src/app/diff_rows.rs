@@ -100,7 +100,7 @@ impl ReviewSession {
             gap: None,
         }];
 
-        if file.status == crate::diff::FileStatus::Binary {
+        if file.diff.is_binary() {
             rows.push(placeholder_row(
                 "binary file: contents not rendered (mark viewed with v/enter)",
             ));

@@ -39,9 +39,13 @@ gander handoff --copy
 gander hunks show <hunk-id>
 ```
 
-Review state schema remains 2 and records optional comment `session_id` and
-`path` fields plus normalized `action_items` when legacy `tasks` state is read.
-Artifact schema 7 and delegation schema 3 expose the action-item shape.
+Review state schema 3 records optional comment `session_id`, `path`, immutable
+observations, and reply results, plus normalized `action_items` when legacy
+`tasks` state is read.
+Artifact schema 8 and delegation schema 4 expose action-item shape plus
+portable comment-observation and reply-result evidence. A snapshot label or an
+unchanged portable patch is context, not proof that the requested outcome was
+implemented or tested; report actual verification separately.
 State/artifact readers still accept older anchored comments unchanged. A legacy
 comment with no `session_id` remains visible in the active session, while a
 pathless comment is explicitly general to its owning session.
@@ -61,7 +65,10 @@ to its per-instance socket. That means:
 - several instances in the same workspace resolve to the most recently
   touched one (`last_input_at`);
 - without a running TUI, tools serve a snapshot loaded at startup — still
-  useful for headless review passes.
+  useful for headless review passes;
+- durable MCP comments/replies obtain provenance and anchors from that same
+  selected live-or-snapshot session, including its active target; they do not
+  fall back to stale startup fingerprints when a live TUI is selected.
 
 Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (file/line/hunk the human is looking at right now),
@@ -115,7 +122,7 @@ scriptable surface.
 | `action_item_unlink_comment` | `gander action-items unlink-comment <id> --comment <comment-id>` |
 | `action_item_add_ticket` | `gander action-items add-ticket <id> --ticket <ref>` |
 | `action_item_remove_ticket` | `gander action-items remove-ticket <id> --ticket <ref>` |
-| `action_item_close` | `gander action-items close <id> --disposition completed|dismissed|deferred [--summary <text>] [--ticket <ref>]` |
+| `action_item_close` | `gander action-items close <id> --disposition completed|dismissed|deferred [--outcome <text>]` (use `add-ticket` before a deferred close) |
 | `action_item_reopen` | `gander action-items reopen <id>` |
 | `action_item_delete` | `gander action-items delete <id>` |
 | `walkthrough_add_step` | `gander walkthrough add-step --title <title> [--file <path>] [--line <n>] [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]` |

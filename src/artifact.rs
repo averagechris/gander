@@ -34,6 +34,7 @@ pub struct ArtifactBuildOptions {
 }
 
 const EXCERPT_CONTEXT_LINES: usize = 3;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 8;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -190,7 +191,7 @@ pub struct ImportSummary {
 impl Default for OwnedReviewArtifact {
     fn default() -> Self {
         Self {
-            version: 7,
+            version: ARTIFACT_SCHEMA_VERSION,
             base: String::new(),
             revision: String::new(),
             files: Vec::new(),
@@ -226,7 +227,7 @@ impl<'a> ReviewArtifact<'a> {
             .collect::<BTreeSet<_>>();
 
         Self {
-            version: 7,
+            version: ARTIFACT_SCHEMA_VERSION,
             generated_at: Utc::now(),
             repo: &session.repo,
             base: &session.target.base,
@@ -365,6 +366,8 @@ pub fn render_handoff_json(
                 "excerpt": comment.excerpt,
                 "body": comment.comment.body,
                 "state": comment.comment.state,
+                "observation": comment.comment.observation,
+                "replies": comment.comment.replies,
                 "linked_action_item_ids": comment.linked_action_item_ids,
             }),
         })
@@ -443,6 +446,7 @@ fn comment_handoff_value(comment: &CommentArtifact<'_>) -> serde_json::Value {
         "end_line": comment.comment.end_line,
         "body": comment.comment.body,
         "state": comment.comment.state,
+        "observation": comment.comment.observation,
         "replies": comment.comment.replies,
         "excerpt": comment.excerpt,
     })
@@ -458,11 +462,12 @@ pub fn render_handoff_markdown(
 }
 
 fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::ReviewSession> {
-    session.sessions.iter().find(|durable| {
-        durable.status == crate::state::ReviewSessionStatus::Open
-            && durable.target.base.as_deref() == Some(session.target.base.as_str())
-            && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
-    })
+    crate::review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
 }
 
 fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
@@ -596,22 +601,14 @@ pub fn import_json_artifact_into_state(
             .find(|existing| existing.id == comment.id)
         {
             let before = existing.clone();
-            for reply in &comment.replies {
-                if !existing
-                    .replies
-                    .iter()
-                    .any(|current| current.id == reply.id)
-                {
-                    existing.replies.push(reply.clone());
-                }
-            }
-            existing
-                .replies
-                .sort_by_key(|reply| (reply.created_at, reply.id.clone()));
+            crate::state::merge_comment_observation(existing, comment);
+            crate::state::merge_comment_replies(existing, comment);
             if comment.updated_at > existing.updated_at {
                 let replies = existing.replies.clone();
+                let observation = existing.observation.clone();
                 *existing = comment.clone();
                 existing.replies = replies;
+                existing.observation = observation;
             }
             if *existing == before {
                 summary.duplicate_comments_skipped += 1;
@@ -704,6 +701,7 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
     } else {
         for comment in &artifact.comments {
             write_comment_heading(&mut out, comment.comment);
+            write_comment_provenance(&mut out, comment.comment, "");
             out.push_str(&format!("Status: {}\n\n", comment.comment.state.label()));
             out.push_str(comment.comment.body.trim());
             out.push_str("\n\n");
@@ -875,6 +873,7 @@ fn write_open_work(artifact: &ReviewArtifact<'_>, out: &mut String) {
                     out.push_str(": ");
                     out.push_str(comment.comment.body.trim());
                     out.push('\n');
+                    write_comment_provenance(out, comment.comment, "    ");
                     write_comment_replies_indented(out, comment.comment, "    ");
                     write_excerpt_indented(out, comment.excerpt.as_deref(), "    ");
                 }
@@ -897,6 +896,7 @@ fn write_open_work(artifact: &ReviewArtifact<'_>, out: &mut String) {
                 out.push_str(&format!(
                     "\n  Selector: `{selector}`; reply: `gander {globals} comments reply {selector} --body <text>`; resolve: `gander {globals} comments resolve {selector} --reply <text>`\n"
                 ));
+                write_comment_provenance(out, comment.comment, "  ");
                 write_comment_replies(out, comment.comment);
                 write_excerpt(out, comment.excerpt.as_deref());
             }
@@ -932,6 +932,7 @@ fn write_other_comments(artifact: &ReviewArtifact<'_>, out: &mut String) {
         }
         wrote = true;
         write_comment_heading(out, comment.comment);
+        write_comment_provenance(out, comment.comment, "");
         out.push_str(&format!(
             "Status: {}; kind: {}; action: {}\n\n",
             comment.comment.state.label(),
@@ -1280,8 +1281,55 @@ fn write_comment_replies_indented(out: &mut String, comment: &Comment, indent: &
             reply.created_at,
             reply.body.trim()
         ));
+        match &reply.result {
+            Some(result) => {
+                let against = result
+                    .observation_aggregate_fingerprint
+                    .as_deref()
+                    .unwrap_or("null (legacy observation unavailable)");
+                out.push_str(&format!(
+                    "{indent}  Result snapshot: `{}`; against: `{against}`; relation: {}; portable patch changed: {}.\n",
+                    result.snapshot.scope.aggregate,
+                    related_transition_label(&result.related),
+                    result
+                        .portable_patch_changed
+                        .map(|changed| if changed { "yes" } else { "no" })
+                        .unwrap_or("unknown"),
+                ));
+            }
+            None => out.push_str(&format!(
+                "{indent}  Result snapshot unavailable (legacy reply).\n"
+            )),
+        }
     }
     out.push('\n');
+}
+
+fn write_comment_provenance(out: &mut String, comment: &Comment, indent: &str) {
+    match &comment.observation {
+        Some(observation) => out.push_str(&format!(
+            "{indent}Observation snapshot: `{}` (scope v{}, captured `{}`).\n",
+            observation.snapshot.scope.aggregate,
+            observation.snapshot.scope.version,
+            observation.snapshot.captured_at,
+        )),
+        None => out.push_str(&format!(
+            "{indent}Observation snapshot unavailable (legacy comment; target labels are context, not proof).\n"
+        )),
+    }
+}
+
+fn related_transition_label(related: &crate::provenance::RelatedTransition) -> String {
+    match related {
+        crate::provenance::RelatedTransition::SamePath { path } => format!("same_path `{path}`"),
+        crate::provenance::RelatedTransition::RenamedFrom { old_path, path } => {
+            format!("renamed_from `{old_path}` to `{path}`")
+        }
+        crate::provenance::RelatedTransition::NotInDiff { path } => path
+            .as_deref()
+            .map(|path| format!("not_in_diff `{path}`"))
+            .unwrap_or_else(|| "not_in_diff (general comment)".to_owned()),
+    }
 }
 
 #[cfg(test)]
@@ -1301,6 +1349,7 @@ mod tests {
                 id: "active".into(),
                 title: Some("Current review".into()),
                 target: ReviewTarget {
+                    repo: Some("/repo".into()),
                     base: Some("main".into()),
                     revision: Some("@".into()),
                     ..Default::default()
@@ -1371,6 +1420,7 @@ mod tests {
                     id: "reply".into(),
                     body: "extra evidence".into(),
                     created_at: chrono::DateTime::UNIX_EPOCH,
+                    result: None,
                 }],
                 ..Default::default()
             },
@@ -1411,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn full_artifact_schema_seven_exposes_durable_action_item_fields_and_links() {
+    fn full_artifact_schema_eight_exposes_durable_action_item_fields_and_links() {
         let mut session = fixture();
         let closed = ActionItem {
             id: "action-closed".into(),
@@ -1438,8 +1488,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(value["version"], 7);
+        assert_eq!(value["version"], ARTIFACT_SCHEMA_VERSION);
         assert_eq!(value["action_items"].as_array().unwrap().len(), 2);
+        assert_eq!(value["action_items"][0]["comment_ids"][0], "linked");
+        assert!(value["action_items"][0].get("linked_comment_ids").is_none());
+        assert!(value["action_items"][0].get("close_disposition").is_none());
         assert_eq!(
             value["comments"][0]["linked_action_item_ids"][0],
             "action-open"
@@ -1453,6 +1506,16 @@ mod tests {
         assert_eq!(
             value["action_items"][1]["closed_at"],
             "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(value["walkthroughs"][0]["steps"][0]["kind"], "step");
+        assert_eq!(
+            value["walkthroughs"][0]["steps"][0]["importance"],
+            "spotlight"
+        );
+        assert!(
+            value["walkthroughs"][0]["steps"][0]
+                .get("change_id")
+                .is_none()
         );
     }
 
@@ -1538,6 +1601,24 @@ mod tests {
     }
 
     #[test]
+    fn artifact_active_session_requires_matching_repo_identity() {
+        let mut session = fixture();
+        let mut wrong = session.sessions[0].clone();
+        wrong.id = "wrong-repo".into();
+        wrong.target.repo = Some("/other-repo".into());
+        wrong.title = Some("Wrong repo".into());
+        wrong.action_items[0].title = "wrong repo action".into();
+        session.sessions.insert(0, wrong);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_artifact(&session, ArtifactFormat::Json).unwrap())
+                .unwrap();
+
+        assert_eq!(value["session"]["id"], "active");
+        assert!(!value.to_string().contains("wrong repo action"));
+    }
+
+    #[test]
     fn agent_profile_contains_hunks_and_handoff_limits_general_comment_reference() {
         let session = fixture();
         let full: serde_json::Value = serde_json::from_str(
@@ -1566,7 +1647,7 @@ mod tests {
     fn import_preserves_backward_artifact_deserialization() {
         let artifact: OwnedReviewArtifact = serde_json::from_str(
             r#"{
-  "version": 5,
+  "version": 7,
   "base": "trunk()",
   "revision": "@",
   "files": [{ "path": "src/lib.rs", "viewed": true, "fingerprint": "abc" }],
@@ -1575,7 +1656,12 @@ mod tests {
     "path": "src/lib.rs",
     "body": "legacy body",
     "state": "todo",
-    "created_at": "2026-06-30T00:00:00Z"
+    "created_at": "2026-06-30T00:00:00Z",
+    "replies": [{
+      "id": "legacy-reply",
+      "body": "legacy result",
+      "created_at": "2026-06-30T00:01:00Z"
+    }]
   }]
 }"#,
         )
@@ -1591,10 +1677,160 @@ mod tests {
 
         let summary = import_json_artifact_into_state(&mut state, &artifact);
 
-        assert_eq!(artifact.version, 5);
+        assert_eq!(artifact.version, 7);
         assert_eq!(summary.viewed_files_imported, 1);
         assert_eq!(summary.comments_imported, 1);
         assert_eq!(state.comments[0].session_id, None);
+        assert!(state.comments[0].observation.is_none());
+        assert!(state.comments[0].replies[0].result.is_none());
+    }
+
+    #[test]
+    fn artifact_handoff_and_markdown_carry_provenance_and_missing_language() {
+        let mut session = fixture();
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            "active",
+            session.sessions[0].target.clone(),
+            session.files.iter().map(|file| &file.diff),
+        );
+        let observation = crate::provenance::CommentObservation::new(
+            snapshot.clone(),
+            Some(crate::anchor::CommentAnchor::File {
+                path: "a.txt".into(),
+                old_path: None,
+                diff_fingerprint: session.files[0].fingerprint.clone(),
+            }),
+        );
+        session.comments[0].observation = Some(observation.clone());
+        session.comments[0].replies[0].result =
+            Some(crate::provenance::CommentReplyResult::compare(
+                "linked",
+                Some(&observation),
+                Some("a.txt"),
+                snapshot,
+            ));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_artifact(&session, ArtifactFormat::Json).unwrap())
+                .unwrap();
+        assert_eq!(json["version"], ARTIFACT_SCHEMA_VERSION);
+        assert!(json["comments"][0]["observation"]["snapshot"]["scope"]["aggregate"].is_string());
+        assert!(json["comments"][0]["replies"][0]["result"]["snapshot"].is_object());
+
+        let handoff = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
+        assert!(handoff.contains("observation_aggregate_fingerprint"));
+        let markdown = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
+        assert!(markdown.contains("Observation snapshot:"));
+        assert!(markdown.contains("Result snapshot:"));
+        assert!(markdown.contains("Observation snapshot unavailable (legacy comment"));
+    }
+
+    #[test]
+    fn import_enriches_missing_same_id_reply_result() {
+        let reply = CommentReply {
+            id: "reply".into(),
+            body: "done".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            result: None,
+        };
+        let comment = Comment {
+            id: "comment".into(),
+            replies: vec![reply],
+            ..Default::default()
+        };
+        let mut state = ReviewState {
+            comments: vec![comment.clone()],
+            ..Default::default()
+        };
+        let mut imported = comment;
+        let snapshot = crate::provenance::SnapshotEvidence::capture(
+            chrono::DateTime::UNIX_EPOCH,
+            "session",
+            ReviewTarget::default(),
+            std::iter::empty(),
+        );
+        imported.replies[0].result = Some(crate::provenance::CommentReplyResult::compare(
+            "comment", None, None, snapshot,
+        ));
+        imported.observation = Some(crate::provenance::CommentObservation::new(
+            imported.replies[0]
+                .result
+                .as_ref()
+                .unwrap()
+                .snapshot
+                .clone(),
+            None,
+        ));
+        let artifact = OwnedReviewArtifact {
+            version: ARTIFACT_SCHEMA_VERSION,
+            comments: vec![imported],
+            ..Default::default()
+        };
+
+        let summary = import_json_artifact_into_state(&mut state, &artifact);
+
+        assert_eq!(summary.comments_imported, 1);
+        assert!(state.comments[0].replies[0].result.is_some());
+        assert!(state.comments[0].observation.is_some());
+    }
+
+    #[test]
+    fn import_equal_timestamp_reply_conflicts_converge_bidirectionally() {
+        fn comment(body: &str, result_session: &str) -> Comment {
+            let snapshot = crate::provenance::SnapshotEvidence::capture(
+                chrono::DateTime::UNIX_EPOCH,
+                result_session,
+                ReviewTarget::default(),
+                std::iter::empty(),
+            );
+            Comment {
+                id: "comment".into(),
+                replies: vec![CommentReply {
+                    id: "reply".into(),
+                    body: body.into(),
+                    created_at: chrono::DateTime::UNIX_EPOCH,
+                    result: Some(crate::provenance::CommentReplyResult::compare(
+                        "comment", None, None, snapshot,
+                    )),
+                }],
+                ..Default::default()
+            }
+        }
+        let left = comment("z metadata", "left-result");
+        let right = comment("a metadata", "right-result");
+        let mut left_state = ReviewState {
+            comments: vec![left.clone()],
+            ..Default::default()
+        };
+        let mut right_state = ReviewState {
+            comments: vec![right.clone()],
+            ..Default::default()
+        };
+
+        import_json_artifact_into_state(
+            &mut left_state,
+            &OwnedReviewArtifact {
+                version: ARTIFACT_SCHEMA_VERSION,
+                comments: vec![right],
+                ..Default::default()
+            },
+        );
+        import_json_artifact_into_state(
+            &mut right_state,
+            &OwnedReviewArtifact {
+                version: ARTIFACT_SCHEMA_VERSION,
+                comments: vec![left],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            left_state.comments[0].replies,
+            right_state.comments[0].replies
+        );
+        assert_eq!(left_state.comments[0].replies[0].body, "a metadata");
+        assert!(left_state.comments[0].replies[0].result.is_some());
     }
 
     #[test]

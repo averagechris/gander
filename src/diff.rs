@@ -49,6 +49,18 @@ impl fmt::Display for FileStatus {
     }
 }
 
+impl FileDiff {
+    /// Whether this patch carries binary content independently of its
+    /// structural rename/copy status.
+    pub fn is_binary(&self) -> bool {
+        self.status == FileStatus::Binary
+            || self
+                .raw
+                .lines()
+                .any(|line| line.starts_with("Binary files ") || line == "GIT binary patch")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hunk {
     pub old_start: usize,
@@ -159,6 +171,7 @@ struct FileDiffBuilder {
     new_line: usize,
     additions: usize,
     deletions: usize,
+    binary: bool,
     raw: String,
 }
 
@@ -201,7 +214,7 @@ impl FileDiffBuilder {
             self.status = FileStatus::Copied;
             self.path = Some(parse_bare_path(rest));
         } else if in_header && (line.starts_with("Binary files ") || line == "GIT binary patch") {
-            self.status = FileStatus::Binary;
+            self.binary = true;
         } else if in_header && let Some(rest) = line.strip_prefix("--- ") {
             if let Some(parsed) = parse_marker_path(rest, "a/") {
                 self.old_path = Some(parsed);
@@ -281,10 +294,16 @@ impl FileDiffBuilder {
         let fingerprint = format!("{:x}", hasher.finalize());
 
         let path = self.path.unwrap_or_else(|| "<unknown>".to_owned());
+        let status =
+            if self.binary && !matches!(self.status, FileStatus::Renamed | FileStatus::Copied) {
+                FileStatus::Binary
+            } else {
+                self.status
+            };
         FileDiff {
             old_path: self.old_path.filter(|old| *old != path),
             path,
-            status: self.status,
+            status,
             additions: self.additions,
             deletions: self.deletions,
             hunks: self.hunks,
@@ -668,6 +687,24 @@ LcmZQzU|;|M0Ha
         assert_eq!(diff.files[0].status, FileStatus::Binary);
         assert_eq!(diff.files[0].path, "logo.png");
         assert!(diff.files[0].hunks.is_empty());
+        assert!(diff.files[0].is_binary());
+    }
+
+    #[test]
+    fn binary_rename_and_copy_keep_structural_status() {
+        let renamed = DiffSet::parse(
+            "diff --git a/old.bin b/new.bin\nsimilarity index 50%\nrename from old.bin\nrename to new.bin\nBinary files a/old.bin and b/new.bin differ",
+        )
+        .unwrap();
+        assert_eq!(renamed.files[0].status, FileStatus::Renamed);
+        assert!(renamed.files[0].is_binary());
+
+        let copied = DiffSet::parse(
+            "diff --git a/old.bin b/copy.bin\nsimilarity index 50%\ncopy from old.bin\ncopy to copy.bin\nBinary files a/old.bin and b/copy.bin differ",
+        )
+        .unwrap();
+        assert_eq!(copied.files[0].status, FileStatus::Copied);
+        assert!(copied.files[0].is_binary());
     }
 
     #[test]
