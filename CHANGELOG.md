@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- Empty `tui --tour` startup now falls back to the normal empty TUI with an
+  informational notice, while terminal acquisition and later exits remain
+  guarded so raw mode, mouse capture, alternate-screen, and cursor state are
+  restored safely.
 
 ## v0.7.0 - 2026-07-10
 

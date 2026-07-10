@@ -42,7 +42,11 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{
+    Terminal,
+    backend::{Backend, CrosstermBackend},
+    layout::Rect,
+};
 
 use crate::{
     agent::{AgentProcess, ChunkPart},
@@ -312,12 +316,15 @@ pub fn run(
     };
 
     enable_raw_mode()?;
+    let raw_mode_guard = RawModeGuard::armed();
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
     // This lets `gander > review.md` capture only the post-quit artifact.
     let mut stderr = io::stderr();
-    execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+    enter_interactive_screen(&mut stderr)?;
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
+    raw_mode_guard.disarm();
+    let mut terminal_lifecycle = TerminalLifecycle::new(&mut terminal);
     let mut mode = Mode::Normal;
 
     // Seed the autosave fingerprint so an unchanged session does not trigger
@@ -343,14 +350,10 @@ pub fn run(
         summon_agent(session, &mut tui_state);
     }
     if start_tour {
-        seed_zen_tour(session, &review_loader, &mut tui_state);
-        if tui_state.zen.is_none() {
-            println!("nothing to tour — no walkthrough steps or changed files in this target");
-            return Ok(());
-        }
+        start_startup_tour_or_notice(session, &review_loader, &mut tui_state);
     }
     let result = run_loop(
-        &mut terminal,
+        terminal_lifecycle.terminal_mut(),
         session,
         &mut mode,
         &keymap,
@@ -362,6 +365,87 @@ pub fn run(
         acp_bridge.as_mut(),
     );
 
+    terminal_lifecycle.restore()?;
+    result
+}
+
+struct RawModeGuard {
+    armed: bool,
+}
+
+impl RawModeGuard {
+    fn armed() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = disable_raw_mode();
+        }
+    }
+}
+
+fn enter_interactive_screen<W: io::Write>(writer: &mut W) -> Result<()> {
+    match execute!(writer, EnterAlternateScreen, EnableMouseCapture) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = execute!(writer, DisableMouseCapture, LeaveAlternateScreen);
+            Err(error.into())
+        }
+    }
+}
+
+struct TerminalLifecycle<'a, B: Backend + io::Write>
+where
+    B::Error: Send + Sync + 'static,
+{
+    terminal: &'a mut Terminal<B>,
+    restored: bool,
+}
+
+impl<'a, B: Backend + io::Write> TerminalLifecycle<'a, B>
+where
+    B::Error: Send + Sync + 'static,
+{
+    fn new(terminal: &'a mut Terminal<B>) -> Self {
+        Self {
+            terminal,
+            restored: false,
+        }
+    }
+
+    fn terminal_mut(&mut self) -> &mut Terminal<B> {
+        self.terminal
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        restore_terminal(self.terminal)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl<B: Backend + io::Write> Drop for TerminalLifecycle<'_, B>
+where
+    B::Error: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = restore_terminal(self.terminal);
+        }
+    }
+}
+
+fn restore_terminal<B: Backend + io::Write>(terminal: &mut Terminal<B>) -> Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -369,7 +453,22 @@ pub fn run(
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
-    result
+    Ok(())
+}
+
+fn start_startup_tour_or_notice(
+    session: &mut ReviewSession,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) {
+    seed_zen_tour(session, review_loader, tui_state);
+    if tui_state.zen.is_none() {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "selected target is empty — no changed files or walkthrough stops; normal review and target-selection controls remain available"
+                .to_owned(),
+        });
+    }
 }
 
 pub fn render_tour_text(
@@ -3930,10 +4029,106 @@ pub(super) mod test_support {
 mod tests {
     use super::{test_support::snapshot_session, *};
     use color_eyre::eyre::bail;
-    use std::{cell::RefCell, path::Path};
+    use std::{cell::RefCell, path::Path, rc::Rc};
 
     use crate::jj::{JjBackend, JjChangeSummary, ReviewTarget};
     use crate::state::{ActionIntent, ActionItem, Comment, CommentKind, CommentState};
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+
+    impl io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_lifecycle_drop_restores_on_post_acquisition_error() {
+        let writer = SharedWriter::default();
+        let output = writer.0.clone();
+        let backend = CrosstermBackend::new(writer);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        {
+            let _lifecycle = TerminalLifecycle::new(&mut terminal);
+            // Once terminal acquisition has succeeded, any later error return must
+            // restore the terminal through Drop.
+        }
+
+        let output = output.borrow();
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output.contains("\u{1b}[?1049l"),
+            "dropping the lifecycle should leave the alternate screen; output={output:?}"
+        );
+        assert!(
+            output.contains("\u{1b}[?1000l"),
+            "dropping the lifecycle should disable mouse capture; output={output:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_lifecycle_explicit_restore_makes_drop_a_noop() {
+        let writer = SharedWriter::default();
+        let output = writer.0.clone();
+        let backend = CrosstermBackend::new(writer);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        {
+            let mut lifecycle = TerminalLifecycle::new(&mut terminal);
+            // Explicit restoration should make Drop a no-op so normal quit and
+            // handled error paths do not emit duplicate cleanup sequences.
+            lifecycle.restore().expect("restore terminal");
+        }
+
+        let output = output.borrow();
+        let output = String::from_utf8_lossy(&output);
+        assert_eq!(
+            output.matches("\u{1b}[?1049l").count(),
+            1,
+            "explicit restore should leave the alternate screen exactly once; output={output:?}"
+        );
+        assert_eq!(
+            output.matches("\u{1b}[?1000l").count(),
+            1,
+            "explicit restore should disable mouse capture exactly once; output={output:?}"
+        );
+    }
+
+    #[test]
+    fn empty_startup_tour_falls_back_to_normal_tui_with_notice() {
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut session = snapshot_session("");
+        let mut tui_state = TuiState::default();
+
+        start_startup_tour_or_notice(&mut session, &loader, &mut tui_state);
+
+        assert!(tui_state.zen.is_none());
+        let notice = tui_state.notice.expect("empty startup tour notice");
+        assert_eq!(notice.level, UiNoticeLevel::Info);
+        assert!(notice.message.contains("selected target is empty"));
+        assert!(
+            notice
+                .message
+                .contains("no changed files or walkthrough stops")
+        );
+        assert!(
+            notice
+                .message
+                .contains("target-selection controls remain available")
+        );
+    }
 
     struct MockJjBackend {
         snapshot_calls: RefCell<usize>,
