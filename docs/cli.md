@@ -283,13 +283,15 @@ artifacts cross-reference each other). Import currently restores only matching
 viewed state and duplicate-safe comments; exported tasks and walkthroughs are
 not restored by `gander import`.
 
-Delegate mode emits an independently versioned `gander_delegation` packet for
-an external human or agent. It selects open work without mutating review state
-or executing verification text:
+Humans read the durable review session directly in the TUI (and future web UI).
+Prompt handoff and delegate mode are outbound adapters for transferring work to
+an external agent or harness. Delegate mode emits an independently versioned
+`gander_delegation` packet for typed orchestration; it selects open work without
+mutating review state or executing verification text:
 
 ```sh
 gander handoff --mode delegate \
-  --task <task-id> --include-comment <comment-id> \
+  --task <task-prefix> --include-comment <comment-prefix> \
   --to implementation-agent \
   --objective "Fix the parser finding and add coverage." \
   --constraint "Preserve the public API." \
@@ -324,8 +326,8 @@ files unless `--force` is supplied. The harness-neutral default directory is
 `~/.agents/skills`; use `--dir` for a project or harness-specific location.
 
 The bundled `gander-review` skill teaches read-only review authoring. The
-`gander-address-review` skill teaches an implementation agent to consume a
-handoff, edit/test through external development tools, and then record honest
+`gander-address-review` skill teaches an implementation agent to consume the
+relevant review state, use the project's normal tools, and then record concise
 reply, resolution, and task-completion evidence in Gander.
 
 ## MCP and ACP

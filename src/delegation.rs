@@ -161,7 +161,7 @@ pub fn build_delegation_packet(
     diff: &DiffSet,
     spec: &DelegationSpec,
 ) -> Result<DelegationPacket> {
-    let selected = select_action_items(session, &state.comments, spec)?;
+    let selected = with_action_selectors(select_action_items(session, &state.comments, spec)?);
     let return_contract = return_contract(&session.target, &selected);
     let paths = selected
         .iter()
@@ -173,7 +173,14 @@ pub fn build_delegation_packet(
         generated_at: chrono::Utc::now(),
         session: SessionMeta {
             id: session.id.clone(),
-            selector: shortest_unique_prefix(&session.id, &[session.id.as_str()]),
+            selector: shortest_unique_prefix(
+                &session.id,
+                &state
+                    .sessions
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<Vec<_>>(),
+            ),
             title: session.title.clone(),
             status: format!("{:?}", session.status).to_lowercase(),
             created_at: session.created_at,
@@ -194,7 +201,7 @@ pub fn build_delegation_packet(
             acceptance_criteria: spec.acceptance_criteria.clone(),
             requested_verification: spec.requested_verification.clone(),
         },
-        action_items: with_action_selectors(selected),
+        action_items: selected,
         walkthrough: walkthrough_context(&session.walkthroughs),
         reference_hunks: reference_hunks(diff, &paths, spec.hunk_context_lines),
         return_contract,
@@ -355,17 +362,17 @@ fn comment_evidence(c: &Comment) -> CommentEvidence {
 fn with_action_selectors(mut items: Vec<DelegatedActionItem>) -> Vec<DelegatedActionItem> {
     let id_strings = items.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
     let ids = id_strings.iter().map(String::as_str).collect::<Vec<_>>();
+    let comment_id_strings = items
+        .iter()
+        .flat_map(|item| item.evidence_comments.iter())
+        .map(|comment| comment.id.clone())
+        .collect::<Vec<_>>();
+    let comment_ids = comment_id_strings
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     for item in &mut items {
         item.selector = shortest_unique_prefix(&item.id, &ids);
-        let comment_id_strings = item
-            .evidence_comments
-            .iter()
-            .map(|comment| comment.id.clone())
-            .collect::<Vec<_>>();
-        let comment_ids = comment_id_strings
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         for comment in &mut item.evidence_comments {
             comment.selector = shortest_unique_prefix(&comment.id, &comment_ids);
         }
@@ -906,5 +913,27 @@ mod tests {
                 .to_string()
                 .contains("already resolved")
         );
+    }
+
+    #[test]
+    fn return_contract_uses_compact_task_selector() {
+        let (mut state, mut session, diff) = fixture();
+        session.tasks[0].id = "12345678-aaaa-bbbb-cccc-000000000000".into();
+        state.sessions = vec![session.clone()];
+
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let task = packet
+            .action_items
+            .iter()
+            .find(|item| item.source == ActionSource::Task)
+            .unwrap();
+        assert_eq!(task.selector, "12345678");
+        assert!(packet.return_contract.commands.iter().any(|command| {
+            command
+                .command
+                .contains("tasks complete 12345678 --summary")
+                && !command.command.contains(&task.id)
+        }));
     }
 }

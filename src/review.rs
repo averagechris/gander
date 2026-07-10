@@ -6,7 +6,7 @@
 use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
 
-use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
+use crate::ids::{MIN_SELECTOR_LEN, resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession,
     ReviewSessionStatus, ReviewState, ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough,
@@ -437,7 +437,14 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
 fn title_from_comment(comment: &Comment) -> String {
     let first = comment.body.trim().lines().next().unwrap_or("").trim();
     if first.is_empty() {
-        format!("comment {}", &comment.id[..comment.id.len().min(8)])
+        format!(
+            "comment {}",
+            comment
+                .id
+                .chars()
+                .take(MIN_SELECTOR_LEN)
+                .collect::<String>()
+        )
     } else if first.chars().count() > 72 {
         format!("{}…", first.chars().take(71).collect::<String>())
     } else {

@@ -343,6 +343,11 @@ pub fn render_handoff_json(
         .walkthroughs
         .iter()
         .flat_map(|walkthrough| {
+            let step_ids = artifact
+                .walkthroughs
+                .iter()
+                .flat_map(|walkthrough| walkthrough.steps.iter().map(|step| step.id))
+                .collect::<Vec<_>>();
             walkthrough
                 .steps
                 .iter()
@@ -350,7 +355,7 @@ pub fn render_handoff_json(
                 .map(move |(index, step)| {
                     serde_json::json!({
                         "id": step.id,
-                        "selector": step.id.get(..8).unwrap_or(step.id),
+                        "selector": shortest_unique_prefix(step.id, &step_ids),
                         "order": index + 1,
                         "kind": step.kind,
                         "importance": step.importance,
@@ -846,8 +851,7 @@ fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
                 }
                 let selector = shortest_unique_prefix(&comment.comment.id, &comment_ids);
                 out.push_str(&format!(
-                    "\n  ID: `{}`; reply: `gander {globals} comments reply {selector} --body <text>`; resolve: `gander {globals} comments resolve {selector} --reply <text>`\n",
-                    comment.comment.id,
+                    "\n  Selector: `{selector}`; reply: `gander {globals} comments reply {selector} --body <text>`; resolve: `gander {globals} comments resolve {selector} --reply <text>`\n"
                 ));
                 write_comment_replies(out, comment.comment);
                 write_excerpt(out, comment.excerpt.as_deref());

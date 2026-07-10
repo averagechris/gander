@@ -1,6 +1,6 @@
 ---
 name: gander-address-review
-description: Address Gander review comments or tasks by editing code externally, then updating durable Gander review state.
+description: Address Gander review comments or tasks, then update durable Gander review state with the outcome.
 ---
 
 # Address a Gander Review

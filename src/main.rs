@@ -2813,7 +2813,25 @@ fn session_hunk_diff(session: &ReviewSession, id: &str) -> Option<String> {
 }
 
 fn session_comments_json(session: &ReviewSession) -> serde_json::Value {
-    serde_json::json!({ "comments": session.comments })
+    let ids = session
+        .comments
+        .iter()
+        .map(|comment| comment.id.as_str())
+        .collect::<Vec<_>>();
+    let comments = session
+        .comments
+        .iter()
+        .map(|comment| {
+            let mut value = serde_json::to_value(comment).expect("comments serialize");
+            if let serde_json::Value::Object(object) = &mut value {
+                let selector = ids::shortest_unique_prefix(&comment.id, &ids);
+                object.insert("selector".into(), selector.clone().into());
+                object.insert("short_id".into(), selector.into());
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "comments": comments })
 }
 
 #[cfg(unix)]
