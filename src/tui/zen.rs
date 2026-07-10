@@ -1013,7 +1013,10 @@ pub(super) fn comments_for_stop<'a>(
     };
     comments
         .iter()
-        .filter(|comment| comment.path == part.path && comment_intersects_part(comment, part))
+        .filter(|comment| {
+            comment.path.as_deref() == Some(part.path.as_str())
+                && comment_intersects_part(comment, part)
+        })
         .collect()
 }
 
@@ -1580,7 +1583,7 @@ diff --git a/b.rs b/b.rs
     fn comment(path: &str, line: Option<usize>, end_line: Option<usize>) -> Comment {
         Comment {
             id: "a3c7b887".to_owned(),
-            path: path.to_owned(),
+            path: Some(path.to_owned()),
             line,
             end_line,
             anchor: None,

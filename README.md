@@ -34,9 +34,9 @@ This repo is intentionally early, but the first vertical slice is in place:
 - changed-symbol outline (`o`) with `]`/`[` jumps between changed functions
 - symbol-aware folding of long unchanged context runs (`z`)
 - records lightweight file-level and line-level comments from the TUI
-- tracks comment states (draft/todo/resolved), kinds (note/issue/question/
-  praise), and action tags (fix/explain/test/follow-up) with a comment list
-  pane (`C`, then `s`/`a`/`K`)
+- tracks comment states (draft saved/private/withheld, todo ready/actionable,
+  resolved history), kinds (note/issue/question/praise), and action tags
+  (fix/explain/test/follow-up) with a comment list pane (`C`, then `s`/`a`/`K`)
 - persists durable review sessions with review tasks and maintainer-authored
   walkthrough steps over the shared CLI/MCP/TUI review core
 - exposes scriptable CLI groups for `reviews`, `files`, `hunks`, `comments`,
@@ -175,6 +175,9 @@ profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JS
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
 
+[comments]
+initial-state = "todo" # todo (default) | draft; per-comment CLI --state overrides this
+
 [syntax]
 enabled = true
 languages = [
@@ -241,7 +244,8 @@ file-search = ["/"]
 symbol-outline = ["o"]
 next-symbol = ["]"]
 previous-symbol = ["["]
-comment = ["c"]
+comment = ["c"] # opens an empty comment editor
+comment-general = ["n"] # session-level comment, no file/line/excerpt
 mark-walkthrough = ["Y"]
 edit-comment = ["e"]
 delete-comment = ["x"]
@@ -408,7 +412,7 @@ full grouped keymap; the footer only shows the everyday hints.
 | --- | --- |
 | `?` | help overlay with the full keymap |
 | `@` | summon the configured review agent (`[agent] command`) |
-| Ctrl-y | copy an agent-profile handoff to the clipboard |
+| Ctrl-y | copy the agent handoff to the clipboard; unchanged from prior releases, discoverable in `?`, and reports selected todo/draft counts |
 | `j` / Down | next file |
 | `k` / Up | previous file |
 | `n` / `N` | next / previous unviewed file |
@@ -444,10 +448,12 @@ full grouped keymap; the footer only shows the everyday hints.
 | `d` / PageDown | scroll diff down |
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
-| `c` | add a file comment in file focus, or line/range comment in diff focus |
+| `c` | open an empty comment editor for a file comment in file focus, or line/range comment in diff focus |
+| `n` | add a general session comment with no file location or excerpt |
 | `Y` | mark the current hunk/range as a walkthrough step |
 | `e` / `x` | edit / delete the selected comment |
 | `C` | comment list popup (jump, `s` cycle state, `a` cycle action, `K` cycle kind, `x` delete) |
+| `R` in comment list | ready all active-session draft comments as todo atomically |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
 | `q` | quit and save state |
@@ -475,16 +481,22 @@ cargo run -- acp
 
 Agents can read the diff, comments, and viewed state, and write review state or
 suggestions: durable walkthrough steps/chapters, a review ordering, flagged
-critical sections, live overlay curation, and draft comments. A running TUI polls
-the persisted state/overlay and surfaces suggestions live; draft dispositions
-(accept/edit/discard) are written back so agents observe the outcome.
+critical sections, live overlay curation, and comments. New durable comments are
+todo by default; set `[comments].initial-state = "draft"` or pass `--state draft`
+to save them privately. Draft means saved/private/withheld; todo means
+ready/actionable; resolved means history. Every todo comment asks an
+implementation agent to address it regardless of kind or action tag, including
+questions, explanations, praise, and `action=none`. Agent overlay drafts remain a
+separate pending, pre-acceptance concept. A running TUI polls the persisted
+state/overlay and surfaces suggestions live; overlay draft dispositions are
+written back so agents observe the outcome.
 
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
-It prints an implementation prompt with action items first, then walkthrough
-context, and reference hunks limited to files that carry action items or
-walkthrough stops. Use `gander handoff --format json` for the legacy structured
-action schema (`session`, `action_items`, `walkthrough`, trailing
-`reference.hunks`).
+It prints an implementation prompt with open tasks and todo comments first, then
+walkthrough context, and reference hunks limited to files that carry action items
+or walkthrough stops. Drafts are withheld; resolved comments are history. Use
+`gander handoff --format json` for the legacy structured action schema
+(`session`, `action_items`, `walkthrough`, trailing `reference.hunks`).
 
 For typed delegation, use the read-only outbound adapter. This is orchestration
 for harnesses, not a mode humans must use to read review state:
@@ -504,8 +516,8 @@ packet so they work from a different cwd; `--state-file` selects storage only,
 not the code workspace. Delegate-only flags intentionally fail unless `--mode
 delegate` is set.
 Use `gander export markdown --profile agent` or `gander export json --profile
-agent` for a fuller archive/reference artifact with all hunks and resolved
-comments.
+agent` for a fuller archive/reference artifact with all hunks and all comments,
+including drafts and resolved history.
 
 Bundled CLI-first agent skills can be inspected and installed without a jj repo:
 

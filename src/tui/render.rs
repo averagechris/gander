@@ -1270,6 +1270,7 @@ fn draw_footer(
             "{kind} comment · refresh paused · {newline} newline · {submit} save · {cancel} cancel",
             kind = match target {
                 CommentInputTarget::New => "new",
+                CommentInputTarget::NewGeneral => "new general",
                 CommentInputTarget::Edit { .. } => "edit",
                 CommentInputTarget::AcceptDraft { .. } => "accept draft",
             },
@@ -1319,7 +1320,7 @@ fn draw_footer(
         }
         Mode::SymbolOutline(_) => "changed symbols · j/k move · enter jump · esc cancel".to_owned(),
         Mode::CommentList(_) => {
-            "comments · j/k move · enter jump · s state · a action · K kind · x delete · esc close"
+            "comments · j/k move · n general · enter jump · e edit · s state · R ready drafts · a action · K kind · x delete · esc close"
                 .to_owned()
         }
         Mode::ViewOptions(_) => {
@@ -1414,6 +1415,7 @@ fn files_footer_segments(
         FooterHint::new([Action::MarkViewed], "viewed"),
         FooterHint::new([Action::ToggleFocus], "diff"),
         FooterHint::new([Action::Comment], "comment"),
+        FooterHint::new([Action::YankHandoff], "handoff"),
         FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
@@ -1437,6 +1439,7 @@ fn diff_footer_segments(
         FooterHint::new([Action::RangeComment], "range"),
         FooterHint::new([Action::MarkWalkthrough], "walkthrough"),
         FooterHint::new([Action::Comment], "comment"),
+        FooterHint::new([Action::YankHandoff], "handoff"),
         FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
         FooterHint::new([Action::ToggleFocus], "files"),
         FooterHint::new([Action::Help], "help"),
@@ -1573,7 +1576,10 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::CycleCommentState], "cycle comment state"),
         entry(&[Action::EditComment], "edit comment"),
         entry(&[Action::DeleteComment], "delete comment"),
-        entry(&[Action::CommentList], "comment list"),
+        entry(
+            &[Action::CommentList],
+            "comment center (n general, R ready)",
+        ),
         entry(&[Action::TaskList], "review tasks"),
         entry(&[Action::WalkthroughList], "walkthrough panel"),
         entry(&[Action::MarkWalkthrough], "mark for walkthrough"),
@@ -1666,6 +1672,7 @@ fn comment_popup_title(
 ) -> String {
     let kind = match target {
         CommentInputTarget::New => "comment",
+        CommentInputTarget::NewGeneral => "general comment",
         CommentInputTarget::Edit { .. } => "edit comment",
         CommentInputTarget::AcceptDraft { .. } => "accept draft",
     };
@@ -1677,15 +1684,21 @@ fn comment_popup_title(
             .and_then(|comment| comment.anchor.clone()),
         _ => session.selected_comment_anchor(),
     };
-    let location = target_anchor
-        .map(
-            |anchor| match (anchor.path(), anchor.line(), anchor.end_line()) {
-                (path, Some(line), Some(end)) if end != line => format!("{path}:{line}-{end}"),
-                (path, Some(line), _) => format!("{path}:{line}"),
-                (path, None, _) => path.to_owned(),
-            },
-        )
-        .unwrap_or_else(|| "unanchored".to_owned());
+    let is_general = matches!(target, CommentInputTarget::NewGeneral)
+        || matches!(target, CommentInputTarget::Edit { id } if session.comments.iter().any(|comment| &comment.id == id && comment.is_general()));
+    let location = if is_general {
+        "general".to_owned()
+    } else {
+        target_anchor
+            .map(
+                |anchor| match (anchor.path(), anchor.line(), anchor.end_line()) {
+                    (path, Some(line), Some(end)) if end != line => format!("{path}:{line}-{end}"),
+                    (path, Some(line), _) => format!("{path}:{line}"),
+                    (path, None, _) => path.to_owned(),
+                },
+            )
+            .unwrap_or_else(|| "unanchored".to_owned())
+    };
     truncate_middle(&format!("{kind} · {location}"), max_width)
 }
 
@@ -3528,6 +3541,17 @@ fn draw_symbol_outline_popup(
     );
 }
 
+fn comment_list_location(comment: &Comment) -> String {
+    let Some(path) = comment.path.as_deref() else {
+        return "general".to_owned();
+    };
+    match (comment.line, comment.end_line) {
+        (Some(line), Some(end_line)) => format!("{path}:{line}-{end_line}"),
+        (Some(line), None) => format!("{path}:{line}"),
+        _ => path.to_owned(),
+    }
+}
+
 fn draw_comment_list_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -3572,13 +3596,7 @@ fn draw_comment_list_popup(
                     } else {
                         Style::default().fg(Color::Gray)
                     };
-                    let location = match (comment.line, comment.end_line) {
-                        (Some(line), Some(end_line)) => {
-                            format!("{}:{line}-{end_line}", comment.path)
-                        }
-                        (Some(line), None) => format!("{}:{line}", comment.path),
-                        _ => comment.path.clone(),
-                    };
+                    let location = comment_list_location(comment);
                     let summary = comment
                         .body
                         .lines()
@@ -3610,7 +3628,7 @@ fn draw_comment_list_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · s state · a action · K kind · x delete · esc close",
+        "↑/↓ or j/k move · n general · enter jump · e edit · s state · R ready drafts · a action · K kind · x delete · esc close",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3668,11 +3686,7 @@ fn draw_task_list_popup(
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let location = match (comment.line, comment.end_line) {
-                (Some(line), Some(end_line)) => format!("{}:{line}-{end_line}", comment.path),
-                (Some(line), None) => format!("{}:{line}", comment.path),
-                _ => comment.path.clone(),
-            };
+            let location = comment_list_location(comment);
             let summary = comment
                 .body
                 .lines()
@@ -4496,6 +4510,8 @@ diff --git a/README.md b/README.md
         session.comments[1].id = "test-task".to_owned();
         session.comments[1].action = Some(crate::state::ActionIntent::Test);
         session.comments[1].kind = Some(crate::state::CommentKind::Issue);
+        let id = session.comments[1].id.clone();
+        session.cycle_comment_state(&id);
         let mode = Mode::TaskList(TaskListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
@@ -5570,7 +5586,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let anchor = session.selected_line_anchor().unwrap();
         session.comments.push(Comment {
             id: "c1".to_owned(),
-            path: anchor.path().to_owned(),
+            path: Some(anchor.path().to_owned()),
             line: anchor.line(),
             end_line: None,
             anchor: Some(anchor.clone()),
@@ -5583,7 +5599,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         });
         session.comments.push(Comment {
             id: "c2".to_owned(),
-            path: anchor.path().to_owned(),
+            path: Some(anchor.path().to_owned()),
             line: anchor.line(),
             end_line: None,
             anchor: Some(anchor),

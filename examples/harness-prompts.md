@@ -4,8 +4,8 @@
 
 > Use Gander's CLI only. Do not edit code yet. Create a temp `--state-file`,
 > run `gander reviews create`, inspect `gander files list` and `gander hunks
-> list/show`, add comments with `gander comments add --kind issue --action fix`
-> for concrete problems, create tasks with `gander tasks add`, then print
+> list/show`, add comments with `gander comments add --state todo --kind issue --action fix`
+> for concrete problems and `--state draft` for private/withheld notes, create tasks with `gander tasks add`, then print
 > `gander tasks list` and a short summary. Remember that Gander mutation
 > commands write only review state.
 
@@ -14,8 +14,9 @@
 > Use the `gander` MCP server for this workspace. Start with `review_summary`,
 > `review_files`, and `current_focus` if the human asks about the open hunk.
 > Use `reviews_create`, `comment_add`, `task_add`, and
-> `walkthrough_add_step` for durable state, and mention each CLI equivalent in
-> your response. Do not fetch PRs, post to forges, or edit code unless asked.
+> `walkthrough_add_step` for durable state, honoring comment state semantics
+> (draft withheld, todo actionable, resolved history), and mention each CLI
+> equivalent in your response. Do not fetch PRs, post to forges, or edit code unless asked.
 
 ## Split-pane live review
 
@@ -23,4 +24,5 @@
 > `stack_changes` and `change_diff` for stacked changes, `set_ordering` for
 > risky files first, `flag_section` for sensitive areas, walkthrough tools for
 > a guided zen pass (use `set_chunks` only as a compatibility fallback), and
-> `draft_comment` only for comments the human should triage.
+> `draft_comment` only for comments the human should triage. Ask the human or use
+> `comments ready` before delegating comments to an implementation agent.

@@ -4,6 +4,10 @@
 
 ### Added
 
+- Documented the ready-comment workflow: durable private drafts, actionable
+  todos, resolved history, configurable comment initial state, `comments ready`,
+  general comments, handoff/delegate selection, TUI keys, MCP parity, and schema
+  compatibility expectations.
 - `gander tui --tour` starts directly in the zen tour, and `gander tour render`
   renders the slide deck to plain text for automation and review.
 - `gander walkthrough set --dry-run` validates a walkthrough replacement and
@@ -22,6 +26,10 @@
 
 ### Changed
 
+- Review state schema 2 adds optional comment `session_id` and `path`; artifact
+  schema 6 and delegation schema 2 carry the same general-comment shape. Legacy
+  anchored/unscoped comments still deserialize unchanged and remain visible for
+  compatibility.
 - Zen/tour mode now presents a polished full-screen slide deck with full-bleed
   chapter, spotlight, and at-a-glance slides instead of framed floating cards.
 - Removed the deprecated public `gander chunks` and `gander briefs` command

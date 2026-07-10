@@ -188,7 +188,7 @@ pub struct ImportSummary {
 impl Default for OwnedReviewArtifact {
     fn default() -> Self {
         Self {
-            version: 5,
+            version: 6,
             base: String::new(),
             revision: String::new(),
             files: Vec::new(),
@@ -214,15 +214,16 @@ impl<'a> ReviewArtifact<'a> {
         options: ArtifactBuildOptions,
     ) -> Self {
         let agent = profile == ArtifactProfile::Agent;
+        let durable_session = active_durable_session(session);
         Self {
-            version: 5,
+            version: 6,
             generated_at: Utc::now(),
             repo: &session.repo,
             base: &session.target.base,
             revision: &session.target.rev,
             profile: agent.then_some("agent"),
             summary: session.summary_line(),
-            session: active_durable_session(session).map(|durable| SessionArtifact {
+            session: durable_session.map(|durable| SessionArtifact {
                 id: &durable.id,
                 title: durable.title.as_deref(),
             }),
@@ -244,14 +245,20 @@ impl<'a> ReviewArtifact<'a> {
             comments: session
                 .comments
                 .iter()
-                .filter(|comment| !options.only_open || comment.state != CommentState::Resolved)
+                .filter(|comment| {
+                    comment_belongs_to_session(
+                        comment,
+                        durable_session.map(|durable| durable.id.as_str()),
+                    )
+                })
+                .filter(|comment| !options.only_open || comment.state == CommentState::Todo)
                 .map(|comment| CommentArtifact {
                     comment,
                     linked_task_ids: linked_task_ids_for_comment(session, &comment.id),
                     excerpt: agent.then(|| comment_excerpt(session, comment)).flatten(),
                 })
                 .collect(),
-            tasks: active_durable_session(session)
+            tasks: durable_session
                 .into_iter()
                 .flat_map(|durable| durable.tasks.iter())
                 .filter(|task| !options.only_open || task.status == ReviewTaskStatus::Open)
@@ -261,11 +268,26 @@ impl<'a> ReviewArtifact<'a> {
                     body: task.body.as_deref(),
                     status: task.status,
                     action: task.action,
-                    linked_comment_ids: task.source_comment_id.iter().map(String::as_str).collect(),
+                    linked_comment_ids: task
+                        .source_comment_id
+                        .as_deref()
+                        .filter(|comment_id| {
+                            !options.only_open
+                                || session.comments.iter().any(|comment| {
+                                    comment.id == *comment_id
+                                        && comment_belongs_to_session(
+                                            comment,
+                                            durable_session.map(|durable| durable.id.as_str()),
+                                        )
+                                        && comment.state == CommentState::Todo
+                                })
+                        })
+                        .into_iter()
+                        .collect(),
                     target: task.target.as_ref().map(target_artifact),
                 })
                 .collect(),
-            walkthroughs: active_durable_session(session)
+            walkthroughs: durable_session
                 .into_iter()
                 .flat_map(|durable| durable.walkthroughs.iter())
                 .map(|walkthrough| WalkthroughArtifact {
@@ -369,9 +391,11 @@ pub fn render_handoff_json(
                 })
         })
         .collect::<Vec<_>>();
+    let referenced_paths = referenced_hunk_paths(&artifact);
     let hunks = artifact
         .files
         .iter()
+        .filter(|file| referenced_paths.contains(file.path))
         .filter_map(|file| {
             file.hunks.as_ref().map(|hunks| {
                 serde_json::json!({
@@ -404,8 +428,9 @@ pub fn render_handoff_json(
 
 pub fn render_handoff_markdown(
     session: &ReviewSession,
-    options: ArtifactBuildOptions,
+    mut options: ArtifactBuildOptions,
 ) -> Result<String> {
+    options.only_open = true;
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
     Ok(to_handoff_markdown(&artifact))
 }
@@ -415,6 +440,12 @@ fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::Revi
         durable.status == crate::state::ReviewSessionStatus::Open
             && durable.target.base.as_deref() == Some(session.target.base.as_str())
             && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
+    })
+}
+
+fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
+    session_id.map_or(comment.session_id.is_none(), |id| {
+        comment.belongs_to_session(id)
     })
 }
 
@@ -467,6 +498,9 @@ fn comment_excerpt<'a>(
     session: &'a ReviewSession,
     comment: &Comment,
 ) -> Option<Vec<ExcerptLine<'a>>> {
+    if comment.is_general() {
+        return None;
+    }
     let anchor = comment.anchor.as_ref()?;
     let file = session
         .files
@@ -727,7 +761,7 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
     let mut out = String::new();
     out.push_str("# Review session export (agent profile)\n\n");
     out.push_str("**Export artifact (agent profile).**\n\n");
-    out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks (open items first, resolved/done items below) plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
+    out.push_str("Complete session artifact for archive/import/tooling. It includes all comments/tasks (open tasks and ready comments first, draft/resolved/done items below) plus full reference hunks. For a one-shot implementer prompt, use `gander handoff`.\n\n");
     write_agent_header(artifact, &mut out);
     write_action_items(artifact, &mut out);
 
@@ -769,7 +803,7 @@ fn write_agent_header(artifact: &ReviewArtifact<'_>, out: &mut String) {
         out.push_str(&format!("- Session: {}\n", title));
     }
     out.push_str(&format!(
-        "- Action items: {} item(s) ({} open task(s), {} unresolved comment(s))\n\n",
+        "- Action items: {} item(s) ({} open task(s), {} ready comment(s))\n\n",
         action_item_count(artifact),
         action_item_tasks(artifact).count(),
         action_item_comments(artifact).count()
@@ -841,8 +875,10 @@ fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
                     kind_label(comment.comment.kind.unwrap_or(CommentKind::Note)),
                     action_label(comment.comment.action.unwrap_or(ActionIntent::None))
                 ));
-                write_comment_location_inline(out, comment.comment);
-                out.push_str(" — ");
+                if comment.comment.path.is_some() {
+                    write_comment_location_inline(out, comment.comment);
+                    out.push_str(" — ");
+                }
                 out.push_str(comment.comment.body.trim());
                 let linked_tasks = linked_tasks_for_comment(artifact, comment.comment.id.as_str());
                 if !linked_tasks.is_empty() {
@@ -854,19 +890,21 @@ fn write_action_items(artifact: &ReviewArtifact<'_>, out: &mut String) {
                     "\n  Selector: `{selector}`; reply: `gander {globals} comments reply {selector} --body <text>`; resolve: `gander {globals} comments resolve {selector} --reply <text>`\n"
                 ));
                 write_comment_replies(out, comment.comment);
-                write_excerpt(out, comment.excerpt.as_deref());
+                if comment.comment.path.is_some() {
+                    write_excerpt(out, comment.excerpt.as_deref());
+                }
             }
         }
     }
     if !wrote {
-        out.push_str("No open tasks or unresolved comments.\n");
+        out.push_str("No open tasks or ready comments.\n");
     }
 }
 
 fn write_other_comments(artifact: &ReviewArtifact<'_>, out: &mut String) {
     let mut other = false;
     for comment in &artifact.comments {
-        if comment.comment.state != CommentState::Resolved {
+        if comment.comment.state == CommentState::Todo {
             continue;
         }
         other = true;
@@ -953,13 +991,16 @@ fn referenced_hunk_paths<'a>(artifact: &'a ReviewArtifact<'a>) -> BTreeSet<&'a s
                 .comments
                 .iter()
                 .find(|comment| comment.comment.id == *comment_id)
+                && let Some(path) = comment.comment.path.as_deref()
             {
-                paths.insert(comment.comment.path.as_str());
+                paths.insert(path);
             }
         }
     }
     for comment in action_item_comments(artifact) {
-        paths.insert(comment.comment.path.as_str());
+        if let Some(path) = comment.comment.path.as_deref() {
+            paths.insert(path);
+        }
     }
     for walkthrough in &artifact.walkthroughs {
         for step in &walkthrough.steps {
@@ -986,7 +1027,7 @@ fn action_item_comments<'a>(
     artifact
         .comments
         .iter()
-        .filter(|comment| comment.comment.state != CommentState::Resolved)
+        .filter(|comment| comment.comment.state == CommentState::Todo)
 }
 
 enum OrderedActionItem<'a> {
@@ -1021,7 +1062,7 @@ fn ordered_action_items<'a>(artifact: &'a ReviewArtifact<'a>) -> Vec<OrderedActi
     for (idx, comment) in action_item_comments(artifact).enumerate() {
         indexed.push((
             action_priority(comment.comment.action.unwrap_or(ActionIntent::None)),
-            comment.comment.path.as_str(),
+            comment.comment.path.as_deref().unwrap_or("~"),
             comment.comment.line.unwrap_or(usize::MAX),
             offset + idx,
             OrderedActionItem::Comment(comment),
@@ -1056,7 +1097,10 @@ fn write_linked_comments(out: &mut String, artifact: &ReviewArtifact<'_>, ids: &
                     .line
                     .map(|line| format!(":{line}"))
                     .unwrap_or_default();
-                format!("linked to comment {id} ({}{})", comment.comment.path, line)
+                match comment.comment.path.as_deref() {
+                    Some(path) => format!("linked to comment {id} ({path}{line})"),
+                    None => format!("linked to general comment {id}"),
+                }
             } else {
                 format!("linked to comment {id}")
             }
@@ -1113,9 +1157,12 @@ fn write_excerpt(out: &mut String, excerpt: Option<&[ExcerptLine<'_>]>) {
 }
 
 fn write_comment_location_inline(out: &mut String, comment: &crate::state::Comment) {
+    let Some(path) = comment.path.as_deref() else {
+        return;
+    };
     match comment.line {
-        Some(line) => out.push_str(&format!("`{}`:{line}", comment.path)),
-        None => out.push_str(&format!("`{}`", comment.path)),
+        Some(line) => out.push_str(&format!("`{path}`:{line}")),
+        None => out.push_str(&format!("`{path}`")),
     }
 }
 
@@ -1203,9 +1250,10 @@ fn write_comment_heading(out: &mut String, comment: &crate::state::Comment) {
             out.push_str("```\n\n");
         }
         Some(CommentAnchor::File { path, .. }) => out.push_str(&format!("### `{path}`\n\n")),
-        None => match comment.line {
-            Some(line) => out.push_str(&format!("### `{}`:{}\n\n", comment.path, line)),
-            None => out.push_str(&format!("### `{}`\n\n", comment.path)),
+        None => match (comment.path.as_deref(), comment.line) {
+            (Some(path), Some(line)) => out.push_str(&format!("### `{path}`:{line}\n\n")),
+            (Some(path), None) => out.push_str(&format!("### `{path}`\n\n")),
+            (None, _) => out.push_str("### General comment\n\n"),
         },
     }
 }
@@ -1425,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_version_is_5() {
+    fn artifact_version_is_6_for_optional_comment_paths() {
         let diff = DiffSet::parse(
             r#"diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -1445,7 +1493,7 @@ mod tests {
 
         let artifact = ReviewArtifact::from(&session);
 
-        assert_eq!(artifact.version, 5);
+        assert_eq!(artifact.version, 6);
         assert_eq!(artifact.profile, None);
     }
 
@@ -1463,6 +1511,7 @@ mod tests {
         session.add_comment("Please fix this".into());
         session.comments[0].kind = Some(CommentKind::Issue);
         session.comments[0].action = Some(ActionIntent::Fix);
+        session.comments[0].state = CommentState::Todo;
 
         let markdown = render_artifact_with_profile(
             &session,
@@ -1537,7 +1586,8 @@ mod tests {
         });
         session.add_comment("other comment".into());
         session.comments[0].action = Some(ActionIntent::None);
-        session.comments[0].path = "a.rs".into();
+        session.comments[0].state = CommentState::Todo;
+        session.comments[0].path = Some("a.rs".into());
         session.comments[0].line = Some(1);
 
         let json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
@@ -1596,6 +1646,7 @@ mod tests {
         );
         session.add_comment("Keep comment".into());
         session.add_comment("Drop comment".into());
+        session.comments[0].state = CommentState::Todo;
         session.comments[1].state = CommentState::Resolved;
 
         let json = render_artifact_with_options(
@@ -1731,6 +1782,7 @@ mod tests {
         session.add_comment("Please fix".into());
         session.comments[0].id = "comment-1".to_owned();
         session.comments[0].kind = Some(CommentKind::Issue);
+        session.comments[0].state = CommentState::Todo;
 
         let json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1813,6 +1865,7 @@ mod tests {
             comment.id = id.to_owned();
             comment.kind = kind;
             comment.action = action;
+            comment.state = CommentState::Todo;
         }
         session.comments[3].state = CommentState::Resolved;
 
@@ -1828,8 +1881,7 @@ mod tests {
         let markdown = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
         assert_eq!(ids, vec!["issue", "note", "task-2", "question", "task-1"]);
         assert!(
-            markdown
-                .contains("- Action items: 5 item(s) (2 open task(s), 3 unresolved comment(s))")
+            markdown.contains("- Action items: 5 item(s) (2 open task(s), 3 ready comment(s))")
         );
         assert_eq!(markdown.matches("- [task]").count(), 2);
         assert_eq!(markdown.matches("- [comment]").count(), 3);
@@ -1856,8 +1908,9 @@ mod tests {
             ReviewState::default(),
         );
         session.add_comment("Action on a only".into());
-        session.comments[0].path = "a.txt".to_owned();
+        session.comments[0].path = Some("a.txt".to_owned());
         session.comments[0].kind = Some(CommentKind::Issue);
+        session.comments[0].state = CommentState::Todo;
         let handoff = render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
         let export = render_artifact_with_profile(
             &session,
@@ -1909,6 +1962,7 @@ mod tests {
         session.comments[0].id = "comment-1".to_owned();
         session.comments[0].kind = Some(CommentKind::Issue);
         session.comments[0].line = Some(1);
+        session.comments[0].state = CommentState::Todo;
 
         let markdown = render_artifact_with_profile(
             &session,
@@ -2018,6 +2072,187 @@ mod tests {
         assert_eq!(artifact.version, 4);
         assert_eq!(summary.viewed_files_imported, 1);
         assert!(state.files["src/lib.rs"].viewed);
+    }
+
+    #[test]
+    fn acceptance_artifact_comments_are_scoped_to_active_session_with_legacy_visible() {
+        let mut state = ReviewState::default();
+        state.sessions.extend([
+            crate::state::ReviewSession {
+                id: "active".into(),
+                target: crate::state::ReviewTarget {
+                    base: Some("trunk()".into()),
+                    revision: Some("@".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            crate::state::ReviewSession {
+                id: "other".into(),
+                ..Default::default()
+            },
+        ]);
+        state.comments.extend([
+            Comment {
+                id: "legacy".into(),
+                path: Some("a.txt".into()),
+                session_id: None,
+                body: "legacy comment".into(),
+                state: CommentState::Draft,
+                ..Default::default()
+            },
+            Comment {
+                id: "matching".into(),
+                path: Some("a.txt".into()),
+                session_id: Some("active".into()),
+                body: "matching comment".into(),
+                state: CommentState::Todo,
+                ..Default::default()
+            },
+            Comment {
+                id: "foreign".into(),
+                path: Some("a.txt".into()),
+                session_id: Some("other".into()),
+                body: "foreign comment".into(),
+                state: CommentState::Resolved,
+                ..Default::default()
+            },
+        ]);
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_artifact(&session, ArtifactFormat::Json).unwrap())
+                .unwrap();
+        let ids = value["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|comment| comment["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["legacy", "matching"]);
+        assert_eq!(value["version"], 6);
+    }
+
+    #[test]
+    fn acceptance_handoff_uses_todo_state_only_and_general_todo_has_no_location_or_hunks() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "active".into(),
+            target: crate::state::ReviewTarget {
+                base: Some("trunk()".into()),
+                revision: Some("@".into()),
+                ..Default::default()
+            },
+            tasks: vec![ReviewTask {
+                id: "task-linked-to-draft".into(),
+                title: "task remains actionable".into(),
+                source_comment_id: Some("draft".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        state.comments.extend([
+            Comment {
+                id: "general-todo".into(),
+                path: None,
+                session_id: Some("active".into()),
+                body: "general praise ready".into(),
+                kind: Some(CommentKind::Praise),
+                action: Some(ActionIntent::None),
+                state: CommentState::Todo,
+                ..Default::default()
+            },
+            Comment {
+                id: "draft".into(),
+                path: Some("a.txt".into()),
+                session_id: Some("active".into()),
+                body: "draft must stay private".into(),
+                state: CommentState::Draft,
+                ..Default::default()
+            },
+            Comment {
+                id: "resolved".into(),
+                path: Some("a.txt".into()),
+                session_id: Some("active".into()),
+                body: "resolved must stay out".into(),
+                state: CommentState::Resolved,
+                ..Default::default()
+            },
+        ]);
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            state,
+        );
+
+        let handoff_json = render_handoff_json(&session, ArtifactBuildOptions::default()).unwrap();
+        let handoff: serde_json::Value = serde_json::from_str(&handoff_json).unwrap();
+        let items = handoff["action_items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        let general = items
+            .iter()
+            .find(|item| item["id"] == "general-todo")
+            .unwrap();
+        assert!(general["path"].is_null());
+        assert!(general["excerpt"].is_null());
+        let task = items
+            .iter()
+            .find(|item| item["id"] == "task-linked-to-draft")
+            .unwrap();
+        assert!(task["linked_comment_ids"].as_array().unwrap().is_empty());
+        assert!(handoff["reference"]["hunks"].as_array().unwrap().is_empty());
+
+        let handoff_markdown =
+            render_handoff_markdown(&session, ArtifactBuildOptions::default()).unwrap();
+        assert!(handoff_markdown.contains("general praise ready"));
+        assert!(!handoff_markdown.contains("draft must stay private"));
+        assert!(!handoff_markdown.contains("resolved must stay out"));
+        assert!(!handoff_markdown.contains("### `a.txt`"));
+
+        let full = render_artifact(&session, ArtifactFormat::Json).unwrap();
+        assert!(full.contains("general praise ready"));
+        assert!(full.contains("draft must stay private"));
+        assert!(full.contains("resolved must stay out"));
+    }
+
+    #[test]
+    fn acceptance_import_deserializes_legacy_v5_comment_path_and_missing_session() {
+        let artifact: OwnedReviewArtifact = serde_json::from_str(
+            r#"{
+  "version": 5,
+  "base": "trunk()",
+  "revision": "@",
+  "comments": [{
+    "id": "legacy-v5",
+    "path": "src/lib.rs",
+    "body": "legacy body",
+    "state": "todo",
+    "created_at": "2026-06-30T00:00:00Z"
+  }]
+}"#,
+        )
+        .unwrap();
+        let mut state = ReviewState::default();
+
+        let summary = import_json_artifact_into_state(&mut state, &artifact);
+
+        assert_eq!(artifact.version, 5);
+        assert_eq!(summary.comments_imported, 1);
+        assert_eq!(state.comments[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(state.comments[0].session_id, None);
     }
 
     #[test]
@@ -2174,7 +2409,7 @@ mod tests {
         );
         state.comments.push(crate::state::Comment {
             id: "existing".to_owned(),
-            path: "src/main.rs".to_owned(),
+            path: Some("src/main.rs".to_owned()),
             line: None,
             end_line: None,
             anchor: None,

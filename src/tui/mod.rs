@@ -124,6 +124,7 @@ enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommentInputTarget {
     New,
+    NewGeneral,
     Edit {
         id: String,
     },
@@ -744,11 +745,23 @@ fn yank_handoff_with(
     let options = ArtifactBuildOptions { only_open: false };
     let artifact = ReviewArtifact::build_with_options(session, ArtifactProfile::Agent, options);
     let count = action_item_count(&artifact);
+    let todo_count = artifact
+        .comments
+        .iter()
+        .filter(|comment| comment.comment.state == crate::state::CommentState::Todo)
+        .count();
+    let draft_count = artifact
+        .comments
+        .iter()
+        .filter(|comment| comment.comment.state == crate::state::CommentState::Draft)
+        .count();
     match render_handoff_markdown(session, options).and_then(|body| copy(&body)) {
         Ok(method) => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: format!("handoff copied via {method} ({count} action items)"),
+                message: format!(
+                    "handoff copied via {method} ({todo_count} todo comments included, {draft_count} drafts withheld; {count} action items)"
+                ),
             });
         }
         Err(error) => {
@@ -1722,7 +1735,27 @@ fn handle_key_event(
             }
         }
         Mode::CommentList(list) => {
-            if handle_comment_list_key(key, list, session, keymap, tui_state) {
+            if key.code == KeyCode::Char('n') {
+                *mode = Mode::CommentInput {
+                    editor: CommentEditor::default(),
+                    target: CommentInputTarget::NewGeneral,
+                };
+            } else if key.code == KeyCode::Char('e') {
+                if let Some(comment) = list
+                    .selected_comment_id(session)
+                    .and_then(|id| session.comments.iter().find(|comment| comment.id == id))
+                {
+                    *mode = Mode::CommentInput {
+                        editor: CommentEditor {
+                            text: comment.body.clone(),
+                            cursor: comment.body.len(),
+                        },
+                        target: CommentInputTarget::Edit {
+                            id: comment.id.clone(),
+                        },
+                    };
+                }
+            } else if handle_comment_list_key(key, list, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1906,14 +1939,7 @@ fn handle_normal_action(
         Action::NextChangedHunk => session.jump_to_changed_hunk(1),
         Action::PreviousChangedHunk => session.jump_to_changed_hunk(-1),
         Action::CommentList => {
-            if session.comments.is_empty() {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "no comments recorded yet".to_owned(),
-                });
-            } else {
-                *mode = Mode::CommentList(CommentListState::default());
-            }
+            *mode = Mode::CommentList(CommentListState::default());
         }
         Action::NextComment => session.move_to_comment(1),
         Action::PreviousComment => session.move_to_comment(-1),
@@ -3237,7 +3263,13 @@ fn handle_comment_list_key(
     match key.code {
         KeyCode::Esc => true,
         KeyCode::Enter => {
-            if let Some(id) = list.selected_comment_id(session) {
+            if let Some(id) = list.selected_comment_id(session)
+                && session
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == id)
+                    .is_some_and(|comment| comment.is_located())
+            {
                 session.select_comment_by_id(&id);
             }
             true
@@ -3259,6 +3291,14 @@ fn handle_comment_list_key(
                     message: format!("comment marked {}", state.label()),
                 });
             }
+            false
+        }
+        KeyCode::Char('R') => {
+            let result = session.ready_all_draft_comments();
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!("readied {} draft comment(s)", result.readied),
+            });
             false
         }
         KeyCode::Char('a') => {
@@ -3292,7 +3332,7 @@ fn handle_comment_list_key(
                 tui_state.state_tombstones.comments.insert(id);
                 list.clamp(session);
             }
-            session.comments.is_empty()
+            false
         }
         _ => false,
     }
@@ -3606,6 +3646,7 @@ fn handle_comment_action(
             let body = std::mem::take(editor).into_text();
             match target {
                 CommentInputTarget::New => session.add_comment(body),
+                CommentInputTarget::NewGeneral => session.add_general_comment(body),
                 CommentInputTarget::Edit { id } => {
                     session.update_comment_body(id, body);
                 }
@@ -3905,7 +3946,7 @@ mod tests {
         let mut session = snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n");
         session.comments.push(Comment {
             id: "c1".to_owned(),
-            path: "src/lib.rs".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -3913,6 +3954,13 @@ mod tests {
             kind: Some(CommentKind::Issue),
             action: Some(ActionIntent::Fix),
             state: CommentState::Todo,
+            created_at: chrono::Utc::now(),
+            ..Default::default()
+        });
+        session.comments.push(Comment {
+            id: "private".to_owned(),
+            body: "withheld draft".to_owned(),
+            state: CommentState::Draft,
             created_at: chrono::Utc::now(),
             ..Default::default()
         });
@@ -3933,12 +3981,107 @@ mod tests {
 
         assert!(copied.borrow().starts_with("# Human review handoff"));
         assert!(copied.borrow().contains("fix this"));
+        assert!(!copied.borrow().contains("withheld draft"));
         assert_eq!(
             tui_state.notice,
             Some(UiNotice {
                 level: UiNoticeLevel::Info,
-                message: "handoff copied via OSC52 (/dev/tty) (2 action items)".to_owned(),
+                message: "handoff copied via OSC52 (/dev/tty) (1 todo comments included, 1 drafts withheld; 2 action items)".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn configured_tui_creation_defaults_to_todo_and_can_default_to_draft() {
+        let diff = crate::diff::DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new_with_config(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff.clone(),
+            ReviewState::default(),
+            &crate::config::Config::default(),
+        );
+        session.add_comment("ready feedback".to_owned());
+        assert_eq!(session.comments[0].state, CommentState::Todo);
+        assert!(session.comments[0].session_id.is_some());
+
+        let mut config = crate::config::Config::default();
+        config.comments.initial_state = crate::config::InitialCommentState::Draft;
+        let mut session = ReviewSession::new_with_config(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+            &config,
+        );
+        session.add_comment("private feedback".to_owned());
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+    }
+
+    #[test]
+    fn empty_comment_center_creates_general_comment_and_readies_drafts() {
+        let mut session = snapshot_session("diff --git a/a.txt b/a.txt\n");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState::default();
+        handle_normal_action(
+            Action::CommentList,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::CommentList(_)));
+
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        let Mode::CommentInput { editor, target } = &mut mode else {
+            panic!("n should open general comment input");
+        };
+        assert_eq!(*target, CommentInputTarget::NewGeneral);
+        editor.text = "general draft".to_owned();
+        editor.cursor = editor.text.len();
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            editor,
+            target,
+            &mut tui_state,
+        ));
+        assert!(session.comments[0].is_general());
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+
+        let mut list = CommentListState::default();
+        assert!(!handle_comment_list_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+            &mut list,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert_eq!(session.comments[0].state, CommentState::Todo);
+        assert!(
+            tui_state
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("readied 1"))
         );
     }
 
@@ -4255,7 +4398,7 @@ mod tests {
         );
         on_disk.comments.push(Comment {
             id: "b-comment".to_owned(),
-            path: "b.txt".to_owned(),
+            path: Some("b.txt".to_owned()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -4295,7 +4438,12 @@ mod tests {
                 .iter()
                 .any(|comment| comment.id == "b-comment")
         );
-        assert!(saved.comments.iter().any(|comment| comment.path == "a.txt"));
+        assert!(
+            saved
+                .comments
+                .iter()
+                .any(|comment| comment.path.as_deref() == Some("a.txt"))
+        );
     }
 
     #[test]
@@ -4533,7 +4681,7 @@ mod tests {
         let mut initial = crate::state::ReviewState::default();
         initial.comments.push(Comment {
             id: "initial".to_owned(),
-            path: "a.txt".to_owned(),
+            path: Some("a.txt".to_owned()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -4566,7 +4714,7 @@ mod tests {
         let mut external = crate::state::ReviewState::load_or_default(&state_path).unwrap();
         external.comments.push(Comment {
             id: "external".to_owned(),
-            path: "a.txt".to_owned(),
+            path: Some("a.txt".to_owned()),
             line: Some(2),
             end_line: None,
             anchor: None,

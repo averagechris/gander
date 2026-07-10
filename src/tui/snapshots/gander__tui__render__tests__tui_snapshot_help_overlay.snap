@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4124
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
 ┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
@@ -23,14 +22,14 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │      ctrl-g  dismiss range/notice                          s  cycle comment state               │    │
 │     │           q  quit (writes artifact)                        e  edit comment                      │    │
 │     │files                                                       x  delete comment                    │    │
-│     │         j/k  move in tree                                  C  comment list                      │    │
-│     │       space  fold/unfold directory                         X  review tasks                      │    │
-│     │  left/right  collapse/expand directory                     W  walkthrough panel                 │    │
-│     │           /  fuzzy file search                             Y  mark for walkthrough              │    │
-│     │           h  hide/show noisy files                       m/M  next/previous comment             │    │
-│     │           f  cycle viewed filter                targets & jj                                    │    │
-│     │         n/N  next/previous unviewed file                   t  return to launch target           │    │
-│     │       enter  mark viewed and advance                       p  compare @-..@                     │    │
+│     │         j/k  move in tree                                  C  comment center (n general, R      │    │
+│     │       space  fold/unfold directory              ready)                                          │    │
+│     │  left/right  collapse/expand directory                     X  review tasks                      │    │
+│     │           /  fuzzy file search                             W  walkthrough panel                 │    │
+│     │           h  hide/show noisy files                         Y  mark for walkthrough              │    │
+│     │           f  cycle viewed filter                         m/M  next/previous comment             │    │
+│     │         n/N  next/previous unviewed file        targets & jj                                    │    │
+│     │       enter  mark viewed and advance                       t  return to launch target           │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @

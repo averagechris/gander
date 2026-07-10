@@ -159,15 +159,20 @@ pub fn find_session_mut<'a>(
 ///
 /// Grouping the fields keeps the service call sites readable as optional
 /// metadata (kind/action) grows; see docs/vision.md.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NewComment {
-    pub path: String,
+    /// The durable session that will own the new comment.
+    pub session_id: String,
+    /// `None` creates a general, session-level comment.
+    pub path: Option<String>,
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub anchor: Option<crate::anchor::CommentAnchor>,
     pub body: String,
     pub kind: Option<CommentKind>,
     pub action: Option<ActionIntent>,
+    /// New comments may start as private drafts or actionable todos.
+    pub state: CommentState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -185,11 +190,25 @@ pub fn add_comment(
     session: &mut ReviewSession,
     comments: &mut Vec<Comment>,
     new: NewComment,
-) -> Comment {
-    validate_body(&new.body, "comment body").expect("callers must validate comment bodies");
+) -> Result<Comment> {
+    validate_body(&new.body, "comment body")?;
+    if new.session_id != session.id {
+        return Err(eyre!(
+            "comment session `{}` does not match active session `{}`",
+            new.session_id,
+            session.id
+        ));
+    }
+    if !matches!(new.state, CommentState::Draft | CommentState::Todo) {
+        return Err(eyre!(
+            "new comment state must be draft or todo, not {}",
+            new.state.label()
+        ));
+    }
     let now = chrono::Utc::now();
     let comment = Comment {
         id: uuid::Uuid::new_v4().to_string(),
+        session_id: Some(new.session_id),
         path: new.path,
         line: new.line,
         end_line: new.end_line,
@@ -197,14 +216,116 @@ pub fn add_comment(
         body: new.body,
         kind: new.kind,
         action: new.action,
-        state: CommentState::Draft,
+        state: new.state,
         replies: Vec::new(),
         created_at: now,
         updated_at: Some(now),
     };
+    comment.validate()?;
     comments.push(comment.clone());
-    touch(session);
-    comment
+    touch_at(session, now);
+    Ok(comment)
+}
+
+/// Counts returned by an atomic draft-readiness operation.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct ReadyCommentsResult {
+    /// Draft comments changed to todo.
+    pub readied: usize,
+    /// Explicitly selected comments that were already todo.
+    pub already_ready: usize,
+}
+
+/// Atomically mark comments ready for implementation.
+///
+/// `Some(selectors)` resolves every id prefix before making any mutation. An
+/// unknown, ambiguous, out-of-session, or resolved selection rejects the whole
+/// operation. `None` means all drafts belonging to the active session; scoped
+/// comments from other sessions are simply excluded. Legacy unscoped comments
+/// belong to every session for compatibility.
+pub fn ready_comments(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    selectors: Option<&[String]>,
+) -> Result<ReadyCommentsResult> {
+    let (indices, already_ready) = if let Some(selectors) = selectors {
+        let mut indices = Vec::with_capacity(selectors.len());
+        for selector in selectors {
+            let canonical_id = resolve_comment_id(comments, selector)?;
+            let index = comments
+                .iter()
+                .position(|comment| comment.id == canonical_id)
+                .expect("resolved comment id must exist");
+            let comment = &comments[index];
+            if !comment.belongs_to_session(&session.id) {
+                return Err(eyre!(
+                    "comment `{}` does not belong to active session `{}`",
+                    comment.id,
+                    session.id
+                ));
+            }
+            if comment.state == CommentState::Resolved {
+                return Err(eyre!("comment `{}` is already resolved", comment.id));
+            }
+            if !indices.contains(&index) {
+                indices.push(index);
+            }
+        }
+        let already_ready = indices
+            .iter()
+            .filter(|index| comments[**index].state == CommentState::Todo)
+            .count();
+        (indices, already_ready)
+    } else {
+        (
+            comments
+                .iter()
+                .enumerate()
+                .filter(|(_, comment)| {
+                    comment.state == CommentState::Draft && comment.belongs_to_session(&session.id)
+                })
+                .map(|(index, _)| index)
+                .collect(),
+            0,
+        )
+    };
+
+    let draft_indices = indices
+        .into_iter()
+        .filter(|index| comments[*index].state == CommentState::Draft)
+        .collect::<Vec<_>>();
+    if draft_indices.is_empty() {
+        return Ok(ReadyCommentsResult {
+            readied: 0,
+            already_ready,
+        });
+    }
+
+    let now = chrono::Utc::now();
+    for index in &draft_indices {
+        comments[*index].state = CommentState::Todo;
+        comments[*index].updated_at = Some(now);
+    }
+    touch_at(session, now);
+    Ok(ReadyCommentsResult {
+        readied: draft_indices.len(),
+        already_ready,
+    })
+}
+
+pub fn ready_selected_comments(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    selectors: &[String],
+) -> Result<ReadyCommentsResult> {
+    ready_comments(session, comments, Some(selectors))
+}
+
+pub fn ready_all_drafts(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+) -> Result<ReadyCommentsResult> {
+    ready_comments(session, comments, None)
 }
 
 pub fn set_comment_state(
@@ -218,9 +339,11 @@ pub fn set_comment_state(
         .iter_mut()
         .find(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
+    ensure_comment_belongs_to_session(comment, session)?;
+    let now = chrono::Utc::now();
     comment.state = new_state;
-    comment.updated_at = Some(chrono::Utc::now());
-    touch(session);
+    comment.updated_at = Some(now);
+    touch_at(session, now);
     Ok(comment.clone())
 }
 
@@ -254,6 +377,7 @@ pub fn reply_and_maybe_resolve_comment(
         .iter_mut()
         .find(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
+    ensure_comment_belongs_to_session(comment, session)?;
     let now = chrono::Utc::now();
     comment.replies.push(CommentReply {
         id: uuid::Uuid::new_v4().to_string(),
@@ -264,7 +388,7 @@ pub fn reply_and_maybe_resolve_comment(
         comment.state = CommentState::Resolved;
     }
     comment.updated_at = Some(now);
-    touch(session);
+    touch_at(session, now);
     Ok(comment.clone())
 }
 
@@ -275,12 +399,14 @@ pub fn edit_comment(
     edits: CommentEdits,
 ) -> Result<Comment> {
     let canonical_id = resolve_comment_id(comments, id)?;
-    let comment = comments
-        .iter_mut()
-        .find(|comment| comment.id == canonical_id)
+    let index = comments
+        .iter()
+        .position(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
+    let mut comment = comments[index].clone();
+    ensure_comment_belongs_to_session(&comment, session)?;
     if let Some(path) = edits.path {
-        comment.path = path;
+        comment.path = Some(path);
     }
     if let Some(line) = edits.line {
         comment.line = line;
@@ -301,9 +427,12 @@ pub fn edit_comment(
     if let Some(action) = edits.action {
         comment.action = action;
     }
-    comment.updated_at = Some(chrono::Utc::now());
-    touch(session);
-    Ok(comment.clone())
+    comment.validate()?;
+    let now = chrono::Utc::now();
+    comment.updated_at = Some(now);
+    comments[index] = comment.clone();
+    touch_at(session, now);
+    Ok(comment)
 }
 
 pub fn delete_comment(
@@ -316,9 +445,22 @@ pub fn delete_comment(
         .iter()
         .position(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
+    ensure_comment_belongs_to_session(&comments[index], session)?;
     let comment = comments.remove(index);
     touch(session);
     Ok(comment)
+}
+
+fn ensure_comment_belongs_to_session(comment: &Comment, session: &ReviewSession) -> Result<()> {
+    if comment.belongs_to_session(&session.id) {
+        Ok(())
+    } else {
+        Err(eyre!(
+            "comment `{}` does not belong to active session `{}`",
+            comment.id,
+            session.id
+        ))
+    }
 }
 
 pub fn add_task(
@@ -406,7 +548,7 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
     tasks.extend(
         comments
             .iter()
-            .filter(|c| c.state == CommentState::Todo)
+            .filter(|c| c.state == CommentState::Todo && c.belongs_to_session(&session.id))
             .map(|c| ListedTask {
                 id: c.id.clone(),
                 selector: shortest_unique_prefix(
@@ -421,8 +563,8 @@ pub fn list_tasks(session: &ReviewSession, comments: &[Comment]) -> Vec<ListedTa
                 body: Some(c.body.clone()),
                 status: ReviewTaskStatus::Open,
                 action: c.action,
-                target: Some(ReviewTarget {
-                    file: Some(c.path.clone()),
+                target: c.path.as_ref().map(|path| ReviewTarget {
+                    file: Some(path.clone()),
                     line: c.line,
                     end_line: c.end_line,
                     ..ReviewTarget::default()
@@ -655,7 +797,11 @@ fn resolve_walkthrough_step_index(
 }
 
 fn touch(session: &mut ReviewSession) {
-    session.updated_at = Some(chrono::Utc::now());
+    touch_at(session, chrono::Utc::now());
+}
+
+fn touch_at(session: &mut ReviewSession, now: chrono::DateTime<chrono::Utc>) {
+    session.updated_at = Some(now);
 }
 
 #[cfg(test)]
@@ -727,7 +873,7 @@ mod tests {
         fn comment(id: &str, body: &str) -> Comment {
             Comment {
                 id: id.into(),
-                path: "a.rs".into(),
+                path: Some("a.rs".into()),
                 line: Some(1),
                 end_line: None,
                 anchor: None,
@@ -848,7 +994,7 @@ mod tests {
         fn comment(id: &str) -> Comment {
             Comment {
                 id: id.into(),
-                path: "a.txt".into(),
+                path: Some("a.txt".into()),
                 line: None,
                 end_line: None,
                 anchor: None,
@@ -933,5 +1079,226 @@ mod tests {
         assert_eq!(resolved.replies.len(), 2);
         assert_eq!(resolved.state, CommentState::Resolved);
         assert!(reply_to_comment(&mut session, &mut comments, "abc", "  ".into()).is_err());
+    }
+
+    fn scoped_comment(id: &str, session_id: Option<&str>, state: CommentState) -> Comment {
+        Comment {
+            id: id.into(),
+            session_id: session_id.map(str::to_owned),
+            path: Some("src/lib.rs".into()),
+            body: format!("comment {id}"),
+            state,
+            ..Comment::default()
+        }
+    }
+
+    #[test]
+    fn add_comment_stores_general_scope_and_explicit_initial_state() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let mut comments = Vec::new();
+
+        let comment = add_comment(
+            &mut session,
+            &mut comments,
+            NewComment {
+                session_id: "session-a".into(),
+                path: None,
+                line: None,
+                end_line: None,
+                anchor: None,
+                body: "Overall concern".into(),
+                kind: Some(CommentKind::Issue),
+                action: Some(ActionIntent::Explain),
+                state: CommentState::Todo,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(comment.session_id.as_deref(), Some("session-a"));
+        assert!(comment.is_general());
+        assert_eq!(comment.state, CommentState::Todo);
+        assert_eq!(comments, vec![comment.clone()]);
+        assert_eq!(session.updated_at, comment.updated_at);
+    }
+
+    #[test]
+    fn add_comment_rejects_invalid_scope_location_and_initial_state_without_mutation() {
+        fn new(session_id: &str, state: CommentState) -> NewComment {
+            NewComment {
+                session_id: session_id.into(),
+                path: None,
+                line: None,
+                end_line: None,
+                anchor: None,
+                body: "body".into(),
+                kind: None,
+                action: None,
+                state,
+            }
+        }
+
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            updated_at: None,
+            ..ReviewSession::default()
+        };
+        let mut comments = Vec::new();
+
+        assert!(
+            add_comment(
+                &mut session,
+                &mut comments,
+                new("session-a", CommentState::Resolved)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("must be draft or todo")
+        );
+        assert!(
+            add_comment(
+                &mut session,
+                &mut comments,
+                new("session-b", CommentState::Draft)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not match active session")
+        );
+        let mut invalid_location = new("session-a", CommentState::Draft);
+        invalid_location.line = Some(1);
+        assert!(
+            add_comment(&mut session, &mut comments, invalid_location)
+                .unwrap_err()
+                .to_string()
+                .contains("general comment cannot")
+        );
+        assert!(comments.is_empty());
+        assert!(session.updated_at.is_none());
+    }
+
+    #[test]
+    fn ready_selected_comments_is_atomic_timestamped_and_idempotent() {
+        let old_touch = chrono::Utc::now() - chrono::Duration::hours(1);
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            updated_at: Some(old_touch),
+            ..ReviewSession::default()
+        };
+        let mut comments = vec![
+            scoped_comment("draft-a-0000", Some("session-a"), CommentState::Draft),
+            scoped_comment("todo-a-0000", Some("session-a"), CommentState::Todo),
+            scoped_comment("resolved-a-0000", Some("session-a"), CommentState::Resolved),
+            scoped_comment("draft-b-0000", Some("session-b"), CommentState::Draft),
+        ];
+        let todo_updated_at = comments[1].updated_at;
+
+        let result = ready_selected_comments(
+            &mut session,
+            &mut comments,
+            &["draft-a".into(), "todo-a".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            ReadyCommentsResult {
+                readied: 1,
+                already_ready: 1
+            }
+        );
+        assert_eq!(comments[0].state, CommentState::Todo);
+        assert_eq!(comments[0].updated_at, session.updated_at);
+        assert_eq!(comments[1].updated_at, todo_updated_at);
+        let first_touch = session.updated_at;
+
+        let repeated = ready_selected_comments(
+            &mut session,
+            &mut comments,
+            &["draft-a".into(), "todo-a".into(), "draft-a".into()],
+        )
+        .unwrap();
+        assert_eq!(repeated.readied, 0);
+        assert_eq!(repeated.already_ready, 2);
+        assert_eq!(session.updated_at, first_touch);
+
+        let snapshot = comments.clone();
+        assert!(
+            ready_selected_comments(
+                &mut session,
+                &mut comments,
+                &["draft-a".into(), "missing".into()]
+            )
+            .is_err()
+        );
+        assert_eq!(comments, snapshot);
+        assert_eq!(session.updated_at, first_touch);
+
+        assert!(ready_selected_comments(&mut session, &mut comments, &["draft-b".into()]).is_err());
+        assert!(
+            ready_selected_comments(&mut session, &mut comments, &["resolved-a".into()]).is_err()
+        );
+        assert_eq!(comments, snapshot);
+        assert_eq!(session.updated_at, first_touch);
+    }
+
+    #[test]
+    fn ready_all_drafts_scopes_session_and_includes_legacy_comments() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let mut comments = vec![
+            scoped_comment("scoped-a", Some("session-a"), CommentState::Draft),
+            scoped_comment("legacy", None, CommentState::Draft),
+            scoped_comment("scoped-b", Some("session-b"), CommentState::Draft),
+            scoped_comment("todo-a", Some("session-a"), CommentState::Todo),
+        ];
+
+        let result = ready_all_drafts(&mut session, &mut comments).unwrap();
+        assert_eq!(result.readied, 2);
+        assert_eq!(result.already_ready, 0);
+        assert_eq!(comments[0].state, CommentState::Todo);
+        assert_eq!(comments[1].state, CommentState::Todo);
+        assert_eq!(comments[2].state, CommentState::Draft);
+        assert_eq!(comments[3].state, CommentState::Todo);
+        assert_eq!(comments[0].updated_at, comments[1].updated_at);
+        assert_eq!(comments[0].updated_at, session.updated_at);
+        let first_touch = session.updated_at;
+
+        let repeated = ready_all_drafts(&mut session, &mut comments).unwrap();
+        assert_eq!(repeated, ReadyCommentsResult::default());
+        assert_eq!(session.updated_at, first_touch);
+    }
+
+    #[test]
+    fn comment_mutations_reject_foreign_session_scope() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let foreign = scoped_comment("foreign-comment", Some("session-b"), CommentState::Draft);
+        let mut comments = vec![foreign.clone()];
+
+        assert!(
+            set_comment_state(&mut session, &mut comments, "foreign-", CommentState::Todo).is_err()
+        );
+        assert!(
+            edit_comment(
+                &mut session,
+                &mut comments,
+                "foreign-",
+                CommentEdits {
+                    body: Some("changed".into()),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(reply_to_comment(&mut session, &mut comments, "foreign-", "reply".into()).is_err());
+        assert!(delete_comment(&mut session, &mut comments, "foreign-").is_err());
+        assert_eq!(comments, vec![foreign]);
+        assert!(session.updated_at.is_none());
     }
 }

@@ -33,10 +33,11 @@ use crate::{
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
     jj::ReviewTarget,
+    review,
     state::{
-        Comment, CommentState, FileState, ReviewSessionStatus, ReviewState, ReviewStateMeta,
-        ReviewTarget as StateReviewTarget, StepArtifact, StepArtifactKind, StepImportance,
-        StepKind, Walkthrough, WalkthroughStep,
+        Comment, CommentState, FileState, REVIEW_STATE_SCHEMA_VERSION, ReviewSessionStatus,
+        ReviewState, ReviewStateMeta, ReviewTarget as StateReviewTarget, StepArtifact,
+        StepArtifactKind, StepImportance, StepKind, Walkthrough, WalkthroughStep,
     },
     syntax::SyntaxConfig,
 };
@@ -117,6 +118,8 @@ pub struct ReviewSession {
     persisted_files: BTreeMap<String, FileState>,
     pub comments: Vec<Comment>,
     pub sessions: Vec<crate::state::ReviewSession>,
+    /// Configured lifecycle state for newly accepted durable comments.
+    pub comment_initial_state: CommentState,
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
@@ -212,6 +215,13 @@ pub struct RefreshedFileChange {
 struct FileViewport {
     diff_scroll: u16,
     diff_cursor: usize,
+}
+
+struct ReviewSessionOptions {
+    syntax: SyntaxConfig,
+    limits: LimitsConfig,
+    diff_cues: DiffConfig,
+    comment_initial_state: CommentState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,9 +333,12 @@ impl ReviewSession {
             target,
             diff,
             state,
-            config.syntax.clone(),
-            config.limits.clone(),
-            config.diff.clone(),
+            ReviewSessionOptions {
+                syntax: config.syntax.clone(),
+                limits: config.limits.clone(),
+                diff_cues: config.diff.clone(),
+                comment_initial_state: config.comments.initial_state.into(),
+            },
         )
     }
 
@@ -342,9 +355,12 @@ impl ReviewSession {
             target,
             diff,
             state,
-            syntax,
-            LimitsConfig::default(),
-            DiffConfig::default(),
+            ReviewSessionOptions {
+                syntax,
+                limits: LimitsConfig::default(),
+                diff_cues: DiffConfig::default(),
+                comment_initial_state: CommentState::Draft,
+            },
         )
     }
 
@@ -353,10 +369,14 @@ impl ReviewSession {
         target: ReviewTarget,
         diff: DiffSet,
         state: ReviewState,
-        syntax: SyntaxConfig,
-        limits: LimitsConfig,
-        diff_cues: DiffConfig,
+        options: ReviewSessionOptions,
     ) -> Self {
+        let ReviewSessionOptions {
+            syntax,
+            limits,
+            diff_cues,
+            comment_initial_state,
+        } = options;
         let mut state = state;
         state.normalize_legacy_file_state();
         let ReviewState {
@@ -391,6 +411,7 @@ impl ReviewSession {
             persisted_files: files,
             comments,
             sessions,
+            comment_initial_state,
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
@@ -437,13 +458,16 @@ impl ReviewSession {
             target,
             diff,
             state,
-            self.syntax.clone(),
-            LimitsConfig {
-                max_diff_lines: self.max_diff_lines,
-                nudge_diff_lines: self.nudge_diff_lines,
-                nudge_files: self.nudge_files,
+            ReviewSessionOptions {
+                syntax: self.syntax.clone(),
+                limits: LimitsConfig {
+                    max_diff_lines: self.max_diff_lines,
+                    nudge_diff_lines: self.nudge_diff_lines,
+                    nudge_files: self.nudge_files,
+                },
+                diff_cues: self.diff_cues.clone(),
+                comment_initial_state: self.comment_initial_state,
             },
-            self.diff_cues.clone(),
         );
         self.refresh_comment_anchors_for_current_diff();
     }
@@ -605,7 +629,10 @@ impl ReviewSession {
 
     fn refresh_comment_anchors_for_current_diff(&mut self) {
         for comment in &mut self.comments {
-            let Some(file) = self.files.iter().find(|file| file.path == comment.path) else {
+            let Some(path) = comment.path.as_deref() else {
+                continue;
+            };
+            let Some(file) = self.files.iter().find(|file| file.path == path) else {
                 continue;
             };
             let Some(anchor) = comment_anchor_for_file_lines(file, comment.line, comment.end_line)
@@ -1788,7 +1815,7 @@ impl ReviewSession {
             }),
             Focus::Files => self.selected_file().and_then(|file| {
                 self.comments.iter().position(|comment| {
-                    comment.path == file.path
+                    comment.path.as_deref() == Some(file.path.as_str())
                         && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
                 })
             }),
@@ -1801,54 +1828,86 @@ impl ReviewSession {
                 .selected_line_anchor()
                 .is_some_and(|anchor| self.comment_matches_diff_row_anchor(comment, &anchor)),
             Focus::Files => self.selected_file().is_some_and(|file| {
-                comment.path == file.path
+                comment.path.as_deref() == Some(file.path.as_str())
                     && matches!(comment.anchor, Some(CommentAnchor::File { .. }) | None)
             }),
         }
     }
 
     pub fn update_comment_body(&mut self, id: &str, body: String) -> bool {
-        if body.trim().is_empty() {
-            return false;
-        }
-        let Some(comment) = self.comments.iter_mut().find(|comment| comment.id == id) else {
-            return false;
-        };
-        comment.body = body;
-        true
+        let index = self.ensure_active_review_session_index();
+        review::edit_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            id,
+            review::CommentEdits {
+                body: Some(body),
+                ..Default::default()
+            },
+        )
+        .is_ok()
     }
 
     /// Advance a comment's state (draft -> todo -> resolved -> draft).
     pub fn cycle_comment_state(&mut self, id: &str) -> Option<CommentState> {
         let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
-        comment.state = comment.state.next();
-        Some(comment.state)
+        let next = comment.state.next();
+        let index = self.ensure_active_review_session_index();
+        review::set_comment_state(&mut self.sessions[index], &mut self.comments, id, next)
+            .ok()
+            .map(|comment| comment.state)
     }
 
     /// Advance a comment's action intent (none -> fix -> explain -> test -> follow-up -> none).
     pub fn cycle_comment_action(&mut self, id: &str) -> Option<Option<crate::state::ActionIntent>> {
-        let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
-        comment.action = match comment.action.unwrap_or(crate::state::ActionIntent::None) {
+        let next = match self
+            .comments
+            .iter()
+            .find(|comment| comment.id == id)?
+            .action
+            .unwrap_or(crate::state::ActionIntent::None)
+        {
             crate::state::ActionIntent::None => Some(crate::state::ActionIntent::Fix),
             crate::state::ActionIntent::Fix => Some(crate::state::ActionIntent::Explain),
             crate::state::ActionIntent::Explain => Some(crate::state::ActionIntent::Test),
             crate::state::ActionIntent::Test => Some(crate::state::ActionIntent::FollowUp),
             crate::state::ActionIntent::FollowUp => None,
         };
-        Some(comment.action)
+        let index = self.ensure_active_review_session_index();
+        review::edit_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            id,
+            review::CommentEdits {
+                action: Some(next),
+                ..Default::default()
+            },
+        )
+        .ok()
+        .map(|comment| comment.action)
     }
 
     /// Advance a comment's kind (none -> note -> issue -> question -> praise -> none).
     pub fn cycle_comment_kind(&mut self, id: &str) -> Option<Option<crate::state::CommentKind>> {
-        let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
-        comment.kind = match comment.kind {
+        let next = match self.comments.iter().find(|comment| comment.id == id)?.kind {
             None => Some(crate::state::CommentKind::Note),
             Some(crate::state::CommentKind::Note) => Some(crate::state::CommentKind::Issue),
             Some(crate::state::CommentKind::Issue) => Some(crate::state::CommentKind::Question),
             Some(crate::state::CommentKind::Question) => Some(crate::state::CommentKind::Praise),
             Some(crate::state::CommentKind::Praise) => None,
         };
-        Some(comment.kind)
+        let index = self.ensure_active_review_session_index();
+        review::edit_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            id,
+            review::CommentEdits {
+                kind: Some(next),
+                ..Default::default()
+            },
+        )
+        .ok()
+        .map(|comment| comment.kind)
     }
 
     /// Select a comment by id, moving the file/diff cursors to its anchor.
@@ -1859,10 +1918,12 @@ impl ReviewSession {
     }
 
     pub fn delete_comment(&mut self, id: &str) -> bool {
-        let Some(index) = self.comments.iter().position(|comment| comment.id == id) else {
+        let session_index = self.ensure_active_review_session_index();
+        if review::delete_comment(&mut self.sessions[session_index], &mut self.comments, id)
+            .is_err()
+        {
             return false;
-        };
-        self.comments.remove(index);
+        }
         if self.selected_comment_id.as_deref() == Some(id) {
             self.selected_comment_id = None;
         }
@@ -1894,29 +1955,76 @@ impl ReviewSession {
     }
 
     pub fn add_comment_with_anchor(&mut self, body: String, anchor: CommentAnchor) {
-        if body.trim().is_empty() {
-            return;
+        let index = self.ensure_active_review_session_index();
+        let session_id = self.sessions[index].id.clone();
+        let _ = review::add_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            review::NewComment {
+                session_id,
+                path: Some(anchor.path().to_owned()),
+                line: anchor.line(),
+                end_line: anchor
+                    .end_line()
+                    .filter(|end_line| Some(*end_line) != anchor.line()),
+                anchor: Some(anchor),
+                body,
+                kind: None,
+                action: None,
+                state: self.comment_initial_state,
+            },
+        );
+    }
+
+    pub fn add_general_comment(&mut self, body: String) {
+        let index = self.ensure_active_review_session_index();
+        let session_id = self.sessions[index].id.clone();
+        let _ = review::add_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            review::NewComment {
+                session_id,
+                path: None,
+                line: None,
+                end_line: None,
+                anchor: None,
+                body,
+                kind: None,
+                action: None,
+                state: self.comment_initial_state,
+            },
+        );
+    }
+
+    pub fn ready_all_draft_comments(&mut self) -> review::ReadyCommentsResult {
+        let index = self.ensure_active_review_session_index();
+        review::ready_all_drafts(&mut self.sessions[index], &mut self.comments).unwrap_or_default()
+    }
+
+    fn ensure_active_review_session_index(&mut self) -> usize {
+        if let Some(index) = self.sessions.iter().position(|session| {
+            session.status == ReviewSessionStatus::Open
+                && session.target.base.as_deref() == Some(self.target.base.as_str())
+                && session.target.revision.as_deref() == Some(self.target.rev.as_str())
+        }) {
+            return index;
         }
-        let created_at = Utc::now();
-        self.comments.push(Comment {
-            // UUIDs keep comment ids collision-free across delete/re-add cycles
-            // and across sessions/people, which matters because artifact import
-            // dedupes comments by id.
-            id: uuid::Uuid::new_v4().to_string(),
-            path: anchor.path().to_owned(),
-            line: anchor.line(),
-            end_line: anchor
-                .end_line()
-                .filter(|end_line| Some(*end_line) != anchor.line()),
-            anchor: Some(anchor),
-            body,
-            kind: None,
-            action: None,
-            state: CommentState::default(),
-            replies: Vec::new(),
-            created_at,
-            updated_at: Some(created_at),
-        });
+        let mut state = ReviewState {
+            sessions: std::mem::take(&mut self.sessions),
+            ..ReviewState::default()
+        };
+        let spec = review::SessionTargetSpec {
+            repo: Some(self.repo.display().to_string()),
+            base: Some(self.target.base.clone()),
+            revision: Some(self.target.rev.clone()),
+            revset: None,
+        };
+        let id = review::ensure_session(&mut state, &spec, None).id.clone();
+        self.sessions = state.sessions;
+        self.sessions
+            .iter()
+            .position(|session| session.id == id)
+            .expect("ensured session must exist")
     }
 
     fn current_comment_index(&self) -> Option<usize> {
@@ -1928,11 +2036,14 @@ impl ReviewSession {
             return;
         };
         self.selected_comment_id = Some(comment.id.clone());
-        let target_path = comment
+        let Some(target_path) = comment
             .anchor
             .as_ref()
             .map(CommentAnchor::path)
-            .unwrap_or(&comment.path);
+            .or(comment.path.as_deref())
+        else {
+            return;
+        };
         let Some(file_index) = self.files.iter().position(|file| file.path == target_path) else {
             return;
         };
@@ -1990,7 +2101,7 @@ impl ReviewSession {
     pub fn to_state(&self) -> ReviewState {
         ReviewState {
             meta: ReviewStateMeta {
-                version: 1,
+                version: REVIEW_STATE_SCHEMA_VERSION,
                 base: Some(self.target.base.clone()),
                 revision: Some(self.target.rev.clone()),
                 repo: Some(self.repo.display().to_string()),
@@ -2765,7 +2876,7 @@ diff --git a/src/c.rs b/src/c.rs
     fn comment(id: &str, path: &str) -> Comment {
         Comment {
             id: id.to_owned(),
-            path: path.to_owned(),
+            path: Some(path.to_owned()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -3171,7 +3282,7 @@ diff --git a/src/c.rs b/src/c.rs
         session.add_comment("File note".into());
 
         let comment = &session.comments[0];
-        assert_eq!(comment.path, "src/tui.rs");
+        assert_eq!(comment.path.as_deref(), Some("src/tui.rs"));
         assert_eq!(comment.line, None);
         assert!(matches!(comment.anchor, Some(CommentAnchor::File { .. })));
     }
@@ -3184,7 +3295,7 @@ diff --git a/src/c.rs b/src/c.rs
         session.add_comment("Line note".into());
 
         let comment = &session.comments[0];
-        assert_eq!(comment.path, "src/tui.rs");
+        assert_eq!(comment.path.as_deref(), Some("src/tui.rs"));
         assert_eq!(comment.line, Some(1));
         assert!(matches!(comment.anchor, Some(CommentAnchor::Line { .. })));
     }
@@ -3792,7 +3903,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         let state = session.into_state();
 
-        assert_eq!(state.meta.version, 1);
+        assert_eq!(state.meta.version, REVIEW_STATE_SCHEMA_VERSION);
         assert_eq!(state.meta.base.as_deref(), Some("trunk()"));
         assert_eq!(state.meta.revision.as_deref(), Some("@"));
         assert!(state.meta.repo.is_some());

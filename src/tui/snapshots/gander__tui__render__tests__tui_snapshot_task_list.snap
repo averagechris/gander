@@ -6,9 +6,9 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
 │  • mod     app.rs                        ││@@ -1 +1 @@                                           │
 │                                          ││1   1 - old                                           │
-│                                          ││      ↳ test-tas [draft] [test] [issue] Please add a  │
+│                                          ││      ↳ test-tas [todo] [test] [issue] Please add a   │
 │        ╭ Review tasks ──────────────────────────────────────────────────────────────────╮        │
-│        │› src/app.rs:1 [test] [issue] [draft] Please add a regression test              │        │
+│        │› src/app.rs:1 [test] [issue] [todo] Please add a regression test               │        │
 │        │                                                                                │        │
 │        │↑/↓ or j/k move · enter jump · d cycle state · esc close                        │        │
 │        │                                                                                │        │

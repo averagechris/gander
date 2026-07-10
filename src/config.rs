@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     generated::{GeneratedPolicy, GeneratedPreset},
+    state::CommentState,
     syntax::SyntaxConfig,
 };
 
@@ -23,6 +24,32 @@ pub struct Config {
     pub limits: LimitsConfig,
     pub agent: AgentConfig,
     pub diff: DiffConfig,
+    pub comments: CommentsConfig,
+}
+
+/// Defaults for new durable comments. This deliberately cannot represent
+/// `resolved`: closed history is never a valid creation state.
+#[derive(Debug, Clone, Copy, Default, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InitialCommentState {
+    Draft,
+    #[default]
+    Todo,
+}
+
+impl From<InitialCommentState> for CommentState {
+    fn from(value: InitialCommentState) -> Self {
+        match value {
+            InitialCommentState::Draft => Self::Draft,
+            InitialCommentState::Todo => Self::Todo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct CommentsConfig {
+    pub initial_state: InitialCommentState,
 }
 
 /// Diff-pane visual cues. All runtime-toggleable from the view options
@@ -289,6 +316,13 @@ struct ConfigPatch {
     limits: LimitsConfigPatch,
     agent: AgentConfigPatch,
     diff: DiffConfigPatch,
+    comments: CommentsConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct CommentsConfigPatch {
+    initial_state: Option<InitialCommentState>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -651,6 +685,10 @@ impl Config {
         }
         if let Some(prompt) = patch.agent.prompt {
             self.agent.prompt = Some(prompt);
+        }
+
+        if let Some(initial_state) = patch.comments.initial_state {
+            self.comments.initial_state = initial_state;
         }
 
         if let Some(word_highlight) = patch.diff.word_highlight {
@@ -1097,6 +1135,9 @@ expand-context = ["ctrl-e"]
 [artifact]
 format = "json"
 
+[comments]
+initial-state = "draft"
+
 [keybindings]
 move-down = ["s"]
 move-up = ["r"]
@@ -1114,6 +1155,9 @@ basename = "project-review"
 
 [generated]
 presets = ["lockfiles"]
+
+[comments]
+initial-state = "todo"
 "#,
         )
         .unwrap();
@@ -1148,5 +1192,24 @@ move-down = ["n", "down"]
         assert_eq!(config.generated.presets, [GeneratedPreset::Lockfiles]);
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
+        assert_eq!(config.comments.initial_state, InitialCommentState::Todo);
+    }
+
+    #[test]
+    fn comments_default_to_todo_and_reject_resolved() {
+        assert_eq!(
+            Config::default().comments.initial_state,
+            InitialCommentState::Todo
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resolved.toml");
+        fs::write(&path, "[comments]\ninitial-state = \"resolved\"\n").unwrap();
+        let error = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to parse config"));
     }
 }

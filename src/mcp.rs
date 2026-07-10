@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 use crate::{
     acp::AcpHandler,
     app::ReviewSession,
+    config::InitialCommentState,
     jj::{JjBackend, ReviewTarget as JjReviewTarget},
     registry, review,
     state::{
@@ -44,6 +45,7 @@ pub struct GanderMcp {
     state_path: PathBuf,
     target: review::SessionTargetSpec,
     diff_files: Vec<String>,
+    initial_comment_state: CommentState,
     snapshot: mpsc::Sender<SnapshotRequest>,
     tool_router: ToolRouter<Self>,
 }
@@ -55,6 +57,7 @@ pub struct GanderMcpParams {
     pub workspace_root: PathBuf,
     pub target: JjReviewTarget,
     pub diff_files: Vec<String>,
+    pub initial_comment_state: CommentState,
 }
 
 struct SnapshotRequest {
@@ -214,13 +217,25 @@ pub struct IdParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CommentAddParams {
-    /// Diff file path. Equivalent to `gander comments add <path>`.
-    pub path: String,
+    /// Diff file path. Mutually exclusive with `general`.
+    pub path: Option<String>,
+    /// Create a session-level comment with no file anchor.
+    pub general: Option<bool>,
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub body: String,
     pub kind: Option<CommentKind>,
     pub action: Option<ActionIntent>,
+    /// Initial durable state. Only draft or todo are accepted.
+    pub state: Option<InitialCommentState>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentsReadyParams {
+    /// Full ids or unambiguous prefixes. Mutually exclusive with all_drafts.
+    pub ids: Option<Vec<String>>,
+    /// Ready every active-session draft.
+    pub all_drafts: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -325,6 +340,7 @@ impl GanderMcp {
             state_path: params.state_path,
             target: target_spec,
             diff_files: params.diff_files,
+            initial_comment_state: params.initial_comment_state,
             snapshot: sender,
             tool_router: Self::tool_router(),
         })
@@ -575,13 +591,25 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentAddParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.ensure_diff_file(&params.path)?;
+        let general = params.general.unwrap_or(false);
+        match (params.path.as_deref(), general) {
+            (Some(path), false) => self.ensure_diff_file(path)?,
+            (None, true) => {}
+            _ => {
+                return Err(McpError::invalid_params(
+                    "provide exactly one of `path` or `general: true`",
+                    None,
+                ));
+            }
+        }
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index(state);
-            Ok(review::add_comment(
+            let session_id = state.sessions[idx].id.clone();
+            review::add_comment(
                 &mut state.sessions[idx],
                 &mut state.comments,
                 review::NewComment {
+                    session_id,
                     path: params.path,
                     line: params.line,
                     end_line: params.end_line,
@@ -590,8 +618,37 @@ impl GanderMcp {
                     body: params.body,
                     kind: params.kind,
                     action: params.action,
+                    state: params
+                        .state
+                        .map(Into::into)
+                        .unwrap_or(this.initial_comment_state),
                 },
-            ))
+            )
+        })
+    }
+
+    #[tool(
+        description = "Mark selected durable comments, or all active-session drafts, ready as todos. Equivalent to `gander comments ready`."
+    )]
+    fn comments_ready(
+        &self,
+        Parameters(params): Parameters<CommentsReadyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let all_drafts = params.all_drafts.unwrap_or(false);
+        let ids = params.ids.unwrap_or_default();
+        if all_drafts != ids.is_empty() {
+            return Err(McpError::invalid_params(
+                "provide non-empty `ids` or `all_drafts: true`, but not both",
+                None,
+            ));
+        }
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index(state);
+            if all_drafts {
+                review::ready_all_drafts(&mut state.sessions[idx], &mut state.comments)
+            } else {
+                review::ready_selected_comments(&mut state.sessions[idx], &mut state.comments, &ids)
+            }
         })
     }
 
@@ -1011,6 +1068,7 @@ mod tests {
                 workspace_root: dir.to_path_buf(),
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".to_owned()],
+                initial_comment_state: CommentState::Todo,
             },
         )
         .unwrap()
@@ -1155,12 +1213,14 @@ mod tests {
         let comment = result_json(
             &server
                 .comment_add(Parameters(CommentAddParams {
-                    path: "src/app.rs".to_owned(),
+                    path: Some("src/app.rs".to_owned()),
+                    general: None,
                     line: Some(1),
                     end_line: None,
                     body: "persist me".to_owned(),
                     kind: Some(CommentKind::Issue),
                     action: Some(ActionIntent::Fix),
+                    state: Some(InitialCommentState::Draft),
                 }))
                 .unwrap(),
         );
@@ -1169,6 +1229,43 @@ mod tests {
         assert_eq!(state.comments.len(), 1);
         assert_eq!(state.comments[0].id, comment["id"]);
         assert_eq!(state.comments[0].body, "persist me");
+    }
+
+    #[test]
+    fn general_add_explicit_state_and_bulk_ready_share_core_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+
+        let comment = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: None,
+                    general: Some(true),
+                    line: None,
+                    end_line: None,
+                    body: "session-wide feedback".to_owned(),
+                    kind: Some(CommentKind::Question),
+                    action: Some(ActionIntent::None),
+                    state: Some(InitialCommentState::Draft),
+                }))
+                .unwrap(),
+        );
+        assert!(comment["path"].is_null());
+        assert_eq!(comment["state"], "draft");
+        assert!(comment["session_id"].as_str().is_some());
+
+        let ready = result_json(
+            &server
+                .comments_ready(Parameters(CommentsReadyParams {
+                    ids: None,
+                    all_drafts: Some(true),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(ready["readied"], 1);
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.comments[0].state, CommentState::Todo);
+        assert!(state.comments[0].is_general());
     }
 
     #[test]
@@ -1284,6 +1381,7 @@ mod tests {
                 workspace_root: workspace,
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".to_owned()],
+                initial_comment_state: CommentState::Todo,
             },
         )
         .unwrap();

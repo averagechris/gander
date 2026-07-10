@@ -55,12 +55,7 @@ fn actionable_comment_ids(session: &ReviewSession) -> Vec<String> {
     session
         .comments
         .iter()
-        .filter(|comment| {
-            comment.state == CommentState::Todo
-                || comment
-                    .action
-                    .is_some_and(|action| action != crate::state::ActionIntent::None)
-        })
+        .filter(|comment| comment.state == CommentState::Todo)
         .map(|comment| comment.id.clone())
         .collect()
 }
@@ -80,6 +75,7 @@ mod tests {
 +new
 "#,
         );
+        session.comment_initial_state = CommentState::Draft;
         session.add_comment("plain".into());
         session.add_comment("todo".into());
         let todo = session.comments[1].id.clone();
@@ -90,17 +86,11 @@ mod tests {
     }
 
     #[test]
-    fn tasks_include_todo_or_actionable_comments() {
+    fn tasks_include_only_todo_comments() {
         let session = task_session();
         let state = TaskListState::new(&session);
 
-        assert_eq!(
-            state.comment_ids,
-            vec![
-                session.comments[1].id.clone(),
-                session.comments[2].id.clone()
-            ]
-        );
+        assert_eq!(state.comment_ids, vec![session.comments[1].id.clone()]);
     }
 
     #[test]
@@ -109,9 +99,9 @@ mod tests {
         let mut state = TaskListState::new(&session);
 
         state.move_selection(1);
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
         state.move_selection(5);
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
         state.move_selection(-5);
         assert_eq!(state.selected, 0);
     }
@@ -120,12 +110,11 @@ mod tests {
     fn refresh_clamps_after_task_stops_matching() {
         let mut session = task_session();
         let mut state = TaskListState::new(&session);
-        state.selected = 1;
-        session.comments[2].action = None;
+        session.comments[1].state = CommentState::Draft;
 
         state.refresh(&session);
 
         assert_eq!(state.selected, 0);
-        assert_eq!(state.comment_ids.len(), 1);
+        assert!(state.comment_ids.is_empty());
     }
 }

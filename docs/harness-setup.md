@@ -29,13 +29,21 @@ Current shape (see [docs/cli.md](cli.md) for the complete reference):
 gander reviews create --title "Agent pass"
 gander reviews list
 gander reviews show <id>
-gander comments add --path src/lib.rs --line 42 --kind issue --action fix --body "Check this invariant."
+gander comments add --path src/lib.rs --line 42 --kind issue --action fix --state todo --body "Check this invariant."
+gander comments add --general --state draft --body "Private reviewer note; not ready for handoff."
+gander comments ready --all-drafts
 gander tasks add --title "Tighten invariant" --action fix --comment <comment-id> --path src/lib.rs --line 42
 gander walkthrough add-step --title "Start at the invariant" --path src/lib.rs --line 42 --why "This controls the rest of the change."
 gander walkthrough show
 gander handoff --copy
 gander hunks show <hunk-id>
 ```
+
+Review state schema 2 records optional comment `session_id` and `path` fields;
+artifact schema 6 and delegation schema 2 expose the corresponding shape.
+State/artifact readers still accept older anchored comments unchanged. A legacy
+comment with no `session_id` remains visible in the active session, while a
+pathless comment is explicitly general to its owning session.
 
 Use MCP when your harness benefits from typed tools and live `current_focus`.
 
@@ -64,17 +72,20 @@ prefer `walkthrough_*` for new curation, with optional stack `change_id`),
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
 `comment_*`, `task_*`/`tasks_list`, and `walkthrough_*`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, chunks
-via `S` and zen mode `T`/`Z`, drafts via `D`).
+via `S` and zen mode `T`/`Z`, comments via `C`). MCP must preserve CLI
+semantics: new comments honor the configured initial state unless an explicit
+state is supplied; draft comments are durable/private/withheld, todo comments
+are ready/actionable regardless of kind/action, resolved comments are history,
+and general comments have no file location or excerpt.
 
 The CLI-parity state-file tools load and save the persisted review state
 directly, matching the corresponding `gander reviews`, `comments`, `tasks`,
 and `walkthrough` commands. They are safe to use beside a live TUI: the TUI
 watches the state file and merges external additions/updates before saving, so
-CLI-added comments, tasks, and walkthrough steps survive TUI save/quit. The
-remaining caveat is same-ID comment updates: comments are currently merged by id
-as append-only objects, so two writers editing the same comment are not
-reconciled by `updated_at`. Same-ID conflicts for sessions, tasks,
-walkthroughs, and walkthrough steps prefer the newer timestamp.
+CLI-added comments, tasks, and walkthrough steps survive TUI save/quit. Same-ID
+comment updates use the newer `updated_at` value for body/state metadata and
+union append-only replies by reply id; sessions, tasks, walkthroughs, and
+walkthrough steps likewise prefer the newer timestamp.
 
 ### MCP ⇄ CLI parity table
 
@@ -87,10 +98,11 @@ scriptable surface.
 | `reviews_list` | `gander reviews list` |
 | `reviews_show` | `gander reviews show <id>` |
 | `reviews_create` | `gander reviews create [--title <title>]` |
-| `comment_add` | `gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> [--kind ...] [--action ...]` |
+| `comment_add` | `gander comments add (--path <path> [--line <n>] [--end-line <n>] \| --general) --body <text> [--kind ...] [--action ...] [--state ...]` |
 | `comment_reply` | `gander comments reply <id> --body <text> [--resolve]` |
 | `comment_resolve` | `gander comments resolve <id> [--reply <text>]` |
 | `comment_set_state` | `gander comments set-state <id> --state draft|todo|resolved` |
+| `comment_ready` | `gander comments ready (<id>... \| --all-drafts)` |
 | `task_add` | `gander tasks add --title <title> [--body <text>] [--action ...] [--comment <id>] [--path <path>] [--line <n>]` |
 | `task_complete` | `gander tasks complete <id> [--summary <text>]` |
 | `task_reopen` | `gander tasks reopen <id>` |
@@ -187,8 +199,9 @@ D4). The recommended setup is two panes in the same directory:
      calls `current_focus` and answers about the exact file/line under
      your cursor;
    - *"Draft review comments for the problems you see."* — triage them in
-     gander with `D` (accept/edit/discard; dispositions are written back
-     for the agent to observe).
+      gander with `C`/`D`: keep private drafts, ready todos when they should be
+      addressed, or discard/resolve them. Dispositions are written back for the
+      agent to observe.
 
 When a review is large, gander nudges you in the footer
 (`[limits] nudge-diff-lines` / `nudge-files` in `gander.toml`, 0 to

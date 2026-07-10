@@ -254,6 +254,7 @@ impl AcpHandler {
                     .iter()
                     .map(|comment| json!({
                         "id": comment.id,
+                        "session_id": comment.session_id,
                         "path": comment.path,
                         "line": comment.line,
                         "end_line": comment.end_line,
@@ -1224,6 +1225,8 @@ diff --git a/README.md b/README.md
         assert_eq!(comments.as_array().unwrap().len(), 1);
         assert_eq!(comments[0]["body"], "file note");
         assert_eq!(comments[0]["state"], "draft");
+        assert!(comments[0]["session_id"].as_str().is_some());
+        assert_eq!(comments[0]["path"], "src/app.rs");
     }
 
     #[test]

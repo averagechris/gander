@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `5`.
+Current schema version: `6`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -30,7 +30,7 @@ config.
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -69,6 +69,7 @@ config.
   "comments": [
     {
       "id": "stable-ish-id",
+      "session_id": "review-session-id",
       "path": "src/main.rs",
       "line": 42,
       "anchor": {
@@ -144,6 +145,9 @@ Notes:
   in the `human` profile.
 - `session` is present when the exported change matches an open durable review
   session; it includes the session `id` and optional `title`.
+- `comments[].session_id` identifies the durable session that owns a newly
+  created comment. Version 5 and older comments omit it; those legacy unscoped
+  comments remain visible in matching-session exports for compatibility.
 - `tasks` and `walkthroughs` are exported from the active durable session when
   one is present. They are empty arrays otherwise. Task targets and walkthrough
   step targets include local file/line/symbol coordinates when recorded.
@@ -154,8 +158,20 @@ Notes:
 - Line anchors are 1-indexed diff lines. New-side/post-image anchors are
   preferred; old-side coordinates are used only as a fallback for removed-only
   lines that have no new-side line.
-- `comments[].state` is one of `draft`, `todo`, `resolved`; missing values
-  deserialize as `draft` for artifacts written before version 4.
+- `comments[].path` is optional as of version 6. It and `line`, `anchor`, and
+  `excerpt` are absent/null for general session comments. General comments
+  intentionally have no location or excerpt and do not select unrelated hunks
+  for handoff reference output. Existing version 5 anchored comments retain
+  their string `path` and deserialize unchanged.
+- `comments[].state` is one of `draft`, `todo`, `resolved`. `draft` means saved,
+  private, and withheld from prompt/delegate handoff; `todo` means ready and
+  actionable (every todo asks an agent to address it regardless of kind/action);
+  `resolved` is retained history. Missing values deserialize as `draft` for
+  artifacts written before version 4 and for persisted state written before
+  `CommentState` existed.
+- Full exports include all comment states. Prompt handoff and delegation select
+  only open tasks plus `todo` comments by default; draft comments are rejected by
+  explicit delegate selectors unless first readied.
 - `comments[].updated_at` and `comments[].replies` are emitted when present.
   Replies are append-only objects with stable UUID `id`, `body`, and
   `created_at`. Import merges same-id comments by timestamp and unions replies,
@@ -163,6 +179,10 @@ Notes:
 
 ## Version history
 
+- `6`: comments may carry a durable `session_id`, and `path` is optional so a
+  comment can be general to its session. Version 5 anchored comments remain
+  readable; missing `session_id` is treated as legacy-visible compatibility
+  state.
 - `5`: active durable session metadata plus session `tasks` and `walkthroughs`;
   comment `updated_at` and append-only `replies` are backward-compatible fields.
 - `4`: comment `state`, optional `profile` marker, agent-profile `hunks` and

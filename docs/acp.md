@@ -85,7 +85,7 @@ prompt and run a subprocess works.
 | `review/summary` | – | repo, base, revision, summary line |
 | `review/files` | – | array of `{path, old_path, status, additions, deletions, viewed, generated, fingerprint}` |
 | `review/file_diff` | `{path}` | `{path, fingerprint, raw}` (raw git-style diff) |
-| `review/comments` | – | array of comments with `id`, target fields, `body`, `kind`, `action`, `state`, `replies`, `created_at`, and `updated_at` |
+| `review/comments` | – | array of comments with `id`, optional `session_id`, optional target fields, `body`, `kind`, `action`, `state`, `replies`, `created_at`, and `updated_at`; legacy comments may omit `session_id`, and general comments have no path/line/excerpt |
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
 | `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
 | `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what compatibility chunk parts anchored to this change must reference |
@@ -105,6 +105,14 @@ within one poll tick.
 | `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
 | `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's spotlight stops. Response: `{briefs, warnings}`; warnings are advisory |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; `line` is a 1-indexed diff line for the current session diff, preferring new-side/post-image coordinates with old-side fallback for removed-only lines; returns `{id}` |
+
+Durable comment state semantics match the CLI/MCP review-state tools: `draft`
+is saved/private/withheld, `todo` is ready/actionable and asks an agent to
+address it regardless of kind/action, and `resolved` is retained history. Prompt
+handoff selects only open tasks plus todo comments; full export includes all
+states. The older overlay `review/draft_comment` method always creates a
+triage draft; use CLI/MCP `comment_add` with an explicit state for durable
+ready comments or general comments.
 
 `artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
 one of `example` (default), `output`, `diagram`, or `note`: exhibits that

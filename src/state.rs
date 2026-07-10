@@ -4,10 +4,14 @@ use std::{
     path::Path,
 };
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::anchor::CommentAnchor;
+
+/// Current on-disk review-state schema. Version 2 adds session-scoped and
+/// general comments while preserving version 0/1 anchored comments on read.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -60,7 +64,15 @@ impl FileState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Comment {
     pub id: String,
-    pub path: String,
+    /// Durable review session that owns this comment.
+    ///
+    /// This is optional only for compatibility with comments written before
+    /// session-scoped comments were introduced. An unscoped legacy comment is
+    /// considered visible in every session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,7 +97,8 @@ impl Default for Comment {
     fn default() -> Self {
         Self {
             id: String::new(),
-            path: String::new(),
+            session_id: None,
+            path: None,
             line: None,
             end_line: None,
             anchor: None,
@@ -97,6 +110,106 @@ impl Default for Comment {
             created_at: chrono::Utc::now(),
             updated_at: None,
         }
+    }
+}
+
+impl Comment {
+    /// Whether this is a session-level comment with no file location.
+    pub fn is_general(&self) -> bool {
+        self.path.is_none()
+    }
+
+    /// Whether this comment has a file location (possibly without a line).
+    pub fn has_location(&self) -> bool {
+        self.path.is_some()
+    }
+
+    /// Alias useful to callers that model general and located comments as a
+    /// pair of variants.
+    pub fn is_located(&self) -> bool {
+        self.has_location()
+    }
+
+    /// Return whether this comment is visible in `session_id`.
+    ///
+    /// Comments lacking a session id predate durable comment scoping, so they
+    /// remain visible and eligible in every session.
+    pub fn belongs_to_session(&self, session_id: &str) -> bool {
+        self.session_id
+            .as_deref()
+            .is_none_or(|owner| owner == session_id)
+    }
+
+    pub fn is_in_session(&self, session_id: &str) -> bool {
+        self.belongs_to_session(session_id)
+    }
+
+    /// Validate relationships between the denormalized location fields and
+    /// an optional durable diff anchor.
+    pub fn validate(&self) -> Result<()> {
+        if self.session_id.as_deref() == Some("") {
+            return Err(eyre!("comment session id must not be empty"));
+        }
+
+        let Some(path) = self.path.as_deref() else {
+            if self.line.is_some() || self.end_line.is_some() || self.anchor.is_some() {
+                return Err(eyre!(
+                    "general comment cannot have a line, end line, or anchor"
+                ));
+            }
+            return Ok(());
+        };
+
+        if path.is_empty() {
+            return Err(eyre!("comment path must not be empty"));
+        }
+        if self.end_line.is_some() && self.line.is_none() {
+            return Err(eyre!("comment end line requires a start line"));
+        }
+        if self.line == Some(0) || self.end_line == Some(0) {
+            return Err(eyre!("comment lines must be 1-indexed"));
+        }
+        if let (Some(line), Some(end_line)) = (self.line, self.end_line)
+            && end_line < line
+        {
+            return Err(eyre!(
+                "comment end line must be greater than or equal to its start line"
+            ));
+        }
+
+        let Some(anchor) = self.anchor.as_ref() else {
+            return Ok(());
+        };
+        if anchor.path() != path {
+            return Err(eyre!(
+                "comment path `{path}` does not match anchor path `{}`",
+                anchor.path()
+            ));
+        }
+        match anchor {
+            CommentAnchor::File { .. } => {
+                if self.line.is_some() || self.end_line.is_some() {
+                    return Err(eyre!("file anchor cannot have line coordinates"));
+                }
+            }
+            CommentAnchor::Line { line, .. } => {
+                if self.line != Some(*line)
+                    || self.end_line.is_some_and(|end_line| end_line != *line)
+                {
+                    return Err(eyre!("comment line coordinates do not match line anchor"));
+                }
+            }
+            CommentAnchor::Range {
+                start_line,
+                end_line,
+                ..
+            } => {
+                if self.line != Some(*start_line) || self.end_line != Some(*end_line) {
+                    return Err(eyre!("comment line coordinates do not match range anchor"));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -321,7 +434,9 @@ impl ReviewState {
         // cannot truncate or corrupt existing review state.
         let mut tmp = path.to_path_buf();
         tmp.set_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        let mut persisted = self.clone();
+        persisted.meta.version = REVIEW_STATE_SCHEMA_VERSION;
+        fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -577,6 +692,7 @@ mod tests {
 
         let loaded = ReviewState::load_or_default(&path).unwrap();
         assert!(loaded.files["src/main.rs"].viewed);
+        assert_eq!(loaded.meta.version, REVIEW_STATE_SCHEMA_VERSION);
         assert!(!path.with_extension("json.tmp").exists());
     }
 
@@ -635,7 +751,7 @@ mod tests {
     fn comment(id: &str, body: &str) -> Comment {
         Comment {
             id: id.to_owned(),
-            path: "src/lib.rs".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -920,7 +1036,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.comments[0].path, "src/main.rs");
+        assert_eq!(state.comments[0].path.as_deref(), Some("src/main.rs"));
+        assert!(state.comments[0].session_id.is_none());
         assert!(state.comments[0].anchor.is_none());
         assert!(state.comments[0].kind.is_none());
         assert!(state.comments[0].action.is_none());
@@ -1049,5 +1166,145 @@ mod tests {
         assert_eq!(json, "\"follow-up\"");
         let action: ActionIntent = serde_json::from_str(&json).unwrap();
         assert_eq!(action, ActionIntent::FollowUp);
+    }
+
+    #[test]
+    fn legacy_anchored_comment_loads_without_session_scope() {
+        let comment: Comment = serde_json::from_str(
+            r#"{
+  "id": "legacy",
+  "path": "src/lib.rs",
+  "line": 4,
+  "anchor": {
+    "type": "line",
+    "path": "src/lib.rs",
+    "old_path": null,
+    "side": "new",
+    "line": 4,
+    "old_line": 4,
+    "new_line": 4,
+    "hunk_header": "@@ -1 +1 @@",
+    "hunk_old_start": 1,
+    "hunk_old_len": 1,
+    "hunk_new_start": 1,
+    "hunk_new_len": 1,
+    "hunk_index": 0,
+    "line_index": 0,
+    "line_kind": "context",
+    "line_text": "line",
+    "line_fingerprint": "line-fingerprint",
+    "diff_fingerprint": "diff-fingerprint"
+  },
+  "body": "legacy anchored comment",
+  "created_at": "2026-06-30T00:00:00Z"
+}"#,
+        )
+        .unwrap();
+
+        assert_eq!(comment.path.as_deref(), Some("src/lib.rs"));
+        assert!(comment.session_id.is_none());
+        assert_eq!(comment.state, CommentState::Draft);
+        comment.validate().unwrap();
+    }
+
+    #[test]
+    fn general_comment_round_trips_and_reports_membership() {
+        let comment = Comment {
+            id: "general".into(),
+            session_id: Some("session-a".into()),
+            path: None,
+            body: "Overall review note".into(),
+            ..Comment::default()
+        };
+
+        comment.validate().unwrap();
+        assert!(comment.is_general());
+        assert!(!comment.has_location());
+        assert!(comment.belongs_to_session("session-a"));
+        assert!(!comment.belongs_to_session("session-b"));
+
+        let loaded: Comment =
+            serde_json::from_str(&serde_json::to_string(&comment).unwrap()).unwrap();
+        assert_eq!(loaded, comment);
+        assert!(
+            !serde_json::to_string(&comment)
+                .unwrap()
+                .contains("\"path\"")
+        );
+
+        let legacy = Comment {
+            session_id: None,
+            ..comment
+        };
+        assert!(legacy.belongs_to_session("session-a"));
+        assert!(legacy.belongs_to_session("session-b"));
+    }
+
+    #[test]
+    fn comment_validation_rejects_impossible_locations() {
+        let general_with_line = Comment {
+            line: Some(1),
+            ..Comment::default()
+        };
+        assert_eq!(
+            general_with_line.validate().unwrap_err().to_string(),
+            "general comment cannot have a line, end line, or anchor"
+        );
+
+        let end_without_start = Comment {
+            path: Some("src/lib.rs".into()),
+            end_line: Some(2),
+            ..Comment::default()
+        };
+        assert_eq!(
+            end_without_start.validate().unwrap_err().to_string(),
+            "comment end line requires a start line"
+        );
+
+        let path_mismatch = Comment {
+            path: Some("src/lib.rs".into()),
+            anchor: Some(CommentAnchor::File {
+                path: "src/main.rs".into(),
+                old_path: None,
+                diff_fingerprint: "diff".into(),
+            }),
+            ..Comment::default()
+        };
+        assert!(
+            path_mismatch
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("does not match anchor path")
+        );
+
+        let anchored_line_mismatch = Comment {
+            path: Some("src/lib.rs".into()),
+            line: Some(2),
+            anchor: Some(CommentAnchor::Line {
+                path: "src/lib.rs".into(),
+                old_path: None,
+                side: crate::anchor::DiffSide::New,
+                line: 3,
+                old_line: Some(3),
+                new_line: Some(3),
+                hunk_header: "@@ -1 +1 @@".into(),
+                hunk_old_start: 1,
+                hunk_old_len: 1,
+                hunk_new_start: 1,
+                hunk_new_len: 1,
+                hunk_index: 0,
+                line_index: 0,
+                line_kind: "context".into(),
+                line_text: "line".into(),
+                line_fingerprint: "line".into(),
+                diff_fingerprint: "diff".into(),
+            }),
+            ..Comment::default()
+        };
+        assert_eq!(
+            anchored_line_mismatch.validate().unwrap_err().to_string(),
+            "comment line coordinates do not match line anchor"
+        );
     }
 }

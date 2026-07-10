@@ -11,13 +11,15 @@ generated-file filters, `--state-file <path>`, and `--config <path>`. They are
 listed under a separate "Target & state (global)" heading in every
 subcommand's `--help`.
 
-Durable review objects (sessions, tasks, walkthroughs) are keyed by the exact
+Durable review objects (sessions, tasks, walkthroughs, and scoped comments) are keyed by the exact
 `base..rev` target. When a read command's target matches no open session but
 one exists for another target, Gander warns on stderr and names the session
 (`warning: no open review session matches 'trunk()..@'; open session "…"
 targets 'main..@' …`) instead of silently emitting a truncated artifact; read
-commands never create sessions as a side effect. Comments are
-workspace-scoped and visible regardless of target.
+commands never create sessions as a side effect. New comments belong to the
+active matching session when one exists; legacy unscoped comments remain visible
+for compatibility in every session until edited or otherwise migrated into a
+session scope.
 
 Most list commands and mutation echoes accept `--format <json|text>`. JSON is
 always the default (agent-stable); `text` prints compact aligned rows or a
@@ -65,18 +67,22 @@ hunk ids suitable for `hunks show` and accepts the file as a positional or
 
 ```sh
 gander comments list [--format json|text]
-gander comments add --path <path> [--line <n>] [--end-line <n>] --body <text> \
+gander comments add (--path <path> [--line <n>] [--end-line <n>] | --general) --body <text> \
   [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] \
-  [--format json|text]
+  [--state draft|todo] [--format json|text]
 gander comments reply <id> --body <text> [--resolve] [--format json|text]
 gander comments resolve <id> [--reply <text>] [--format json|text]
 gander comments set-state <id> --state draft|todo|resolved [--format json|text]
+gander comments ready (<id>... | --all-drafts) [--format json|text]
 gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
   [--body <text>] [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] [--format json|text]
 gander comments delete <id> [--format json|text]
 ```
 
-`add` creates a persisted comment. `--end-line` requires `--line`; `edit --line` conflicts with `--start-line`, and `edit --end-line` needs either a supplied start or an existing anchored start. End lines must be greater than or equal to their start. `--line`, `--start-line`, and `--end-line`
+`add` creates a persisted comment. Exactly one of `--path` or `--general` is
+required. General comments are session-level notes with no file location, line,
+anchor, or excerpt. `--state` overrides the configured initial state for this
+comment. `--end-line` requires `--line`; `edit --line` conflicts with `--start-line`, and `edit --end-line` needs either a supplied start or an existing anchored start. End lines must be greater than or equal to their start. `--line`, `--start-line`, and `--end-line`
 are 1-indexed diff line anchors, preferring the new side (post-image). For a
 removed-only line with no new-side coordinate, Gander falls back to the old-side
 line in the current jj diff. Omitting them creates a file-level anchor. `edit`
@@ -85,22 +91,52 @@ recomputing the stored excerpt anchor from the current diff. If a supplied line
 is not in either accepted side for the file, Gander stores the comment without
 an excerpt anchor and prints a warning so intentional unchanged-context comments
 remain possible.
-`delete` removes the comment from local Gander review state. Example:
+`delete` removes the comment from local Gander review state.
+
+Comment state semantics are deliberately workflow-oriented:
+
+- `draft`: saved, private, and withheld from implementation handoff. Drafts are
+  durable reviewer notes until explicitly readied, resolved, or deleted.
+- `todo`: ready/actionable. Every todo comment asks an agent to address it,
+  regardless of `kind` (`question`, `praise`, `note`, or `issue`) or `action`
+  (`none`, `explain`, `fix`, `test`, or `follow-up`). A todo praise may ask the
+  agent to preserve a good behavior; a todo question asks for an answer/change.
+- `resolved`: retained history. Resolved comments are not selected for prompt
+  handoff or delegation by default, but remain in full exports and threads.
+
+New comments default to `[comments].initial-state`, which is `todo`; set it to
+`draft` to save new feedback privately until it is readied:
+
+```toml
+[comments]
+initial-state = "draft" # todo (default) | draft
+```
+
+Schema compatibility note: missing serialized comment states still deserialize as
+`draft`; this preserves artifacts and state files written before `CommentState`
+was introduced.
+
+Example:
 
 ```json
 {
   "id": "d9e9e6de-f819-4022-823d-b1ed573d6091",
+  "session_id": "active-review-session-id",
   "path": "README.md",
   "line": 1,
   "body": "Clarify intro",
   "kind": "issue",
   "action": "fix",
-  "state": "draft",
+  "state": "todo",
   "created_at": "2026-07-04T22:19:06.819614Z"
 }
 ```
 
-`comments list` returns `{ "comments": [...] }`. `reply` appends an immutable
+`comments list` returns `{ "comments": [...] }`. `comments ready <id>...` marks
+the selected active-session drafts `todo`; `comments ready --all-drafts` marks
+all active-session drafts `todo`. The operation is atomic: if any supplied id is
+unknown, ambiguous, not in the active session, or already resolved, no comments
+are changed. `reply` appends an immutable
 UUID-addressed reply with a timestamp and updates the parent comment's
 `updated_at`; `--resolve` also marks the parent resolved. `resolve` is a
 convenience for `set-state --state resolved`, and `--reply` first appends the
@@ -268,7 +304,8 @@ gander summary
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
 defaults to action items first, walkthrough next, then reference hunks limited
 to files that carry action items or walkthrough stops. JSON uses the same
-default action-item selection: open tasks plus unresolved comments. Action
+default action-item selection: open tasks plus `todo` comments only. Drafts are
+saved/private/withheld, and resolved comments are history. Action
 items are deterministically ordered the same way in both formats: action
 priority (fix > test > follow-up > other), then path, then line. `handoff
 --format json` is a stable action artifact shaped
@@ -278,8 +315,10 @@ are task/comment objects with `id`, `source`, `kind`/`action`, `path`, `line`,
 `--output` writes without stdout body output; `--copy` copies it to the clipboard (pbcopy,
 wl-copy, xclip, or OSC52 via `/dev/tty`). Use `export --profile agent` instead
 when you need the full session artifact for archive/reference or broad
-automation (its H1 is `# Review session export (agent profile)`; the two
-artifacts cross-reference each other). Import currently restores only matching
+automation: full exports include all comments (`draft`, `todo`, and
+`resolved`), all tasks, walkthroughs, replies, and excerpts when available (its
+H1 is `# Review session export (agent profile)`; the two artifacts
+cross-reference each other). Import currently restores only matching
 viewed state and duplicate-safe comments; exported tasks and walkthroughs are
 not restored by `gander import`.
 
@@ -303,7 +342,8 @@ gander handoff --mode delegate \
 Selectors accept full ids or unambiguous prefixes. With no selectors, delegate
 mode includes open durable tasks and actionable `todo` comments, folds linked
 source comments into task evidence, and excludes resolved comments and closed
-tasks. Packets include source fingerprints, walkthrough context, relevant
+tasks. Draft comments are rejected when explicitly selected for delegation unless
+they are first readied, and implicit delegation never selects them. Packets include source fingerprints, walkthrough context, relevant
 hunks, reply history, and concrete `comments resolve --reply` / `tasks complete
 --summary` return commands. `--verify` is inert requested text; Gander never
 executes it.
@@ -351,7 +391,7 @@ state="$TMPDIR/gander-review.json"
 rm -f "$state"
 review_id=$(gander --state-file "$state" reviews create --title "Agent pass" | jq -r .id)
 comment_id=$(gander --state-file "$state" comments add --path README.md --line 1 \
-  --kind issue --action fix --body "Clarify the introduction." | jq -r .id)
+  --state todo --kind issue --action fix --body "Clarify the introduction." | jq -r .id)
 task_id=$(gander --state-file "$state" tasks add --title "Fix intro" \
   --action fix --comment "$comment_id" --path README.md --line 1 | jq -r .id)
 gander --state-file "$state" tasks list | jq -r '.tasks[] | select(.status == "open") | .id' |

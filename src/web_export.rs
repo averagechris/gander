@@ -3,11 +3,12 @@ use chrono::Utc;
 use crate::{
     app::ReviewSession,
     diff::DiffLineKind,
-    state::{Comment, ReviewState, ReviewTarget},
+    state::{Comment, ReviewSessionStatus, ReviewState, ReviewTarget},
 };
 
 pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     let generated_at = Utc::now().to_rfc3339();
+    let active_session_id = active_session_id(session, state);
     let mut out = String::from(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>gander review export</title>\n<style>",
     );
@@ -51,11 +52,25 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     out.push_str("</nav><main>\n");
     render_walkthroughs(&mut out, state);
     render_tasks(&mut out, state);
+    let general_comments = state
+        .comments
+        .iter()
+        .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+        .filter(|comment| comment.path.is_none())
+        .collect::<Vec<_>>();
+    if !general_comments.is_empty() {
+        out.push_str("<section class=\"card comments\"><h2>General comments</h2>");
+        for comment in general_comments {
+            render_comment(&mut out, comment);
+        }
+        out.push_str("</section>");
+    }
     for file in &session.files {
         let comments: Vec<_> = state
             .comments
             .iter()
-            .filter(|comment| comment.path == file.path)
+            .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+            .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
             .collect();
         out.push_str("<section class=\"card file\" id=\"");
         out.push_str(&file_anchor(&file.path));
@@ -102,6 +117,24 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     }
     out.push_str("</main></div><script>document.querySelectorAll('[data-step-target]').forEach(a=>a.addEventListener('click',()=>{const e=document.querySelector(a.getAttribute('href')); if(e) e.querySelector('details')?.setAttribute('open','');}));</script>\n</body></html>\n");
     out
+}
+
+fn active_session_id<'a>(session: &ReviewSession, state: &'a ReviewState) -> Option<&'a str> {
+    state
+        .sessions
+        .iter()
+        .find(|durable| {
+            durable.status == ReviewSessionStatus::Open
+                && durable.target.base.as_deref() == Some(session.target.base.as_str())
+                && durable.target.revision.as_deref() == Some(session.target.rev.as_str())
+        })
+        .map(|durable| durable.id.as_str())
+}
+
+fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
+    session_id.map_or(comment.session_id.is_none(), |id| {
+        comment.belongs_to_session(id)
+    })
 }
 
 fn render_walkthroughs(out: &mut String, state: &ReviewState) {
@@ -304,7 +337,7 @@ mod tests {
         let mut state = ReviewState::default();
         state.comments.push(Comment {
             id: "c1".into(),
-            path: "src/lib.rs".into(),
+            path: Some("src/lib.rs".into()),
             line: Some(1),
             end_line: None,
             anchor: None,
@@ -360,5 +393,49 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("comment body"));
         assert!(html.contains("Step title"));
+    }
+
+    #[test]
+    fn acceptance_html_renders_general_comments_and_scopes_session_comments_with_legacy_visible() {
+        let (session, mut state) = fixture();
+        state.sessions[0].target = ReviewTarget {
+            base: Some("main".into()),
+            revision: Some("@".into()),
+            ..Default::default()
+        };
+        state.comments.extend([
+            Comment {
+                id: "general".into(),
+                path: None,
+                session_id: Some("s1".into()),
+                body: "general body".into(),
+                state: CommentState::Todo,
+                ..Default::default()
+            },
+            Comment {
+                id: "matching".into(),
+                path: Some("src/lib.rs".into()),
+                session_id: Some("s1".into()),
+                body: "matching body".into(),
+                state: CommentState::Resolved,
+                ..Default::default()
+            },
+            Comment {
+                id: "foreign".into(),
+                path: Some("src/lib.rs".into()),
+                session_id: Some("other".into()),
+                body: "foreign body".into(),
+                state: CommentState::Todo,
+                ..Default::default()
+            },
+        ]);
+
+        let html = render_html(&session, &state);
+
+        assert!(html.contains("<h2>General comments</h2>"));
+        assert!(html.contains("general body"));
+        assert!(html.contains("matching body"));
+        assert!(html.contains("comment body"));
+        assert!(!html.contains("foreign body"));
     }
 }

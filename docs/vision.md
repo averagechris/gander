@@ -114,7 +114,7 @@ Example shape:
 gander reviews list
 gander reviews show <id>
 gander hunks list --file src/lib.rs
-gander comments add --path src/lib.rs --line 42 --kind issue --action fix --body "..."
+gander comments add --path src/lib.rs --line 42 --state todo --kind issue --action fix --body "..."
 gander tasks list
 gander walkthrough add-step --file src/lib.rs --line 42 --why "Entry point" --title "Start here"
 gander walkthrough export

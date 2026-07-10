@@ -8,12 +8,12 @@ use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff},
     ids::shortest_unique_prefix,
     state::{
-        ActionIntent, Comment, CommentKind, CommentReply, CommentState, ReviewSession, ReviewState,
+        ActionIntent, Comment, CommentReply, CommentState, ReviewSession, ReviewState,
         ReviewTarget, ReviewTask, ReviewTaskStatus, Walkthrough, WalkthroughStep,
     },
 };
 
-pub const DELEGATION_SCHEMA_VERSION: u8 = 1;
+pub const DELEGATION_SCHEMA_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DelegationSpec {
@@ -113,7 +113,7 @@ pub enum ActionSource {
 pub struct CommentEvidence {
     pub id: String,
     pub selector: String,
-    pub path: String,
+    pub path: Option<String>,
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub body: String,
@@ -161,7 +161,12 @@ pub fn build_delegation_packet(
     diff: &DiffSet,
     spec: &DelegationSpec,
 ) -> Result<DelegationPacket> {
-    let selected = with_action_selectors(select_action_items(session, &state.comments, spec)?);
+    let session_comments = state
+        .comments
+        .iter()
+        .filter(|comment| comment.belongs_to_session(&session.id))
+        .collect::<Vec<_>>();
+    let selected = with_action_selectors(select_action_items(session, &session_comments, spec)?);
     let return_contract = return_contract(&session.target, &selected);
     let paths = selected
         .iter()
@@ -190,7 +195,7 @@ pub fn build_delegation_packet(
         source: SourceMeta {
             diff_file_count: diff.files.len(),
             task_count: session.tasks.len(),
-            comment_count: state.comments.len(),
+            comment_count: session_comments.len(),
             walkthrough_count: session.walkthroughs.len(),
         },
         fingerprints: fingerprints(diff),
@@ -210,12 +215,13 @@ pub fn build_delegation_packet(
 
 fn select_action_items(
     session: &ReviewSession,
-    comments: &[Comment],
+    comments: &[&Comment],
     spec: &DelegationSpec,
 ) -> Result<Vec<DelegatedActionItem>> {
     let comments_by_id = comments
         .iter()
-        .map(|c| (c.id.as_str(), c))
+        .filter(|c| c.state == CommentState::Todo)
+        .map(|c| (c.id.as_str(), *c))
         .collect::<BTreeMap<_, _>>();
     let mut items = Vec::new();
     let explicit = !spec.task_selectors.is_empty() || !spec.comment_selectors.is_empty();
@@ -223,6 +229,7 @@ fn select_action_items(
     let selected_task_comments = tasks
         .iter()
         .filter_map(|t| t.source_comment_id.as_deref())
+        .filter(|id| comments_by_id.contains_key(id))
         .collect::<BTreeSet<_>>();
     for task in tasks {
         let mut evidence = Vec::new();
@@ -278,7 +285,7 @@ fn resolve_tasks<'a>(
     }
 }
 fn resolve_comments<'a>(
-    comments: &'a [Comment],
+    comments: &[&'a Comment],
     selectors: &[String],
     explicit: bool,
 ) -> Result<Vec<&'a Comment>> {
@@ -287,12 +294,26 @@ fn resolve_comments<'a>(
             .iter()
             .map(|s| {
                 let comment = one(
-                    comments.iter().filter(|c| c.id.starts_with(s)).collect(),
+                    comments
+                        .iter()
+                        .copied()
+                        .filter(|c| c.id.starts_with(s))
+                        .collect(),
                     "comment",
                     s,
                 )?;
-                if comment.state == CommentState::Resolved {
-                    return Err(eyre!("comment `{}` is already resolved", comment.id));
+                if comment.state != CommentState::Todo {
+                    return Err(match comment.state {
+                        CommentState::Draft => eyre!(
+                            "comment `{}` is still draft; run `gander comments ready {}` before delegating it",
+                            comment.id,
+                            s
+                        ),
+                        CommentState::Resolved => {
+                            eyre!("comment `{}` is already resolved", comment.id)
+                        }
+                        CommentState::Todo => unreachable!(),
+                    });
                 }
                 Ok(comment)
             })
@@ -302,11 +323,8 @@ fn resolve_comments<'a>(
     } else {
         Ok(comments
             .iter()
-            .filter(|c| {
-                c.state == CommentState::Todo
-                    && c.kind != Some(CommentKind::Praise)
-                    && c.action.unwrap_or(ActionIntent::Fix) != ActionIntent::None
-            })
+            .copied()
+            .filter(|c| c.state == CommentState::Todo)
             .collect())
     }
 }
@@ -336,9 +354,9 @@ fn comment_item(c: &Comment) -> DelegatedActionItem {
         source: ActionSource::Comment,
         title: first_line(&c.body),
         body: Some(c.body.clone()),
-        action: c.action.unwrap_or(ActionIntent::Fix),
-        target: Some(ReviewTarget {
-            file: Some(c.path.clone()),
+        action: c.action.unwrap_or(ActionIntent::None),
+        target: c.path.as_ref().map(|path| ReviewTarget {
+            file: Some(path.clone()),
             line: c.line,
             end_line: c.end_line,
             ..ReviewTarget::default()
@@ -455,10 +473,9 @@ fn walkthrough_context(ws: &[Walkthrough]) -> Vec<DelegatedWalkthroughStep> {
     out
 }
 fn reference_hunks(diff: &DiffSet, paths: &BTreeSet<String>, limit: usize) -> Vec<ReferenceHunk> {
-    let include_all = paths.is_empty();
     let mut out = Vec::new();
     for f in sorted_files(&diff.files) {
-        if !include_all && !paths.contains(&f.path) {
+        if !paths.contains(&f.path) {
             continue;
         }
         for h in &f.hunks {
@@ -613,12 +630,15 @@ pub fn render_delegation_markdown(packet: &DelegationPacket) -> String {
             out.push_str(&format!("\n{}\n", body.trim()));
         }
         for e in &i.evidence_comments {
-            out.push_str(&format!(
-                "\nReviewer comment `{}` at `{}`:\n\n> {}\n",
-                e.id,
-                e.path,
-                e.body.trim().replace('\n', "\n> ")
-            ));
+            out.push_str(&format!("\nReviewer comment `{}`", e.id));
+            if let Some(path) = &e.path {
+                out.push_str(" at `");
+                out.push_str(&path.replace('`', "\\`"));
+                out.push('`');
+            }
+            out.push_str(":\n\n> ");
+            out.push_str(&e.body.trim().replace('\n', "\n> "));
+            out.push('\n');
             for reply in &e.replies {
                 out.push_str(&format!("\nReply `{}`: {}\n", reply.id, reply.body.trim()));
             }
@@ -688,7 +708,7 @@ fn list(out: &mut String, title: &str, xs: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ReviewSessionStatus, StepImportance};
+    use crate::state::{CommentKind, ReviewSessionStatus, StepImportance};
     fn comment(
         id: &str,
         state: CommentState,
@@ -698,7 +718,8 @@ mod tests {
     ) -> Comment {
         Comment {
             id: id.into(),
-            path: path.into(),
+            path: Some(path.into()),
+            session_id: None,
             line: Some(10),
             end_line: None,
             anchor: None,
@@ -745,7 +766,7 @@ mod tests {
                 "c-praise",
                 CommentState::Todo,
                 Some(CommentKind::Praise),
-                Some(ActionIntent::Fix),
+                None,
                 "a.rs",
             ),
             comment(
@@ -796,7 +817,7 @@ mod tests {
         (state, session, diff)
     }
     #[test]
-    fn default_filters_and_folds_comments() {
+    fn acceptance_implicit_selection_uses_todo_state_across_all_kinds_and_actions() {
         let (s, sess, d) = fixture();
         let p = build_delegation_packet(&s, &sess, &d, &DelegationSpec::default()).unwrap();
         assert_eq!(
@@ -804,7 +825,7 @@ mod tests {
                 .iter()
                 .map(|i| i.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["t-open", "c-todo"]
+            vec!["t-open", "c-todo", "c-praise"]
         );
         assert_eq!(p.action_items[0].evidence_comments[0].id, "c-linked");
     }
@@ -842,6 +863,16 @@ mod tests {
                 .to_string()
                 .contains("ambiguous comment")
         );
+
+        let draft = DelegationSpec {
+            comment_selectors: vec!["c-draft".into()],
+            ..Default::default()
+        };
+        let error = build_delegation_packet(&s, &sess, &d, &draft)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("still draft"));
+        assert!(error.contains("comments ready"));
     }
     #[test]
     fn deterministic_fingerprints_and_no_mutation() {
@@ -871,7 +902,7 @@ mod tests {
         };
         let p = build_delegation_packet(&s, &sess, &d, &spec).unwrap();
         let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["kind"], "gander_delegation");
         let md = render_delegation_markdown(&p);
         assert!(md.contains("do it"));
@@ -935,5 +966,77 @@ mod tests {
                 .contains("tasks complete 12345678 --summary")
                 && !command.command.contains(&task.id)
         }));
+    }
+
+    #[test]
+    fn acceptance_general_todo_delegates_without_target_path_or_reference_hunks() {
+        let (mut state, mut session, diff) = fixture();
+        session.tasks.clear();
+        let mut general = comment(
+            "general",
+            CommentState::Todo,
+            Some(CommentKind::Praise),
+            None,
+            "unused.rs",
+        );
+        general.path = None;
+        general.line = None;
+        state.comments = vec![general];
+        state.sessions = vec![session.clone()];
+
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+
+        assert_eq!(packet.action_items.len(), 1);
+        assert_eq!(packet.action_items[0].action, ActionIntent::None);
+        assert!(packet.action_items[0].target.is_none());
+        assert!(packet.action_items[0].evidence_comments[0].path.is_none());
+        assert!(packet.reference_hunks.is_empty());
+        let markdown = render_delegation_markdown(&packet);
+        assert!(markdown.contains("Reviewer comment `general`:\n"));
+        assert!(!markdown.contains("unused.rs"));
+    }
+
+    #[test]
+    fn acceptance_delegation_scopes_new_comments_to_session_and_keeps_legacy() {
+        let (mut state, mut session, diff) = fixture();
+        session.tasks.clear();
+        let mut legacy = comment(
+            "legacy",
+            CommentState::Todo,
+            Some(CommentKind::Issue),
+            Some(ActionIntent::Fix),
+            "a.rs",
+        );
+        legacy.session_id = None;
+        let mut matching = comment(
+            "matching",
+            CommentState::Todo,
+            Some(CommentKind::Note),
+            Some(ActionIntent::Test),
+            "b.rs",
+        );
+        matching.session_id = Some(session.id.clone());
+        let mut foreign = comment(
+            "foreign",
+            CommentState::Todo,
+            Some(CommentKind::Issue),
+            Some(ActionIntent::Fix),
+            "a.rs",
+        );
+        foreign.session_id = Some("another-session".into());
+        state.comments = vec![legacy, matching, foreign];
+        state.sessions = vec![session.clone()];
+
+        let packet =
+            build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
+        let ids = packet
+            .action_items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["legacy", "matching"]);
+        assert_eq!(packet.source.comment_count, 2);
     }
 }

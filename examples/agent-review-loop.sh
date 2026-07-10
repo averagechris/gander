@@ -8,6 +8,7 @@ review_id=$(cargo run --quiet -- --state-file "$state" reviews create --title "A
 comment_id=$(cargo run --quiet -- --state-file "$state" comments add \
   --path README.md \
   --line 1 \
+  --state todo \
   --kind issue \
   --action fix \
   --body "Clarify the first sentence for new users." | jq -r .id)

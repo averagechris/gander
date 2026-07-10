@@ -441,16 +441,24 @@ enum CommentsCommand {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
-    /// Add a durable comment anchored to a changed file.
+    /// Add a durable anchored or general comment.
     Add {
         /// Changed file path to comment on. Alias: --file.
-        #[arg(long, alias = "file")]
-        path: String,
+        #[arg(
+            long,
+            alias = "file",
+            required_unless_present = "general",
+            conflicts_with = "general"
+        )]
+        path: Option<String>,
+        /// Create a session-level comment with no file anchor.
+        #[arg(long, conflicts_with = "path")]
+        general: bool,
         /// 1-indexed new-side line number; old-side fallback is used only for removed-only lines.
-        #[arg(long)]
+        #[arg(long, requires = "path", conflicts_with = "general")]
         line: Option<usize>,
         /// 1-indexed inclusive new-side (post-image) end line for a range anchor.
-        #[arg(long = "end-line", requires = "line")]
+        #[arg(long = "end-line", requires = "line", conflicts_with = "general")]
         end_line: Option<usize>,
         /// Comment body text.
         #[arg(long)]
@@ -461,7 +469,22 @@ enum CommentsCommand {
         /// Suggested action intent for task/handoff output.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
+        /// Initial lifecycle state; overrides [comments] initial-state.
+        #[arg(long, value_enum, id = "initial-comment-state")]
+        state: Option<InitialCommentStateArg>,
         /// Echo format for the added comment.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Mark selected comments, or every active-session draft, ready as todos.
+    Ready {
+        /// Comment ids or unique id prefixes to ready.
+        #[arg(required_unless_present = "all_drafts", conflicts_with = "all_drafts")]
+        ids: Vec<String>,
+        /// Ready all draft comments belonging to the active durable session.
+        #[arg(long)]
+        all_drafts: bool,
+        /// Result format.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
@@ -756,6 +779,21 @@ enum CommentStateArg {
     Draft,
     Todo,
     Resolved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum InitialCommentStateArg {
+    Draft,
+    Todo,
+}
+
+impl From<InitialCommentStateArg> for CommentState {
+    fn from(value: InitialCommentStateArg) -> Self {
+        match value {
+            InitialCommentStateArg::Draft => Self::Draft,
+            InitialCommentStateArg::Todo => Self::Todo,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1281,6 +1319,7 @@ fn run() -> color_eyre::Result<()> {
             let (target, diff, state, config, generated_matcher) =
                 mcp_ingredients.expect("captured above for the mcp command");
             let session_repo = repo.clone();
+            let initial_comment_state = config.comments.initial_state.into();
             crate::mcp::run(
                 move || {
                     let mut session =
@@ -1299,6 +1338,7 @@ fn run() -> color_eyre::Result<()> {
                     workspace_root: workspace_paths.workspace_root.clone(),
                     target: session.target.clone(),
                     diff_files: session.files.iter().map(|file| file.path.clone()).collect(),
+                    initial_comment_state,
                 },
             )?;
         }
@@ -1357,18 +1397,29 @@ fn run() -> color_eyre::Result<()> {
             CommentsCommand::List { format } => {
                 let spec = session_target_spec(&repo, &session.target);
                 warn_session_target_mismatch(&state, &spec);
+                let active_session_id = review::find_session_for_target(&state, &spec)
+                    .map(|review_session| review_session.id.as_str());
+                let mut listed_session = session.clone();
+                listed_session
+                    .comments
+                    .retain(|comment| match active_session_id {
+                        Some(id) => comment.is_in_session(id),
+                        None => comment.session_id.is_none(),
+                    });
                 match format {
-                    ListFormat::Json => print_json(&session_comments_json(&session))?,
-                    ListFormat::Text => print!("{}", session_comments_text(&session)),
+                    ListFormat::Json => print_json(&session_comments_json(&listed_session))?,
+                    ListFormat::Text => print!("{}", session_comments_text(&listed_session)),
                 }
             }
             CommentsCommand::Add {
                 path,
+                general: _,
                 line,
                 end_line,
                 body,
                 kind,
                 action,
+                state: initial_state,
                 format,
             } => {
                 if let (Some(start), Some(end)) = (line, end_line)
@@ -1378,13 +1429,19 @@ fn run() -> color_eyre::Result<()> {
                         "comments add --end-line must be greater than or equal to --line",
                     ));
                 }
-                ensure_diff_file(&session, &path)?;
-                let anchor = session
-                    .files
-                    .iter()
-                    .find(|file| file.path == path)
-                    .and_then(|file| comment_anchor_for_file_lines(file, line, end_line));
-                warn_if_anchorless_line(&path, line, anchor.is_some());
+                if let Some(path) = path.as_deref() {
+                    ensure_diff_file(&session, path)?;
+                }
+                let anchor = path.as_deref().and_then(|path| {
+                    session
+                        .files
+                        .iter()
+                        .find(|file| file.path == path)
+                        .and_then(|file| comment_anchor_for_file_lines(file, line, end_line))
+                });
+                if let Some(path) = path.as_deref() {
+                    warn_if_anchorless_line(path, line, anchor.is_some());
+                }
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
@@ -1393,6 +1450,7 @@ fn run() -> color_eyre::Result<()> {
                     &mut state.sessions[idx],
                     &mut state.comments,
                     review::NewComment {
+                        session_id: id,
                         path,
                         line,
                         end_line,
@@ -1400,12 +1458,44 @@ fn run() -> color_eyre::Result<()> {
                         body,
                         kind: kind.map(Into::into),
                         action: action.and_then(action_intent_arg_to_option),
+                        state: initial_state
+                            .map(Into::into)
+                            .unwrap_or_else(|| config.comments.initial_state.into()),
                     },
-                );
+                )
+                .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&comment)?,
                     ListFormat::Text => print!("{}", comment_echo_text(&comment)),
+                }
+            }
+            CommentsCommand::Ready {
+                ids,
+                all_drafts,
+                format,
+            } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let result = if all_drafts {
+                    review::ready_all_drafts(&mut state.sessions[idx], &mut state.comments)
+                } else {
+                    review::ready_selected_comments(
+                        &mut state.sessions[idx],
+                        &mut state.comments,
+                        &ids,
+                    )
+                }
+                .map_err(into_user_error)?;
+                state.save(&state_path)?;
+                match format {
+                    ListFormat::Json => print_json(&result)?,
+                    ListFormat::Text => println!(
+                        "readied: {}\nalready ready: {}",
+                        result.readied, result.already_ready
+                    ),
                 }
             }
             CommentsCommand::Resolve { id, reply, format } => {
@@ -1521,7 +1611,7 @@ fn run() -> color_eyre::Result<()> {
                 }
                 let effective_path = if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
-                    path.to_owned()
+                    Some(path.to_owned())
                 } else {
                     existing.path.clone()
                 };
@@ -1530,17 +1620,23 @@ fn run() -> color_eyre::Result<()> {
                 let effective_line = new_line.or(existing.line);
                 let effective_end_line = end_line.or(existing.end_line);
                 let anchor = anchor_changed.then(|| {
-                    session
-                        .files
-                        .iter()
-                        .find(|file| file.path == effective_path)
-                        .and_then(|file| {
-                            comment_anchor_for_file_lines(file, effective_line, effective_end_line)
-                        })
+                    effective_path.as_deref().and_then(|effective_path| {
+                        session
+                            .files
+                            .iter()
+                            .find(|file| file.path == effective_path)
+                            .and_then(|file| {
+                                comment_anchor_for_file_lines(
+                                    file,
+                                    effective_line,
+                                    effective_end_line,
+                                )
+                            })
+                    })
                 });
-                if anchor_changed {
+                if anchor_changed && let Some(effective_path) = effective_path.as_deref() {
                     warn_if_anchorless_line(
-                        &effective_path,
+                        effective_path,
                         effective_line,
                         anchor.as_ref().and_then(|anchor| anchor.as_ref()).is_some(),
                     );
@@ -1554,7 +1650,7 @@ fn run() -> color_eyre::Result<()> {
                     &mut state.comments,
                     &canonical_id,
                     review::CommentEdits {
-                        path: path.or(Some(effective_path)),
+                        path: path.or(effective_path),
                         line: (start_line.is_some() || line.is_some()).then_some(new_line),
                         end_line: end_line.map(Some),
                         anchor,
@@ -2571,6 +2667,13 @@ fn loc(path: &str, line: Option<usize>, end_line: Option<usize>) -> String {
     }
 }
 
+fn comment_loc(path: Option<&str>, line: Option<usize>, end_line: Option<usize>) -> String {
+    path.map_or_else(
+        || "general/session".to_owned(),
+        |path| loc(path, line, end_line),
+    )
+}
+
 fn session_files_text(session: &ReviewSession) -> String {
     let mut out = String::new();
     for f in &session.files {
@@ -2634,7 +2737,7 @@ fn session_comments_text(session: &ReviewSession) -> String {
             &c.id[..c.id.len().min(8)],
             c.state.label(),
             format!("[{}/{}]", kind_label(c.kind), action_label_opt(c.action)),
-            ellipsize(&loc(&c.path, c.line, c.end_line), 36),
+            ellipsize(&comment_loc(c.path.as_deref(), c.line, c.end_line), 36),
             c.replies.len(),
             ellipsize(&c.body, 80)
         ));
@@ -2692,6 +2795,15 @@ fn reviews_text(state: &ReviewState) -> String {
 }
 
 fn comment_echo_text(c: &crate::state::Comment) -> String {
+    if c.is_general() {
+        return format!(
+            "id: {}\nstate/kind/action: {}/{}/{}\nlocation: general/session\n",
+            c.id,
+            c.state.label(),
+            kind_label(c.kind),
+            action_label_opt(c.action),
+        );
+    }
     let anchored = c
         .anchor
         .as_ref()
@@ -2712,7 +2824,7 @@ fn comment_echo_text(c: &crate::state::Comment) -> String {
         c.state.label(),
         kind_label(c.kind),
         action_label_opt(c.action),
-        loc(&c.path, c.line, c.end_line),
+        comment_loc(c.path.as_deref(), c.line, c.end_line),
         anchored
     )
 }
@@ -3519,7 +3631,6 @@ mod tests {
             "comments list --json",
             "tasks list --json",
             "walkthrough show --json",
-            "--state ",
             "gander review ",
             "--revset",
             "gander chunks",
@@ -3538,6 +3649,77 @@ mod tests {
         ] {
             assert!(Cli::try_parse_from(command).is_err());
         }
+    }
+
+    #[test]
+    fn comment_add_and_ready_clap_constraints_are_enforced() {
+        assert!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "add",
+                "--general",
+                "--body",
+                "overall note"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "add",
+                "--path",
+                "a.rs",
+                "--state",
+                "draft",
+                "--body",
+                "line note"
+            ])
+            .is_ok()
+        );
+        for args in [
+            vec!["gander", "comments", "add", "--body", "missing scope"],
+            vec![
+                "gander",
+                "comments",
+                "add",
+                "--general",
+                "--path",
+                "a.rs",
+                "--body",
+                "bad",
+            ],
+            vec![
+                "gander",
+                "comments",
+                "add",
+                "--general",
+                "--line",
+                "1",
+                "--body",
+                "bad",
+            ],
+            vec![
+                "gander",
+                "comments",
+                "add",
+                "--general",
+                "--state",
+                "resolved",
+                "--body",
+                "bad",
+            ],
+            vec!["gander", "comments", "ready"],
+            vec!["gander", "comments", "ready", "abcd", "--all-drafts"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "unexpectedly parsed {args:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["gander", "comments", "ready", "abcd", "efgh"]).is_ok());
+        assert!(Cli::try_parse_from(["gander", "comments", "ready", "--all-drafts"]).is_ok());
     }
 
     #[test]
@@ -3778,16 +3960,20 @@ mod tests {
             &mut state.sessions[idx],
             &mut state.comments,
             review::NewComment {
-                path: "src/lib.rs".to_owned(),
+                session_id: sid.clone(),
+                path: Some("src/lib.rs".to_owned()),
                 line: Some(3),
                 end_line: None,
                 anchor,
                 body: "explain this".to_owned(),
                 kind: None,
                 action: None,
+                state: CommentState::Todo,
             },
-        );
+        )
+        .unwrap();
         session.comments = state.comments;
+        session.sessions = state.sessions;
 
         let json = crate::artifact::render_artifact_with_profile(
             &session,
@@ -3857,16 +4043,20 @@ mod tests {
             &mut state.sessions[idx],
             &mut state.comments,
             review::NewComment {
-                path: "src/lib.rs".to_owned(),
+                session_id: sid.clone(),
+                path: Some("src/lib.rs".to_owned()),
                 line: Some(3),
                 end_line: Some(4),
                 anchor,
                 body: "explain this range".to_owned(),
                 kind: None,
                 action: None,
+                state: CommentState::Todo,
             },
-        );
+        )
+        .unwrap();
         session.comments = state.comments;
+        session.sessions = state.sessions;
 
         let json = crate::artifact::render_artifact_with_profile(
             &session,
@@ -3893,7 +4083,7 @@ mod tests {
         let mut state = ReviewState::default();
         state.comments.push(crate::state::Comment {
             id: "c1".to_owned(),
-            path: "src/lib.rs".to_owned(),
+            path: Some("src/lib.rs".to_owned()),
             line: Some(2),
             end_line: None,
             anchor: None,
