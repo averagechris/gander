@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod paths;
 pub mod registry;
 pub mod review;
+pub mod skills;
 pub mod state;
 pub mod syntax;
 pub mod tui;
