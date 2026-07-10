@@ -12,10 +12,10 @@ Use when a review handoff, delegation, or local Gander session asks you to addre
 1. Read the handoff/delegation and verify the target:
 
    ```bash
-   gander target --json
-   gander session show --json
-   gander comments list --json
-   gander tasks list --json
+   gander summary
+   gander reviews list --format json
+   gander comments list --format json
+   gander tasks list --format json
    ```
 
    Match repo, revision/range, files, and task IDs before changing code. If the handoff is ambiguous or stale, ask for clarification.
@@ -32,10 +32,10 @@ Use when a review handoff, delegation, or local Gander session asks you to addre
 3. Update durable review state after each addressed item:
 
    ```bash
-   gander comment reply <id> --body -
-   gander comment resolve <id>
-   gander task complete <id> --body -
-   gander task add --body -
+   gander comments reply <id> --body -
+   gander comments resolve <id>
+   gander tasks complete <id> --body -
+   gander tasks add --title "Follow up" --body -
    ```
 
    Explain what changed and cite tests that actually ran. If verification was not run or failed, say so and leave the item unresolved or add a follow-up task.
@@ -45,6 +45,7 @@ Use when a review handoff, delegation, or local Gander session asks you to addre
    ```bash
    gander handoff --format markdown
    gander handoff --format json
+   gander handoff --mode delegate --task <id> --format json
    ```
 
 ## Guardrails

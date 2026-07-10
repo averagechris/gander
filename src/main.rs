@@ -5,6 +5,7 @@ mod app;
 mod artifact;
 mod clipboard;
 mod config;
+mod delegation;
 mod diff;
 mod file_tree;
 mod fuzzy;
@@ -14,6 +15,7 @@ mod mcp;
 mod paths;
 mod registry;
 mod review;
+mod skills;
 mod state;
 mod syntax;
 mod tui;
@@ -47,6 +49,7 @@ use crate::{
     },
     clipboard::copy_to_clipboard,
     config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
+    delegation::{DelegationSpec, build_delegation_packet, render_delegation_markdown},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
     jj::{JjBackend, JjCliBackend, ReviewTarget},
@@ -184,18 +187,47 @@ enum Command {
         after_help = "Examples:\n  gander handoff --copy\n      Copy prompt-ready Markdown for an implementer agent.\n  gander handoff --format json --only-open\n      Emit structured action items plus walkthrough and reference hunks.\n  gander export markdown --profile agent --output review.md\n      Use export for the complete session artifact with all comments and full hunks."
     )]
     Handoff {
+        /// Handoff mode: prompt is the legacy implementation prompt; delegate emits a typed work packet.
+        #[arg(long, value_enum, default_value_t = HandoffMode::Prompt)]
+        mode: HandoffMode,
         /// Handoff output format. Action items are ordered by action priority (fix, test, follow-up, other), then path and line.
         #[arg(long, value_enum, default_value_t = HandoffFormat::Markdown)]
         format: HandoffFormat,
         /// Include only unresolved comments and open tasks (the default for handoff formats).
-        #[arg(long)]
+        #[arg(long, hide = true)]
         only_open: bool,
+        /// Delegate a specific task id. Repeat to include multiple tasks.
+        #[arg(long = "task", value_name = "ID")]
+        tasks: Vec<String>,
+        /// Delegate a specific comment id. Repeat to include multiple comments.
+        #[arg(long = "include-comment", value_name = "ID")]
+        include_comments: Vec<String>,
+        /// Intended recipient label for delegate mode.
+        #[arg(long = "to", value_name = "RECIPIENT")]
+        to: Option<String>,
+        /// Delegate objective.
+        #[arg(long, value_name = "TEXT")]
+        objective: Option<String>,
+        /// Delegate constraint. Repeat to include multiple constraints.
+        #[arg(long = "constraint", value_name = "TEXT")]
+        constraints: Vec<String>,
+        /// Acceptance criterion. Repeat to include multiple criteria.
+        #[arg(long = "accept", value_name = "TEXT")]
+        acceptance: Vec<String>,
+        /// Requested verification note. Repeat to include multiple checks; recorded as inert text.
+        #[arg(long = "verify", value_name = "TEXT")]
+        verification: Vec<String>,
         /// Write handoff to this file instead of stdout.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Copy the rendered handoff to the clipboard instead of printing it.
         #[arg(long)]
         copy: bool,
+    },
+    /// Manage bundled agent skills without requiring a repository.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
     },
     /// Import comments/viewed state from a JSON review artifact.
     Import {
@@ -446,8 +478,8 @@ enum HunksCommand {
     List {
         /// Changed file path to list hunks for.
         file_arg: Option<String>,
-        /// Changed file path to list hunks for.
-        #[arg(long, conflicts_with = "file_arg")]
+        /// Changed file path to list hunks for. Prefer --path; --file remains a hidden alias.
+        #[arg(long = "path", alias = "file", conflicts_with = "file_arg")]
         file: Option<String>,
         /// Output format for the hunk list.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
@@ -795,6 +827,43 @@ enum HandoffFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum HandoffMode {
+    Prompt,
+    Delegate,
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillsCommand {
+    /// List bundled skills.
+    List {
+        #[arg(long, value_enum, default_value_t = ListFormat::Text)]
+        format: ListFormat,
+    },
+    /// Show one bundled skill.
+    Show {
+        name: String,
+        #[arg(long, value_enum, default_value_t = SkillShowFormat::Markdown)]
+        format: SkillShowFormat,
+    },
+    /// Install bundled skills to ~/.agents/skills or --dir.
+    Install {
+        names: Vec<String>,
+        #[arg(long = "dir")]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_enum, default_value_t = ListFormat::Text)]
+        format: ListFormat,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SkillShowFormat {
+    Markdown,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum HunkShowFormat {
     Json,
     #[value(alias = "text")]
@@ -881,7 +950,10 @@ fn main() -> color_eyre::Result<()> {
 }
 
 fn run() -> color_eyre::Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(Command::Skills { command }) = cli.command.take() {
+        return handle_skills(command);
+    }
     let repo = cli.repo.unwrap_or(std::env::current_dir()?);
     let config = Config::load(&repo, cli.config.as_deref())?;
     warn_deprecated_config_layer(&repo);
@@ -931,7 +1003,7 @@ fn run() -> color_eyre::Result<()> {
         )
     });
     let mut session =
-        ReviewSession::new_with_config(repo.clone(), target, diff, state.clone(), &config);
+        ReviewSession::new_with_config(repo.clone(), target, diff.clone(), state.clone(), &config);
     session.annotate_generated_where(|file| {
         generated_matcher.is_match(&file.path)
             || crate::generated::diff_content_looks_generated(&file.diff)
@@ -1058,20 +1130,71 @@ fn run() -> color_eyre::Result<()> {
             }
         }
         Command::Handoff {
+            mode,
             format,
             only_open,
+            tasks,
+            include_comments,
+            to,
+            objective,
+            constraints,
+            acceptance,
+            verification,
             output,
             copy,
         } => {
             let spec = session_target_spec(&repo, &session.target);
             warn_session_target_mismatch(&state, &spec);
             note_if_no_session_for_artifact(&state, &spec);
-            let body = match format {
-                HandoffFormat::Json => {
-                    render_handoff_json(&session, ArtifactBuildOptions { only_open })?
+            let delegate_flags = !tasks.is_empty()
+                || !include_comments.is_empty()
+                || to.is_some()
+                || objective.is_some()
+                || !constraints.is_empty()
+                || !acceptance.is_empty()
+                || !verification.is_empty();
+            let body = match mode {
+                HandoffMode::Prompt => {
+                    if delegate_flags {
+                        return Err(user_error(
+                            "delegate-only flags require `gander handoff --mode delegate`",
+                        ));
+                    }
+                    match format {
+                        HandoffFormat::Json => {
+                            render_handoff_json(&session, ArtifactBuildOptions { only_open })?
+                        }
+                        HandoffFormat::Markdown => {
+                            render_handoff_markdown(&session, ArtifactBuildOptions { only_open })?
+                        }
+                    }
                 }
-                HandoffFormat::Markdown => {
-                    render_handoff_markdown(&session, ArtifactBuildOptions { only_open })?
+                HandoffMode::Delegate => {
+                    let durable = find_current_durable_session(&state, &spec)?;
+                    let objective = objective.unwrap_or_else(|| {
+                        "Address the selected Gander review tasks and comments.".to_owned()
+                    });
+                    let spec = DelegationSpec {
+                        recipient: to,
+                        objective,
+                        repeated_constraints: constraints,
+                        acceptance_criteria: acceptance,
+                        requested_verification: verification,
+                        task_selectors: tasks,
+                        comment_selectors: include_comments,
+                        hunk_context_lines: 3,
+                    };
+                    let packet = build_delegation_packet(&state, durable, &diff, &spec)
+                        .map_err(into_user_error)?;
+                    if packet.action_items.is_empty() {
+                        return Err(user_error(
+                            "delegation selected no open task or comment items",
+                        ));
+                    }
+                    match format {
+                        HandoffFormat::Json => serde_json::to_string_pretty(&packet)?,
+                        HandoffFormat::Markdown => render_delegation_markdown(&packet),
+                    }
                 }
             };
             if let Some(path) = output {
@@ -1747,6 +1870,9 @@ fn run() -> color_eyre::Result<()> {
                 print_json(&serde_json::json!({ "walkthroughs": walkthroughs }))?;
             }
         },
+        Command::Skills { .. } => {
+            unreachable!("skills dispatches before repository initialization")
+        }
     }
 
     Ok(())
@@ -1831,6 +1957,70 @@ fn print_json(value: &impl Serialize) -> color_eyre::Result<()> {
     serde_json::to_writer_pretty(&mut stdout, value)?;
     stdout.write_all(b"\n")?;
     Ok(())
+}
+
+fn handle_skills(command: SkillsCommand) -> color_eyre::Result<()> {
+    match command {
+        SkillsCommand::List { format } => {
+            let skills = skills::list()?;
+            match format {
+                ListFormat::Json => print_json(
+                    &serde_json::json!({"kind":"gander.skills.list","schema_version":1,"skills":skills}),
+                )?,
+                ListFormat::Text => {
+                    for skill in skills {
+                        println!("{}\t{}", skill.name, skill.description);
+                    }
+                }
+            }
+        }
+        SkillsCommand::Show { name, format } => match format {
+            SkillShowFormat::Markdown => {
+                print!("{}", skills::show(&name).map_err(into_user_error)?)
+            }
+            SkillShowFormat::Json => {
+                let skill = skills::find_skill(&name).map_err(into_user_error)?;
+                print_json(
+                    &serde_json::json!({"kind":"gander.skills.show","schema_version":1,"skill":skill.metadata,"markdown":skill.markdown}),
+                )?;
+            }
+        },
+        SkillsCommand::Install {
+            names,
+            dir,
+            force,
+            format,
+        } => {
+            let dir = match dir {
+                Some(path) => path,
+                None => std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".agents/skills"))
+                    .ok_or_else(|| user_error("HOME is unavailable; pass --dir PATH"))?,
+            };
+            let installed = skills::install(&dir, &names, force).map_err(into_user_error)?;
+            match format {
+                ListFormat::Json => print_json(
+                    &serde_json::json!({"kind":"gander.skills.install","schema_version":1,"installed":installed}),
+                )?,
+                ListFormat::Text => {
+                    for item in installed {
+                        println!("installed {} -> {}", item.name, item.path.display());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_current_durable_session<'a>(
+    state: &'a ReviewState,
+    spec: &SessionTargetSpec,
+) -> color_eyre::Result<&'a state::ReviewSession> {
+    review::find_session_for_target(state, spec).ok_or_else(|| {
+        user_error("no existing review session for this target; create tasks/comments first")
+    })
 }
 
 fn handle_chunks_command(
@@ -3885,6 +4075,7 @@ mod tests {
                 only_open,
                 output,
                 copy,
+                ..
             } => {
                 assert_eq!(format, HandoffFormat::Json);
                 assert!(only_open);

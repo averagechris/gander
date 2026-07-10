@@ -536,7 +536,9 @@ mod tests {
             kind,
             action,
             state,
+            replies: Vec::new(),
             created_at: chrono::DateTime::UNIX_EPOCH,
+            updated_at: None,
         }
     }
     fn task(

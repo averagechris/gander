@@ -1,5 +1,5 @@
 {
-  description = "gander: take a gander at your jj changes in a fast review TUI";
+  description = "gander: local-first jj review workspace with TUI, CLI, and agent handoff";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

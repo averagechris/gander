@@ -481,11 +481,34 @@ the persisted state/overlay and surfaces suggestions live; draft dispositions
 For a one-shot prompt handoff, run `gander handoff` (or `gander handoff --copy`).
 It prints an implementation prompt with action items first, then walkthrough
 context, and reference hunks limited to files that carry action items or
-walkthrough stops.
-Use `gander handoff --format json` for the structured action schema
-`session`, `action_items`, `walkthrough`, and trailing `reference.hunks`; use
-`gander export markdown --profile agent` or `gander export json --profile agent`
-for a fuller archive/reference artifact with all hunks and resolved comments.
+walkthrough stops. Use `gander handoff --format json` for the legacy structured
+action schema (`session`, `action_items`, `walkthrough`, trailing
+`reference.hunks`).
+
+For typed delegation, use the read-only delegation adapter:
+
+```sh
+gander handoff --mode delegate --task TASK_ID --include-comment COMMENT_ID \
+  --to "build agent" --objective "Address the selected review feedback" \
+  --constraint "Do not mutate unrelated files" \
+  --accept "All selected tasks are completed" \
+  --verify "nix run .#ci-test" --format markdown
+gander handoff --mode delegate --task TASK_ID --format json --output delegate.json
+```
+
+Verification strings are recorded as instructions only; Gander does not execute
+them. Delegate-only flags intentionally fail unless `--mode delegate` is set.
+Use `gander export markdown --profile agent` or `gander export json --profile
+agent` for a fuller archive/reference artifact with all hunks and resolved
+comments.
+
+Bundled CLI-first agent skills can be inspected and installed without a jj repo:
+
+```sh
+gander skills list
+gander skills show gander-review --format markdown
+gander skills install --dir ~/.agents/skills --force --format json
+```
 Current import restores duplicate-safe comments and matching viewed state only;
 tasks and walkthroughs are exported for reference but are not restored by
 `gander import`.

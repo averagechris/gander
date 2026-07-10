@@ -12,9 +12,8 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
 1. Verify target and session before judging changes:
 
    ```bash
-   gander target --json
-   gander sessions list --json
-   gander session show --json
+   gander summary
+   gander reviews list --format json
    ```
 
    Confirm the repo, revision/range, base, and existing session match the user's request. If they do not, stop and ask or switch explicitly.
@@ -22,8 +21,8 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
 2. Inspect bounded context from the CLI first:
 
    ```bash
-   gander files --json
-   gander diff --file <path>
+   gander files list --format json
+   gander hunks list --path <path> --format json
    gander comments list --json
    gander tasks list --json
    gander walkthrough show --json
@@ -34,9 +33,9 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
 3. Record durable review state as you go:
 
    ```bash
-   gander comment add --file <path> --line <n> --body -
-   gander task add --file <path> --line <n> --body -
-   gander walkthrough add --file <path> --line <n> --body -
+   gander comments add --path <path> --line <n> --body -
+   gander tasks add --title "Follow up" --path <path> --line <n> --body -
+   gander walkthrough add-step --path <path> --line <n> --body - --title "Why this matters"
    ```
 
    Anchor comments/tasks to the smallest useful location. Mark actionable follow-ups as tasks; use walkthroughs for reading order or handoff context.
@@ -46,6 +45,7 @@ Use when reviewing local jj-visible work with Gander. Gander reads code state an
    ```bash
    gander handoff --format markdown
    gander handoff --format json
+   gander handoff --mode delegate --task <id> --include-comment <id> --format json
    ```
 
 ## Guardrails

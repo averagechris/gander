@@ -2,7 +2,7 @@
 name = "gander"
 version = "0.6.1"
 edition = "2024"
-description = "Take a gander at your jj changes: a fast review TUI with durable viewed-state, comments, and exportable review artifacts"
+description = "Local-first jj review workspace with TUI, CLI, agent handoff, skills, and exportable artifacts"
 license = "MIT OR Apache-2.0"
 repository = "https://git.sr.ht/~averagechris/gander"
 homepage = "https://git.sr.ht/~averagechris/gander"

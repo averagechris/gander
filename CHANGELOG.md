@@ -11,6 +11,11 @@
 - Live presentation control: `gander present`, ACP `present/*` methods,
   and matching MCP tools can drive a running TUI's tour/view through the
   per-instance socket, with modal safety guards.
+- `gander handoff --mode delegate` emits typed Markdown/JSON delegation packets
+  with task/comment selectors, recipient, objective, constraints, acceptance,
+  and verification text.
+- `gander skills list/show/install` exposes bundled CLI-first agent skills
+  without requiring repository, config, or jj initialization.
 
 ### Changed
 
@@ -18,6 +23,8 @@
   chapter, spotlight, and at-a-glance slides instead of framed floating cards.
 - Walkthroughs and the zen tour now share one durable model; legacy
   chunks/briefs authoring is treated as a deprecated compatibility shim.
+- `gander handoff --only-open` remains accepted for compatibility but is hidden
+  from help; the default prompt handoff remains backward compatible.
 
 ### Fixed
 
