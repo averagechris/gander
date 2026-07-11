@@ -1,11 +1,6 @@
 //! All drawing code: panes, popups, styles, and layout math.
 
-use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    ops::Range,
-    rc::Rc,
-};
+use std::{collections::HashMap, ops::Range, rc::Rc};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -484,7 +479,7 @@ enum DiffVisualSource {
     },
     Comment {
         owner: usize,
-        comment_index: usize,
+        summary: Line<'static>,
         byte_range: Range<usize>,
         width: usize,
     },
@@ -512,12 +507,43 @@ struct DiffLayoutCacheKey {
     width: u16,
     split_active: bool,
     soft_wrap: bool,
-    annotation_hash: u64,
+    annotations: AnnotationLayoutInput,
+}
+
+/// Selected-file review state that can change measured diff geometry.
+///
+/// Comment association is represented by logical row ownership, including
+/// one entry per owner for range comments. The exact rendered summary text is
+/// the only comment content measurement consumes; bodies after that summary,
+/// replies, timestamps, unrelated files, and presentation-only session state
+/// deliberately do not participate in equality.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AnnotationLayoutInput {
+    changed_hunks: Vec<usize>,
+    comments: Vec<AnnotationCommentInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnnotationCommentInput {
+    owner: usize,
+    summary: String,
+}
+
+/// Geometry input plus the exact presentation captured for each measured
+/// summary. Keeping these vectors aligned lets cached visual lines own their
+/// rendered comment instead of retaining a fragile index into session-wide
+/// comments.
+#[derive(Debug, Clone, Default)]
+struct SelectedFileAnnotations {
+    input: AnnotationLayoutInput,
+    rendered_summaries: Vec<Line<'static>>,
 }
 
 #[derive(Debug, Clone)]
 struct CachedDiffLayout {
     key: DiffLayoutCacheKey,
+    /// Retain the allocation named by `key.rows_ptr` so its address cannot be
+    /// recycled for different rows while this cache entry remains live.
     _rows: Rc<Vec<DiffRow>>,
     layout: Rc<MeasuredDiffLayout>,
 }
@@ -591,19 +617,26 @@ fn cached_diff_layout(
     split_active: bool,
     tui_state: &TuiState,
 ) -> Rc<MeasuredDiffLayout> {
+    let annotations = selected_file_annotations(session, &rows);
     let key = DiffLayoutCacheKey {
         rows_ptr: Rc::as_ptr(&rows) as usize,
         width: inner.width,
         split_active,
         soft_wrap: session.diff_cues.soft_wrap,
-        annotation_hash: diff_annotation_hash(session),
+        annotations: annotations.input.clone(),
     };
     if let Some(cached) = tui_state.diff_layout_cache.borrow().entry.as_ref()
         && cached.key == key
     {
         return Rc::clone(&cached.layout);
     }
-    let layout = Rc::new(measured_diff_layout(session, &rows, inner, split_active));
+    let layout = Rc::new(measured_diff_layout_with_annotations(
+        session,
+        &rows,
+        inner,
+        split_active,
+        &annotations,
+    ));
     let mut cache = tui_state.diff_layout_cache.borrow_mut();
     cache.entry = Some(CachedDiffLayout {
         key,
@@ -617,31 +650,51 @@ fn cached_diff_layout(
     layout
 }
 
-fn diff_annotation_hash(session: &ReviewSession) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    if let Some(file) = session.selected_visible_file() {
-        file.path.hash(&mut hasher);
-        file.fingerprint.hash(&mut hasher);
-        for hunk in &file.changed_hunks {
-            hunk.hash(&mut hasher);
+fn selected_file_annotations(session: &ReviewSession, rows: &[DiffRow]) -> SelectedFileAnnotations {
+    let changed_hunks = session
+        .selected_visible_file()
+        .map(|file| file.changed_hunks.iter().copied().collect())
+        .unwrap_or_default();
+    let mut comments = Vec::new();
+    let mut rendered_summaries = Vec::new();
+    for (owner, row) in rows.iter().enumerate() {
+        let Some(anchor) = row.anchor.as_ref() else {
+            continue;
+        };
+        for comment in session.comments_for_diff_row_anchor_details(anchor) {
+            comments.push(AnnotationCommentInput {
+                owner,
+                summary: comment_summary_text(comment),
+            });
+            rendered_summaries.push(comment_summary_line(comment));
         }
     }
-    for comment in &session.comments {
-        comment.id.hash(&mut hasher);
-        comment.body.hash(&mut hasher);
-        comment.state.label().hash(&mut hasher);
-        format!("{:?}", comment.action).hash(&mut hasher);
-        format!("{:?}", comment.kind).hash(&mut hasher);
-        format!("{:?}", comment.anchor).hash(&mut hasher);
+    SelectedFileAnnotations {
+        input: AnnotationLayoutInput {
+            changed_hunks,
+            comments,
+        },
+        rendered_summaries,
     }
-    hasher.finish()
 }
 
+#[cfg(test)]
 fn measured_diff_layout(
     session: &ReviewSession,
     rows: &[DiffRow],
     inner: Rect,
     split_active: bool,
+) -> MeasuredDiffLayout {
+    let annotations = selected_file_annotations(session, rows);
+    measured_diff_layout_with_annotations(session, rows, inner, split_active, &annotations)
+}
+
+fn measured_diff_layout_with_annotations(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    inner: Rect,
+    split_active: bool,
+    annotations: &SelectedFileAnnotations,
 ) -> MeasuredDiffLayout {
     let line_number_width = measured_line_number_width(rows);
     let width = inner.width as usize;
@@ -668,9 +721,9 @@ fn measured_diff_layout(
         .unwrap_or(0);
     let horizontal_limit = widest.saturating_sub(code_width);
     let mut layout = if split_active {
-        measured_split_layout(session, rows, width, line_number_width)
+        measured_split_layout(session, rows, width, line_number_width, annotations)
     } else {
-        measured_unified_layout(session, rows, width, line_number_width)
+        measured_unified_layout(session, rows, width, line_number_width, annotations)
     };
     layout.line_number_width = line_number_width;
     layout.width = width;
@@ -699,11 +752,13 @@ fn measured_unified_layout(
     rows: &[DiffRow],
     width: usize,
     line_number_width: usize,
+    annotations: &SelectedFileAnnotations,
 ) -> MeasuredDiffLayout {
     let mut lines = Vec::new();
     for (index, row) in rows.iter().enumerate() {
-        let comments = row_comment_indices(session, row);
-        for source in measured_unified_row(session, row, index, width, line_number_width) {
+        for source in
+            measured_unified_row(session, row, index, width, line_number_width, annotations)
+        {
             lines.push(DiffVisualLine {
                 source,
                 hit: DiffVisualHit::Full(index),
@@ -711,7 +766,7 @@ fn measured_unified_layout(
                 is_comment: false,
             });
         }
-        append_comment_lines(&mut lines, session, comments, index, index, width);
+        append_comment_lines(&mut lines, annotations, index, index, width);
     }
     MeasuredDiffLayout {
         lines,
@@ -724,6 +779,7 @@ fn measured_split_layout(
     rows: &[DiffRow],
     width: usize,
     line_number_width: usize,
+    annotations: &SelectedFileAnnotations,
 ) -> MeasuredDiffLayout {
     let mut lines = Vec::new();
     let left_width = width.saturating_sub(1) / 2;
@@ -731,10 +787,14 @@ fn measured_split_layout(
     for split in split_rows(rows) {
         match split {
             SplitRow::Full(index) => {
-                let comments = row_comment_indices(session, &rows[index]);
-                for source in
-                    measured_unified_row(session, &rows[index], index, width, line_number_width)
-                {
+                for source in measured_unified_row(
+                    session,
+                    &rows[index],
+                    index,
+                    width,
+                    line_number_width,
+                    annotations,
+                ) {
                     lines.push(DiffVisualLine {
                         source,
                         hit: DiffVisualHit::Full(index),
@@ -742,7 +802,7 @@ fn measured_split_layout(
                         is_comment: false,
                     });
                 }
-                append_comment_lines(&mut lines, session, comments, index, index, width);
+                append_comment_lines(&mut lines, annotations, index, index, width);
             }
             SplitRow::Pair { left, right } => {
                 let anchor = left.or(right).unwrap_or(0);
@@ -779,8 +839,7 @@ fn measured_split_layout(
                 let mut owners: Vec<_> = left.into_iter().chain(right).collect();
                 owners.dedup();
                 for owner in owners {
-                    let comments = row_comment_indices(session, &rows[owner]);
-                    append_comment_lines(&mut lines, session, comments, owner, anchor, width);
+                    append_comment_lines(&mut lines, annotations, owner, anchor, width);
                 }
             }
         }
@@ -791,42 +850,35 @@ fn measured_split_layout(
     }
 }
 
-fn row_comment_indices(session: &ReviewSession, row: &DiffRow) -> Vec<usize> {
+fn row_comment_count(session: &ReviewSession, row: &DiffRow) -> usize {
     let Some(anchor) = row.anchor.as_ref() else {
-        return Vec::new();
+        return 0;
     };
-    let comments = session.comments_for_diff_row_anchor_details(anchor);
-    session
-        .comments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| {
-            comments
-                .iter()
-                .any(|comment| comment.id == candidate.id)
-                .then_some(index)
-        })
-        .collect()
+    session.comments_for_diff_row_anchor_details(anchor).len()
 }
 
 fn append_comment_lines(
     lines: &mut Vec<DiffVisualLine>,
-    session: &ReviewSession,
-    comments: Vec<usize>,
+    annotations: &SelectedFileAnnotations,
     owner: usize,
     block_anchor: usize,
     width: usize,
 ) {
-    for comment_index in comments {
-        let text = comment_summary_text(&session.comments[comment_index]);
-        for byte_range in visual_byte_ranges(&text, width.max(1), true)
+    for (comment, rendered) in annotations
+        .input
+        .comments
+        .iter()
+        .zip(&annotations.rendered_summaries)
+        .filter(|(comment, _)| comment.owner == owner)
+    {
+        for byte_range in visual_byte_ranges(&comment.summary, width.max(1), true)
             .into_iter()
             .flatten()
         {
             lines.push(DiffVisualLine {
                 source: DiffVisualSource::Comment {
                     owner,
-                    comment_index,
+                    summary: rendered.clone(),
                     byte_range,
                     width,
                 },
@@ -844,6 +896,7 @@ fn measured_unified_row(
     index: usize,
     width: usize,
     line_number_width: usize,
+    annotations: &SelectedFileAnnotations,
 ) -> Vec<DiffVisualSource> {
     if matches!(row.kind, DiffRowKind::DiffLine(_)) {
         return measured_diff_cells(
@@ -858,7 +911,7 @@ fn measured_unified_row(
         .map(DiffVisualSource::Diff)
         .collect();
     }
-    let text = plain_row_text(session, row);
+    let text = plain_row_text(row, &annotations.input);
     visual_byte_ranges(&text, width.max(1), session.diff_cues.soft_wrap)
         .into_iter()
         .map(|byte_range| DiffVisualSource::Plain {
@@ -930,15 +983,13 @@ fn visual_byte_ranges(text: &str, width: usize, wrap: bool) -> Vec<Option<Range<
         .collect()
 }
 
-fn plain_row_text(session: &ReviewSession, row: &DiffRow) -> String {
+fn plain_row_text(row: &DiffRow, annotations: &AnnotationLayoutInput) -> String {
     match row.kind {
         DiffRowKind::FileHeader | DiffRowKind::SyntaxSummary | DiffRowKind::Raw => row.text.clone(),
         DiffRowKind::HunkHeader
-            if row.hunk_index.is_some_and(|hunk| {
-                session
-                    .selected_file()
-                    .is_some_and(|file| file.changed_hunks.contains(&hunk))
-            }) =>
+            if row
+                .hunk_index
+                .is_some_and(|hunk| annotations.changed_hunks.binary_search(&hunk).is_ok()) =>
         {
             format!("{}  changed", row.text)
         }
@@ -1012,7 +1063,7 @@ fn materialize_diff_source_cached(
         DiffVisualSource::Plain {
             row, byte_range, ..
         } => {
-            let comment_count = row_comment_indices(session, &rows[*row]).len();
+            let comment_count = row_comment_count(session, &rows[*row]);
             let spans = unified_row_line(session, &rows[*row], *row, comment_count).spans;
             let visible = byte_range.as_ref().map_or_else(
                 || clip_spans(&spans, horizontal, source.width()),
@@ -1067,16 +1118,13 @@ fn materialize_diff_source_cached(
             Line::from(spans)
         }
         DiffVisualSource::Comment {
-            comment_index,
+            summary,
             byte_range,
             ..
-        } => {
-            let spans = comment_summary_line(&session.comments[*comment_index]).spans;
-            Line::from(pad_spans(
-                slice_spans_bytes(&spans, byte_range.clone()),
-                source.width(),
-            ))
-        }
+        } => Line::from(pad_spans(
+            slice_spans_bytes(&summary.spans, byte_range.clone()),
+            source.width(),
+        )),
     }
 }
 
@@ -1123,7 +1171,7 @@ fn prepare_diff_cell(
 ) -> PreparedDiffCell {
     const CHROME_SPANS: usize = 5;
     let row = &rows[cell.row];
-    let comments = row_comment_indices(session, row).len();
+    let comments = row_comment_count(session, row);
     let mut all = diff_line_cell_spans_with_width(
         session,
         row,
@@ -5388,7 +5436,7 @@ mod tests {
 
     use crate::{
         config::KeybindingsConfig,
-        state::Comment,
+        state::{ActionIntent, Comment, CommentKind, CommentReply, CommentState},
         syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
         tui::test_support::snapshot_session,
     };
@@ -7450,28 +7498,245 @@ diff --git a/Cargo.toml b/Cargo.toml
         assert_eq!(window.len(), 5);
     }
 
+    fn push_row_comment(session: &mut ReviewSession, row: usize, id: &str, body: &str) {
+        let anchor = session.diff_rows_for_selected_file()[row]
+            .anchor
+            .clone()
+            .expect("comment row must be anchorable");
+        session.comments.push(Comment {
+            id: id.to_owned(),
+            path: Some(anchor.path().to_owned()),
+            line: anchor.line(),
+            end_line: None,
+            anchor: Some(anchor),
+            body: body.to_owned(),
+            ..Default::default()
+        });
+    }
+
     #[test]
-    fn geometry_cache_invalidates_for_comment_geometry_but_not_cursor_style() {
+    fn geometry_cache_invalidates_for_all_selected_file_annotation_inputs() {
         let mut session = snapshot_session(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        session.toggle_focus();
         let inner = Rect::new(0, 0, 40, 5);
         let tui_state = TuiState::default();
         let rows = session.diff_rows_for_selected_file();
+        let old = rows.iter().position(|row| row.text == "old").unwrap();
+        let new = rows.iter().position(|row| row.text == "new").unwrap();
+        let mut previous = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+
+        push_row_comment(&mut session, old, "selected-comment", "first summary");
+        let added = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &added));
+        previous = added;
+
+        session.comments[0].body = "changed summary".to_owned();
+        let summary = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &summary));
+        previous = summary;
+
+        session.comments[0].state = CommentState::Todo;
+        let state = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &state));
+        previous = state;
+
+        session.comments[0].action = Some(ActionIntent::Fix);
+        let action = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &action));
+        previous = action;
+
+        session.comments[0].kind = Some(CommentKind::Issue);
+        let kind = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &kind));
+        previous = kind;
+
+        let new_anchor = rows[new].anchor.clone().unwrap();
+        session.comments[0].path = Some(new_anchor.path().to_owned());
+        session.comments[0].line = new_anchor.line();
+        session.comments[0].end_line = None;
+        session.comments[0].anchor = Some(new_anchor);
+        let ownership = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &ownership));
+        previous = ownership;
+
+        session.comments.clear();
+        let removed = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &removed));
+        previous = removed;
+
+        session.files[0].changed_hunks.insert(0);
+        let changed_hunk = cached_diff_layout(&session, rows, inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &changed_hunk));
+        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 9);
+    }
+
+    #[test]
+    fn geometry_cache_reuses_for_unrelated_detail_and_style_mutations() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old a\n+new a\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old b\n+new b\n",
+        );
+        let inner = Rect::new(0, 0, 50, 8);
+        let tui_state = TuiState::default();
+        let rows = session.diff_rows_for_selected_file();
+        let selected = rows.iter().position(|row| row.text == "old a").unwrap();
+        push_row_comment(
+            &mut session,
+            selected,
+            "selected-comment",
+            "selected summary\noriginal detail",
+        );
         let first = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
 
-        session.move_diff_cursor(1);
-        let cursor_only = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
-        assert!(Rc::ptr_eq(&first, &cursor_only));
+        let unrelated_anchor =
+            crate::anchor::comment_anchor_for_file_lines(&session.files[1], Some(1), None).unwrap();
+        session.comments.insert(
+            0,
+            Comment {
+                id: "unrelated-comment".to_owned(),
+                path: Some(unrelated_anchor.path().to_owned()),
+                line: unrelated_anchor.line(),
+                anchor: Some(unrelated_anchor),
+                body: "unrelated summary".to_owned(),
+                ..Default::default()
+            },
+        );
+        let unrelated_insert = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(Rc::ptr_eq(&first, &unrelated_insert));
 
-        let before_hash = diff_annotation_hash(&session);
-        session.add_comment("a comment long enough to wrap across rows".into());
-        assert_eq!(session.comments.len(), 1);
-        assert_ne!(before_hash, diff_annotation_hash(&session));
-        let with_comment = cached_diff_layout(&session, rows, inner, false, &tui_state);
-        assert!(!Rc::ptr_eq(&first, &with_comment));
-        assert!(with_comment.lines.len() > first.lines.len());
+        let rendered_comment = first
+            .lines
+            .iter()
+            .find_map(|line| match &line.source {
+                DiffVisualSource::Comment { .. } => Some(spans_text(
+                    &materialize_diff_source(
+                        &session,
+                        &rows,
+                        first.line_number_width,
+                        0,
+                        &line.source,
+                    )
+                    .spans,
+                )),
+                _ => None,
+            })
+            .unwrap();
+        assert!(rendered_comment.contains("selected summary"));
+        assert!(!rendered_comment.contains("unrelated summary"));
+
+        session.comments[0].body = "mutated unrelated summary".to_owned();
+        let unrelated_edit = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(Rc::ptr_eq(&first, &unrelated_edit));
+
+        session.comments.push(Comment {
+            id: "general-comment".to_owned(),
+            body: "general summary".to_owned(),
+            ..Default::default()
+        });
+        let general = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(Rc::ptr_eq(&first, &general));
+
+        let file_anchor =
+            crate::anchor::comment_anchor_for_file_lines(&session.files[0], None, None).unwrap();
+        session.comments.push(Comment {
+            id: "file-comment".to_owned(),
+            path: Some(file_anchor.path().to_owned()),
+            anchor: Some(file_anchor),
+            body: "file-only summary".to_owned(),
+            ..Default::default()
+        });
+        session.comments[2].body = "mutated general summary".to_owned();
+        session.comments[3].body = "mutated file-only summary".to_owned();
+        session.comments[1].body = "selected summary\nchanged detail only".to_owned();
+        session.comments[1].replies.push(CommentReply::default());
+        session.comments[1].updated_at = Some(chrono::Utc::now());
+        session.move_diff_cursor(1);
+        session.toggle_focus();
+        session.set_diff_range_selection(selected, selected);
+        session.syntax.theme.keyword = "red bold".to_owned();
+        let detail_and_style = cached_diff_layout(&session, rows, inner, false, &tui_state);
+        assert!(Rc::ptr_eq(&first, &detail_and_style));
+        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 1);
+    }
+
+    #[test]
+    fn geometry_cache_invalidates_for_view_and_rows_inputs() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new long enough to wrap\n",
+        );
+        let tui_state = TuiState::default();
+        let rows = session.diff_rows_for_selected_file();
+        let first = cached_diff_layout(
+            &session,
+            rows.clone(),
+            Rect::new(0, 0, 40, 5),
+            false,
+            &tui_state,
+        );
+        let width = cached_diff_layout(
+            &session,
+            rows.clone(),
+            Rect::new(0, 0, 30, 5),
+            false,
+            &tui_state,
+        );
+        assert!(!Rc::ptr_eq(&first, &width));
+
+        let split = cached_diff_layout(
+            &session,
+            rows.clone(),
+            Rect::new(0, 0, 30, 5),
+            true,
+            &tui_state,
+        );
+        assert!(!Rc::ptr_eq(&width, &split));
+
+        session.diff_cues.soft_wrap = !session.diff_cues.soft_wrap;
+        let wrap = cached_diff_layout(
+            &session,
+            rows.clone(),
+            Rect::new(0, 0, 30, 5),
+            true,
+            &tui_state,
+        );
+        assert!(!Rc::ptr_eq(&split, &wrap));
+
+        let replacement_rows = Rc::new(rows.as_ref().clone());
+        let replaced = cached_diff_layout(
+            &session,
+            replacement_rows,
+            Rect::new(0, 0, 30, 5),
+            true,
+            &tui_state,
+        );
+        assert!(!Rc::ptr_eq(&wrap, &replaced));
+        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 5);
+    }
+
+    #[test]
+    fn range_comment_annotation_owners_are_deterministic() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let old = rows.iter().position(|row| row.text == "old").unwrap();
+        let new = rows.iter().position(|row| row.text == "new").unwrap();
+        session.set_diff_range_selection(old, new);
+        let anchor = session.selected_range_anchor().unwrap();
+        session.comments.push(Comment {
+            id: "range-comment".to_owned(),
+            path: Some(anchor.path().to_owned()),
+            line: anchor.line(),
+            end_line: anchor.end_line(),
+            anchor: Some(anchor),
+            body: "range summary".to_owned(),
+            ..Default::default()
+        });
+
+        let input = selected_file_annotations(&session, &rows).input;
+        let owners: Vec<_> = input.comments.iter().map(|comment| comment.owner).collect();
+        assert!(owners.len() >= 2);
+        assert!(owners.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
