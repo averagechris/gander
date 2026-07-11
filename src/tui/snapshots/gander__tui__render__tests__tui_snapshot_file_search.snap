@@ -12,8 +12,8 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │             │› • src/app.rs                                                        │             │
 │             │  • src/tui/render.rs                                                 │             │
 │             │                                                                      │             │
-│             │type fuzzy filter · ↑/↓ or ctrl-j/ctrl-k move · enter open file · esc │             │
-│             │cancel                                                                │             │
+│             │type fuzzy filter · down/up move · enter open file · esc cancel       │             │
+│             │                                                                      │             │
 │             │                                                                      │             │
 │             │                                                                      │             │
 │             │                                                                      │             │

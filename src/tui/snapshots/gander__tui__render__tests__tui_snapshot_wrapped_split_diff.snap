@@ -1,0 +1,18 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &Mode::Normal, 130, 14)"
+---
+┌diff · a.txt────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│a.txt  +1 -1                                                                                                                    │
+│@@ -1 +1 @@                                                                                                                     │
+│    1 - removed unicode 界 é 👨‍👩‍👧‍👦  removed unicode 界 é 👨‍👩‍👧‍👦  removed u│    1 + replacement replacement replacement                     │
+│        nicode 界 é 👨‍👩‍👧‍👦  removed unicode 界 é 👨‍👩‍👧‍👦  removed unicode 界 │                                                                │
+│        é 👨‍👩‍👧‍👦                                                    │                                                                │
+│                                                                                                                                │
+│                                                                                                                                │
+│                                                                                                                                │
+│                                                                                                                                │
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+trunk()..@ · focus diff (wrap) · j/k line · d/u scroll · V view/wrap · r range · Y walkthrough · c comment · ctrl-y handoff · n/N

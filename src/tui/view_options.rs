@@ -10,15 +10,17 @@ pub(super) enum ViewOption {
     WordHighlight,
     LineBackground,
     GutterBar,
+    SoftWrap,
     FilePane,
     SideBySide,
 }
 
 impl ViewOption {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::WordHighlight,
         Self::LineBackground,
         Self::GutterBar,
+        Self::SoftWrap,
         Self::FilePane,
         Self::SideBySide,
     ];
@@ -28,6 +30,7 @@ impl ViewOption {
             Self::WordHighlight => "word-level change highlights",
             Self::LineBackground => "line backgrounds",
             Self::GutterBar => "gutter change bar",
+            Self::SoftWrap => "soft-wrap diff lines",
             Self::FilePane => "file pane",
             Self::SideBySide => "side-by-side view",
         }
@@ -38,6 +41,7 @@ impl ViewOption {
             Self::WordHighlight => session.diff_cues.word_highlight,
             Self::LineBackground => session.diff_cues.line_background,
             Self::GutterBar => session.diff_cues.gutter_bar,
+            Self::SoftWrap => session.diff_cues.soft_wrap,
             Self::FilePane => session.file_pane_visible,
             Self::SideBySide => {
                 session.diff_cues.view == crate::config::DiffViewModeConfig::SideBySide
@@ -50,6 +54,7 @@ impl ViewOption {
             Self::WordHighlight => session.toggle_word_highlight(),
             Self::LineBackground => session.toggle_line_background(),
             Self::GutterBar => session.toggle_gutter_bar(),
+            Self::SoftWrap => session.toggle_diff_wrap(),
             Self::FilePane => session.toggle_file_pane(),
             Self::SideBySide => session.toggle_diff_view(),
         }
@@ -94,11 +99,14 @@ mod tests {
         assert!(ViewOption::WordHighlight.enabled(&session));
         assert!(ViewOption::LineBackground.enabled(&session));
         assert!(!ViewOption::GutterBar.enabled(&session));
+        assert!(ViewOption::SoftWrap.enabled(&session));
 
         ViewOption::WordHighlight.toggle(&mut session);
         ViewOption::GutterBar.toggle(&mut session);
+        ViewOption::SoftWrap.toggle(&mut session);
 
         assert!(!session.diff_cues.word_highlight);
         assert!(session.diff_cues.gutter_bar);
+        assert!(!session.diff_cues.soft_wrap);
     }
 }

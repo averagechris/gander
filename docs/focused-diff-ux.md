@@ -143,14 +143,15 @@ View options
  [x] word-level change highlights
  [x] line backgrounds
  [ ] gutter change bar
- [x] file pane
+  [x] soft-wrap diff lines
+  [x] file pane
  ( ) side-by-side   (•) unified
 ```
 
 Each row maps to an `Action` (`ToggleWordHighlight`, `ToggleLineBackground`,
-`ToggleGutterBar`, `ToggleFilePane`, `ToggleDiffViewMode`) so users can also
-bind direct keys via `[keybindings]` — all new bindings are remappable like
-every existing one. Runtime toggles do not write config; they are
+`ToggleGutterBar`, `ToggleDiffWrap`, `ToggleFilePane`, `ToggleDiffViewMode`) so
+users can also bind direct keys via `[keybindings]` — all new bindings are
+remappable like every existing one. Runtime toggles do not write config; they are
 deliberately session-only (decided): config sets defaults, toggles are
 transient view state.
 
@@ -195,7 +196,10 @@ get a blank opposite cell.
   old-side anchor regardless of view).
 - Width fallback: below ~100 columns the view renders unified with a one-time
   notice, rather than producing two unreadable 40-col panes.
-- Long lines truncate (as today); no wrapping in v1.
+- Long lines soft-wrap by default (`[diff] soft-wrap = true`) in both unified
+  and side-by-side layouts. Turning soft wrap off uses horizontal scrolling for
+  long lines. Split view keeps removed/added pairs aligned by applying wrapping
+  to the projected split row rather than reflowing each side independently.
 
 ### Snapshots
 
@@ -342,17 +346,15 @@ configs working); defaults are `T` and `Z`.
 Each step lands with unit tests (word-diff LCS via proptest, pairing,
 gap/expansion math) and insta snapshot coverage, and passes `jj lint`.
 
-## Open questions
-
-- Side-by-side + very long lines: is truncation acceptable long-term, or is
-  horizontal scroll/wrap needed?
-
 ## Resolved decisions (2026-07)
 
 - Word diff uses the `similar` crate as a slim dependency (not vendored,
   not hand-rolled) — see §1.
 - Expanded context rows are not commentable in v1.
 - Runtime view toggles are session-only; config sets defaults.
+- Diff lines soft-wrap by default; disabling soft wrap uses horizontal
+  scrolling for long lines, including side-by-side panes while preserving split
+  alignment.
 - Keybind defaults (`V`, `w`, `|`, `+`/`=`/`-`) accepted; all remappable
   through `[keybindings]`.
 - Cue color defaults are truecolor hex with automatic nearest-indexed

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Fixed
+
+- Diff lines now soft-wrap by default through one grapheme-width-aware measured
+  layout shared by rendering, visual scrolling, and mouse hit testing. Unified
+  and side-by-side views preserve long content, split pairs align to the taller
+  wrapped side, and disabling wrap enables fixed-gutter horizontal scrolling;
+  config, keybindings, View Options, resize reflow, comments/selections, and
+  per-file viewport state all follow the same logical rows (#164).
+- Comment editing now uses one grapheme-safe, display-width-aware visual layout
+  for wrapping, rendering, cursor placement, vertical navigation, reflow, and
+  scrolling, keeping CJK, combining text, and emoji cursors exact in new,
+  existing, general, and agent-draft comments (#165).
+- TUI bindings now use context-aware validation and effective hints: canonical
+  collisions fail only where actions overlap, disjoint modal reuse remains
+  valid, unknown fields and invalid key syntax fail clearly, text filters keep
+  literal `j`/`k`, and popup, Comment Center, walkthrough, draft, and zen
+  controls are configurable and documented with a collision-free Colemak
+  Mod-DH override (#168).
 
 ## v0.7.1 - 2026-07-10
 

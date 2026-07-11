@@ -1,5 +1,12 @@
 //! All drawing code: panes, popups, styles, and layout math.
 
+use std::{
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    ops::Range,
+    rc::Rc,
+};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -11,7 +18,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{DiffRow, DiffRowKind, Focus, ReviewSession, SplitRow, split_index_of, split_rows},
+    app::{DiffRow, DiffRowKind, Focus, ReviewSession, SplitRow, split_rows},
     config::DiffViewModeConfig,
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
@@ -34,6 +41,7 @@ use super::{
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
     search::FileSearchState,
+    text_layout::VisualTextLayout,
     view_options::{ViewOption, ViewOptionsState},
     walkthroughs::WalkthroughListState,
     zen::{ZenState, ZenStop},
@@ -89,7 +97,7 @@ pub(super) fn draw(
     match zen.map(|zen| zen.phase) {
         Some(ZenPhase::Focus) => {
             let body = body_area(frame.area());
-            draw_zen_focus(frame, body, session, zen.expect("checked above"));
+            draw_zen_focus(frame, body, session, zen.expect("checked above"), keymap);
             draw_footer(
                 frame,
                 layout.footer,
@@ -100,8 +108,8 @@ pub(super) fn draw(
         Some(ZenPhase::Artifact { index, scroll }) => {
             let body = body_area(frame.area());
             let zen = zen.expect("checked above");
-            draw_zen_focus(frame, body, session, zen);
-            draw_zen_artifact(frame, body, zen, index, scroll);
+            draw_zen_focus(frame, body, session, zen, keymap);
+            draw_zen_artifact(frame, body, zen, index, scroll, keymap);
             draw_footer(
                 frame,
                 layout.footer,
@@ -111,7 +119,7 @@ pub(super) fn draw(
         }
         Some(ZenPhase::Glance) => {
             let body = body_area(frame.area());
-            draw_zen_glance(frame, body, session, zen.expect("checked above"));
+            draw_zen_glance(frame, body, session, zen.expect("checked above"), keymap);
             draw_footer(
                 frame,
                 layout.footer,
@@ -123,7 +131,7 @@ pub(super) fn draw(
             if session.file_pane_visible {
                 draw_files(frame, layout.files, session);
             }
-            draw_diff(frame, layout.diff, session);
+            draw_diff(frame, layout.diff, session, tui_state);
             draw_footer(
                 frame,
                 layout.footer,
@@ -134,31 +142,41 @@ pub(super) fn draw(
             // The zen reading panel is a layer under any popup: progress and
             // rationale stay visible while e.g. a comment is being written.
             if let Some(zen) = zen {
-                draw_zen_panel(frame, frame.area(), session, zen);
+                draw_zen_panel(frame, frame.area(), session, zen, keymap);
             }
         }
     }
 
     match mode {
-        Mode::TargetChooser(chooser) => draw_target_chooser_popup(frame, frame.area(), chooser),
-        Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input),
-        Mode::OperationPicker(picker) => draw_operation_picker_popup(frame, frame.area(), picker),
-        Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state),
-        Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list),
-        Mode::OpenWork(list) => draw_open_work_popup(frame, frame.area(), session, list),
+        Mode::TargetChooser(chooser) => {
+            draw_target_chooser_popup(frame, frame.area(), chooser, keymap)
+        }
+        Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input, keymap),
+        Mode::OperationPicker(picker) => {
+            draw_operation_picker_popup(frame, frame.area(), picker, keymap)
+        }
+        Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state, keymap),
+        Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list, keymap),
+        Mode::OpenWork(list) => draw_open_work_popup(frame, frame.area(), session, list, keymap),
         Mode::Activity(list) => draw_activity_popup(frame, frame.area(), tui_state, list),
         Mode::WalkthroughList(list) => {
-            draw_walkthrough_list_popup(frame, frame.area(), session, list)
+            draw_walkthrough_list_popup(frame, frame.area(), session, list, keymap)
         }
-        Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list),
-        Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search),
-        Mode::SymbolOutline(outline) => draw_symbol_outline_popup(frame, frame.area(), outline),
-        Mode::CommentList(list) => draw_comment_list_popup(frame, frame.area(), session, list),
-        Mode::ViewOptions(state) => draw_view_options_popup(frame, frame.area(), session, state),
+        Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list, keymap),
+        Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search, keymap),
+        Mode::SymbolOutline(outline) => {
+            draw_symbol_outline_popup(frame, frame.area(), outline, keymap)
+        }
+        Mode::CommentList(list) => {
+            draw_comment_list_popup(frame, frame.area(), session, list, keymap)
+        }
+        Mode::ViewOptions(state) => {
+            draw_view_options_popup(frame, frame.area(), session, state, keymap)
+        }
         Mode::CommentInput { editor, target } => {
             draw_comment_popup(frame, frame.area(), session, editor, target, keymap)
         }
-        Mode::Help => draw_help_popup(frame, frame.area(), keymap),
+        Mode::Help => draw_help_popup(frame, frame.area(), keymap, tui_state.help_scroll),
         Mode::Normal => {}
     }
 }
@@ -321,7 +339,12 @@ fn render_file_row(
     ]))
 }
 
-fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
+fn draw_diff(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    tui_state: &TuiState,
+) {
     if session.selected_visible_file().is_none() {
         let generated_hint = if session.hide_generated {
             "Noisy/generated files are hidden. Press the hide-noisy toggle to show them."
@@ -360,11 +383,9 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
     let inner = inner_bordered(area);
     let split_requested = session.diff_cues.view == DiffViewModeConfig::SideBySide;
     let split_active = split_requested && inner.width >= MIN_SPLIT_WIDTH;
-    let lines = if split_active {
-        split_diff_lines(session, &rows, inner)
-    } else {
-        unified_diff_lines(session, &rows, inner)
-    };
+    let measured = cached_diff_layout(session, rows.clone(), inner, split_active, tui_state);
+    let start = measured.viewport_start(session, inner.height as usize);
+    let lines = materialize_diff_window(session, &rows, &measured, start, inner.height as usize);
 
     let mut title = diff_pane_title(session);
     if split_requested && !split_active {
@@ -372,153 +393,492 @@ fn draw_diff(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession
         // narrow terminals and say so in the title.
         title.push_str(" · unified (narrow)");
     }
-    let paragraph = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
+    let horizontal = measured.effective_horizontal_scroll(session);
+    if !session.diff_cues.soft_wrap && horizontal > 0 {
+        title.push_str(&format!(" · x:{horizontal}"));
+    }
+    let paragraph =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(paragraph, area);
 }
 
 /// Minimum inner width (columns) for the side-by-side layout.
 const MIN_SPLIT_WIDTH: u16 = 100;
 
-/// Unified layout: one line per diff row plus attached comment summaries.
-/// Lazy rendering: only construct styled lines for the visible window.
-/// Rows before the scroll offset are counted (a row emits one line plus
-/// one line per attached comment) but never built, so huge files cost
-/// O(viewport) per frame instead of O(file).
-fn unified_diff_lines(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffVisualHit {
+    Full(usize),
+    Split {
+        left: Option<usize>,
+        right: Option<usize>,
+        divider: usize,
+    },
+}
+
+impl DiffVisualHit {
+    fn contains(self, row: usize) -> bool {
+        match self {
+            Self::Full(owner) => owner == row,
+            Self::Split { left, right, .. } => left == Some(row) || right == Some(row),
+        }
+    }
+
+    fn row_at(self, column: usize) -> Option<usize> {
+        match self {
+            Self::Full(row) => Some(row),
+            Self::Split {
+                left,
+                right,
+                divider,
+            } => {
+                if column < divider {
+                    left
+                } else {
+                    right
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffChrome {
+    Full,
+    Prefix,
+    None,
+}
+
+impl DiffChrome {
+    fn width(self, line_number_width: usize) -> usize {
+        match self {
+            Self::Full => line_number_width + 4,
+            Self::Prefix => 2,
+            Self::None => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffCellVisual {
+    row: usize,
+    lineno: Option<usize>,
+    chrome: DiffChrome,
+    content_range: Option<Range<usize>>,
+    continuation: bool,
+    width: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiffVisualSource {
+    Plain {
+        row: usize,
+        byte_range: Option<Range<usize>>,
+        width: usize,
+    },
+    Diff(DiffCellVisual),
+    Split {
+        left: Option<DiffCellVisual>,
+        right: Option<DiffCellVisual>,
+        left_width: usize,
+        right_width: usize,
+    },
+    Comment {
+        owner: usize,
+        comment_index: usize,
+        byte_range: Range<usize>,
+        width: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct DiffVisualLine {
+    source: DiffVisualSource,
+    hit: DiffVisualHit,
+    block_anchor: usize,
+    is_comment: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MeasuredDiffLayout {
+    lines: Vec<DiffVisualLine>,
+    line_number_width: usize,
+    width: usize,
+    horizontal_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLayoutCacheKey {
+    rows_ptr: usize,
+    width: u16,
+    split_active: bool,
+    soft_wrap: bool,
+    annotation_hash: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDiffLayout {
+    key: DiffLayoutCacheKey,
+    _rows: Rc<Vec<DiffRow>>,
+    layout: Rc<MeasuredDiffLayout>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct DiffLayoutCache {
+    entry: Option<CachedDiffLayout>,
+    #[cfg(test)]
+    builds: usize,
+}
+
+impl MeasuredDiffLayout {
+    fn viewport_start(&self, session: &ReviewSession, viewport_height: usize) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let logical = session.diff_scroll as usize;
+        let first = self
+            .lines
+            .iter()
+            .position(|line| line.hit.contains(logical))
+            .or_else(|| {
+                self.lines
+                    .iter()
+                    .position(|line| line.block_anchor >= logical)
+            })
+            .unwrap_or_else(|| self.lines.len().saturating_sub(1));
+        let anchor = self.lines[first].block_anchor;
+        let block_end = self.lines[first..]
+            .iter()
+            .position(|line| line.block_anchor != anchor)
+            .map(|offset| first + offset)
+            .unwrap_or(self.lines.len());
+        let requested = first
+            .saturating_add(session.diff_visual_offset)
+            .min(block_end.saturating_sub(1));
+        let maximum_top = self.lines.len().saturating_sub(viewport_height.max(1));
+        requested.min(maximum_top)
+    }
+
+    fn effective_horizontal_scroll(&self, session: &ReviewSession) -> usize {
+        if session.diff_cues.soft_wrap {
+            0
+        } else {
+            session.diff_horizontal_scroll.min(self.horizontal_limit)
+        }
+    }
+
+    fn set_viewport_from_line(&self, session: &mut ReviewSession, index: usize) {
+        let index = index.min(self.lines.len().saturating_sub(1));
+        let Some(line) = self.lines.get(index) else {
+            session.diff_scroll = 0;
+            session.diff_visual_offset = 0;
+            return;
+        };
+        let first = self.lines[..=index]
+            .iter()
+            .rposition(|candidate| candidate.block_anchor != line.block_anchor)
+            .map_or(0, |prior| prior + 1);
+        session.diff_scroll = line.block_anchor.min(u16::MAX as usize) as u16;
+        session.diff_visual_offset = index.saturating_sub(first);
+    }
+}
+
+/// Build the complete terminal-row projection. Drawing, visual scrolling,
+/// and mouse hit testing all consume this exact measured geometry.
+fn cached_diff_layout(
+    session: &ReviewSession,
+    rows: Rc<Vec<DiffRow>>,
+    inner: Rect,
+    split_active: bool,
+    tui_state: &TuiState,
+) -> Rc<MeasuredDiffLayout> {
+    let key = DiffLayoutCacheKey {
+        rows_ptr: Rc::as_ptr(&rows) as usize,
+        width: inner.width,
+        split_active,
+        soft_wrap: session.diff_cues.soft_wrap,
+        annotation_hash: diff_annotation_hash(session),
+    };
+    if let Some(cached) = tui_state.diff_layout_cache.borrow().entry.as_ref()
+        && cached.key == key
+    {
+        return Rc::clone(&cached.layout);
+    }
+    let layout = Rc::new(measured_diff_layout(session, &rows, inner, split_active));
+    let mut cache = tui_state.diff_layout_cache.borrow_mut();
+    cache.entry = Some(CachedDiffLayout {
+        key,
+        _rows: rows,
+        layout: Rc::clone(&layout),
+    });
+    #[cfg(test)]
+    {
+        cache.builds += 1;
+    }
+    layout
+}
+
+fn diff_annotation_hash(session: &ReviewSession) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    if let Some(file) = session.selected_visible_file() {
+        file.path.hash(&mut hasher);
+        file.fingerprint.hash(&mut hasher);
+        for hunk in &file.changed_hunks {
+            hunk.hash(&mut hasher);
+        }
+    }
+    for comment in &session.comments {
+        comment.id.hash(&mut hasher);
+        comment.body.hash(&mut hasher);
+        comment.state.label().hash(&mut hasher);
+        format!("{:?}", comment.action).hash(&mut hasher);
+        format!("{:?}", comment.kind).hash(&mut hasher);
+        format!("{:?}", comment.anchor).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn measured_diff_layout(
     session: &ReviewSession,
     rows: &[DiffRow],
     inner: Rect,
-) -> Vec<Line<'static>> {
-    let scroll = session.diff_scroll as usize;
-    let viewport_lines = inner.height as usize;
-    let window_end = scroll.saturating_add(viewport_lines);
-    let mut line_index = 0usize;
+    split_active: bool,
+) -> MeasuredDiffLayout {
+    let line_number_width = measured_line_number_width(rows);
+    let width = inner.width as usize;
+    let chrome_width = line_number_width + 4;
+    let narrowest_cell = if split_active {
+        width.saturating_sub(1) / 2
+    } else {
+        width
+    };
+    let chrome = if narrowest_cell > chrome_width {
+        DiffChrome::Full
+    } else if narrowest_cell > 2 {
+        DiffChrome::Prefix
+    } else {
+        DiffChrome::None
+    };
+    let code_width = narrowest_cell
+        .saturating_sub(chrome.width(line_number_width))
+        .max(1);
+    let widest = rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(row.text.as_str()))
+        .max()
+        .unwrap_or(0);
+    let horizontal_limit = widest.saturating_sub(code_width);
+    let mut layout = if split_active {
+        measured_split_layout(session, rows, width, line_number_width)
+    } else {
+        measured_unified_layout(session, rows, width, line_number_width)
+    };
+    layout.line_number_width = line_number_width;
+    layout.width = width;
+    layout.horizontal_limit = horizontal_limit;
+    layout
+}
+
+fn measured_line_number_width(rows: &[DiffRow]) -> usize {
+    rows.iter()
+        .flat_map(|row| [row.old_lineno, row.new_lineno])
+        .flatten()
+        .map(decimal_digits)
+        .max()
+        .unwrap_or(4)
+        .max(4)
+}
+
+fn decimal_digits(value: usize) -> usize {
+    value
+        .checked_ilog10()
+        .map_or(1, |digits| digits as usize + 1)
+}
+
+fn measured_unified_layout(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    width: usize,
+    line_number_width: usize,
+) -> MeasuredDiffLayout {
     let mut lines = Vec::new();
-    let in_window = |line_index: usize| line_index >= scroll && line_index < window_end;
     for (index, row) in rows.iter().enumerate() {
-        if line_index >= window_end {
-            break;
+        let comments = row_comment_indices(session, row);
+        for source in measured_unified_row(session, row, index, width, line_number_width) {
+            lines.push(DiffVisualLine {
+                source,
+                hit: DiffVisualHit::Full(index),
+                block_anchor: index,
+                is_comment: false,
+            });
         }
-        let comments = row
-            .anchor
-            .as_ref()
-            .map(|anchor| session.comments_for_diff_row_anchor_details(anchor))
-            .unwrap_or_default();
-        // Skip rows that end before the window without building any spans.
-        let row_extent = 1 + comments.len();
-        if line_index + row_extent <= scroll {
-            line_index += row_extent;
-            continue;
-        }
-        if in_window(line_index) {
-            lines.push(unified_row_line(session, row, index, comments.len()));
-        }
-        line_index += 1;
-        for comment in comments {
-            if in_window(line_index) {
-                lines.push(comment_summary_line(comment));
-            }
-            line_index += 1;
-        }
+        append_comment_lines(&mut lines, session, comments, index, index, width);
     }
-    lines
+    MeasuredDiffLayout {
+        lines,
+        ..Default::default()
+    }
 }
 
-/// Side-by-side layout: removed/context cells on the left, added/context on
-/// the right; headers and folds span the full width. The unified rows stay
-/// the source of truth for the cursor, comments, and anchors
-/// (docs/focused-diff-ux.md §4).
-fn split_diff_lines(session: &ReviewSession, rows: &[DiffRow], inner: Rect) -> Vec<Line<'static>> {
-    let split = split_rows(rows);
-    if split.is_empty() {
-        return Vec::new();
-    }
-    let viewport_lines = (inner.height as usize).max(1);
-    // Session scroll/cursor positions are unified row indices; project them
-    // into display-row space and keep the cursor inside the window.
-    let cursor_display = split_index_of(&split, session.diff_cursor);
-    let mut scroll = split_index_of(
-        &split,
-        (session.diff_scroll as usize).min(rows.len().saturating_sub(1)),
-    );
-    if cursor_display < scroll {
-        scroll = cursor_display;
-    } else if cursor_display >= scroll + viewport_lines {
-        scroll = cursor_display + 1 - viewport_lines;
-    }
-    let window_end = scroll.saturating_add(viewport_lines);
-    let in_window = |line_index: usize| line_index >= scroll && line_index < window_end;
-
-    let cell_width = ((inner.width as usize).saturating_sub(1)) / 2;
-    let divider = Span::styled("\u{2502}", Style::default().fg(Color::DarkGray));
+fn measured_split_layout(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    width: usize,
+    line_number_width: usize,
+) -> MeasuredDiffLayout {
     let mut lines = Vec::new();
-    let mut line_index = 0usize;
-    for row in &split {
-        if line_index >= window_end {
-            break;
-        }
-        let cells: Vec<usize> = match row {
-            SplitRow::Full(index) => vec![*index],
+    let left_width = width.saturating_sub(1) / 2;
+    let right_width = width.saturating_sub(1).saturating_sub(left_width);
+    for split in split_rows(rows) {
+        match split {
+            SplitRow::Full(index) => {
+                let comments = row_comment_indices(session, &rows[index]);
+                for source in
+                    measured_unified_row(session, &rows[index], index, width, line_number_width)
+                {
+                    lines.push(DiffVisualLine {
+                        source,
+                        hit: DiffVisualHit::Full(index),
+                        block_anchor: index,
+                        is_comment: false,
+                    });
+                }
+                append_comment_lines(&mut lines, session, comments, index, index, width);
+            }
             SplitRow::Pair { left, right } => {
-                let mut cells: Vec<usize> = left.iter().chain(right.iter()).copied().collect();
-                cells.dedup();
-                cells
-            }
-        };
-        let cell_comments: Vec<Vec<&Comment>> = cells
-            .iter()
-            .map(|index| {
-                rows[*index]
-                    .anchor
-                    .as_ref()
-                    .map(|anchor| session.comments_for_diff_row_anchor_details(anchor))
-                    .unwrap_or_default()
-            })
-            .collect();
-        let comment_lines: usize = cell_comments.iter().map(Vec::len).sum();
-        if line_index + 1 + comment_lines <= scroll {
-            line_index += 1 + comment_lines;
-            continue;
-        }
-
-        if in_window(line_index) {
-            let line = match row {
-                SplitRow::Full(index) => {
-                    unified_row_line(session, &rows[*index], *index, cell_comments[0].len())
+                let anchor = left.or(right).unwrap_or(0);
+                let left_lines =
+                    measured_split_cell(session, rows, left, left_width, true, line_number_width);
+                let right_lines = measured_split_cell(
+                    session,
+                    rows,
+                    right,
+                    right_width,
+                    false,
+                    line_number_width,
+                );
+                let height = left_lines.len().max(right_lines.len()).max(1);
+                for visual_row in 0..height {
+                    let visual_left = left_lines.get(visual_row).cloned();
+                    let visual_right = right_lines.get(visual_row).cloned();
+                    lines.push(DiffVisualLine {
+                        source: DiffVisualSource::Split {
+                            left: visual_left.clone(),
+                            right: visual_right.clone(),
+                            left_width,
+                            right_width,
+                        },
+                        hit: DiffVisualHit::Split {
+                            left: visual_left.map(|cell| cell.row),
+                            right: visual_right.map(|cell| cell.row),
+                            divider: left_width,
+                        },
+                        block_anchor: anchor,
+                        is_comment: false,
+                    });
                 }
-                SplitRow::Pair { left, right } => {
-                    let mut spans = split_cell_spans(session, rows, *left, cell_width, true);
-                    spans.push(divider.clone());
-                    spans.extend(split_cell_spans(session, rows, *right, cell_width, false));
-                    Line::from(spans)
+                let mut owners: Vec<_> = left.into_iter().chain(right).collect();
+                owners.dedup();
+                for owner in owners {
+                    let comments = row_comment_indices(session, &rows[owner]);
+                    append_comment_lines(&mut lines, session, comments, owner, anchor, width);
                 }
-            };
-            lines.push(line);
-        }
-        line_index += 1;
-        for comment in cell_comments.into_iter().flatten() {
-            if in_window(line_index) {
-                lines.push(comment_summary_line(comment));
             }
-            line_index += 1;
         }
     }
-    lines
+    MeasuredDiffLayout {
+        lines,
+        ..Default::default()
+    }
 }
 
-/// One side-by-side cell: the row rendered with its side-specific line
-/// number, truncated and padded to the cell width. Empty cells pad blank.
-fn split_cell_spans(
+fn row_comment_indices(session: &ReviewSession, row: &DiffRow) -> Vec<usize> {
+    let Some(anchor) = row.anchor.as_ref() else {
+        return Vec::new();
+    };
+    let comments = session.comments_for_diff_row_anchor_details(anchor);
+    session
+        .comments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            comments
+                .iter()
+                .any(|comment| comment.id == candidate.id)
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn append_comment_lines(
+    lines: &mut Vec<DiffVisualLine>,
+    session: &ReviewSession,
+    comments: Vec<usize>,
+    owner: usize,
+    block_anchor: usize,
+    width: usize,
+) {
+    for comment_index in comments {
+        let text = comment_summary_text(&session.comments[comment_index]);
+        for byte_range in visual_byte_ranges(&text, width.max(1), true)
+            .into_iter()
+            .flatten()
+        {
+            lines.push(DiffVisualLine {
+                source: DiffVisualSource::Comment {
+                    owner,
+                    comment_index,
+                    byte_range,
+                    width,
+                },
+                hit: DiffVisualHit::Full(owner),
+                block_anchor,
+                is_comment: true,
+            });
+        }
+    }
+}
+
+fn measured_unified_row(
+    session: &ReviewSession,
+    row: &DiffRow,
+    index: usize,
+    width: usize,
+    line_number_width: usize,
+) -> Vec<DiffVisualSource> {
+    if matches!(row.kind, DiffRowKind::DiffLine(_)) {
+        return measured_diff_cells(
+            session,
+            row,
+            index,
+            row.new_lineno.or(row.old_lineno),
+            width,
+            line_number_width,
+        )
+        .into_iter()
+        .map(DiffVisualSource::Diff)
+        .collect();
+    }
+    let text = plain_row_text(session, row);
+    visual_byte_ranges(&text, width.max(1), session.diff_cues.soft_wrap)
+        .into_iter()
+        .map(|byte_range| DiffVisualSource::Plain {
+            row: index,
+            byte_range,
+            width,
+        })
+        .collect()
+}
+
+fn measured_split_cell(
     session: &ReviewSession,
     rows: &[DiffRow],
     cell: Option<usize>,
     width: usize,
     is_left: bool,
-) -> Vec<Span<'static>> {
+    line_number_width: usize,
+) -> Vec<DiffCellVisual> {
     let Some(index) = cell else {
-        return vec![Span::raw(" ".repeat(width))];
+        return Vec::new();
     };
     let row = &rows[index];
     let lineno = if is_left {
@@ -526,49 +886,540 @@ fn split_cell_spans(
     } else {
         row.new_lineno
     };
-    let comment_count = row
-        .anchor
-        .as_ref()
-        .map(|anchor| session.comments_for_diff_row_anchor_details(anchor).len())
-        .unwrap_or(0);
-    let mut spans = diff_line_cell_spans(session, row, index, lineno, comment_count);
-    if zen_row_dimmed(session, row, index) {
-        spans = dim_spans(spans);
-    }
-    fit_spans(spans, width)
+    measured_diff_cells(session, row, index, lineno, width, line_number_width)
 }
 
-/// Truncate spans to a display width and pad the remainder with spaces.
-fn fit_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
-    use unicode_width::UnicodeWidthChar;
+fn measured_diff_cells(
+    session: &ReviewSession,
+    row: &DiffRow,
+    index: usize,
+    lineno: Option<usize>,
+    width: usize,
+    line_number_width: usize,
+) -> Vec<DiffCellVisual> {
+    let full_chrome_width = line_number_width + 4;
+    let chrome = if width > full_chrome_width {
+        DiffChrome::Full
+    } else if width > 2 {
+        DiffChrome::Prefix
+    } else {
+        DiffChrome::None
+    };
+    let content_width = width.saturating_sub(chrome.width(line_number_width)).max(1);
+    visual_byte_ranges(&row.text, content_width, session.diff_cues.soft_wrap)
+        .into_iter()
+        .enumerate()
+        .map(|(visual_row, content_range)| DiffCellVisual {
+            row: index,
+            lineno,
+            chrome,
+            content_range,
+            continuation: visual_row > 0,
+            width,
+        })
+        .collect()
+}
 
-    let mut result = Vec::new();
-    let mut used = 0usize;
-    for span in spans {
-        let span_width = span.width();
-        if used + span_width <= width {
-            used += span_width;
-            result.push(span);
-            continue;
-        }
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used + ch_width > width {
-                break;
-            }
-            used += ch_width;
-            text.push(ch);
-        }
-        if !text.is_empty() {
-            result.push(Span::styled(text, span.style));
-        }
-        break;
+fn visual_byte_ranges(text: &str, width: usize, wrap: bool) -> Vec<Option<Range<usize>>> {
+    if !wrap {
+        return vec![None];
     }
-    if used < width {
-        result.push(Span::raw(" ".repeat(width - used)));
+    let layout = VisualTextLayout::read_only(text, width.max(1));
+    (0..layout.rows().len())
+        .map(|row| Some(layout.row_byte_range(row)))
+        .collect()
+}
+
+fn plain_row_text(session: &ReviewSession, row: &DiffRow) -> String {
+    match row.kind {
+        DiffRowKind::FileHeader | DiffRowKind::SyntaxSummary | DiffRowKind::Raw => row.text.clone(),
+        DiffRowKind::HunkHeader
+            if row.hunk_index.is_some_and(|hunk| {
+                session
+                    .selected_file()
+                    .is_some_and(|file| file.changed_hunks.contains(&hunk))
+            }) =>
+        {
+            format!("{}  changed", row.text)
+        }
+        DiffRowKind::HunkHeader => row.text.clone(),
+        DiffRowKind::Placeholder => format!("  \u{2298} {}", row.text),
+        DiffRowKind::ContextFold | DiffRowKind::ExpandGap { .. } => {
+            format!("      {}", row.text)
+        }
+        DiffRowKind::DiffLine(_) => row.text.clone(),
+    }
+}
+
+fn comment_summary_text(comment: &Comment) -> String {
+    spans_text(&comment_summary_line(comment).spans)
+}
+
+fn materialize_diff_window(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    layout: &MeasuredDiffLayout,
+    start: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let horizontal = layout.effective_horizontal_scroll(session);
+    let mut prepared = HashMap::new();
+    layout
+        .lines
+        .iter()
+        .skip(start)
+        .take(height)
+        .map(|visual| {
+            materialize_diff_source_cached(
+                session,
+                rows,
+                layout.line_number_width,
+                horizontal,
+                &visual.source,
+                &mut prepared,
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn materialize_diff_source(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    line_number_width: usize,
+    horizontal: usize,
+    source: &DiffVisualSource,
+) -> Line<'static> {
+    materialize_diff_source_cached(
+        session,
+        rows,
+        line_number_width,
+        horizontal,
+        source,
+        &mut HashMap::new(),
+    )
+}
+
+fn materialize_diff_source_cached(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    line_number_width: usize,
+    horizontal: usize,
+    source: &DiffVisualSource,
+    prepared: &mut HashMap<(usize, Option<usize>), PreparedDiffCell>,
+) -> Line<'static> {
+    match source {
+        DiffVisualSource::Plain {
+            row, byte_range, ..
+        } => {
+            let comment_count = row_comment_indices(session, &rows[*row]).len();
+            let spans = unified_row_line(session, &rows[*row], *row, comment_count).spans;
+            let visible = byte_range.as_ref().map_or_else(
+                || clip_spans(&spans, horizontal, source.width()),
+                |range| slice_spans_bytes(&spans, range.clone()),
+            );
+            Line::from(pad_spans(visible, source.width()))
+        }
+        DiffVisualSource::Diff(cell) => Line::from(materialize_diff_cell(
+            session,
+            rows,
+            line_number_width,
+            horizontal,
+            cell,
+            prepared,
+        )),
+        DiffVisualSource::Split {
+            left,
+            right,
+            left_width,
+            right_width,
+        } => {
+            let mut spans = left.as_ref().map_or_else(
+                || vec![Span::raw(" ".repeat(*left_width))],
+                |cell| {
+                    materialize_diff_cell(
+                        session,
+                        rows,
+                        line_number_width,
+                        horizontal,
+                        cell,
+                        prepared,
+                    )
+                },
+            );
+            spans.push(Span::styled(
+                "\u{2502}",
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.extend(right.as_ref().map_or_else(
+                || vec![Span::raw(" ".repeat(*right_width))],
+                |cell| {
+                    materialize_diff_cell(
+                        session,
+                        rows,
+                        line_number_width,
+                        horizontal,
+                        cell,
+                        prepared,
+                    )
+                },
+            ));
+            Line::from(spans)
+        }
+        DiffVisualSource::Comment {
+            comment_index,
+            byte_range,
+            ..
+        } => {
+            let spans = comment_summary_line(&session.comments[*comment_index]).spans;
+            Line::from(pad_spans(
+                slice_spans_bytes(&spans, byte_range.clone()),
+                source.width(),
+            ))
+        }
+    }
+}
+
+impl DiffVisualSource {
+    fn width(&self) -> usize {
+        match self {
+            Self::Plain { width, .. } | Self::Comment { width, .. } => *width,
+            Self::Diff(cell) => cell.width,
+            Self::Split {
+                left_width,
+                right_width,
+                ..
+            } => left_width + 1 + right_width,
+        }
+    }
+}
+
+fn materialize_diff_cell(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    line_number_width: usize,
+    horizontal: usize,
+    cell: &DiffCellVisual,
+    prepared: &mut HashMap<(usize, Option<usize>), PreparedDiffCell>,
+) -> Vec<Span<'static>> {
+    let prepared = prepared
+        .entry((cell.row, cell.lineno))
+        .or_insert_with(|| prepare_diff_cell(session, rows, line_number_width, cell));
+    render_prepared_diff_cell(prepared, cell, line_number_width, horizontal)
+}
+
+#[derive(Debug, Clone)]
+struct PreparedDiffCell {
+    chrome: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    continuation_style: Style,
+}
+
+fn prepare_diff_cell(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+    line_number_width: usize,
+    cell: &DiffCellVisual,
+) -> PreparedDiffCell {
+    const CHROME_SPANS: usize = 5;
+    let row = &rows[cell.row];
+    let comments = row_comment_indices(session, row).len();
+    let mut all = diff_line_cell_spans_with_width(
+        session,
+        row,
+        cell.row,
+        cell.lineno,
+        comments,
+        line_number_width,
+    );
+    if zen_row_dimmed(session, row, cell.row) {
+        all = dim_spans(all);
+    }
+    let content = if all.len() > CHROME_SPANS {
+        all.split_off(CHROME_SPANS)
+    } else {
+        Vec::new()
+    };
+    let continuation_style = diff_row_style(
+        row.kind,
+        session.focus == Focus::Diff && session.diff_cursor == cell.row,
+        session.diff_row_in_active_range(cell.row),
+    );
+    PreparedDiffCell {
+        chrome: all,
+        content,
+        continuation_style,
+    }
+}
+
+fn render_prepared_diff_cell(
+    prepared: &PreparedDiffCell,
+    cell: &DiffCellVisual,
+    line_number_width: usize,
+    horizontal: usize,
+) -> Vec<Span<'static>> {
+    let chrome_width = cell.chrome.width(line_number_width);
+    let mut spans = if cell.continuation {
+        vec![Span::styled(
+            " ".repeat(chrome_width),
+            prepared.continuation_style,
+        )]
+    } else {
+        match cell.chrome {
+            DiffChrome::Full => prepared.chrome.clone(),
+            DiffChrome::Prefix => prepared.chrome.iter().skip(3).take(2).cloned().collect(),
+            DiffChrome::None => Vec::new(),
+        }
+    };
+    let content_width = cell.width.saturating_sub(chrome_width).max(1);
+    let visible = cell.content_range.as_ref().map_or_else(
+        || clip_spans(&prepared.content, horizontal, content_width),
+        |range| slice_spans_bytes(&prepared.content, range.clone()),
+    );
+    spans.extend(pad_spans(visible, content_width));
+    pad_spans(spans, cell.width)
+}
+
+fn spans_text(spans: &[Span<'_>]) -> String {
+    spans.iter().map(|span| span.content.as_ref()).collect()
+}
+
+fn slice_spans_bytes(spans: &[Span<'static>], range: std::ops::Range<usize>) -> Vec<Span<'static>> {
+    let mut result = Vec::new();
+    let mut offset = 0usize;
+    for span in spans {
+        let end = offset + span.content.len();
+        let start = range.start.max(offset).min(end);
+        let stop = range.end.max(offset).min(end);
+        if start < stop {
+            let local = start - offset..stop - offset;
+            if span.content.is_char_boundary(local.start)
+                && span.content.is_char_boundary(local.end)
+            {
+                result.push(Span::styled(span.content[local].to_owned(), span.style));
+            }
+        }
+        offset = end;
+        if offset >= range.end {
+            break;
+        }
     }
     result
+}
+
+fn clip_spans(spans: &[Span<'static>], horizontal: usize, width: usize) -> Vec<Span<'static>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = spans_text(spans);
+    let mut column = 0usize;
+    let end_column = horizontal.saturating_add(width);
+    let mut byte_start = None;
+    let mut byte_end = 0usize;
+    let mut first_column = horizontal;
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        let next = column.saturating_add(grapheme_width);
+        let wholly_visible = column >= horizontal && next <= end_column;
+        if wholly_visible && (grapheme_width > 0 || column >= horizontal) {
+            if byte_start.is_none() {
+                byte_start = Some(byte);
+                first_column = column;
+            }
+            byte_end = byte + grapheme.len();
+        } else if column >= end_column || next > end_column {
+            break;
+        }
+        column = next;
+    }
+    byte_start.map_or_else(Vec::new, |start| {
+        let mut clipped = Vec::new();
+        if first_column > horizontal {
+            clipped.push(Span::raw(" ".repeat(first_column - horizontal)));
+        }
+        clipped.extend(slice_spans_bytes(spans, start..byte_end));
+        clipped
+    })
+}
+
+fn pad_spans(mut spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let used: usize = spans.iter().map(Span::width).sum();
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    spans
+}
+
+fn split_is_active(session: &ReviewSession, inner: Rect) -> bool {
+    session.diff_cues.view == DiffViewModeConfig::SideBySide && inner.width >= MIN_SPLIT_WIDTH
+}
+
+pub(super) fn diff_row_at_point(
+    session: &ReviewSession,
+    inner: Rect,
+    x: u16,
+    visible_row: usize,
+    tui_state: &TuiState,
+) -> Option<usize> {
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    let line = layout
+        .lines
+        .get(layout.viewport_start(session, inner.height as usize) + visible_row)?;
+    line.hit.row_at(x.saturating_sub(inner.x) as usize)
+}
+
+pub(super) fn scroll_diff_visual(
+    session: &mut ReviewSession,
+    inner: Rect,
+    delta: isize,
+    tui_state: &TuiState,
+) {
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    if layout.lines.is_empty() {
+        return;
+    }
+    let start = layout.viewport_start(session, inner.height as usize);
+    let maximum_top = layout
+        .lines
+        .len()
+        .saturating_sub(inner.height.max(1) as usize);
+    let target = start.saturating_add_signed(delta).min(maximum_top);
+    layout.set_viewport_from_line(session, target);
+}
+
+pub(super) fn scroll_diff_horizontal_visual(
+    session: &mut ReviewSession,
+    inner: Rect,
+    delta: isize,
+    tui_state: &TuiState,
+) {
+    if session.diff_cues.soft_wrap {
+        return;
+    }
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    let current = layout.effective_horizontal_scroll(session);
+    session.diff_horizontal_scroll = current
+        .saturating_add_signed(delta)
+        .min(layout.horizontal_limit);
+}
+
+pub(super) fn scroll_diff_to_bottom_visual(
+    session: &mut ReviewSession,
+    inner: Rect,
+    tui_state: &TuiState,
+) {
+    session.scroll_diff_to_bottom();
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    let target = layout
+        .lines
+        .len()
+        .saturating_sub(inner.height.max(1) as usize);
+    layout.set_viewport_from_line(session, target);
+}
+
+pub(super) fn ensure_diff_cursor_visible(
+    session: &mut ReviewSession,
+    inner: Rect,
+    tui_state: &TuiState,
+) {
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    let start = layout.viewport_start(session, inner.height as usize);
+    let end = start.saturating_add(inner.height.max(1) as usize);
+    let first = layout
+        .lines
+        .iter()
+        .position(|line| !line.is_comment && line.hit.contains(session.diff_cursor));
+    let last = layout
+        .lines
+        .iter()
+        .rposition(|line| !line.is_comment && line.hit.contains(session.diff_cursor));
+    let height = inner.height.max(1) as usize;
+    match (first, last) {
+        (Some(first), Some(last)) if last - first + 1 > height && first != start => {
+            layout.set_viewport_from_line(session, first);
+        }
+        (Some(first), Some(last)) if last - first + 1 > height && first == start => {}
+        (Some(first), Some(_)) if first < start => layout.set_viewport_from_line(session, first),
+        (Some(_), Some(last)) if last >= end => {
+            layout.set_viewport_from_line(session, last.saturating_add(1).saturating_sub(height))
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn reconcile_diff_viewport(
+    session: &mut ReviewSession,
+    inner: Rect,
+    keep_cursor_visible: bool,
+    tui_state: &TuiState,
+) {
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    session.diff_horizontal_scroll = layout.effective_horizontal_scroll(session);
+    let start = layout.viewport_start(session, inner.height as usize);
+    layout.set_viewport_from_line(session, start);
+    if keep_cursor_visible {
+        ensure_diff_cursor_visible(session, inner, tui_state);
+    }
+}
+
+pub(super) fn diff_cursor_is_visible(
+    session: &ReviewSession,
+    inner: Rect,
+    tui_state: &TuiState,
+) -> bool {
+    let rows = session.diff_rows_for_selected_file();
+    let layout = cached_diff_layout(
+        session,
+        rows,
+        inner,
+        split_is_active(session, inner),
+        tui_state,
+    );
+    let start = layout.viewport_start(session, inner.height as usize);
+    let end = start.saturating_add(inner.height.max(1) as usize);
+    layout.lines[start.min(layout.lines.len())..end.min(layout.lines.len())]
+        .iter()
+        .any(|line| !line.is_comment && line.hit.contains(session.diff_cursor))
 }
 
 /// One full-width line for a diff row in the unified layout (also used for
@@ -682,6 +1533,17 @@ fn diff_line_cell_spans(
     lineno: Option<usize>,
     comment_count: usize,
 ) -> Vec<Span<'static>> {
+    diff_line_cell_spans_with_width(session, row, index, lineno, comment_count, 4)
+}
+
+fn diff_line_cell_spans_with_width(
+    session: &ReviewSession,
+    row: &DiffRow,
+    index: usize,
+    lineno: Option<usize>,
+    comment_count: usize,
+    line_number_width: usize,
+) -> Vec<Span<'static>> {
     let DiffRowKind::DiffLine(line_kind) = row.kind else {
         return vec![Span::raw(row.text.clone())];
     };
@@ -743,8 +1605,8 @@ fn diff_line_cell_spans(
         None => style,
     };
     let lineno = lineno
-        .map(|n| format!("{n:>4}"))
-        .unwrap_or_else(|| "    ".to_owned());
+        .map(|n| format!("{n:>line_number_width$}"))
+        .unwrap_or_else(|| " ".repeat(line_number_width));
     let mut spans = vec![
         Span::styled(comment_mark, mark_style),
         Span::styled(lineno, Style::default().fg(Color::DarkGray)),
@@ -1164,20 +2026,37 @@ fn draw_footer(
                 ZenPhase::Focus => match zen.current() {
                     Some(ZenStop::Chapter(chapter)) => {
                         let mut text = format!(
-                            "zen chapter {}/{} · n tours its {} stop(s)",
-                            chapter.position.0, chapter.position.1, chapter.stop_count,
+                            "zen chapter {}/{} · {} tours its {} stop(s)",
+                            chapter.position.0,
+                            chapter.position.1,
+                            keymap.hint(Action::ZenNext),
+                            chapter.stop_count,
                         );
                         if !chapter.description_body().is_empty() {
-                            text.push_str(if zen.chapter_description_collapsed {
-                                " · d details"
+                            let details = if zen.chapter_description_collapsed {
+                                format!(" · {} details", keymap.hint(Action::ZenToggleDetails))
                             } else {
-                                " · d collapse/expand brief"
-                            });
+                                format!(
+                                    " · {} collapse/expand brief",
+                                    keymap.hint(Action::ZenToggleDetails)
+                                )
+                            };
+                            text.push_str(&details);
                         }
                         if !chapter.artifacts.is_empty() {
-                            text.push_str(&format!(" · e {} artifact(s)", chapter.artifacts.len()));
+                            text.push_str(&format!(
+                                " · {} {} artifact(s)",
+                                keymap.hint(Action::ZenArtifact),
+                                chapter.artifacts.len()
+                            ));
                         }
-                        text.push_str(" · p back · tab full diff · g glance · esc end");
+                        text.push_str(&format!(
+                            " · {} back · {} full diff · {} glance · {} end",
+                            keymap.hint(Action::ZenPrevious),
+                            keymap.hint(Action::ZenToggleView),
+                            keymap.hint(Action::ZenGlance),
+                            keymap.hint(Action::PopupClose),
+                        ));
                         text
                     }
                     current => {
@@ -1186,24 +2065,47 @@ fn draw_footer(
                             .map(|stop| super::zen::stop_artifacts(stop).len())
                             .unwrap_or(0);
                         let artifact_hint = if artifacts > 0 {
-                            format!(" · e {artifacts} artifact(s)")
+                            format!(
+                                " · {} {artifacts} artifact(s)",
+                                keymap.hint(Action::ZenArtifact)
+                            )
                         } else {
                             String::new()
                         };
                         format!(
-                            "zen {current_stop}/{total} · n next (marks viewed) · p back · j/k lines · . refocus · tab full diff · g glance{artifact_hint} · c comment · esc end",
+                            "zen {current_stop}/{total} · {next} next (marks viewed) · {previous} back · {down}/{up} lines · {refocus} refocus · {view} full diff · {glance} glance{artifact_hint} · {comment} comment · {close} end",
+                            next = keymap.hint(Action::ZenNext),
+                            previous = keymap.hint(Action::ZenPrevious),
+                            down = keymap.hint(Action::MoveDown),
+                            up = keymap.hint(Action::MoveUp),
+                            refocus = keymap.hint(Action::ZenRefocus),
+                            view = keymap.hint(Action::ZenToggleView),
+                            glance = keymap.hint(Action::ZenGlance),
+                            comment = keymap.hint(Action::Comment),
+                            close = keymap.hint(Action::PopupClose),
                         )
                     }
                 },
                 ZenPhase::Reading => {
                     let (current, total) = zen.chunk_position();
                     format!(
-                        "zen read {current}/{total} · n next · p back · . refocus · tab focus card · esc end · other keys as normal",
+                        "zen read {current}/{total} · {} next · {} back · {} refocus · {} focus card · {} end · other keys as normal",
+                        keymap.hint(Action::ZenNext),
+                        keymap.hint(Action::ZenPrevious),
+                        keymap.hint(Action::ZenRefocus),
+                        keymap.hint(Action::ZenToggleView),
+                        keymap.hint(Action::PopupClose),
                     )
                 }
                 ZenPhase::Glance => format!(
-                    "zen glance · {} item(s) · j/k move · enter jump · a mark all viewed & finish · p back · esc end",
+                    "zen glance · {} item(s) · {}/{} move · {} jump · {} mark all viewed & finish · {} back · {} end",
                     zen.glance_rows.len(),
+                    keymap.hint(Action::PopupMoveDown),
+                    keymap.hint(Action::PopupMoveUp),
+                    keymap.hint(Action::PopupSelect),
+                    keymap.hint(Action::ZenAcknowledge),
+                    keymap.hint(Action::ZenPrevious),
+                    keymap.hint(Action::PopupClose),
                 ),
                 ZenPhase::Artifact { index, .. } => {
                     let count = zen
@@ -1211,8 +2113,14 @@ fn draw_footer(
                         .map(|stop| super::zen::stop_artifacts(stop).len())
                         .unwrap_or(0);
                     format!(
-                        "zen artifact {}/{count} · j/k scroll · h/l switch · esc close",
+                        "zen artifact {}/{count} · {}/{} scroll · {}/{} switch · {}/{} close",
                         (index + 1).min(count),
+                        keymap.hint(Action::PopupMoveDown),
+                        keymap.hint(Action::PopupMoveUp),
+                        keymap.hint(Action::ZenArtifactPrevious),
+                        keymap.hint(Action::ZenArtifactNext),
+                        keymap.hint(Action::PopupClose),
+                        keymap.hint(Action::PopupCloseQ),
                     )
                 }
             }
@@ -1242,19 +2150,24 @@ fn draw_footer(
                 zen,
                 keymap,
                 &format!(
-                "focus diff{}{}{}",
-                if session.has_active_diff_range() {
-                    " (range active)"
-                } else {
-                    ""
-                },
-                if session.hide_generated {
-                    " (noisy hidden)"
-                } else {
-                    ""
-                },
-                viewed_filter_label(session),
-            ),
+                    "focus diff{}{}{}{}",
+                    if session.has_active_diff_range() {
+                        " (range active)"
+                    } else {
+                        ""
+                    },
+                    if session.hide_generated {
+                        " (noisy hidden)"
+                    } else {
+                        ""
+                    },
+                    viewed_filter_label(session),
+                    if session.diff_cues.soft_wrap {
+                        " (wrap)"
+                    } else {
+                        " (nowrap)"
+                    },
+                ),
             ));
             if session.selected_comment().is_some() {
                 text.push_str(&format!(
@@ -1280,53 +2193,108 @@ fn draw_footer(
         ),
         Mode::TargetChooser(_) => {
             format!(
-                "choose base/tip · refresh paused · type filter · tab side · {down}/{up} move · enter load · esc cancel",
+                "choose base/tip · refresh paused · type filter · tab side · {down}/{up} move · {select} load · {close} cancel",
                 down = keymap.hint(Action::TargetPickerMoveDown),
                 up = keymap.hint(Action::TargetPickerMoveUp),
+                select = keymap.hint(Action::PopupSelect),
+                close = keymap.hint(Action::PopupClose),
             )
         }
         Mode::RevsetInput(_) => {
-            "revset target · refresh paused · type revset · tab/↑/↓ switch field · enter load · esc cancel"
-                .to_owned()
+            format!(
+                "revset target · refresh paused · type revset · tab/↑/↓ switch field · {} load · {} cancel",
+                keymap.hint(Action::PopupSelect),
+                keymap.hint(Action::PopupClose),
+            )
         }
         Mode::OperationPicker(_) => {
-            "prior operation · refresh paused · ↑/↓ or n/e move · enter apply · esc cancel"
-                .to_owned()
+            format!(
+                "prior operation · refresh paused · {}/{} move · {} apply · {} cancel",
+                keymap.hint(Action::PopupMoveDown),
+                keymap.hint(Action::PopupMoveUp),
+                keymap.hint(Action::PopupSelect),
+                keymap.hint(Action::PopupClose),
+            )
         }
         Mode::JjHelpers(state) => {
             if state.confirming {
-                "confirm jj command · enter run · esc back".to_owned()
+                format!(
+                    "confirm jj command · {} run · {} back",
+                    keymap.hint(Action::PopupSelect),
+                    keymap.hint(Action::PopupClose)
+                )
             } else {
-                "jj helpers · j/k move · enter select · esc close".to_owned()
+                list_popup_hint("jj helpers", keymap, "select")
             }
         }
-        Mode::FlagList(_) => "agent flags · j/k move · enter jump · esc close".to_owned(),
-        Mode::OpenWork(_) => {
-            "action items & feedback · j/k move · enter jump · esc close".to_owned()
-        }
-        Mode::Activity(_) => "activity · j/k/n/e move · enter jump (file events) · esc close".to_owned(),
+        Mode::FlagList(_) => list_popup_hint("agent flags", keymap, "jump"),
+        Mode::OpenWork(_) => list_popup_hint("action items & feedback", keymap, "jump"),
+        Mode::Activity(_) => list_popup_hint("activity", keymap, "jump (file events)"),
         Mode::WalkthroughList(_) => {
-            "walkthrough · j/k move · enter jump · J/K reorder · d delete · esc close".to_owned()
+            format!(
+                "{} · {}/{} reorder · {} delete",
+                list_popup_hint("walkthrough", keymap, "jump"),
+                keymap.hint(Action::WalkthroughMoveDown),
+                keymap.hint(Action::WalkthroughMoveUp),
+                keymap.hint(Action::WalkthroughDelete),
+            )
         }
         Mode::DraftList(_) => {
-            "agent drafts · j/k move · enter/a accept · e edit · x discard · esc close".to_owned()
+            format!(
+                "agent drafts · {}/{} move · {} accept · {} edit · {} discard · {} close",
+                keymap.hint(Action::PopupMoveDown),
+                keymap.hint(Action::PopupMoveUp),
+                keymap.hint(Action::DraftAccept),
+                keymap.hint(Action::DraftEdit),
+                keymap.hint(Action::DraftDiscard),
+                keymap.hint(Action::PopupClose),
+            )
         }
         Mode::FileSearch(_) => {
             format!(
-                "file search · type filter · {down}/{up} move · enter open · esc cancel",
+                "file search · type filter · {down}/{up} move · {select} open · {close} cancel",
                 down = keymap.hint(Action::TargetPickerMoveDown),
                 up = keymap.hint(Action::TargetPickerMoveUp),
+                select = keymap.hint(Action::PopupSelect),
+                close = keymap.hint(Action::PopupClose),
             )
         }
-        Mode::SymbolOutline(_) => "changed symbols · j/k move · enter jump · esc cancel".to_owned(),
+        Mode::SymbolOutline(_) => list_popup_hint("changed symbols", keymap, "jump"),
         Mode::CommentList(_) => {
-            "comments · j/k move · n general · enter jump · e edit · s state · R ready drafts · a action · K kind · x delete · esc close"
-                .to_owned()
+            format!(
+                "comments · {down}/{up} move · {general} general · {select} jump · {edit} edit · {state} state · {ready} ready drafts · {action} action · {kind} kind · {delete} delete · {close} close",
+                down = keymap.hint(Action::PopupMoveDown),
+                up = keymap.hint(Action::PopupMoveUp),
+                general = keymap.hint(Action::CommentListNewGeneral),
+                select = keymap.hint(Action::PopupSelect),
+                edit = keymap.hint(Action::EditComment),
+                state = keymap.hint(Action::CycleCommentState),
+                ready = keymap.hint(Action::CommentListReady),
+                action = keymap.hint(Action::CommentListCycleIntent),
+                kind = keymap.hint(Action::CommentListCycleKind),
+                delete = keymap.hint(Action::DeleteComment),
+                close = keymap.hint(Action::PopupClose),
+            )
         }
         Mode::ViewOptions(_) => {
-            "view options · j/k move · space/enter toggle · esc close".to_owned()
+            format!(
+                "view options · {}/{} move · {}/{} toggle · {}/{} close",
+                keymap.hint(Action::PopupMoveDown),
+                keymap.hint(Action::PopupMoveUp),
+                keymap.hint(Action::PopupToggle),
+                keymap.hint(Action::PopupSelect),
+                keymap.hint(Action::PopupClose),
+                keymap.hint(Action::PopupCloseQ),
+            )
         }
-        Mode::Help => "help · any key to close".to_owned(),
+        Mode::Help => format!(
+            "help · {}/{} or page keys scroll · {}/{}/{} close",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::PopupClose),
+            keymap.hint(Action::PopupCloseQ),
+            keymap.hint(Action::Help),
+        ),
     };
     let mut summary = session.summary_line();
     let display_target = context
@@ -1394,6 +2362,16 @@ fn footer_line(segments: Vec<String>) -> String {
     segments.join(" · ")
 }
 
+fn list_popup_hint(title: &str, keymap: &KeyMap, select_label: &str) -> String {
+    format!(
+        "{title} · {}/{} move · {} {select_label} · {} close",
+        keymap.hint(Action::PopupMoveDown),
+        keymap.hint(Action::PopupMoveUp),
+        keymap.hint(Action::PopupSelect),
+        keymap.hint(Action::PopupClose),
+    )
+}
+
 fn hint_segments(keymap: &KeyMap, hints: &[FooterHint]) -> Vec<String> {
     hints.iter().map(|hint| hint.render(keymap)).collect()
 }
@@ -1436,6 +2414,7 @@ fn diff_footer_segments(
     let hints = [
         FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
         FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
+        FooterHint::new([Action::ViewOptions], "view/wrap"),
         FooterHint::new([Action::RangeComment], "range"),
         FooterHint::new([Action::MarkWalkthrough], "walkthrough"),
         FooterHint::new([Action::Comment], "comment"),
@@ -1462,9 +2441,9 @@ fn viewed_filter_label(session: &ReviewSession) -> String {
 }
 
 /// Full keymap reference, grouped by workflow. The footer only shows the
-/// everyday hints; this popup is the complete map. Two columns keep every
-/// group visible on typical terminal heights.
-fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) {
+/// everyday hints; this popup is the complete map. Two independently wrapped
+/// columns share a scroll offset so every group remains reachable.
+fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, scroll: usize) {
     let popup = centered_rect(90, 80, area);
     frame.render_widget(Clear, popup);
 
@@ -1504,6 +2483,14 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         entry(&[Action::Comment], "comment on what needs work"),
         entry(&[Action::Zen], "zen briefing for a focused pass"),
         entry(&[Action::YankHandoff], "copy handoff when done"),
+        section("diff & view"),
+        entry(&[Action::MoveDown, Action::MoveUp], "move diff cursor"),
+        entry(&[Action::ScrollDown, Action::ScrollUp], "vertical scroll"),
+        entry(
+            &[Action::ScrollDiffLeft, Action::ScrollDiffRight],
+            "horizontal scroll when wrap is off",
+        ),
+        entry(&[Action::ViewOptions], "soft wrap, layout, and visual cues"),
         section("general"),
         entry(
             &[Action::ToggleFocus],
@@ -1537,6 +2524,10 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         section("diff"),
         entry(&[Action::MoveDown, Action::MoveUp], "move cursor"),
         entry(&[Action::ScrollDown, Action::ScrollUp], "scroll"),
+        entry(
+            &[Action::ScrollDiffLeft, Action::ScrollDiffRight],
+            "horizontal scroll (wrapping off)",
+        ),
         entry(&[Action::DiffTop, Action::DiffBottom], "jump top/bottom"),
         entry(
             &[Action::NextSymbol, Action::PreviousSymbol],
@@ -1556,30 +2547,35 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
             ],
             "expand/collapse hidden context",
         ),
-        entry(&[Action::ViewOptions], "view options (visual cues)"),
+        entry(&[Action::ViewOptions], "view options (wrap/layout/cues)"),
         entry(&[Action::ToggleDiffView], "toggle side-by-side view"),
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
     ];
     let right = vec![
         section("zen keys"),
-        literal("n/p", "next/back stop"),
-        literal("tab", "toggle focus card / reading view"),
-        literal("g", "open glance board"),
-        literal("e", "open artifacts"),
-        literal("d", "toggle chapter details / expand brief"),
-        literal(".", "refocus current stop"),
-        literal("a", "acknowledge glance items"),
-        literal("esc", "leave zen / close artifact"),
+        entry(&[Action::ZenNext, Action::ZenPrevious], "next/back stop"),
+        entry(&[Action::ZenToggleView], "toggle focus card / reading view"),
+        entry(&[Action::ZenGlance], "open glance board"),
+        entry(&[Action::ZenArtifact], "open/close artifacts"),
+        entry(
+            &[Action::ZenToggleDetails],
+            "toggle chapter details / expand brief",
+        ),
+        entry(&[Action::ZenRefocus], "refocus current stop"),
+        entry(&[Action::ZenAcknowledge], "acknowledge glance items"),
+        entry(&[Action::PopupClose], "leave zen / close artifact"),
         section("comments"),
         entry(&[Action::Comment], "comment at cursor"),
         entry(&[Action::RangeComment], "start/finish range comment"),
         entry(&[Action::CycleCommentState], "cycle comment state"),
         entry(&[Action::EditComment], "edit comment"),
         entry(&[Action::DeleteComment], "delete comment"),
+        entry(&[Action::CommentList], "comment center"),
         entry(
-            &[Action::CommentList],
-            "comment center (n general, R ready)",
+            &[Action::CommentList, Action::CommentListNewGeneral],
+            "create general comment (sequence)",
         ),
+        entry(&[Action::CommentListReady], "ready all draft comments"),
         entry(&[Action::OpenWork], "action items & todo feedback"),
         entry(&[Action::WalkthroughList], "walkthrough panel"),
         entry(&[Action::MarkWalkthrough], "mark for walkthrough"),
@@ -1621,8 +2617,19 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap) 
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(inner);
-    frame.render_widget(Paragraph::new(left).wrap(Wrap { trim: false }), columns[0]);
-    frame.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), columns[1]);
+    let scroll = scroll.min(u16::MAX as usize) as u16;
+    frame.render_widget(
+        Paragraph::new(left)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        columns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(right)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        columns[1],
+    );
 }
 
 fn draw_comment_popup(
@@ -1633,7 +2640,18 @@ fn draw_comment_popup(
     target: &CommentInputTarget,
     keymap: &KeyMap,
 ) {
-    let popup = centered_rect(70, 40, area);
+    let popup = comment_popup_rect(area);
+    let inner = inner_bordered(popup);
+    let layout = editor.layout(inner.width as usize);
+    let scroll = editor.visible_scroll(inner.width as usize, inner.height as usize);
+    let rows = layout
+        .rows()
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(inner.height as usize)
+        .map(|(row, _)| Line::raw(layout.row_text(row)))
+        .collect::<Vec<_>>();
     frame.render_widget(Clear, popup);
     let title = comment_popup_title(session, target, popup.width.saturating_sub(4) as usize);
     let hint = format!(
@@ -1642,27 +2660,33 @@ fn draw_comment_popup(
         keymap.hint(Action::CancelComment)
     );
     frame.render_widget(
-        Paragraph::new(editor.text.clone())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .title_bottom(Line::from(Span::styled(
-                        hint,
-                        Style::default().fg(Color::DarkGray),
-                    ))),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(rows).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom(Line::from(Span::styled(
+                    hint,
+                    Style::default().fg(Color::DarkGray),
+                ))),
+        ),
         popup,
     );
 
-    let (line, col) = editor.line_col();
-    let inner_x = popup.x.saturating_add(1);
-    let inner_y = popup.y.saturating_add(1);
+    let cursor = layout.cursor_position(editor.cursor);
     frame.set_cursor_position((
-        inner_x.saturating_add(col as u16),
-        inner_y.saturating_add(line as u16),
+        inner.x.saturating_add(cursor.column as u16),
+        inner
+            .y
+            .saturating_add(cursor.row.saturating_sub(scroll) as u16),
     ));
+}
+
+pub(super) fn comment_editor_inner(area: Rect) -> Rect {
+    inner_bordered(comment_popup_rect(area))
+}
+
+fn comment_popup_rect(area: Rect) -> Rect {
+    centered_rect(70, 40, area)
 }
 
 fn comment_popup_title(
@@ -1702,7 +2726,12 @@ fn comment_popup_title(
     truncate_middle(&format!("{kind} · {location}"), max_width)
 }
 
-fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &RevsetInputState) {
+fn draw_revset_input_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    input: &RevsetInputState,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(70, 30, area);
     frame.render_widget(Clear, popup);
 
@@ -1738,7 +2767,11 @@ fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &R
         field_line("tip", &input.tip, input.editing == RevsetField::Tip),
         Line::from(""),
         Line::from(Span::styled(
-            "type revset · tab/↑/↓ switch field · enter load · esc cancel",
+            format!(
+                "type revset · tab/↑/↓ switch field · {} load · {} cancel",
+                keymap.hint(Action::PopupSelect),
+                keymap.hint(Action::PopupClose)
+            ),
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1751,7 +2784,12 @@ fn draw_revset_input_popup(frame: &mut ratatui::Frame<'_>, area: Rect, input: &R
     );
 }
 
-fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjHelperState) {
+fn draw_jj_helpers_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &JjHelperState,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(76, 46, area);
     frame.render_widget(Clear, popup);
 
@@ -1774,7 +2812,11 @@ fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjH
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "This rewrites history in your repo. enter run · esc back",
+            format!(
+                "This rewrites history in your repo. {} run · {} back",
+                keymap.hint(Action::PopupSelect),
+                keymap.hint(Action::PopupClose)
+            ),
             Style::default().fg(Color::Red),
         )));
     } else {
@@ -1803,7 +2845,9 @@ fn draw_jj_helpers_popup(frame: &mut ratatui::Frame<'_>, area: Rect, state: &JjH
         }
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "↑/↓ or j/k move · enter select · esc close",
+            list_popup_hint("", keymap, "select")
+                .trim_start_matches(" · ")
+                .to_owned(),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -1821,8 +2865,9 @@ fn draw_view_options_popup(
     area: Rect,
     session: &ReviewSession,
     state: &ViewOptionsState,
+    keymap: &KeyMap,
 ) {
-    let popup = centered_rect(50, 40, area);
+    let popup = centered_rect(56, 70, area);
     frame.render_widget(Clear, popup);
 
     let mut lines = vec![Line::from(Span::styled(
@@ -1853,7 +2898,15 @@ fn draw_view_options_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "j/k move · space/enter toggle · esc close",
+        format!(
+            "{}/{} move · {}/{} toggle · {}/{} close",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::PopupToggle),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::PopupClose),
+            keymap.hint(Action::PopupCloseQ),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1865,7 +2918,12 @@ fn draw_view_options_popup(
     );
 }
 
-fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagListState) {
+fn draw_flag_list_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    list: &FlagListState,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(80, 60, area);
     frame.render_widget(Clear, popup);
 
@@ -1930,7 +2988,9 @@ fn draw_flag_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &FlagL
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · esc close",
+        list_popup_hint("", keymap, "jump")
+            .trim_start_matches(" · ")
+            .to_owned(),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1952,6 +3012,7 @@ fn draw_zen_panel(
     area: Rect,
     session: &ReviewSession,
     zen: &ZenState,
+    keymap: &KeyMap,
 ) {
     let height = if zen.glance_rows.is_empty() { 6 } else { 8 }.min(area.height);
     let panel = Rect {
@@ -2056,7 +3117,14 @@ fn draw_zen_panel(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "enter/n next (marks viewed) · p back · . refocus · tab focus card · esc end · comment/flag/expand as normal",
+        format!(
+            "{} next (marks viewed) · {} back · {} refocus · {} focus card · {} end · comment/flag/expand as normal",
+            keymap.hint(Action::ZenNext),
+            keymap.hint(Action::ZenPrevious),
+            keymap.hint(Action::ZenRefocus),
+            keymap.hint(Action::ZenToggleView),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -2198,10 +3266,13 @@ fn draw_zen_focus(
     area: Rect,
     session: &ReviewSession,
     zen: &ZenState,
+    keymap: &KeyMap,
 ) {
     match zen.current() {
-        Some(ZenStop::Chapter(chapter)) => draw_zen_chapter(frame, area, session, zen, chapter),
-        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop),
+        Some(ZenStop::Chapter(chapter)) => {
+            draw_zen_chapter(frame, area, session, zen, chapter, keymap)
+        }
+        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop, keymap),
         None => {}
     }
 }
@@ -2216,6 +3287,7 @@ fn draw_zen_chapter(
     session: &ReviewSession,
     zen: &ZenState,
     chapter: &super::zen::ChapterCard,
+    keymap: &KeyMap,
 ) {
     frame.render_widget(Clear, area);
     let inner = slide_inner(area);
@@ -2349,7 +3421,11 @@ fn draw_zen_chapter(
     if chapter.stop_count > 0 {
         body.push(Line::from(""));
         body.push(Line::from(Span::styled(
-            format!("enter to begin — {} stops", chapter.stop_count),
+            format!(
+                "{} to begin — {} stops",
+                keymap.hint(Action::ZenNext),
+                chapter.stop_count
+            ),
             Style::default().fg(Color::Cyan),
         )));
     }
@@ -2473,6 +3549,7 @@ fn draw_zen_stop(
     session: &ReviewSession,
     zen: &ZenState,
     stop: &super::chunks::WalkthroughRow,
+    keymap: &KeyMap,
 ) {
     frame.render_widget(Clear, area);
     let initial_inner = slide_inner(area);
@@ -2649,7 +3726,11 @@ fn draw_zen_stop(
     }
     if let Some((more, end)) = forced_clip {
         excerpt.push(Line::from(Span::styled(
-            format!("  … {more} more lines through {end} — j/k"),
+            format!(
+                "  … {more} more lines through {end} — {}/{}",
+                keymap.hint(Action::MoveDown),
+                keymap.hint(Action::MoveUp),
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -2891,6 +3972,7 @@ fn draw_zen_artifact(
     zen: &ZenState,
     index: usize,
     scroll: u16,
+    keymap: &KeyMap,
 ) {
     let Some(stop) = zen.current() else {
         return;
@@ -2934,7 +4016,13 @@ fn draw_zen_artifact(
     ];
     if artifacts.len() > 1 {
         title_spans.push(Span::styled(
-            format!("· {}/{} (h/l switch) ", index + 1, artifacts.len()),
+            format!(
+                "· {}/{} ({}/{} switch) ",
+                index + 1,
+                artifacts.len(),
+                keymap.hint(Action::ZenArtifactPrevious),
+                keymap.hint(Action::ZenArtifactNext),
+            ),
             Style::default().fg(Color::Cyan),
         ));
     }
@@ -2944,7 +4032,13 @@ fn draw_zen_artifact(
         .border_style(Style::default().fg(Color::Magenta))
         .title(Line::from(title_spans))
         .title_bottom(Line::from(Span::styled(
-            " j/k scroll · esc close ",
+            format!(
+                " {}/{} scroll · {}/{} close ",
+                keymap.hint(Action::PopupMoveDown),
+                keymap.hint(Action::PopupMoveUp),
+                keymap.hint(Action::PopupClose),
+                keymap.hint(Action::PopupCloseQ),
+            ),
             Style::default().fg(Color::DarkGray),
         )));
     let inner = block.inner(popup);
@@ -2968,6 +4062,7 @@ fn draw_zen_glance(
     area: Rect,
     session: &ReviewSession,
     zen: &ZenState,
+    keymap: &KeyMap,
 ) {
     frame.render_widget(Clear, area);
     let inner = slide_inner(area);
@@ -3110,7 +4205,13 @@ fn draw_zen_glance(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "j/k select · enter dives to location · esc ends tour",
+        format!(
+            "{}/{} select · {} dives to location · {} ends tour",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -3189,7 +4290,12 @@ fn distinguish_path_tail(path: &str) -> String {
     }
 }
 
-fn draw_draft_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &DraftListState) {
+fn draw_draft_list_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    list: &DraftListState,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(82, 60, area);
     frame.render_widget(Clear, popup);
 
@@ -3261,7 +4367,15 @@ fn draw_draft_list_popup(frame: &mut ratatui::Frame<'_>, area: Rect, list: &Draf
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter/a accept · e edit then accept · x discard · esc close",
+        format!(
+            "{}/{} move · {} accept · {} edit then accept · {} discard · {} close",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::DraftAccept),
+            keymap.hint(Action::DraftEdit),
+            keymap.hint(Action::DraftDiscard),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3288,6 +4402,7 @@ fn draw_operation_picker_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     picker: &OperationPickerState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(80, 60, area);
     frame.render_widget(Clear, popup);
@@ -3369,7 +4484,13 @@ fn draw_operation_picker_popup(
         Style::default().fg(Color::Yellow),
     )));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or n/e move · enter apply · esc cancel",
+        format!(
+            "{}/{} move · {} apply · {} cancel",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3383,7 +4504,12 @@ fn draw_operation_picker_popup(
     );
 }
 
-fn draw_file_search_popup(frame: &mut ratatui::Frame<'_>, area: Rect, search: &FileSearchState) {
+fn draw_file_search_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    search: &FileSearchState,
+    keymap: &KeyMap,
+) {
     let popup = centered_rect(72, 60, area);
     frame.render_widget(Clear, popup);
 
@@ -3457,7 +4583,13 @@ fn draw_file_search_popup(frame: &mut ratatui::Frame<'_>, area: Rect, search: &F
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "type fuzzy filter · ↑/↓ or ctrl-j/ctrl-k move · enter open file · esc cancel",
+        format!(
+            "type fuzzy filter · {}/{} move · {} open file · {} cancel",
+            keymap.hint(Action::TargetPickerMoveDown),
+            keymap.hint(Action::TargetPickerMoveUp),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3473,6 +4605,7 @@ fn draw_symbol_outline_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     outline: &SymbolOutlineState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(60, 50, area);
     frame.render_widget(Clear, popup);
@@ -3525,7 +4658,9 @@ fn draw_symbol_outline_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · esc cancel",
+        list_popup_hint("", keymap, "jump")
+            .trim_start_matches(" · ")
+            .to_owned(),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3557,6 +4692,7 @@ fn draw_comment_list_popup(
     area: Rect,
     session: &ReviewSession,
     list: &CommentListState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(80, 60, area);
     frame.render_widget(Clear, popup);
@@ -3628,7 +4764,20 @@ fn draw_comment_list_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · n general · enter jump · e edit · s state · R ready drafts · a action · K kind · x delete · esc close",
+        format!(
+            "{}/{} move · {} general · {} jump · {} edit · {} state · {} ready drafts · {} action · {} kind · {} delete · {} close",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::CommentListNewGeneral),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::EditComment),
+            keymap.hint(Action::CycleCommentState),
+            keymap.hint(Action::CommentListReady),
+            keymap.hint(Action::CommentListCycleIntent),
+            keymap.hint(Action::CommentListCycleKind),
+            keymap.hint(Action::DeleteComment),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3645,6 +4794,7 @@ fn draw_open_work_popup(
     area: Rect,
     session: &ReviewSession,
     list: &OpenWorkListState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(82, 60, area);
     frame.render_widget(Clear, popup);
@@ -3694,7 +4844,9 @@ fn draw_open_work_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑/↓ or j/k move · enter jump · esc close",
+        list_popup_hint("", keymap, "jump")
+            .trim_start_matches(" · ")
+            .to_owned(),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -3915,6 +5067,7 @@ fn draw_walkthrough_list_popup(
     area: Rect,
     session: &ReviewSession,
     list: &WalkthroughListState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(84, 60, area);
     frame.render_widget(Clear, popup);
@@ -3968,7 +5121,16 @@ fn draw_walkthrough_list_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "j/k move · enter jump · J/K reorder · d delete · esc close",
+        format!(
+            "{}/{} move · {} jump · {}/{} reorder · {} delete · {} close",
+            keymap.hint(Action::PopupMoveDown),
+            keymap.hint(Action::PopupMoveUp),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::WalkthroughMoveDown),
+            keymap.hint(Action::WalkthroughMoveUp),
+            keymap.hint(Action::WalkthroughDelete),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
     let paragraph = Paragraph::new(lines)
@@ -3986,6 +5148,7 @@ fn draw_target_chooser_popup(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     chooser: &TargetChooserState,
+    keymap: &KeyMap,
 ) {
     let popup = centered_rect(84, 64, area);
     frame.render_widget(Clear, popup);
@@ -4073,7 +5236,13 @@ fn draw_target_chooser_popup(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "type fuzzy filter · tab base/tip · ↑/↓ or ctrl-j/ctrl-k move · enter use selected · esc cancel",
+        format!(
+            "type fuzzy filter · tab base/tip · {}/{} move · {} use selected · {} cancel",
+            keymap.hint(Action::TargetPickerMoveDown),
+            keymap.hint(Action::TargetPickerMoveUp),
+            keymap.hint(Action::PopupSelect),
+            keymap.hint(Action::PopupClose),
+        ),
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -4228,6 +5397,41 @@ mod tests {
         render_tui_text_with_zen(session, mode, None, width, height)
     }
 
+    fn render_tui_buffer_and_cursor(
+        session: &ReviewSession,
+        mode: &Mode,
+        width: u16,
+        height: u16,
+    ) -> (Buffer, (u16, u16)) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    session,
+                    mode,
+                    &keymap,
+                    &TuiState::default(),
+                    None,
+                    None,
+                )
+            })
+            .unwrap();
+        let position = terminal.backend().cursor_position();
+        (
+            terminal.backend().buffer().clone(),
+            (position.x, position.y),
+        )
+    }
+
+    fn buffer_row(buffer: &Buffer, area: Rect, row: u16) -> String {
+        (area.x..area.x + area.width)
+            .map(|x| buffer[(x, area.y + row)].symbol())
+            .collect::<String>()
+    }
+
     fn render_tui_text_with_state(
         session: &ReviewSession,
         mode: &Mode,
@@ -4280,6 +5484,38 @@ mod tests {
             .unwrap();
 
         buffer_text(terminal.backend().buffer())
+    }
+
+    #[test]
+    fn popup_footer_uses_effective_configured_hints() {
+        let session = snapshot_session("");
+        let mode = Mode::CommentList(CommentListState::default());
+        let config = KeybindingsConfig {
+            popup_move_down: vec!["alt-j".to_owned()],
+            popup_move_up: vec!["alt-k".to_owned()],
+            comment_list_new_general: vec!["g".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let backend = TestBackend::new(180, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    &session,
+                    &mode,
+                    &keymap,
+                    &TuiState::default(),
+                    None,
+                    None,
+                )
+            })
+            .unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+
+        assert!(rendered.contains("alt-j/alt-k move"), "{rendered}");
+        assert!(rendered.contains("g general"), "{rendered}");
     }
 
     fn render_tui_style_runs(
@@ -4401,6 +5637,26 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn help_exposes_wrap_and_horizontal_scroll_actions() {
+        let session = snapshot_session("");
+        let rendered = render_tui_text(&session, &Mode::Help, 110, 32);
+
+        assert!(rendered.contains("soft wrap, layout, and visual cues"));
+        assert!(rendered.contains("horizontal scroll when"));
+        assert!(rendered.contains("wrap is off"));
+        assert!(rendered.contains("shift-left/shift-right"));
+        assert!(!rendered.contains("?  toggle diff soft wrap"));
+        assert!(rendered.contains("j/k or page keys scroll"));
+
+        let tui_state = TuiState {
+            help_scroll: 30,
+            ..TuiState::default()
+        };
+        let scrolled = render_tui_text_with_state(&session, &Mode::Help, &tui_state, 110, 32);
+        assert!(scrolled.contains("agent draft comments") || scrolled.contains("badges"));
+    }
+
+    #[test]
     fn tui_snapshot_context_expansion_gaps() {
         let mut session = snapshot_session(
             r#"diff --git a/src/app.rs b/src/app.rs
@@ -4470,14 +5726,91 @@ diff --git a/README.md b/README.md
             .unwrap();
         session.select_diff_row(row);
         let mode = Mode::CommentInput {
-            editor: CommentEditor {
-                text: "Looks good\nexcept this line".to_owned(),
-                cursor: "Looks good\nexcept".len(),
+            editor: {
+                let mut editor = CommentEditor::new("Looks good\nexcept this line".to_owned());
+                editor.cursor = "Looks good\nexcept".len();
+                editor
             },
             target: CommentInputTarget::New,
         };
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+    }
+
+    #[test]
+    fn comment_popup_renders_prewrapped_rows_and_exact_soft_wrap_cursor() {
+        let session = snapshot_session("");
+        let terminal_area = Rect::new(0, 0, 20, 15);
+        let inner = comment_editor_inner(terminal_area);
+        let full_row = format!("{}界", "a".repeat(inner.width as usize - 2));
+        let text = format!("{full_row}x");
+        let mut editor = CommentEditor::new(text);
+        editor.cursor = full_row.len();
+        let mode = Mode::CommentInput {
+            editor,
+            target: CommentInputTarget::NewGeneral,
+        };
+
+        let (buffer, cursor) = render_tui_buffer_and_cursor(
+            &session,
+            &mode,
+            terminal_area.width,
+            terminal_area.height,
+        );
+
+        assert!(buffer_row(&buffer, inner, 0).starts_with(&full_row));
+        assert!(buffer_row(&buffer, inner, 1).starts_with('x'));
+        assert_eq!(cursor, (inner.x, inner.y + 1));
+    }
+
+    #[test]
+    fn comment_popup_cursor_uses_cjk_combining_and_emoji_display_width() {
+        let session = snapshot_session("");
+        let terminal_area = Rect::new(0, 0, 50, 15);
+        let inner = comment_editor_inner(terminal_area);
+        let before = "界e\u{301}👩🏽‍💻";
+        let mut editor = CommentEditor::new(format!("{before}x"));
+        editor.cursor = before.len();
+        let mode = Mode::CommentInput {
+            editor,
+            target: CommentInputTarget::AcceptDraft { id: "draft".into() },
+        };
+
+        let (_, cursor) = render_tui_buffer_and_cursor(
+            &session,
+            &mode,
+            terminal_area.width,
+            terminal_area.height,
+        );
+
+        assert_eq!(cursor, (inner.x + 5, inner.y));
+    }
+
+    #[test]
+    fn comment_popup_scrolls_existing_long_text_to_the_cursor() {
+        let session = snapshot_session("");
+        let terminal_area = Rect::new(0, 0, 40, 10);
+        let inner = comment_editor_inner(terminal_area);
+        assert_eq!(inner.height, 2);
+        let editor =
+            CommentEditor::new("line 0\nline 1\nline 2\nline 3\nline 4\nline 5".to_owned());
+        let mode = Mode::CommentInput {
+            editor,
+            target: CommentInputTarget::Edit {
+                id: "comment".into(),
+            },
+        };
+
+        let (buffer, cursor) = render_tui_buffer_and_cursor(
+            &session,
+            &mode,
+            terminal_area.width,
+            terminal_area.height,
+        );
+
+        assert!(buffer_row(&buffer, inner, 0).starts_with("line 4"));
+        assert!(buffer_row(&buffer, inner, 1).starts_with("line 5"));
+        assert_eq!(cursor, (inner.x + 6, inner.y + 1));
     }
 
     #[test]
@@ -4712,7 +6045,7 @@ diff --git a/README.md b/README.md
         for height in [50, 30] {
             let rendered = render_tui_text(&session, &mode, 200, height);
             assert!(rendered.contains("will mark 5 caught up"));
-            assert!(rendered.contains("↑/↓ or n/e move · enter apply · esc cancel"));
+            assert!(rendered.contains("j/k move · enter apply · esc cancel"));
         }
     }
 
@@ -4806,15 +6139,16 @@ diff --git a/README.md b/README.md
         session.move_diff_cursor(2);
         session.add_comment("note on new".into());
         session.comments[0].id = "pinned".to_owned();
+        session.diff_scroll = 2;
 
-        let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
         assert!(unscrolled.contains("↳ pinned"));
 
         // Scrolling past the commented row must not shift or duplicate the
         // remaining lines: line 4 of the full render becomes the first
         // diff line after scrolling by 4.
         session.diff_scroll = 4;
-        let scrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        let scrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
         assert!(scrolled.contains("↳ pinned"));
         assert!(!scrolled.contains("a.txt  +1 -1"));
     }
@@ -5621,6 +6955,633 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.toggle_diff_view();
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 100, 12));
+    }
+
+    #[test]
+    fn measured_unified_wrap_preserves_unicode_and_logical_owner() {
+        let combining = "e\u{301}";
+        let family = "👨‍👩‍👧‍👦";
+        let long = format!("prefix 界{combining}{family} suffix {}", "tail ".repeat(8));
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.toggle_focus();
+        let rows = session.diff_rows_for_selected_file();
+        let owner = rows.iter().position(|row| row.text == long).unwrap();
+        session.select_diff_row(owner);
+
+        let layout = measured_diff_layout(&session, &rows, Rect::new(0, 0, 30, 20), false);
+        let visual: Vec<_> = layout
+            .lines
+            .iter()
+            .filter(|line| line.hit.contains(owner))
+            .collect();
+        let painted: Vec<_> = visual
+            .iter()
+            .map(|line| {
+                materialize_diff_source(
+                    &session,
+                    &rows,
+                    layout.line_number_width,
+                    layout.effective_horizontal_scroll(&session),
+                    &line.source,
+                )
+            })
+            .collect();
+
+        assert!(visual.len() >= 3);
+        assert!(
+            visual
+                .iter()
+                .all(|line| line.hit == DiffVisualHit::Full(owner))
+        );
+        assert!(painted.iter().skip(1).all(|line| {
+            line.spans
+                .first()
+                .is_some_and(|span| span.style.bg == Some(Color::DarkGray))
+        }));
+        let rendered = painted
+            .iter()
+            .map(|line| spans_text(&line.spans))
+            .collect::<String>();
+        assert!(rendered.contains('界'));
+        assert!(rendered.contains(combining));
+        assert!(rendered.contains(family));
+        assert!(painted.iter().all(|line| line.width() == 30));
+    }
+
+    #[test]
+    fn nowrap_horizontal_scroll_keeps_unified_gutter_fixed() {
+        let long = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.diff_cues.soft_wrap = false;
+        let rows = session.diff_rows_for_selected_file();
+        let owner = rows.iter().position(|row| row.text == long).unwrap();
+        let inner = Rect::new(0, 0, 24, 10);
+        let before_layout = measured_diff_layout(&session, &rows, inner, false);
+        let before = before_layout
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(owner))
+            .map(|line| {
+                spans_text(
+                    &materialize_diff_source(
+                        &session,
+                        &rows,
+                        before_layout.line_number_width,
+                        before_layout.effective_horizontal_scroll(&session),
+                        &line.source,
+                    )
+                    .spans,
+                )
+            })
+            .unwrap();
+
+        let tui_state = TuiState::default();
+        scroll_diff_horizontal_visual(&mut session, inner, 10, &tui_state);
+        let after_layout = measured_diff_layout(&session, &rows, inner, false);
+        let after = after_layout
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(owner))
+            .map(|line| {
+                spans_text(
+                    &materialize_diff_source(
+                        &session,
+                        &rows,
+                        after_layout.line_number_width,
+                        after_layout.effective_horizontal_scroll(&session),
+                        &line.source,
+                    )
+                    .spans,
+                )
+            })
+            .unwrap();
+
+        assert_eq!(&before[..8], &after[..8]);
+        assert!(before[8..].starts_with("0123"));
+        assert!(after[8..].starts_with("abcd"));
+        assert_eq!(before.width(), 24);
+        assert_eq!(after.width(), 24);
+    }
+
+    #[test]
+    fn five_digit_line_numbers_preserve_measured_width_and_split_hits() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10000 +10000 @@\n-old value\n+new value\n",
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let left = rows.iter().position(|row| row.text == "old value").unwrap();
+        let right = rows.iter().position(|row| row.text == "new value").unwrap();
+        let unified = measured_diff_layout(&session, &rows, Rect::new(0, 0, 40, 10), false);
+        assert!(unified.lines.iter().all(|line| {
+            materialize_diff_source(&session, &rows, unified.line_number_width, 0, &line.source)
+                .width()
+                == 40
+        }));
+
+        session.diff_cues.view = DiffViewModeConfig::SideBySide;
+        session.diff_scroll = left as u16;
+        let inner = Rect::new(4, 2, 120, 10);
+        let split = measured_diff_layout(&session, &rows, inner, true);
+        let pair = split
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(left) && line.hit.contains(right))
+            .unwrap();
+        let pair_row = split
+            .lines
+            .iter()
+            .position(|line| line.hit.contains(left) && line.hit.contains(right))
+            .unwrap()
+            .saturating_sub(split.viewport_start(&session, inner.height as usize));
+        assert_eq!(
+            materialize_diff_source(&session, &rows, split.line_number_width, 0, &pair.source,)
+                .width(),
+            120
+        );
+        let tui_state = TuiState::default();
+        assert_eq!(
+            diff_row_at_point(&session, inner, inner.x + 58, pair_row, &tui_state),
+            Some(left)
+        );
+        assert_eq!(
+            diff_row_at_point(&session, inner, inner.x + 60, pair_row, &tui_state),
+            Some(right)
+        );
+    }
+
+    #[test]
+    fn horizontal_clip_inside_wide_grapheme_preserves_display_offset() {
+        let spans = vec![
+            Span::styled("界", Style::default().fg(Color::Blue)),
+            Span::styled("abc", Style::default().fg(Color::Green)),
+        ];
+
+        let clipped = clip_spans(&spans, 1, 3);
+
+        assert_eq!(spans_text(&clipped), " ab");
+        assert_eq!(clipped[1].style.fg, Some(Color::Green));
+        assert_eq!(clipped.iter().map(Span::width).sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn split_pairs_align_to_taller_wrapped_side_and_keep_divider_fixed() {
+        let removed = "removed ".repeat(24);
+        let added = "short replacement";
+        let session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-{removed}\n+{added}\n trailing\n"
+        ));
+        let rows = session.diff_rows_for_selected_file();
+        let left = rows.iter().position(|row| row.text == removed).unwrap();
+        let right = rows.iter().position(|row| row.text == added).unwrap();
+        let trailing = rows.iter().position(|row| row.text == "trailing").unwrap();
+        let inner = Rect::new(0, 0, 120, 30);
+        let layout = measured_diff_layout(&session, &rows, inner, true);
+        let pair: Vec<_> = layout
+            .lines
+            .iter()
+            .filter(|line| line.block_anchor == left && !line.is_comment)
+            .collect();
+
+        assert!(pair.len() > 2);
+        assert!(pair[0].hit.contains(left) && pair[0].hit.contains(right));
+        assert!(
+            pair.iter()
+                .skip(1)
+                .all(|line| line.hit.contains(left) && !line.hit.contains(right))
+        );
+        assert!(pair.iter().all(|line| {
+            materialize_diff_source(&session, &rows, layout.line_number_width, 0, &line.source)
+                .width()
+                == 120
+        }));
+        assert!(pair.iter().all(|line| {
+            matches!(line.hit, DiffVisualHit::Split { divider: 59, .. })
+                && materialize_diff_source(
+                    &session,
+                    &rows,
+                    layout.line_number_width,
+                    0,
+                    &line.source,
+                )
+                .spans
+                .iter()
+                .any(|span| span.content.contains('│'))
+        }));
+        assert_eq!(pair[1].hit.row_at(100), None);
+        let pair_end = layout
+            .lines
+            .iter()
+            .rposition(|line| line.hit.contains(left))
+            .unwrap();
+        let trailing_start = layout
+            .lines
+            .iter()
+            .position(|line| line.hit.contains(trailing))
+            .unwrap();
+        assert!(trailing_start > pair_end);
+    }
+
+    #[test]
+    fn split_nowrap_scroll_keeps_each_gutter_and_divider_fixed() {
+        let removed = "0123456789 removed content ".repeat(5);
+        let added = "abcdefghij added content ".repeat(5);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-{removed}\n+{added}\n"
+        ));
+        session.diff_cues.view = DiffViewModeConfig::SideBySide;
+        session.diff_cues.soft_wrap = false;
+        let rows = session.diff_rows_for_selected_file();
+        let left = rows.iter().position(|row| row.text == removed).unwrap();
+        let inner = Rect::new(0, 0, 120, 20);
+        let before_layout = measured_diff_layout(&session, &rows, inner, true);
+        let before_line = before_layout
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(left))
+            .unwrap();
+        let before_painted = materialize_diff_source(
+            &session,
+            &rows,
+            before_layout.line_number_width,
+            before_layout.effective_horizontal_scroll(&session),
+            &before_line.source,
+        );
+        let before_text = spans_text(&before_painted.spans);
+
+        let tui_state = TuiState::default();
+        scroll_diff_horizontal_visual(&mut session, inner, 10, &tui_state);
+        let after_layout = measured_diff_layout(&session, &rows, inner, true);
+        let after_line = after_layout
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(left))
+            .unwrap();
+        let after_painted = materialize_diff_source(
+            &session,
+            &rows,
+            after_layout.line_number_width,
+            after_layout.effective_horizontal_scroll(&session),
+            &after_line.source,
+        );
+        let after_text = spans_text(&after_painted.spans);
+
+        assert_eq!(&before_text[..8], &after_text[..8]);
+        assert_ne!(&before_text[8..18], &after_text[8..18]);
+        assert!(matches!(
+            before_line.hit,
+            DiffVisualHit::Split { divider: 59, .. }
+        ));
+        assert!(matches!(
+            after_line.hit,
+            DiffVisualHit::Split { divider: 59, .. }
+        ));
+        assert_eq!(
+            before_painted.spans.iter().map(Span::width).sum::<usize>(),
+            120
+        );
+        assert_eq!(
+            after_painted.spans.iter().map(Span::width).sum::<usize>(),
+            120
+        );
+    }
+
+    #[test]
+    fn unpaired_split_continuations_hit_the_nonempty_logical_row() {
+        let long = "unpaired removed ".repeat(15);
+        let session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,1 @@\n-short\n-{long}\n+replacement\n"
+        ));
+        let rows = session.diff_rows_for_selected_file();
+        let owner = rows.iter().position(|row| row.text == long).unwrap();
+        let layout = measured_diff_layout(&session, &rows, Rect::new(0, 0, 120, 20), true);
+        let visual: Vec<_> = layout
+            .lines
+            .iter()
+            .filter(|line| line.hit.contains(owner))
+            .collect();
+
+        assert!(visual.len() > 1);
+        assert!(visual.iter().all(|line| line.hit.row_at(10) == Some(owner)));
+        assert!(visual.iter().all(|line| line.hit.row_at(110).is_none()));
+    }
+
+    #[test]
+    fn reflow_clamps_continuation_offset_to_the_same_logical_block() {
+        let long = "resize me ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = owner as u16;
+        session.diff_visual_offset = 100;
+        let rows = session.diff_rows_for_selected_file();
+        let wide = measured_diff_layout(&session, &rows, Rect::new(0, 0, 90, 10), false);
+        let start = wide.viewport_start(&session, 10);
+
+        let owner_start = wide
+            .lines
+            .iter()
+            .position(|line| line.hit.contains(owner))
+            .unwrap();
+        assert!(owner_start >= start && owner_start < start + 10);
+        assert_eq!(session.diff_scroll as usize, owner);
+    }
+
+    #[test]
+    fn cursor_visibility_targets_start_of_viewport_tall_row() {
+        let long = "very tall wrapped row ".repeat(40);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.toggle_focus();
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.select_diff_row(owner);
+        session.diff_scroll = owner as u16;
+        session.diff_visual_offset = 5;
+        let inner = Rect::new(0, 0, 28, 3);
+        let tui_state = TuiState::default();
+
+        ensure_diff_cursor_visible(&mut session, inner, &tui_state);
+
+        assert_eq!(session.diff_scroll as usize, owner);
+        assert_eq!(session.diff_visual_offset, 0);
+    }
+
+    #[test]
+    fn ultra_narrow_diff_degrades_gutter_before_content() {
+        let text = "界abc";
+        let session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10000 +10000 @@\n-old\n+{text}\n"
+        ));
+        let rows = session.diff_rows_for_selected_file();
+        let owner = rows.iter().position(|row| row.text == text).unwrap();
+
+        for width in 1..=10 {
+            let layout = measured_diff_layout(&session, &rows, Rect::new(0, 0, width, 20), false);
+            let painted = layout
+                .lines
+                .iter()
+                .filter(|line| line.hit.contains(owner))
+                .map(|line| {
+                    materialize_diff_source(
+                        &session,
+                        &rows,
+                        layout.line_number_width,
+                        0,
+                        &line.source,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let visible = painted
+                .iter()
+                .map(|line| spans_text(&line.spans))
+                .collect::<String>();
+            let compact = visible
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            assert!(compact.contains("界abc"), "width {width}: {visible:?}");
+        }
+    }
+
+    #[test]
+    fn split_viewport_resolves_added_owner_before_anchor_fallback() {
+        let session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let added = rows.iter().position(|row| row.text == "new one").unwrap();
+        let mut session = session;
+        session.diff_scroll = added as u16;
+        let layout = measured_diff_layout(&session, &rows, Rect::new(0, 0, 120, 2), true);
+        let expected = layout
+            .lines
+            .iter()
+            .position(|line| line.hit.contains(added))
+            .unwrap();
+
+        assert_eq!(layout.viewport_start(&session, 2), expected);
+    }
+
+    #[test]
+    fn stale_horizontal_offset_is_clamped_after_reflow_or_refresh() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+short\n",
+        );
+        session.diff_cues.soft_wrap = false;
+        session.diff_horizontal_scroll = 500;
+        let rows = session.diff_rows_for_selected_file();
+        let owner = rows.iter().position(|row| row.text == "short").unwrap();
+        let inner = Rect::new(0, 0, 80, 10);
+
+        assert_eq!(
+            measured_diff_layout(&session, &rows, inner, false)
+                .effective_horizontal_scroll(&session),
+            0
+        );
+        let layout = measured_diff_layout(&session, &rows, inner, false);
+        let rendered = layout
+            .lines
+            .iter()
+            .find(|line| line.hit.contains(owner))
+            .map(|line| {
+                spans_text(
+                    &materialize_diff_source(
+                        &session,
+                        &rows,
+                        layout.line_number_width,
+                        layout.effective_horizontal_scroll(&session),
+                        &line.source,
+                    )
+                    .spans,
+                )
+            })
+            .unwrap();
+        assert!(rendered.contains("short"));
+
+        let tui_state = TuiState::default();
+        scroll_diff_horizontal_visual(&mut session, inner, 4, &tui_state);
+        assert_eq!(session.diff_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn reconcile_normalizes_stored_visual_offset_and_reuses_geometry() {
+        let long = "cached geometry ".repeat(200);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = owner as u16;
+        session.diff_visual_offset = usize::MAX;
+        let inner = Rect::new(0, 0, 40, 5);
+        let tui_state = TuiState::default();
+        let rows = session.diff_rows_for_selected_file();
+        let first = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+
+        reconcile_diff_viewport(&mut session, inner, false, &tui_state);
+        let second = cached_diff_layout(&session, rows, inner, false, &tui_state);
+
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 1);
+        assert!(session.diff_visual_offset < first.lines.len());
+        let window = materialize_diff_window(
+            &session,
+            &session.diff_rows_for_selected_file(),
+            &first,
+            0,
+            5,
+        );
+        assert_eq!(window.len(), 5);
+    }
+
+    #[test]
+    fn geometry_cache_invalidates_for_comment_geometry_but_not_cursor_style() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.toggle_focus();
+        let inner = Rect::new(0, 0, 40, 5);
+        let tui_state = TuiState::default();
+        let rows = session.diff_rows_for_selected_file();
+        let first = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+
+        session.move_diff_cursor(1);
+        let cursor_only = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(Rc::ptr_eq(&first, &cursor_only));
+
+        let before_hash = diff_annotation_hash(&session);
+        session.add_comment("a comment long enough to wrap across rows".into());
+        assert_eq!(session.comments.len(), 1);
+        assert_ne!(before_hash, diff_annotation_hash(&session));
+        let with_comment = cached_diff_layout(&session, rows, inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&first, &with_comment));
+        assert!(with_comment.lines.len() > first.lines.len());
+    }
+
+    #[test]
+    fn detached_scroll_survives_reflow_while_visible_cursor_stays_visible() {
+        let mut body = String::from(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,20 +1,20 @@\n",
+        );
+        for line in 1..=20 {
+            body.push_str(&format!(" line {line} {}\n", "wide ".repeat(8)));
+        }
+        let mut session = snapshot_session(&body);
+        session.toggle_focus();
+        let tui_state = TuiState::default();
+        let old_inner = Rect::new(0, 0, 30, 5);
+        let new_inner = Rect::new(0, 0, 60, 5);
+
+        session.diff_scroll = 0;
+        session.diff_visual_offset = 0;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .rposition(|row| row.anchor.is_some())
+            .unwrap();
+        assert!(!diff_cursor_is_visible(&session, old_inner, &tui_state));
+        reconcile_diff_viewport(&mut session, new_inner, false, &tui_state);
+        assert_eq!(session.diff_scroll, 0);
+
+        session.diff_scroll = session.diff_cursor as u16;
+        reconcile_diff_viewport(&mut session, old_inner, true, &tui_state);
+        assert!(diff_cursor_is_visible(&session, old_inner, &tui_state));
+        reconcile_diff_viewport(&mut session, new_inner, true, &tui_state);
+        assert!(diff_cursor_is_visible(&session, new_inner, &tui_state));
+    }
+
+    #[test]
+    fn comments_and_visual_scrolling_keep_logical_association() {
+        let long = "wrapped source ".repeat(10);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.toggle_focus();
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.select_diff_row(owner);
+        session.add_comment(format!("comment {}", "detail ".repeat(12)));
+        session.comments[0].id = "wrapped-comment".into();
+        let inner = Rect::new(0, 0, 32, 5);
+        let rows = session.diff_rows_for_selected_file();
+        let layout = measured_diff_layout(&session, &rows, inner, false);
+        let comment_lines: Vec<_> = layout
+            .lines
+            .iter()
+            .filter(|line| {
+                line.hit.contains(owner) && matches!(line.source, DiffVisualSource::Comment { .. })
+            })
+            .collect();
+        assert!(!comment_lines.is_empty());
+
+        session.diff_scroll = owner as u16;
+        let tui_state = TuiState::default();
+        scroll_diff_visual(&mut session, inner, 2, &tui_state);
+        assert_eq!(session.diff_scroll as usize, owner);
+        assert!(session.diff_visual_offset > 0);
+        assert_eq!(
+            diff_row_at_point(&session, inner, inner.x + 10, 0, &tui_state),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn visual_scroll_clamps_to_a_full_final_page() {
+        let mut body = String::from(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,20 +1,20 @@\n",
+        );
+        for line in 1..=20 {
+            body.push_str(&format!(" line {line}\n"));
+        }
+        let mut session = snapshot_session(&body);
+        let inner = Rect::new(0, 0, 40, 6);
+        let tui_state = TuiState::default();
+        scroll_diff_visual(&mut session, inner, isize::MAX, &tui_state);
+        let rows = session.diff_rows_for_selected_file();
+        let layout = measured_diff_layout(&session, &rows, inner, false);
+        let start = layout.viewport_start(&session, 6);
+
+        assert_eq!(start, layout.lines.len().saturating_sub(6));
+        assert_eq!(layout.lines.len().saturating_sub(start), 6);
+    }
+
+    #[test]
+    fn tui_snapshot_wrapped_unified_and_split_diff() {
+        let removed = "removed unicode 界e\u{301} 👨‍👩‍👧‍👦 ".repeat(5);
+        let added = "replacement ".repeat(3);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-{removed}\n+{added}\n"
+        ));
+        session.toggle_focus();
+        insta::assert_snapshot!(
+            "tui_snapshot_wrapped_unified_diff",
+            render_tui_text(&session, &Mode::Normal, 76, 14)
+        );
+        session.toggle_diff_view();
+        session.toggle_file_pane();
+        insta::assert_snapshot!(
+            "tui_snapshot_wrapped_split_diff",
+            render_tui_text(&session, &Mode::Normal, 130, 14)
+        );
     }
 
     #[test]

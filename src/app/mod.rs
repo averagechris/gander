@@ -14,7 +14,7 @@ mod word_diff;
 
 pub use context_expansion::Expansion;
 pub use diff_rows::{DiffRow, DiffRowKind};
-pub use split_rows::{SplitRow, split_index_of, split_rows};
+pub use split_rows::{SplitRow, split_rows};
 
 use std::{
     cell::RefCell,
@@ -122,6 +122,11 @@ pub struct ReviewSession {
     pub comment_initial_state: CommentState,
     pub selected: usize,
     pub diff_scroll: u16,
+    /// Visual continuation within the logical row at `diff_scroll`.
+    /// The TUI reconciles this against its measured layout after reflow.
+    pub diff_visual_offset: usize,
+    /// Display-cell offset into diff code while soft wrapping is disabled.
+    pub diff_horizontal_scroll: usize,
     pub diff_cursor: usize,
     pub focus: Focus,
     pub syntax: SyntaxConfig,
@@ -211,10 +216,78 @@ pub struct RefreshedFileChange {
     pub reverted_to_seen: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FileViewport {
     diff_scroll: u16,
+    diff_visual_offset: usize,
+    diff_horizontal_scroll: usize,
     diff_cursor: usize,
+    top_identity: Option<DiffRowIdentity>,
+    cursor_identity: Option<DiffRowIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffRowIdentity {
+    old_lineno: Option<usize>,
+    new_lineno: Option<usize>,
+    text: String,
+    kind: DiffRowKind,
+}
+
+impl From<&DiffRow> for DiffRowIdentity {
+    fn from(row: &DiffRow) -> Self {
+        Self {
+            old_lineno: row.old_lineno,
+            new_lineno: row.new_lineno,
+            text: row.text.clone(),
+            kind: row.kind,
+        }
+    }
+}
+
+fn resolve_diff_row_identity(
+    rows: &[DiffRow],
+    identity: Option<&DiffRowIdentity>,
+    fallback: usize,
+) -> (usize, bool) {
+    if rows.is_empty() {
+        return (0, false);
+    }
+    let Some(identity) = identity else {
+        return (fallback.min(rows.len() - 1), false);
+    };
+    if let Some(index) = rows.iter().position(|row| {
+        row.kind == identity.kind
+            && row.old_lineno == identity.old_lineno
+            && row.new_lineno == identity.new_lineno
+            && row.text == identity.text
+    }) {
+        return (index, true);
+    }
+    let old_line = identity
+        .old_lineno
+        .or(identity.new_lineno)
+        .unwrap_or(fallback);
+    if let Some((index, _)) = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.kind == identity.kind && row.text == identity.text)
+        .map(|(index, row)| {
+            let line = row.old_lineno.or(row.new_lineno).unwrap_or(index);
+            (index, line.abs_diff(old_line))
+        })
+        .min_by_key(|(index, distance)| (*distance, index.abs_diff(fallback)))
+    {
+        return (index, true);
+    }
+    if let Some(index) = rows.iter().position(|row| {
+        row.kind == identity.kind
+            && row.old_lineno == identity.old_lineno
+            && row.new_lineno == identity.new_lineno
+    }) {
+        return (index, true);
+    }
+    (fallback.min(rows.len() - 1), false)
 }
 
 struct ReviewSessionOptions {
@@ -414,6 +487,8 @@ impl ReviewSession {
             comment_initial_state,
             selected: 0,
             diff_scroll: 0,
+            diff_visual_offset: 0,
+            diff_horizontal_scroll: 0,
             diff_cursor: 0,
             focus: Focus::Files,
             syntax,
@@ -477,6 +552,9 @@ impl ReviewSession {
     /// per-file viewports, the selected file, and the zen focus frame)
     /// carries over so the reload does not yank the reviewer around.
     pub fn replace_diff_preserving_view(&mut self, target: ReviewTarget, diff: DiffSet) {
+        // The active file lives in the public viewport fields until we leave
+        // it. Snapshot it before moving the per-file map through replacement.
+        self.save_current_viewport();
         let file_pane_visible = self.file_pane_visible;
         let focus = self.focus;
         let hide_generated = self.hide_generated;
@@ -485,7 +563,7 @@ impl ReviewSession {
         let use_agent_order = self.use_agent_order;
         let collapsed_dirs = std::mem::take(&mut self.collapsed_dirs);
         let force_rendered = std::mem::take(&mut self.force_rendered);
-        let viewports = std::mem::take(&mut self.viewport_by_path);
+        let mut viewports = std::mem::take(&mut self.viewport_by_path);
         let zen_focus = self.zen_focus.take();
         let selected_path = self.selected_file().map(|file| file.path.clone());
         struct PreviousFile {
@@ -603,11 +681,30 @@ impl ReviewSession {
         self.use_agent_order = use_agent_order;
         self.collapsed_dirs = collapsed_dirs;
         self.force_rendered = force_rendered;
-        self.viewport_by_path = viewports;
-        if let Some(index) = selected_path
-            .as_deref()
-            .and_then(|path| self.files.iter().position(|file| file.path == path))
+        let selected_match = selected_path.as_deref().and_then(|path| {
+            self.files
+                .iter()
+                .position(|file| file.path == path)
+                .map(|index| (index, false))
+                .or_else(|| {
+                    self.files
+                        .iter()
+                        .position(|file| {
+                            file.status == FileStatus::Renamed
+                                && file.old_path.as_deref() == Some(path)
+                        })
+                        .map(|index| (index, true))
+                })
+        });
+        if let Some((index, renamed)) = selected_match
+            && renamed
+            && let Some(old_path) = selected_path.as_ref()
+            && let Some(viewport) = viewports.remove(old_path)
         {
+            viewports.insert(self.files[index].path.clone(), viewport);
+        }
+        self.viewport_by_path = viewports;
+        if let Some((index, _)) = selected_match {
             self.reveal_file_in_tree(index);
             self.tree_cursor = Some(TreeRowId::File { file_index: index });
             self.selected = index;
@@ -669,6 +766,7 @@ impl ReviewSession {
         }
         self.diff_cursor = 0;
         self.diff_scroll = 0;
+        self.diff_visual_offset = 0;
         self.ensure_diff_cursor_commentable();
     }
 
@@ -748,6 +846,16 @@ impl ReviewSession {
     /// Toggle the colored gutter change bar. Session-only.
     pub fn toggle_gutter_bar(&mut self) {
         self.diff_cues.gutter_bar = !self.diff_cues.gutter_bar;
+    }
+
+    /// Toggle measured soft wrapping of diff content. Cursor, selections,
+    /// comments, and anchors remain attached to logical rows; only the visual
+    /// projection changes.
+    pub fn toggle_diff_wrap(&mut self) {
+        self.diff_cues.soft_wrap = !self.diff_cues.soft_wrap;
+        if self.diff_cues.soft_wrap {
+            self.diff_horizontal_scroll = 0;
+        }
     }
 
     /// Toggle between the unified and side-by-side diff layouts.
@@ -899,11 +1007,18 @@ impl ReviewSession {
         let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
             return;
         };
+        let rows = self.diff_rows_for_selected_file();
         self.viewport_by_path.insert(
             path,
             FileViewport {
                 diff_scroll: self.diff_scroll,
+                diff_visual_offset: self.diff_visual_offset,
+                diff_horizontal_scroll: self.diff_horizontal_scroll,
                 diff_cursor: self.diff_cursor,
+                top_identity: rows
+                    .get(self.diff_scroll as usize)
+                    .map(DiffRowIdentity::from),
+                cursor_identity: rows.get(self.diff_cursor).map(DiffRowIdentity::from),
             },
         );
     }
@@ -911,10 +1026,27 @@ impl ReviewSession {
     fn restore_current_viewport(&mut self) {
         let viewport = self
             .selected_file()
-            .and_then(|file| self.viewport_by_path.get(&file.path).copied())
+            .and_then(|file| self.viewport_by_path.get(&file.path).cloned())
             .unwrap_or_default();
-        self.diff_scroll = viewport.diff_scroll;
-        self.diff_cursor = viewport.diff_cursor;
+        let rows = self.diff_rows_for_selected_file();
+        let (top, top_recovered) = resolve_diff_row_identity(
+            &rows,
+            viewport.top_identity.as_ref(),
+            viewport.diff_scroll as usize,
+        );
+        let (cursor, _) = resolve_diff_row_identity(
+            &rows,
+            viewport.cursor_identity.as_ref(),
+            viewport.diff_cursor,
+        );
+        self.diff_scroll = top.min(u16::MAX as usize) as u16;
+        self.diff_visual_offset = if top_recovered {
+            viewport.diff_visual_offset
+        } else {
+            0
+        };
+        self.diff_horizontal_scroll = viewport.diff_horizontal_scroll;
+        self.diff_cursor = cursor;
     }
 
     pub fn file_tree(&self) -> FileTreeView {
@@ -1058,6 +1190,7 @@ impl ReviewSession {
         let Some(start_line) = part.start_line else {
             self.focus = Focus::Files;
             self.diff_scroll = 0;
+            self.diff_visual_offset = 0;
             return;
         };
         if let Some(row_index) = self.diff_rows_for_selected_file().iter().position(|row| {
@@ -1133,6 +1266,7 @@ impl ReviewSession {
         let Some(line) = flag.line else {
             self.focus = Focus::Files;
             self.diff_scroll = 0;
+            self.diff_visual_offset = 0;
             return;
         };
         if let Some(row_index) = self
@@ -1391,19 +1525,23 @@ impl ReviewSession {
             self.tree_cursor = None;
             self.diff_cursor = 0;
             self.diff_scroll = 0;
+            self.diff_visual_offset = 0;
             self.clear_diff_range_selection();
         }
     }
 
+    #[cfg(test)]
     pub fn scroll_diff(&mut self, delta: i16) {
         self.diff_scroll = if delta.is_negative() {
             self.diff_scroll.saturating_sub(delta.unsigned_abs())
         } else {
             self.diff_scroll.saturating_add(delta as u16)
         };
+        self.diff_visual_offset = 0;
         self.clamp_diff_scroll();
     }
 
+    #[cfg(test)]
     fn clamp_diff_scroll(&mut self) {
         let rows = self.diff_rows_for_selected_file();
         let max_scroll = rows.len().saturating_sub(1).min(u16::MAX as usize) as u16;
@@ -1416,6 +1554,7 @@ impl ReviewSession {
         let rows = self.diff_rows_for_selected_file();
         if rows.is_empty() {
             self.diff_scroll = 0;
+            self.diff_visual_offset = 0;
             return;
         }
         if self.focus == Focus::Diff
@@ -1428,6 +1567,7 @@ impl ReviewSession {
             .saturating_sub(DIFF_CURSOR_SCROLL_MARGIN)
             .min(rows.len().saturating_sub(1))
             .min(u16::MAX as usize) as u16;
+        self.diff_visual_offset = 0;
     }
 
     pub fn toggle_focus(&mut self) {
@@ -1472,8 +1612,10 @@ impl ReviewSession {
         self.diff_cursor = cursor;
         if self.diff_cursor < self.diff_scroll as usize {
             self.diff_scroll = self.diff_cursor as u16;
+            self.diff_visual_offset = 0;
         } else if self.diff_cursor > self.diff_scroll as usize + DIFF_CURSOR_SCROLL_MARGIN {
             self.diff_scroll = self.diff_cursor.saturating_sub(DIFF_CURSOR_SCROLL_MARGIN) as u16;
+            self.diff_visual_offset = 0;
         }
     }
 
@@ -1679,6 +1821,7 @@ impl ReviewSession {
                 self.focus = Focus::Diff;
                 self.diff_cursor = target;
                 self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                self.diff_visual_offset = 0;
                 return;
             }
         }
@@ -1689,6 +1832,7 @@ impl ReviewSession {
     pub fn jump_to_diff_row(&mut self, row_index: usize) {
         self.select_diff_row(row_index);
         self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+        self.diff_visual_offset = 0;
     }
 
     pub fn selected_comment_anchor(&self) -> Option<CommentAnchor> {
@@ -2092,6 +2236,7 @@ impl ReviewSession {
                 {
                     self.diff_cursor = row_index;
                     self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                    self.diff_visual_offset = 0;
                 }
             }
             Some(CommentAnchor::Range { lines, .. }) => {
@@ -2107,6 +2252,7 @@ impl ReviewSession {
                 }) {
                     self.diff_cursor = row_index;
                     self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                    self.diff_visual_offset = 0;
                 }
             }
             _ => self.focus = Focus::Files,
@@ -2424,6 +2570,10 @@ diff --git a/README.md b/README.md
             .position(|file| file.path == "README.md")
             .unwrap();
         session.select_file_index(index);
+        session.diff_scroll = 2;
+        session.diff_visual_offset = 4;
+        session.diff_horizontal_scroll = 7;
+        session.diff_cursor = 3;
         session.zen_focus = Some(ZenFocus {
             path: "README.md".to_owned(),
             lines: Some((1, 1)),
@@ -2460,6 +2610,10 @@ diff --git a/src/new.rs b/src/new.rs
         assert!(session.hide_generated);
         assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
         assert_eq!(session.selected_file().unwrap().path, "README.md");
+        assert_eq!(session.diff_scroll, 2);
+        assert_eq!(session.diff_visual_offset, 4);
+        assert_eq!(session.diff_horizontal_scroll, 7);
+        assert_eq!(session.diff_cursor, 3);
         assert_eq!(session.zen_focus.as_ref().unwrap().path, "README.md");
         // Viewed marks still carry over by fingerprint, and the new file
         // arrived unviewed.
@@ -2479,6 +2633,74 @@ diff --git a/src/new.rs b/src/new.rs
                 .unwrap()
                 .viewed
         );
+    }
+
+    #[test]
+    fn refresh_remaps_active_viewport_by_logical_row_identity() {
+        let original = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10,2 +10,2 @@\n keep\n-old\n+target\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        let old_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.focus = Focus::Diff;
+        session.diff_cursor = old_cursor;
+        session.diff_scroll = old_cursor as u16;
+        session.diff_visual_offset = 2;
+
+        let refreshed = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n@@ -10,2 +10,2 @@\n keep\n-old\n+target\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].text, "target");
+        assert_eq!(rows[session.diff_scroll as usize].text, "target");
+        assert!(session.diff_cursor > old_cursor);
+        assert_eq!(session.diff_visual_offset, 2);
+    }
+
+    #[test]
+    fn refresh_keeps_inactive_viewport_identity_until_file_returns() {
+        let original = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10 +10 @@\n-old\n+target\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.diff_cursor = target;
+        session.diff_scroll = target as u16;
+        session.select_file_index(1);
+
+        let refreshed = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n@@ -10 +10 @@\n-old\n+target\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        session.select_file_index(0);
+
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_cursor].text, "target");
+        assert_eq!(rows[session.diff_scroll as usize].text, "target");
     }
 
     #[test]
@@ -3678,23 +3900,53 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn preserves_diff_viewport_per_file() {
         let mut session = session();
-        session.diff_scroll = 7;
+        session.diff_scroll = 2;
+        session.diff_visual_offset = 4;
+        session.diff_horizontal_scroll = 11;
         session.diff_cursor = 3;
 
         session.move_selection(1);
-        session.diff_scroll = 2;
+        session.diff_scroll = 1;
+        session.diff_visual_offset = 1;
+        session.diff_horizontal_scroll = 5;
         session.diff_cursor = 1;
         session.move_selection(-1);
 
         assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
-        assert_eq!(session.diff_scroll, 7);
+        assert_eq!(session.diff_scroll, 2);
+        assert_eq!(session.diff_visual_offset, 4);
+        assert_eq!(session.diff_horizontal_scroll, 11);
         assert_eq!(session.diff_cursor, 3);
 
         session.move_selection(1);
 
         assert_eq!(session.selected_file().unwrap().path, "README.md");
-        assert_eq!(session.diff_scroll, 2);
+        assert_eq!(session.diff_scroll, 1);
+        assert_eq!(session.diff_visual_offset, 1);
+        assert_eq!(session.diff_horizontal_scroll, 5);
         assert_eq!(session.diff_cursor, 1);
+    }
+
+    #[test]
+    fn wrap_toggle_leaves_visual_offset_for_tui_reconciliation() {
+        let mut session = multi_line_session();
+        session.toggle_focus();
+        session.diff_scroll = 3;
+        session.diff_visual_offset = 7;
+        session.diff_horizontal_scroll = 9;
+        let cursor = session.diff_cursor;
+
+        session.toggle_diff_wrap();
+        assert!(!session.diff_cues.soft_wrap);
+        assert_eq!(session.diff_scroll, 3);
+        assert_eq!(session.diff_visual_offset, 7);
+        assert_eq!(session.diff_cursor, cursor);
+        assert_eq!(session.diff_horizontal_scroll, 9);
+
+        session.toggle_diff_wrap();
+        assert!(session.diff_cues.soft_wrap);
+        assert_eq!(session.diff_horizontal_scroll, 0);
+        assert_eq!(session.diff_cursor, cursor);
     }
 
     #[test]

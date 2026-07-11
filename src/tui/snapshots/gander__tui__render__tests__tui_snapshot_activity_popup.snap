@@ -21,4 +21,4 @@ expression: "render_tui_text_with_state(&session,\n&Mode::Activity(ActivityListS
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-activity · j/k/n/e move · enter jump (file events) · esc close
+activity · j/k move · enter jump (file events) · esc close

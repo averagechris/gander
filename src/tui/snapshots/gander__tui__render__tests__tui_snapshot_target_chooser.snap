@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4086
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -14,8 +13,8 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │       │  T@ abc123       main                      feat: first change                    │       │
 │       │›B   def456       feature*                  fix: selected change                  │       │
 │       │                                                                                  │       │
-│       │type fuzzy filter · tab base/tip · ↑/↓ or ctrl-j/ctrl-k move · enter use selected │       │
-│       │· esc cancel                                                                      │       │
+│       │type fuzzy filter · tab base/tip · down/up move · enter use selected · esc cancel │       │
+│       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       │                                                                                  │       │

@@ -17,8 +17,8 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │start here                                                                                        │
 │glance rail  test churn @ tests/app.rs:1-1                                                        │
 │                                                                                                  │
-│enter/n next (marks viewed) · p back · . refocus · tab focus card · esc end · comment/flag/expand │
-│as normal                                                                                         │
+│n next (marks viewed) · p back · . refocus · tab focus card · esc end · comment/flag/expand as    │
+│normal                                                                                            │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @
 zen read 1/1 · n next · p back · . refocus · tab focus card · esc end · other keys as normal

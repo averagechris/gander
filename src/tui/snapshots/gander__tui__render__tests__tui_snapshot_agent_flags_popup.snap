@@ -10,7 +10,7 @@ expression: "render_tui_text(&session, &Mode::FlagList(FlagListState::new(&sessi
 │         │Sections flagged by agents, critical first                                    │         │
 │         │› [critical] src/app.rs:2 unchecked call                                      │         │
 │         │                                                                              │         │
-│         │↑/↓ or j/k move · enter jump · esc close                                      │         │
+│         │j/k move · enter jump · esc close                                             │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │

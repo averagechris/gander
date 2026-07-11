@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4400
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
 ┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
@@ -11,27 +10,27 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │           /  open a file or fuzzy jump                   n/p  next/back stop                    │    │
 │     │           n  next unviewed file                          tab  toggle focus card / reading view  │    │
 │     │       enter  mark viewed and advance                       g  open glance board                 │    │
-│     │           c  comment on what needs work                    e  open artifacts                    │    │
+│     │           c  comment on what needs work                    e  open/close artifacts              │    │
 │     │           T  zen briefing for a focused pass               d  toggle chapter details / expand   │    │
 │     │      ctrl-y  copy handoff when done             brief                                           │    │
-│     │general                                                     .  refocus current stop              │    │
-│     │         tab  switch focus between files and diff           a  acknowledge glance items          │    │
-│     │           w  hide/show file pane                         esc  leave zen / close artifact        │    │
-│     │           ?  this help                          comments                                        │    │
-│     │      ctrl-a  activity feed (live refresh while             c  comment at cursor                 │    │
-│     │open)                                                       r  start/finish range comment        │    │
-│     │      ctrl-g  dismiss range/notice                          s  cycle comment state               │    │
-│     │           q  quit (writes artifact)                        e  edit comment                      │    │
-│     │files                                                       x  delete comment                    │    │
-│     │         j/k  move in tree                                  C  comment center (n general, R      │    │
-│     │       space  fold/unfold directory              ready)                                          │    │
-│     │  left/right  collapse/expand directory                     X  action items & todo feedback      │    │
-│     │           /  fuzzy file search                             W  walkthrough panel                 │    │
-│     │           h  hide/show noisy files                         Y  mark for walkthrough              │    │
-│     │           f  cycle viewed filter                         m/M  next/previous comment             │    │
-│     │         n/N  next/previous unviewed file        targets & jj                                    │    │
-│     │       enter  mark viewed and advance                       t  return to launch target           │    │
+│     │diff & view                                                 .  refocus current stop              │    │
+│     │         j/k  move diff cursor                              a  acknowledge glance items          │    │
+│     │         d/u  vertical scroll                             esc  leave zen / close artifact        │    │
+│     │  shift-left/shift-right  horizontal scroll when comments                                        │    │
+│     │wrap is off                                                 c  comment at cursor                 │    │
+│     │           V  soft wrap, layout, and visual cues            r  start/finish range comment        │    │
+│     │general                                                     s  cycle comment state               │    │
+│     │         tab  switch focus between files and diff           e  edit comment                      │    │
+│     │           w  hide/show file pane                           x  delete comment                    │    │
+│     │           ?  this help                                     C  comment center                    │    │
+│     │      ctrl-a  activity feed (live refresh while           C/n  create general comment (sequence) │    │
+│     │open)                                                       R  ready all draft comments          │    │
+│     │      ctrl-g  dismiss range/notice                          X  action items & todo feedback      │    │
+│     │           q  quit (writes artifact)                        W  walkthrough panel                 │    │
+│     │files                                                       Y  mark for walkthrough              │    │
+│     │         j/k  move in tree                                m/M  next/previous comment             │    │
+│     │       space  fold/unfold directory              targets & jj                                    │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-help · any key to close
+help · j/k or page keys scroll · esc/q/? close

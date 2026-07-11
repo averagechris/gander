@@ -11,7 +11,7 @@ expression: "render_tui_text(&session, &mode, 100, 20)"
 │        │› [pending ] a.txt:1 consider a clearer name                                    │        │
 │        │  [pending ] a.txt file-level: needs tests                                      │        │
 │        │                                                                                │        │
-│        │↑/↓ or j/k move · enter/a accept · e edit then accept · x discard · esc close   │        │
+│        │j/k move · enter accept · e edit then accept · x discard · esc close            │        │
 │        │                                                                                │        │
 │        │                                                                                │        │
 │        │                                                                                │        │
@@ -21,4 +21,4 @@ expression: "render_tui_text(&session, &mode, 100, 20)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-agent drafts · j/k move · enter/a accept · e edit · x discard · esc close
+agent drafts · j/k move · enter accept · e edit · x discard · esc close

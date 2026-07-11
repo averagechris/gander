@@ -15,7 +15,7 @@ expression: "render_tui_text(&session, &Mode::JjHelpers(state.clone()), 100, 24)
 │           │  squash src/app.rs into the parent of @  (jj squash -r @ src/app.rs)     │           │
 │           │  split src/app.rs out of @  (jj split -r @ src/app.rs)                   │           │
 │           │                                                                          │           │
-│           │↑/↓ or j/k move · enter select · esc close                                │           │
+│           │j/k move · enter select · esc close                                       │           │
 │           │                                                                          │           │
 │           │                                                                          │           │
 │           │                                                                          │           │

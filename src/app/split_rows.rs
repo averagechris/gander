@@ -24,6 +24,7 @@ pub enum SplitRow {
 
 impl SplitRow {
     /// Whether this display row contains the given unified row index.
+    #[cfg(test)]
     pub fn contains(&self, row_index: usize) -> bool {
         match self {
             Self::Full(index) => *index == row_index,
@@ -90,6 +91,7 @@ pub fn split_rows(rows: &[DiffRow]) -> Vec<SplitRow> {
 
 /// Index of the split row containing a unified row, for cursor/scroll
 /// mapping. Falls back to the last split row.
+#[cfg(test)]
 pub fn split_index_of(split: &[SplitRow], row_index: usize) -> usize {
     split
         .iter()

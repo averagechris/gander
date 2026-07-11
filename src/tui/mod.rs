@@ -22,11 +22,13 @@ mod outline;
 mod render;
 mod revset;
 mod search;
+mod text_layout;
 mod view_options;
 mod walkthroughs;
 mod zen;
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     path::{Path, PathBuf},
@@ -72,11 +74,13 @@ use drafts::DraftListState;
 use editor::CommentEditor;
 use flags::FlagListState;
 use helpers::JjHelperState;
-use keymap::{Action, KeyMap};
+use keymap::{Action, KeyContext, KeyMap};
 use ops::OperationPickerState;
 use outline::SymbolOutlineState;
 use render::{
-    downgrade_diff_theme, draw, inner_bordered, point_in_rect, row_in_inner,
+    comment_editor_inner, diff_cursor_is_visible, downgrade_diff_theme, draw,
+    ensure_diff_cursor_visible, inner_bordered, point_in_rect, reconcile_diff_viewport,
+    row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual, scroll_diff_visual,
     terminal_supports_truecolor, ui_layout,
 };
 use revset::RevsetInputState;
@@ -140,6 +144,9 @@ enum CommentInputTarget {
 
 #[derive(Debug, Default)]
 struct TuiState {
+    diff_layout_cache: RefCell<render::DiffLayoutCache>,
+    help_scroll: usize,
+    terminal_size: ratatui::prelude::Size,
     launch_target: Option<ReviewTarget>,
     diff_drag: Option<DiffDrag>,
     notice: Option<UiNotice>,
@@ -710,6 +717,9 @@ fn run_loop(
             });
         }
 
+        let terminal_size = terminal.size()?;
+        tui_state.terminal_size = terminal_size;
+        resize_comment_editor(mode, terminal_size);
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -757,6 +767,15 @@ fn run_loop(
             Event::Mouse(mouse) => {
                 handle_mouse_event(mouse, terminal.size()?, session, mode, tui_state)
             }
+            Event::Resize(width, height) => {
+                let old_inner = current_diff_inner(session, tui_state);
+                let cursor_was_visible = diff_cursor_is_visible(session, old_inner, tui_state);
+                let size = ratatui::prelude::Size::new(width, height);
+                tui_state.terminal_size = size;
+                resize_comment_editor(mode, size);
+                let new_inner = current_diff_inner(session, tui_state);
+                reconcile_diff_viewport(session, new_inner, cursor_was_visible, tui_state);
+            }
             _ => {}
         }
 
@@ -779,6 +798,14 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn resize_comment_editor(mode: &mut Mode, terminal_size: ratatui::prelude::Size) {
+    let Mode::CommentInput { editor, .. } = mode else {
+        return;
+    };
+    let inner = comment_editor_inner(Rect::new(0, 0, terminal_size.width, terminal_size.height));
+    editor.resize(inner.width as usize, inner.height as usize);
 }
 
 /// Launch the configured review agent (`[agent] command`), agent-agnostic:
@@ -1395,6 +1422,8 @@ fn refresh_current_target(
     previous_fingerprint: &str,
     fingerprint: &str,
 ) {
+    let old_inner = current_diff_inner(session, tui_state);
+    let cursor_was_visible = diff_cursor_is_visible(session, old_inner, tui_state);
     if let Err(error) = review_loader.load_in_place(session, session.target.clone()) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Error,
@@ -1402,6 +1431,12 @@ fn refresh_current_target(
         });
         return;
     }
+    reconcile_diff_viewport(
+        session,
+        current_diff_inner(session, tui_state),
+        cursor_was_visible,
+        tui_state,
+    );
     refresh_identity_chip(review_loader, session, tui_state);
     reapply_agent_overlay(session, review_loader, tui_state);
     let mut events = fingerprint_events(previous_fingerprint, fingerprint);
@@ -1768,23 +1803,35 @@ fn handle_key_event(
                     }
                 }
             }
-            if let Some(action) = keymap.action_for(&key)
+            if let Some(action) = keymap.normal_action_for(&key, session.focus == Focus::Diff)
                 && handle_normal_action(action, session, mode, review_loader, tui_state)?
             {
                 return Ok(true);
             }
         }
-        Mode::Help => {
-            // Any key dismisses the help overlay; it is purely informational.
-            *mode = Mode::Normal;
-        }
+        Mode::Help => match keymap.popup_action_for(KeyContext::Help, &key) {
+            Some(Action::PopupClose | Action::PopupCloseQ | Action::Help) => *mode = Mode::Normal,
+            Some(Action::PopupMoveDown) => {
+                tui_state.help_scroll = tui_state.help_scroll.saturating_add(1)
+            }
+            Some(Action::PopupMoveUp) => {
+                tui_state.help_scroll = tui_state.help_scroll.saturating_sub(1)
+            }
+            _ if key.code == KeyCode::PageDown => {
+                tui_state.help_scroll = tui_state.help_scroll.saturating_add(10)
+            }
+            _ if key.code == KeyCode::PageUp => {
+                tui_state.help_scroll = tui_state.help_scroll.saturating_sub(10)
+            }
+            _ => {}
+        },
         Mode::TargetChooser(chooser) => {
             if handle_target_chooser_key(key, chooser, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
             }
         }
         Mode::RevsetInput(input) => {
-            if handle_revset_input_key(key, input, session, review_loader, tui_state) {
+            if handle_revset_input_key(key, input, session, keymap, review_loader, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1829,26 +1876,24 @@ fn handle_key_event(
             }
         }
         Mode::SymbolOutline(outline) => {
-            if handle_symbol_outline_key(key, outline, session, keymap) {
+            if handle_symbol_outline_key(key, outline, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
         Mode::CommentList(list) => {
-            if key.code == KeyCode::Char('n') {
+            let action = keymap.popup_action_for(KeyContext::CommentList, &key);
+            if action == Some(Action::CommentListNewGeneral) {
                 *mode = Mode::CommentInput {
                     editor: CommentEditor::default(),
                     target: CommentInputTarget::NewGeneral,
                 };
-            } else if key.code == KeyCode::Char('e') {
+            } else if action == Some(Action::EditComment) {
                 if let Some(comment) = list
                     .selected_comment_id(session)
                     .and_then(|id| session.comments.iter().find(|comment| comment.id == id))
                 {
                     *mode = Mode::CommentInput {
-                        editor: CommentEditor {
-                            text: comment.body.clone(),
-                            cursor: comment.body.len(),
-                        },
+                        editor: CommentEditor::new(comment.body.clone()),
                         target: CommentInputTarget::Edit {
                             id: comment.id.clone(),
                         },
@@ -1859,7 +1904,7 @@ fn handle_key_event(
             }
         }
         Mode::ViewOptions(state) => {
-            if handle_view_options_key(key, state, session, keymap) {
+            if handle_view_options_key(key, state, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1888,20 +1933,43 @@ fn handle_normal_action(
 ) -> Result<bool> {
     match action {
         Action::Quit => return Ok(true),
-        Action::Help => *mode = Mode::Help,
+        Action::Help => {
+            tui_state.help_scroll = 0;
+            *mode = Mode::Help;
+        }
         Action::SummonAgent => summon_agent(session, tui_state),
         Action::YankHandoff => yank_handoff(session, tui_state),
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
-            Focus::Diff => session.move_diff_cursor(1),
+            Focus::Diff => {
+                session.move_diff_cursor(1);
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         },
         Action::MoveUp => match session.focus {
             Focus::Files => session.move_selection(-1),
-            Focus::Diff => session.move_diff_cursor(-1),
+            Focus::Diff => {
+                session.move_diff_cursor(-1);
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         },
         Action::ToggleFocus => session.toggle_focus(),
-        Action::DiffTop => session.diff_scroll = 0,
-        Action::DiffBottom => session.scroll_diff_to_bottom(),
+        Action::DiffTop => {
+            session.diff_scroll = 0;
+            session.diff_visual_offset = 0;
+        }
+        Action::DiffBottom => {
+            let inner = current_diff_inner(session, tui_state);
+            scroll_diff_to_bottom_visual(session, inner, tui_state);
+        }
         Action::CompareTrunk => load_review_target(
             review_loader,
             session,
@@ -2033,17 +2101,57 @@ fn handle_normal_action(
                 *mode = Mode::SymbolOutline(outline);
             }
         }
-        Action::NextSymbol => session.jump_to_changed_symbol(1),
-        Action::PreviousSymbol => session.jump_to_changed_symbol(-1),
-        Action::NextChangedHunk => session.jump_to_changed_hunk(1),
-        Action::PreviousChangedHunk => session.jump_to_changed_hunk(-1),
+        Action::NextSymbol => {
+            session.jump_to_changed_symbol(1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
+        Action::PreviousSymbol => {
+            session.jump_to_changed_symbol(-1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
+        Action::NextChangedHunk => {
+            session.jump_to_changed_hunk(1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
+        Action::PreviousChangedHunk => {
+            session.jump_to_changed_hunk(-1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
         Action::CommentList => {
             *mode = Mode::CommentList(CommentListState::default());
         }
-        Action::NextComment => session.move_to_comment(1),
-        Action::PreviousComment => session.move_to_comment(-1),
-        Action::ScrollDown => session.scroll_diff(12),
-        Action::ScrollUp => session.scroll_diff(-12),
+        Action::NextComment => {
+            session.move_to_comment(1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
+        Action::PreviousComment => {
+            session.move_to_comment(-1);
+            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+        }
+        Action::ScrollDown => scroll_diff_visual(
+            session,
+            current_diff_inner(session, tui_state),
+            12,
+            tui_state,
+        ),
+        Action::ScrollUp => scroll_diff_visual(
+            session,
+            current_diff_inner(session, tui_state),
+            -12,
+            tui_state,
+        ),
+        Action::ScrollDiffLeft => scroll_diff_horizontal_visual(
+            session,
+            current_diff_inner(session, tui_state),
+            -4,
+            tui_state,
+        ),
+        Action::ScrollDiffRight => scroll_diff_horizontal_visual(
+            session,
+            current_diff_inner(session, tui_state),
+            4,
+            tui_state,
+        ),
         Action::MarkViewed => session.mark_selected_viewed(),
         Action::ToggleViewed => session.toggle_viewed(),
         Action::MarkAllViewed => session.mark_all_viewed(),
@@ -2064,14 +2172,47 @@ fn handle_normal_action(
                 session.expand_tree_node();
             }
         }
-        Action::ToggleContextFold => session.toggle_context_fold(),
-        Action::ExpandContext => {
-            let step = session.diff_cues.context_step;
-            expand_diff_context(session, review_loader, tui_state, Some(step));
+        Action::ToggleContextFold => {
+            session.toggle_context_fold();
+            reconcile_diff_viewport(
+                session,
+                current_diff_inner(session, tui_state),
+                true,
+                tui_state,
+            );
         }
-        Action::ExpandContextAll => expand_diff_context(session, review_loader, tui_state, None),
+        Action::ExpandContext => {
+            if session.focus == Focus::Diff {
+                let step = session.diff_cues.context_step;
+                expand_diff_context(session, review_loader, tui_state, Some(step));
+                reconcile_diff_viewport(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    true,
+                    tui_state,
+                );
+            }
+        }
+        Action::ExpandContextAll => {
+            if session.focus == Focus::Diff {
+                expand_diff_context(session, review_loader, tui_state, None);
+                reconcile_diff_viewport(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    true,
+                    tui_state,
+                );
+            }
+        }
         Action::CollapseContext => {
-            if !session.collapse_nearest_gap() {
+            if session.focus == Focus::Diff && session.collapse_nearest_gap() {
+                reconcile_diff_viewport(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    true,
+                    tui_state,
+                );
+            } else if session.focus == Focus::Diff {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "no expanded context to collapse here".to_owned(),
@@ -2082,8 +2223,33 @@ fn handle_normal_action(
         Action::ToggleWordHighlight => session.toggle_word_highlight(),
         Action::ToggleLineBackground => session.toggle_line_background(),
         Action::ToggleGutterBar => session.toggle_gutter_bar(),
-        Action::ToggleFilePane => session.toggle_file_pane(),
-        Action::ToggleDiffView => session.toggle_diff_view(),
+        Action::ToggleDiffWrap => {
+            session.toggle_diff_wrap();
+            reconcile_diff_viewport(
+                session,
+                current_diff_inner(session, tui_state),
+                true,
+                tui_state,
+            );
+        }
+        Action::ToggleFilePane => {
+            session.toggle_file_pane();
+            reconcile_diff_viewport(
+                session,
+                current_diff_inner(session, tui_state),
+                true,
+                tui_state,
+            );
+        }
+        Action::ToggleDiffView => {
+            session.toggle_diff_view();
+            reconcile_diff_viewport(
+                session,
+                current_diff_inner(session, tui_state),
+                true,
+                tui_state,
+            );
+        }
         Action::ToggleLargeDiff => session.toggle_large_diff_render(),
         Action::ToggleAgentOrder => {
             session.toggle_agent_order();
@@ -2151,10 +2317,7 @@ fn handle_normal_action(
         Action::EditComment => {
             if let Some(comment) = session.selected_comment() {
                 *mode = Mode::CommentInput {
-                    editor: CommentEditor {
-                        text: comment.body.clone(),
-                        cursor: comment.body.len(),
-                    },
+                    editor: CommentEditor::new(comment.body.clone()),
                     target: CommentInputTarget::Edit {
                         id: comment.id.clone(),
                     },
@@ -2186,9 +2349,50 @@ fn handle_normal_action(
         | Action::InsertNewline
         | Action::DeleteChar
         | Action::TargetPickerMoveDown
-        | Action::TargetPickerMoveUp => {}
+        | Action::TargetPickerMoveUp
+        | Action::PopupMoveDown
+        | Action::PopupMoveUp
+        | Action::PopupSelect
+        | Action::PopupToggle
+        | Action::PopupClose
+        | Action::PopupCloseQ
+        | Action::CommentListNewGeneral
+        | Action::CommentListReady
+        | Action::CommentListCycleIntent
+        | Action::CommentListCycleKind
+        | Action::DraftAccept
+        | Action::DraftEdit
+        | Action::DraftDiscard
+        | Action::WalkthroughDelete
+        | Action::WalkthroughMoveDown
+        | Action::WalkthroughMoveUp
+        | Action::ZenNext
+        | Action::ZenPrevious
+        | Action::ZenToggleView
+        | Action::ZenGlance
+        | Action::ZenArtifact
+        | Action::ZenToggleDetails
+        | Action::ZenRefocus
+        | Action::ZenAcknowledge
+        | Action::ZenArtifactNext
+        | Action::ZenArtifactPrevious => {}
     }
     Ok(false)
+}
+
+fn current_diff_inner(session: &ReviewSession, tui_state: &TuiState) -> Rect {
+    let size = if tui_state.terminal_size.width == 0 || tui_state.terminal_size.height == 0 {
+        ratatui::prelude::Size::new(120, 40)
+    } else {
+        tui_state.terminal_size
+    };
+    inner_bordered(
+        ui_layout(
+            Rect::new(0, 0, size.width, size.height),
+            session.file_pane_visible,
+        )
+        .diff,
+    )
 }
 
 fn ensure_tui_review_session(session: &mut ReviewSession) -> &mut crate::state::ReviewSession {
@@ -2427,23 +2631,23 @@ fn handle_target_chooser_key(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.filter_action_for(KeyContext::TargetChooser, &key) {
         match action {
             Action::TargetPickerMoveDown => chooser.move_selection(1),
             Action::TargetPickerMoveUp => chooser.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(target) = chooser.target() {
+                    load_review_target(review_loader, session, target, tui_state);
+                }
+                return true;
+            }
             _ => {}
         }
         return false;
     }
 
     match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(target) = chooser.target() {
-                load_review_target(review_loader, session, target, tui_state);
-            }
-            true
-        }
         KeyCode::Home => {
             chooser.select_first();
             false
@@ -2472,24 +2676,30 @@ fn handle_revset_input_key(
     key: KeyEvent,
     input: &mut RevsetInputState,
     session: &mut ReviewSession,
+    keymap: &KeyMap,
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
+    match keymap.popup_action_for(KeyContext::RevsetInput, &key) {
+        Some(Action::PopupClose) => return true,
+        Some(Action::PopupSelect) => {
+            return match input.target() {
+                Some(target) => {
+                    load_review_target(review_loader, session, target, tui_state);
+                    true
+                }
+                None => {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: "both base and tip revsets are required".to_owned(),
+                    });
+                    false
+                }
+            };
+        }
+        _ => {}
+    }
     match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => match input.target() {
-            Some(target) => {
-                load_review_target(review_loader, session, target, tui_state);
-                true
-            }
-            None => {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "both base and tip revsets are required".to_owned(),
-                });
-                false
-            }
-        },
         KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
             input.toggle_field();
             false
@@ -2514,47 +2724,29 @@ fn handle_operation_picker_key(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
-    if let Some(action) = keymap.action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::OperationPicker, &key) {
         match action {
-            Action::MoveDown => {
+            Action::PopupMoveDown => {
                 picker.move_selection(1);
                 refresh_operation_picker_preview(picker, session, review_loader);
                 return false;
             }
-            Action::MoveUp => {
+            Action::PopupMoveUp => {
                 picker.move_selection(-1);
                 refresh_operation_picker_preview(picker, session, review_loader);
                 return false;
             }
+            Action::PopupSelect => {
+                if let Some(operation) = picker.selected_operation().cloned() {
+                    apply_incremental_review(review_loader, session, &operation, tui_state);
+                }
+                return true;
+            }
+            Action::PopupClose => return true,
             _ => {}
         }
     }
-
-    if let Some(action) = keymap.target_picker_action_for(&key) {
-        match action {
-            Action::TargetPickerMoveDown => {
-                picker.move_selection(1);
-                refresh_operation_picker_preview(picker, session, review_loader);
-            }
-            Action::TargetPickerMoveUp => {
-                picker.move_selection(-1);
-                refresh_operation_picker_preview(picker, session, review_loader);
-            }
-            _ => {}
-        }
-        return false;
-    }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(operation) = picker.selected_operation().cloned() {
-                apply_incremental_review(review_loader, session, &operation, tui_state);
-            }
-            true
-        }
-        _ => false,
-    }
+    false
 }
 
 fn refresh_operation_picker_preview(
@@ -2654,47 +2846,34 @@ fn handle_jj_helpers_key(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::JjHelpers, &key) {
         match action {
-            Action::TargetPickerMoveDown => state.move_selection(1),
-            Action::TargetPickerMoveUp => state.move_selection(-1),
+            Action::PopupMoveDown => state.move_selection(1),
+            Action::PopupMoveUp => state.move_selection(-1),
+            Action::PopupClose => {
+                if state.confirming {
+                    state.confirming = false;
+                } else {
+                    return true;
+                }
+            }
+            Action::PopupSelect => {
+                if state.selected_option().is_none() {
+                    return true;
+                }
+                if !state.confirming {
+                    state.confirming = true;
+                } else {
+                    let option = state.selected_option().cloned().expect("checked above");
+                    run_jj_helper(review_loader, session, &option, tui_state);
+                    return true;
+                }
+            }
             _ => {}
         }
         return false;
     }
-
-    match key.code {
-        // Esc dismisses one layer: the confirmation first, then the popup.
-        KeyCode::Esc => {
-            if state.confirming {
-                state.confirming = false;
-                false
-            } else {
-                true
-            }
-        }
-        KeyCode::Enter => {
-            if state.selected_option().is_none() {
-                return true;
-            }
-            if !state.confirming {
-                state.confirming = true;
-                return false;
-            }
-            let option = state.selected_option().cloned().expect("checked above");
-            run_jj_helper(review_loader, session, &option, tui_state);
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.move_selection(-1);
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 /// Run a confirmed jj helper command and reload the current target so the
@@ -2737,22 +2916,29 @@ fn handle_view_options_key(
     state: &mut ViewOptionsState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    tui_state: &TuiState,
 ) -> bool {
     // The popup's own binding closes it, so `V` toggles the popup.
-    if keymap.action_for(&key) == Some(Action::ViewOptions) {
+    if keymap.normal_action_for(&key, true) == Some(Action::ViewOptions) {
         return true;
     }
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => true,
-        KeyCode::Enter | KeyCode::Char(' ') => {
+    match keymap.popup_action_for(KeyContext::ViewOptions, &key) {
+        Some(Action::PopupClose | Action::PopupCloseQ) => true,
+        Some(Action::PopupSelect | Action::PopupToggle) => {
             state.selected_option().toggle(session);
+            reconcile_diff_viewport(
+                session,
+                current_diff_inner(session, tui_state),
+                true,
+                tui_state,
+            );
             false
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        Some(Action::PopupMoveDown) => {
             state.move_selection(1);
             false
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        Some(Action::PopupMoveUp) => {
             state.move_selection(-1);
             false
         }
@@ -2766,33 +2952,22 @@ fn handle_flag_list_key(
     session: &mut ReviewSession,
     keymap: &KeyMap,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::FlagList, &key) {
         match action {
-            Action::TargetPickerMoveDown => list.move_selection(1),
-            Action::TargetPickerMoveUp => list.move_selection(-1),
+            Action::PopupMoveDown => list.move_selection(1),
+            Action::PopupMoveUp => list.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(flag) = list.selected_flag().cloned() {
+                    session.jump_to_flag(&flag);
+                }
+                return true;
+            }
             _ => {}
         }
         return false;
     }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(flag) = list.selected_flag().cloned() {
-                session.jump_to_flag(&flag);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            list.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            list.move_selection(-1);
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 /// What the zen layer decided about a key press.
@@ -2860,24 +3035,24 @@ fn handle_zen_key(
         return handle_zen_glance_key(key, zen, session, keymap, review_loader, tui_state);
     }
     if let zen::ZenPhase::Artifact { index, scroll } = zen.phase {
-        return handle_zen_artifact_key(key, zen, index, scroll);
+        return handle_zen_artifact_key(key, zen, index, scroll, keymap);
     }
-    match key.code {
-        KeyCode::Esc => {
-            // Esc peels layers in order: an active range selection is more
-            // transient than the walkthrough, so cancel it first.
-            if session.has_active_diff_range() {
-                return ZenKeyOutcome::Fallthrough;
-            }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "zen ended".to_owned(),
-            });
-            return ZenKeyOutcome::End {
-                restore_target: true,
-            };
+    if key.code == KeyCode::Esc {
+        // Esc peels layers in order: an active range selection is more
+        // transient than the walkthrough, so cancel it first.
+        if session.has_active_diff_range() {
+            return ZenKeyOutcome::Fallthrough;
         }
-        KeyCode::Enter | KeyCode::Char('n') | KeyCode::Right | KeyCode::Char(' ') => {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "zen ended".to_owned(),
+        });
+        return ZenKeyOutcome::End {
+            restore_target: true,
+        };
+    }
+    match keymap.action_for_context(KeyContext::ZenFocus, &key) {
+        Some(Action::ZenNext) => {
             let Some(stop) = zen.current().cloned() else {
                 return ZenKeyOutcome::End {
                     restore_target: true,
@@ -2911,7 +3086,7 @@ fn handle_zen_key(
                 restore_target: true,
             };
         }
-        KeyCode::Char('p') | KeyCode::Left => {
+        Some(Action::ZenPrevious) => {
             if zen.back()
                 && let Some(stop) = zen.current().cloned()
                 && !zen_goto_stop(review_loader, session, zen, &stop, tui_state)
@@ -2920,14 +3095,14 @@ fn handle_zen_key(
             }
             return ZenKeyOutcome::Consumed;
         }
-        KeyCode::Tab => {
+        Some(Action::ZenToggleView) => {
             zen.phase = match zen.phase {
                 zen::ZenPhase::Focus => zen::ZenPhase::Reading,
                 _ => zen::ZenPhase::Focus,
             };
             return ZenKeyOutcome::Consumed;
         }
-        KeyCode::Char('.') => {
+        Some(Action::ZenRefocus) => {
             // Refocus: snap the cursor/scroll back to the current stop after
             // wandering off it with line navigation.
             if let Some(stop) = zen.current().cloned() {
@@ -2935,7 +3110,7 @@ fn handle_zen_key(
             }
             return ZenKeyOutcome::Consumed;
         }
-        KeyCode::Char('g') if zen.phase == zen::ZenPhase::Focus => {
+        Some(Action::ZenGlance) if zen.phase == zen::ZenPhase::Focus => {
             if zen.has_glance() {
                 zen.phase = zen::ZenPhase::Glance;
             } else {
@@ -2946,7 +3121,7 @@ fn handle_zen_key(
             }
             return ZenKeyOutcome::Consumed;
         }
-        KeyCode::Char('e') if zen.phase == zen::ZenPhase::Focus => {
+        Some(Action::ZenArtifact) if zen.phase == zen::ZenPhase::Focus => {
             let artifacts = zen
                 .current()
                 .map(|stop| zen::stop_artifacts(stop).len())
@@ -2964,7 +3139,7 @@ fn handle_zen_key(
             }
             return ZenKeyOutcome::Consumed;
         }
-        KeyCode::Char('d')
+        Some(Action::ZenToggleDetails)
             if zen.phase == zen::ZenPhase::Focus
                 && matches!(zen.current(), Some(zen::ZenStop::Chapter(_))) =>
         {
@@ -2975,7 +3150,7 @@ fn handle_zen_key(
         _ => {}
     }
     // Pressing the zen key again also ends the walkthrough.
-    if keymap.action_for(&key) == Some(Action::Zen) {
+    if keymap.normal_action_for(&key, true) == Some(Action::Zen) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
             message: "zen ended".to_owned(),
@@ -3000,16 +3175,16 @@ fn handle_zen_glance_key(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> ZenKeyOutcome {
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
+    match keymap.popup_action_for(KeyContext::ZenGlance, &key) {
+        Some(Action::PopupMoveDown) => {
             zen.move_glance_selection(1);
             ZenKeyOutcome::Consumed
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        Some(Action::PopupMoveUp) => {
             zen.move_glance_selection(-1);
             ZenKeyOutcome::Consumed
         }
-        KeyCode::Enter => {
+        Some(Action::PopupSelect) => {
             if let Some(row) = zen.selected_glance().cloned()
                 && let Some(part) = &row.part
             {
@@ -3041,7 +3216,7 @@ fn handle_zen_glance_key(
                 restore_target: false,
             }
         }
-        KeyCode::Char('a') => {
+        Some(Action::ZenAcknowledge) => {
             zen::mark_glance_viewed(session, zen);
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
@@ -3054,14 +3229,14 @@ fn handle_zen_glance_key(
                 restore_target: true,
             }
         }
-        KeyCode::Char('p') | KeyCode::Left => {
+        Some(Action::ZenPrevious) => {
             zen.phase = zen::ZenPhase::Focus;
             if let Some(stop) = zen.current().cloned() {
                 zen_goto_stop(review_loader, session, zen, &stop, tui_state);
             }
             ZenKeyOutcome::Consumed
         }
-        KeyCode::Esc => {
+        Some(Action::PopupClose) => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "zen ended".to_owned(),
@@ -3071,7 +3246,7 @@ fn handle_zen_glance_key(
             }
         }
         _ => {
-            if keymap.action_for(&key) == Some(Action::Zen) {
+            if keymap.normal_action_for(&key, true) == Some(Action::Zen) {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "zen ended".to_owned(),
@@ -3096,6 +3271,7 @@ fn handle_zen_artifact_key(
     zen: &mut ZenState,
     index: usize,
     scroll: u16,
+    keymap: &KeyMap,
 ) -> ZenKeyOutcome {
     let count = zen
         .current()
@@ -3105,29 +3281,31 @@ fn handle_zen_artifact_key(
         zen.phase = zen::ZenPhase::Focus;
         return ZenKeyOutcome::Consumed;
     }
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('q') => {
+    match keymap.popup_action_for(KeyContext::ZenArtifact, &key) {
+        Some(
+            Action::PopupClose | Action::PopupCloseQ | Action::PopupSelect | Action::ZenArtifact,
+        ) => {
             zen.phase = zen::ZenPhase::Focus;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        Some(Action::PopupMoveDown) => {
             zen.phase = zen::ZenPhase::Artifact {
                 index,
                 scroll: scroll.saturating_add(1),
             };
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        Some(Action::PopupMoveUp) => {
             zen.phase = zen::ZenPhase::Artifact {
                 index,
                 scroll: scroll.saturating_sub(1),
             };
         }
-        KeyCode::Char('l') | KeyCode::Right | KeyCode::Tab => {
+        Some(Action::ZenArtifactNext) => {
             zen.phase = zen::ZenPhase::Artifact {
                 index: (index + 1) % count,
                 scroll: 0,
             };
         }
-        KeyCode::Char('h') | KeyCode::Left => {
+        Some(Action::ZenArtifactPrevious) => {
             zen.phase = zen::ZenPhase::Artifact {
                 index: index.checked_sub(1).unwrap_or(count - 1),
                 scroll: 0,
@@ -3146,35 +3324,23 @@ fn handle_draft_list_key(
     keymap: &KeyMap,
     tui_state: &mut TuiState,
 ) -> Option<Mode> {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
-        match action {
-            Action::TargetPickerMoveDown => list.move_selection(1),
-            Action::TargetPickerMoveUp => list.move_selection(-1),
-            _ => {}
-        }
-        return None;
-    }
-
-    match key.code {
-        KeyCode::Esc => Some(Mode::Normal),
-        KeyCode::Enter | KeyCode::Char('a') => {
+    match keymap.popup_action_for(KeyContext::DraftList, &key) {
+        Some(Action::PopupClose) => Some(Mode::Normal),
+        Some(Action::DraftAccept) => {
             let draft = list.selected_draft().cloned()?;
             if accept_agent_draft(session, tui_state, &draft.id, None) && list.remove(&draft.id) {
                 return Some(Mode::Normal);
             }
             None
         }
-        KeyCode::Char('e') => {
+        Some(Action::DraftEdit) => {
             let draft = list.selected_draft().cloned()?;
             Some(Mode::CommentInput {
-                editor: CommentEditor {
-                    cursor: draft.body.len(),
-                    text: draft.body,
-                },
+                editor: CommentEditor::new(draft.body),
                 target: CommentInputTarget::AcceptDraft { id: draft.id },
             })
         }
-        KeyCode::Char('x') => {
+        Some(Action::DraftDiscard) => {
             let draft = list.selected_draft().cloned()?;
             session.discard_agent_draft(&draft.id);
             persist_draft_disposition(session, tui_state, &draft.id);
@@ -3187,11 +3353,11 @@ fn handle_draft_list_key(
             }
             None
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        Some(Action::PopupMoveDown) => {
             list.move_selection(1);
             None
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        Some(Action::PopupMoveUp) => {
             list.move_selection(-1);
             None
         }
@@ -3279,23 +3445,23 @@ fn handle_file_search_key(
     session: &mut ReviewSession,
     keymap: &KeyMap,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.filter_action_for(KeyContext::FileSearch, &key) {
         match action {
             Action::TargetPickerMoveDown => search.move_selection(1),
             Action::TargetPickerMoveUp => search.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(file_index) = search.selected_file_index() {
+                    session.jump_to_file(file_index);
+                }
+                return true;
+            }
             _ => {}
         }
         return false;
     }
 
     match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(file_index) = search.selected_file_index() {
-                session.jump_to_file(file_index);
-            }
-            true
-        }
         KeyCode::Backspace => {
             search.pop_query_char();
             false
@@ -3313,34 +3479,29 @@ fn handle_symbol_outline_key(
     outline: &mut SymbolOutlineState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    tui_state: &TuiState,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::SymbolOutline, &key) {
         match action {
-            Action::TargetPickerMoveDown => outline.move_selection(1),
-            Action::TargetPickerMoveUp => outline.move_selection(-1),
+            Action::PopupMoveDown => outline.move_selection(1),
+            Action::PopupMoveUp => outline.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(row_index) = outline.selected_row_index() {
+                    session.jump_to_diff_row(row_index);
+                    ensure_diff_cursor_visible(
+                        session,
+                        current_diff_inner(session, tui_state),
+                        tui_state,
+                    );
+                }
+                return true;
+            }
             _ => {}
         }
         return false;
     }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(row_index) = outline.selected_row_index() {
-                session.jump_to_diff_row(row_index);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            outline.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            outline.move_selection(-1);
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 fn handle_comment_list_key(
@@ -3350,91 +3511,83 @@ fn handle_comment_list_key(
     keymap: &KeyMap,
     tui_state: &mut TuiState,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::CommentList, &key) {
         match action {
-            Action::TargetPickerMoveDown => list.move_selection(1, session),
-            Action::TargetPickerMoveUp => list.move_selection(-1, session),
+            Action::PopupMoveDown => list.move_selection(1, session),
+            Action::PopupMoveUp => list.move_selection(-1, session),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(id) = list.selected_comment_id(session)
+                    && session
+                        .comments
+                        .iter()
+                        .find(|comment| comment.id == id)
+                        .is_some_and(|comment| comment.is_located())
+                {
+                    session.select_comment_by_id(&id);
+                    ensure_diff_cursor_visible(
+                        session,
+                        current_diff_inner(session, tui_state),
+                        tui_state,
+                    );
+                }
+                return true;
+            }
+            Action::CycleCommentState => {
+                if let Some(id) = list.selected_comment_id(session)
+                    && let Some(state) = session.cycle_comment_state(&id)
+                {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: format!("comment marked {}", state.label()),
+                    });
+                }
+            }
+            Action::CommentListReady => {
+                let result = session.ready_all_draft_comments();
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: format!("readied {} draft comment(s)", result.readied),
+                });
+            }
+            Action::CommentListCycleIntent => {
+                if let Some(id) = list.selected_comment_id(session)
+                    && let Some(action) = session.cycle_comment_action(&id)
+                {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: format!(
+                            "comment action {}",
+                            action.map_or("none", action_intent_label)
+                        ),
+                    });
+                }
+            }
+            Action::CommentListCycleKind => {
+                if let Some(id) = list.selected_comment_id(session)
+                    && let Some(kind) = session.cycle_comment_kind(&id)
+                {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: format!(
+                            "comment kind {}",
+                            kind.map_or("none", comment_kind_label)
+                        ),
+                    });
+                }
+            }
+            Action::DeleteComment => {
+                if let Some(id) = list.selected_comment_id(session) {
+                    session.delete_comment(&id);
+                    tui_state.state_tombstones.comments.insert(id);
+                    list.clamp(session);
+                }
+            }
             _ => {}
         }
         return false;
     }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(id) = list.selected_comment_id(session)
-                && session
-                    .comments
-                    .iter()
-                    .find(|comment| comment.id == id)
-                    .is_some_and(|comment| comment.is_located())
-            {
-                session.select_comment_by_id(&id);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            list.move_selection(1, session);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            list.move_selection(-1, session);
-            false
-        }
-        KeyCode::Char('s') => {
-            if let Some(id) = list.selected_comment_id(session)
-                && let Some(state) = session.cycle_comment_state(&id)
-            {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: format!("comment marked {}", state.label()),
-                });
-            }
-            false
-        }
-        KeyCode::Char('R') => {
-            let result = session.ready_all_draft_comments();
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: format!("readied {} draft comment(s)", result.readied),
-            });
-            false
-        }
-        KeyCode::Char('a') => {
-            if let Some(id) = list.selected_comment_id(session)
-                && let Some(action) = session.cycle_comment_action(&id)
-            {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: format!(
-                        "comment action {}",
-                        action.map_or("none", action_intent_label)
-                    ),
-                });
-            }
-            false
-        }
-        KeyCode::Char('K') => {
-            if let Some(id) = list.selected_comment_id(session)
-                && let Some(kind) = session.cycle_comment_kind(&id)
-            {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: format!("comment kind {}", kind.map_or("none", comment_kind_label)),
-                });
-            }
-            false
-        }
-        KeyCode::Char('x') => {
-            if let Some(id) = list.selected_comment_id(session) {
-                session.delete_comment(&id);
-                tui_state.state_tombstones.comments.insert(id);
-                list.clamp(session);
-            }
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 fn action_intent_label(action: crate::state::ActionIntent) -> &'static str {
@@ -3462,33 +3615,22 @@ fn handle_open_work_key(
     session: &mut ReviewSession,
     keymap: &KeyMap,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::OpenWork, &key) {
         match action {
-            Action::TargetPickerMoveDown => list.move_selection(1),
-            Action::TargetPickerMoveUp => list.move_selection(-1),
+            Action::PopupMoveDown => list.move_selection(1),
+            Action::PopupMoveUp => list.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(row) = list.selected_row().cloned() {
+                    enter_open_work_row(session, &row);
+                }
+                return true;
+            }
             _ => {}
         }
         return false;
     }
-
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(row) = list.selected_row().cloned() {
-                enter_open_work_row(session, &row);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            list.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            list.move_selection(-1);
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 fn enter_open_work_row(session: &mut ReviewSession, row: &OpenWorkRow) {
@@ -3538,42 +3680,31 @@ fn handle_activity_key(
     tui_state: &mut TuiState,
 ) -> bool {
     let len = tui_state.activity.len();
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::Activity, &key) {
         match action {
-            Action::TargetPickerMoveDown => list.move_selection(1, len),
-            Action::TargetPickerMoveUp => list.move_selection(-1, len),
+            Action::PopupMoveDown => list.move_selection(1, len),
+            Action::PopupMoveUp => list.move_selection(-1, len),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(event) = tui_state.activity.iter().rev().nth(list.selected)
+                    && let Some(index) = session
+                        .files
+                        .iter()
+                        .position(|file| event.message.starts_with(&file.path))
+                {
+                    session.select_file_index(index);
+                    return true;
+                }
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no file target for this event".to_owned(),
+                });
+            }
             _ => {}
         }
         return false;
     }
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Char('j') | KeyCode::Char('n') | KeyCode::Down | KeyCode::Right => {
-            list.move_selection(1, len);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Char('e') | KeyCode::Up | KeyCode::Left => {
-            list.move_selection(-1, len);
-            false
-        }
-        KeyCode::Enter => {
-            if let Some(event) = tui_state.activity.iter().rev().nth(list.selected)
-                && let Some(index) = session
-                    .files
-                    .iter()
-                    .position(|file| event.message.starts_with(&file.path))
-            {
-                session.select_file_index(index);
-                return true;
-            }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "no file target for this event".to_owned(),
-            });
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 fn handle_walkthrough_list_key(
@@ -3583,57 +3714,44 @@ fn handle_walkthrough_list_key(
     keymap: &KeyMap,
     tui_state: &mut TuiState,
 ) -> bool {
-    if let Some(action) = keymap.target_picker_action_for(&key) {
+    if let Some(action) = keymap.popup_action_for(KeyContext::WalkthroughList, &key) {
         match action {
-            Action::TargetPickerMoveDown => list.move_selection(1),
-            Action::TargetPickerMoveUp => list.move_selection(-1),
+            Action::PopupMoveDown => list.move_selection(1),
+            Action::PopupMoveUp => list.move_selection(-1),
+            Action::PopupClose => return true,
+            Action::PopupSelect => {
+                if let Some(step) = selected_walkthrough_step(session, list).cloned() {
+                    jump_to_walkthrough_step(session, &step);
+                }
+                return true;
+            }
+            Action::WalkthroughDelete => {
+                if let Some(id) = list.selected_step_id().map(str::to_owned) {
+                    if let Some(durable) = session.sessions.iter_mut().find(|s| {
+                        s.walkthroughs
+                            .iter()
+                            .any(|w| w.steps.iter().any(|step| step.id == id))
+                    }) {
+                        let _ = review::remove_walkthrough_step(durable, &id);
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: "deleted walkthrough step".to_owned(),
+                        });
+                    }
+                    list.refresh(session);
+                }
+                return list.step_ids.is_empty();
+            }
+            Action::WalkthroughMoveDown => {
+                move_selected_walkthrough_step(session, list, 1);
+            }
+            Action::WalkthroughMoveUp => {
+                move_selected_walkthrough_step(session, list, -1);
+            }
             _ => {}
         }
-        return false;
     }
-    match key.code {
-        KeyCode::Esc => true,
-        KeyCode::Enter => {
-            if let Some(step) = selected_walkthrough_step(session, list).cloned() {
-                jump_to_walkthrough_step(session, &step);
-            }
-            true
-        }
-        KeyCode::Char('j') | KeyCode::Down => {
-            list.move_selection(1);
-            false
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            list.move_selection(-1);
-            false
-        }
-        KeyCode::Char('d') => {
-            if let Some(id) = list.selected_step_id().map(str::to_owned) {
-                if let Some(durable) = session.sessions.iter_mut().find(|s| {
-                    s.walkthroughs
-                        .iter()
-                        .any(|w| w.steps.iter().any(|step| step.id == id))
-                }) {
-                    let _ = review::remove_walkthrough_step(durable, &id);
-                    tui_state.notice = Some(UiNotice {
-                        level: UiNoticeLevel::Info,
-                        message: "deleted walkthrough step".to_owned(),
-                    });
-                }
-                list.refresh(session);
-            }
-            list.step_ids.is_empty()
-        }
-        KeyCode::Char('J') => {
-            move_selected_walkthrough_step(session, list, 1);
-            false
-        }
-        KeyCode::Char('K') => {
-            move_selected_walkthrough_step(session, list, -1);
-            false
-        }
-        _ => false,
-    }
+    false
 }
 
 fn selected_walkthrough_step<'a>(
@@ -3859,10 +3977,10 @@ fn handle_mouse_event(
             handle_left_up(session, mode, tui_state);
         }
         MouseEventKind::ScrollDown if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-            session.scroll_diff(3);
+            scroll_diff_visual(session, inner_bordered(layout.diff), 3, tui_state);
         }
         MouseEventKind::ScrollUp if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-            session.scroll_diff(-3);
+            scroll_diff_visual(session, inner_bordered(layout.diff), -3, tui_state);
         }
         _ => {}
     }
@@ -3907,7 +4025,7 @@ fn handle_zen_mouse_event(
                 true
             }
             zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-                session.scroll_diff(3);
+                scroll_diff_visual(session, inner_bordered(layout.diff), 3, tui_state);
                 true
             }
             _ => false,
@@ -3932,7 +4050,7 @@ fn handle_zen_mouse_event(
                 true
             }
             zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-                session.scroll_diff(-3);
+                scroll_diff_visual(session, inner_bordered(layout.diff), -3, tui_state);
                 true
             }
             _ => false,
@@ -3961,13 +4079,15 @@ fn handle_left_down(
     let diff_inner = inner_bordered(layout.diff);
     if point_in_rect(x, y, diff_inner)
         && let Some(visible_row) = row_in_inner(y, diff_inner)
+        && let Some(row_index) =
+            render::diff_row_at_point(session, diff_inner, x, visible_row, tui_state)
     {
-        let row_index = session.diff_scroll as usize + visible_row;
         session.clear_diff_range_selection();
         session.select_diff_row(row_index);
+        let normalized = session.diff_cursor;
         tui_state.diff_drag = Some(DiffDrag {
-            start_row: row_index,
-            current_row: row_index,
+            start_row: normalized,
+            current_row: normalized,
             saw_drag: false,
         });
     }
@@ -3980,16 +4100,22 @@ fn handle_left_drag(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
 ) {
-    let Some(drag) = tui_state.diff_drag.as_mut() else {
+    let Some(start_row) = tui_state.diff_drag.as_ref().map(|drag| drag.start_row) else {
         return;
     };
     let diff_inner = inner_bordered(layout.diff);
     if point_in_rect(x, y, diff_inner)
         && let Some(visible_row) = row_in_inner(y, diff_inner)
+        && let Some(row_index) =
+            render::diff_row_at_point(session, diff_inner, x, visible_row, tui_state)
     {
-        drag.current_row = session.diff_scroll as usize + visible_row;
-        drag.saw_drag = true;
-        session.set_diff_range_selection(drag.start_row, drag.current_row);
+        session.select_diff_row(row_index);
+        let normalized = session.diff_cursor;
+        if let Some(drag) = tui_state.diff_drag.as_mut() {
+            drag.current_row = normalized;
+            drag.saw_drag = true;
+        }
+        session.set_diff_range_selection(start_row, normalized);
     }
 }
 
@@ -4654,10 +4780,7 @@ mod tests {
         };
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut mode = Mode::CommentInput {
-            editor: CommentEditor {
-                text: "observed".into(),
-                cursor: "observed".len(),
-            },
+            editor: CommentEditor::new("observed".into()),
             target: CommentInputTarget::New,
         };
 
@@ -4840,7 +4963,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_editor_can_update_existing_comment() {
+    fn comment_editor_can_open_reflow_and_update_an_existing_long_comment() {
         let mut session = snapshot_session(
             r#"diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -4850,24 +4973,48 @@ mod tests {
 +new
 "#,
         );
-        session.add_comment("old body".into());
+        let original = "first long line with 界 and e\u{301}\nsecond line\ntrailing 👩🏽‍💻";
+        session.add_comment(original.into());
         let id = session.comments[0].id.clone();
-        let mut editor = CommentEditor {
-            text: "new body".to_owned(),
-            cursor: "new body".len(),
+        session.move_to_comment(1);
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
         };
-        let target = CommentInputTarget::Edit { id };
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState::default();
+
+        assert!(
+            !handle_normal_action(
+                Action::EditComment,
+                &mut session,
+                &mut mode,
+                &loader,
+                &mut tui_state,
+            )
+            .unwrap()
+        );
+        let Mode::CommentInput { editor, target } = &mut mode else {
+            panic!("expected existing comment editor");
+        };
+        assert_eq!(target, &CommentInputTarget::Edit { id: id.clone() });
+        assert_eq!(editor.text, original);
+        editor.resize(8, 3);
+        assert!(editor.visible_scroll(8, 3) > 0);
+        editor.insert_char('!');
 
         assert!(handle_comment_action(
             Action::SubmitComment,
             &mut session,
-            &mut editor,
-            &target,
-            &mut TuiState::default(),
+            editor,
+            target,
+            &mut tui_state,
         ));
 
         assert_eq!(session.comments.len(), 1);
-        assert_eq!(session.comments[0].body, "new body");
+        assert_eq!(session.comments[0].body, format!("{original}!"));
     }
 
     #[test]
@@ -4880,12 +5027,14 @@ mod tests {
             jj: &backend,
         };
         let mut tui_state = TuiState::default();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut input = RevsetInputState::new("", "");
         for ch in "ancestors(@, 2)".chars() {
             assert!(!handle_revset_input_key(
                 KeyEvent::from(KeyCode::Char(ch)),
                 &mut input,
                 &mut session,
+                &keymap,
                 &loader,
                 &mut tui_state,
             ));
@@ -4896,6 +5045,7 @@ mod tests {
                 KeyEvent::from(KeyCode::Char(ch)),
                 &mut input,
                 &mut session,
+                &keymap,
                 &loader,
                 &mut tui_state,
             );
@@ -4905,6 +5055,7 @@ mod tests {
             KeyEvent::from(KeyCode::Enter),
             &mut input,
             &mut session,
+            &keymap,
             &loader,
             &mut tui_state,
         ));
@@ -4926,12 +5077,14 @@ mod tests {
             jj: &backend,
         };
         let mut tui_state = TuiState::default();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut input = RevsetInputState::new("", "@");
 
         assert!(!handle_revset_input_key(
             KeyEvent::from(KeyCode::Enter),
             &mut input,
             &mut session,
+            &keymap,
             &loader,
             &mut tui_state,
         ));
@@ -4940,6 +5093,39 @@ mod tests {
         let notice = tui_state.notice.unwrap();
         assert_eq!(notice.level, UiNoticeLevel::Info);
         assert!(notice.message.contains("required"));
+    }
+
+    #[test]
+    fn text_filter_accepts_literal_j_k_and_uses_safe_movement_keys() {
+        let mut session = snapshot_session(
+            "diff --git a/jk.txt b/jk.txt\n--- a/jk.txt\n+++ b/jk.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut search = FileSearchState::new(&session);
+
+        assert!(!handle_file_search_key(
+            KeyEvent::from(KeyCode::Char('j')),
+            &mut search,
+            &mut session,
+            &keymap,
+        ));
+        assert!(!handle_file_search_key(
+            KeyEvent::from(KeyCode::Char('k')),
+            &mut search,
+            &mut session,
+            &keymap,
+        ));
+        assert_eq!(search.query, "jk");
+
+        search.query.clear();
+        search.filtered = (0..search.files.len()).collect();
+        assert!(!handle_file_search_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            &mut search,
+            &mut session,
+            &keymap,
+        ));
+        assert_eq!(search.query, "");
     }
 
     fn stack_change(id: &str, description: &str) -> JjChangeSummary {
@@ -5253,10 +5439,8 @@ diff --git a/changed.rs b/changed.rs
         };
         let mut tui_state = TuiState::default();
         let config = KeybindingsConfig {
-            move_down: vec!["n".to_owned()],
-            move_up: vec!["e".to_owned()],
-            target_picker_down: vec!["ctrl-j".to_owned()],
-            target_picker_up: vec!["ctrl-k".to_owned()],
+            popup_move_down: vec!["alt-n".to_owned()],
+            popup_move_up: vec!["alt-e".to_owned()],
             ..Default::default()
         };
         let keymap = KeyMap::try_from(&config).unwrap();
@@ -5268,7 +5452,7 @@ diff --git a/changed.rs b/changed.rs
         let mut picker = OperationPickerState::new(vec![op("one"), op("two"), op("three")]);
 
         assert!(!handle_operation_picker_key(
-            KeyEvent::from(KeyCode::Char('n')),
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
             &mut picker,
             &mut session,
             &keymap,
@@ -5288,7 +5472,7 @@ diff --git a/changed.rs b/changed.rs
         assert_eq!(picker.selected, 2);
 
         assert!(!handle_operation_picker_key(
-            KeyEvent::from(KeyCode::Char('e')),
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
             &mut picker,
             &mut session,
             &keymap,
@@ -6399,6 +6583,174 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn wrapped_diff_mouse_continuations_and_wheel_use_visual_rows() {
+        let long = "long unicode 界e\u{301} 👨‍👩‍👧‍👦 ".repeat(12);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.file_pane_visible = false;
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = owner as u16;
+        let size = ratatui::prelude::Size::new(60, 8);
+        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), false);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+
+        // The second terminal row is a continuation of the same logical row.
+        handle_left_down(
+            inner.x + 12,
+            inner.y + 1,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+        assert_eq!(session.diff_cursor, owner);
+        assert_eq!(tui_state.diff_drag.unwrap().start_row, owner);
+
+        let mut mode = Mode::Normal;
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: inner.x + 12,
+                row: inner.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(session.diff_scroll as usize, owner);
+        assert!(session.diff_visual_offset > 0);
+    }
+
+    #[test]
+    fn split_mouse_hit_testing_selects_the_clicked_logical_side() {
+        let removed = "removed side ".repeat(10);
+        let added = "added side ".repeat(10);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-{removed}\n+{added}\n"
+        ));
+        session.toggle_diff_view();
+        session.file_pane_visible = false;
+        let rows = session.diff_rows_for_selected_file();
+        let left = rows.iter().position(|row| row.text == removed).unwrap();
+        let right = rows.iter().position(|row| row.text == added).unwrap();
+        session.diff_scroll = left as u16;
+        let size = ratatui::prelude::Size::new(130, 6);
+        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), false);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+
+        handle_left_down(
+            inner.x + 10,
+            inner.y + 1,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+        assert_eq!(session.diff_cursor, left);
+        handle_left_down(
+            inner.x + inner.width - 10,
+            inner.y + 1,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+        assert_eq!(session.diff_cursor, right);
+    }
+
+    #[test]
+    fn dragging_within_wrapped_row_keeps_logical_range_single_line() {
+        let long = "same logical row ".repeat(20);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.file_pane_visible = false;
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = owner as u16;
+        let layout = ui_layout(Rect::new(0, 0, 60, 7), false);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+
+        handle_left_down(inner.x + 10, inner.y, layout, &mut session, &mut tui_state);
+        handle_left_drag(
+            inner.x + 10,
+            inner.y + 2,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+
+        assert_eq!(session.diff_cursor, owner);
+        assert_eq!(session.diff_range_bounds(), Some((owner, owner)));
+        assert_eq!(tui_state.diff_drag.unwrap().current_row, owner);
+    }
+
+    #[test]
+    fn mouse_drag_start_uses_normalized_commentable_cursor() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.file_pane_visible = false;
+        let rows = session.diff_rows_for_selected_file();
+        let hunk = rows
+            .iter()
+            .position(|row| matches!(row.kind, crate::app::DiffRowKind::HunkHeader))
+            .unwrap();
+        let layout = ui_layout(Rect::new(0, 0, 80, 12), false);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+
+        handle_left_down(
+            inner.x + 2,
+            inner.y + hunk as u16,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+
+        let drag = tui_state.diff_drag.unwrap();
+        assert_eq!(drag.start_row, session.diff_cursor);
+        assert!(rows[drag.start_row].anchor.is_some());
+        assert_ne!(drag.start_row, hunk);
+    }
+
+    #[test]
+    fn blank_split_continuation_does_not_start_mouse_drag() {
+        let removed = "long removed side ".repeat(20);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-{removed}\n+short\n"
+        ));
+        session.toggle_diff_view();
+        session.file_pane_visible = false;
+        let rows = session.diff_rows_for_selected_file();
+        let left = rows.iter().position(|row| row.text == removed).unwrap();
+        session.diff_scroll = left as u16;
+        let layout = ui_layout(Rect::new(0, 0, 130, 8), false);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+
+        handle_left_down(
+            inner.x + inner.width - 4,
+            inner.y + 1,
+            layout,
+            &mut session,
+            &mut tui_state,
+        );
+
+        assert!(tui_state.diff_drag.is_none());
+    }
+
+    #[test]
     fn zen_e_without_artifacts_notices_instead_of_opening() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
@@ -6905,6 +7257,111 @@ diff --git a/c.rs b/c.rs
             rows.iter()
                 .any(|row| matches!(row.kind, crate::app::DiffRowKind::ExpandGap { .. }))
         );
+    }
+
+    #[test]
+    fn context_expansion_reconciles_measured_cursor_visibility() {
+        let mut session = snapshot_session(CONTEXT_EXPANSION_DIFF);
+        session.toggle_focus();
+        let cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "line 12")
+            .unwrap();
+        session.select_diff_row(cursor);
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.file_contents = Some((1..=20).map(|n| format!("line {n}\n")).collect());
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(60, 8),
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::ExpandContext,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].text,
+            "line 12"
+        );
+        assert!(diff_cursor_is_visible(
+            &session,
+            current_diff_inner(&session, &tui_state),
+            &tui_state,
+        ));
+    }
+
+    #[test]
+    fn context_actions_are_inert_while_files_have_focus() {
+        let mut session = snapshot_session(CONTEXT_EXPANSION_DIFF);
+        let mut backend = MockJjBackend::with_diff(Ok(String::new()));
+        backend.file_contents = Some((1..=20).map(|n| format!("line {n}\n")).collect());
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Normal;
+
+        for action in [
+            Action::ExpandContext,
+            Action::ExpandContextAll,
+            Action::CollapseContext,
+        ] {
+            handle_normal_action(action, &mut session, &mut mode, &loader, &mut tui_state).unwrap();
+        }
+
+        assert!(!session.has_file_contents_entry("a.txt"));
+        assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn help_scroll_keys_do_not_close_until_escape() {
+        let mut session = snapshot_session("");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+        let mut mode = Mode::Help;
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('j')),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::Help));
+        assert_eq!(tui_state.help_scroll, 1);
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Esc),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::Normal));
     }
 
     #[test]

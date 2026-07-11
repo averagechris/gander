@@ -1,19 +1,18 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4607
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
 │• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
 │  • mod     app.rs                        ││@@ -1 +1 @@                                           │
 │                                          ││2   1 - old                                           │
-│                                          ││      ↳ test-evi [todo] [test] [issue] Branch is      │
+│                                          ││      ↳ test-evi [todo] [test] [issue] Branch is untes│
 │        ╭ Action items & feedback ───────────────────────────────────────────────────────╮        │
 │        │› [item] [test] src/app.rs:1 Cover fallback with a regression test              │llback  │
 │        │└ [evidence] src/app.rs:1 [todo] [test] [issue] Branch is untested              │        │
 │        │[feedback] src/app.rs:1 [todo] Please document the fallback                     │        │
 │        │                                                                                │        │
-│        │↑/↓ or j/k move · enter jump · esc close                                        │        │
+│        │j/k move · enter jump · esc close                                               │        │
 │        │                                                                                │        │
 │        │                                                                                │        │
 │        │                                                                                │        │

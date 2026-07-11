@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5053
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
@@ -16,7 +15,7 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
            churn: +5 −2 · tests touched
            top changed symbols: none detected
 
-         enter to begin — 1 stops
+         n to begin — 1 stops
 
 
 

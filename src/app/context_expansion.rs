@@ -232,16 +232,6 @@ impl ReviewSession {
             .position(|row| row.anchor.as_ref() == Some(&anchor))
         {
             self.diff_cursor = index;
-            if self.diff_cursor < self.diff_scroll as usize {
-                self.diff_scroll = self.diff_cursor as u16;
-            } else if self.diff_cursor
-                > self.diff_scroll as usize + super::DIFF_CURSOR_SCROLL_MARGIN
-            {
-                self.diff_scroll = self
-                    .diff_cursor
-                    .saturating_sub(super::DIFF_CURSOR_SCROLL_MARGIN)
-                    as u16;
-            }
         }
     }
 }

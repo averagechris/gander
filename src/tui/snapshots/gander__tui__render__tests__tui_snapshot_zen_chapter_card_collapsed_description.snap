@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5080
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
@@ -17,7 +16,7 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
          Swaps the legacy old() startup call for new() and batches extra()
          alongside it, so both effects fire together.
 
-         enter to begin — 1 stops
+         n to begin — 1 stops
 
 
 

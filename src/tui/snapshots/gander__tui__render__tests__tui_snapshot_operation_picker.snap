@@ -1,6 +1,5 @@
 ---
 source: src/tui/render.rs
-assertion_line: 4251
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
@@ -14,7 +13,7 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │         │  456fed789     2 hours ago       commit working copy                         │         │
 │         │                                                                              │         │
 │         │select an operation to preview catch-up                                       │         │
-│         │↑/↓ or n/e move · enter apply · esc cancel                                    │         │
+│         │j/k move · enter apply · esc cancel                                           │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
@@ -26,4 +25,4 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
-prior operation · refresh paused · ↑/↓ or n/e move · enter apply · esc cancel
+prior operation · refresh paused · j/k move · enter apply · esc cancel

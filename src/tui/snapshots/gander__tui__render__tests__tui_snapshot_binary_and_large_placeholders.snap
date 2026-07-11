@@ -4,8 +4,8 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 16)"
 ---
 ┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
 │• mod     huge.txt                        ││huge.txt  +0 -0                                       │
-│• binary     logo.png                     ││  ⊘ large diff hidden: 6 lines exceed the 5 line      │
-│                                          ││threshold (press L to render)                         │
+│• binary     logo.png                     ││  ⊘ large diff hidden: 6 lines exceed the 5 line thres│
+│                                          ││hold (press L to render)                              │
 │                                          ││                                                      │
 │                                          ││                                                      │
 │                                          ││                                                      │

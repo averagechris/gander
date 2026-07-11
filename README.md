@@ -64,6 +64,10 @@ This repo is intentionally early, but the first vertical slice is in place:
   focused on the code
 - offers a side-by-side removed/added view (`|`) alongside the unified
   layout, falling back to unified on narrow terminals
+- soft-wraps diff lines by default; turn wrapping off in View Options or with
+  `[diff] soft-wrap = false` when horizontal scrolling is preferable; split
+  pairs align to the taller wrapped side, while nowrap scrolling keeps both
+  gutters, line numbers, and the divider fixed
 - expands hidden hunk context per gap (`+` by `[diff] context-step`, `=`
   fully, `-` re-collapses), lazily fetching file contents via `jj file show`
 - is packaged with a Nix flake and dev shell
@@ -169,6 +173,14 @@ max-diff-lines = 5000 # larger diffs render a placeholder until expanded with L
 nudge-diff-lines = 1000 # changed-line count that triggers the large-change nudge (0 disables)
 nudge-files = 25 # changed-file count that triggers the large-change nudge (0 disables)
 
+[diff]
+word-highlight = true
+line-background = true
+gutter-bar = false
+view = "unified" # unified | side-by-side; side-by-side keeps removed/added rows aligned
+soft-wrap = true # default; false enables horizontal scrolling for long diff lines
+context-step = 10
+
 [artifact]
 format = "markdown"
 profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JSON)
@@ -232,6 +244,12 @@ zen = ["T", "Z"]
 draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
+popup-move-down = ["j", "down"]
+popup-move-up = ["k", "up"]
+popup-select = ["enter"]
+popup-toggle = ["space"]
+popup-close = ["esc"]
+popup-close-q = ["q"] # only help, View Options, and zen artifacts
 toggle-generated = ["h"]
 cycle-viewed-filter = ["f"]
 toggle-fold = ["space"]
@@ -241,16 +259,44 @@ toggle-context-fold = ["z"]
 expand-context = ["+"]
 expand-context-all = ["="]
 collapse-context = ["-"]
+view-options = ["V"]
+toggle-word-highlight = [] # direct cue toggles default unbound; use View Options
+toggle-line-background = []
+toggle-gutter-bar = []
+toggle-diff-wrap = []
+scroll-diff-left = ["shift-left"]
+scroll-diff-right = ["shift-right"]
+toggle-file-pane = ["w"]
+toggle-diff-view = ["|"]
 file-search = ["/"]
 symbol-outline = ["o"]
 next-symbol = ["]"]
 previous-symbol = ["["]
 comment = ["c"] # opens an empty comment editor
-comment-general = ["n"] # session-level comment, no file/line/excerpt
 mark-walkthrough = ["Y"]
 edit-comment = ["e"]
 delete-comment = ["x"]
 comment-list = ["C"]
+comment-list-new-general = ["n"] # press C, then this key
+comment-list-ready = ["R"]
+comment-list-cycle-action = ["a"]
+comment-list-cycle-kind = ["K"]
+draft-accept = ["enter", "a"]
+draft-edit = ["e"]
+draft-discard = ["x"]
+walkthrough-delete = ["d"]
+walkthrough-move-down = ["J"]
+walkthrough-move-up = ["K"]
+zen-next = ["n", "enter", "right", "space"]
+zen-previous = ["p", "left"]
+zen-toggle-view = ["tab"]
+zen-glance = ["g"]
+zen-artifact = ["e"]
+zen-toggle-details = ["d"]
+zen-refocus = ["."]
+zen-acknowledge = ["a"]
+zen-artifact-next = ["l", "right", "tab"]
+zen-artifact-previous = ["h", "left"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
 quit = ["q"]
@@ -324,15 +370,27 @@ failures fall back to unhighlighted text without interrupting review.
 
 Personal keybindings belong in the XDG user config
 (`~/.config/gander/config.toml`), which applies across all repositories.
-For example, Colemak Mod-DH-friendly vertical movement can use:
+This complete Colemak Mod-DH movement override resolves every affected normal
+and popup binding while leaving text-filter `j`/`k` available for typing:
 
 ```toml
 [keybindings]
 move-down = ["n", "down"]
 move-up = ["e", "up"]
-next-unviewed = ["]"]
-previous-unviewed = ["["]
+next-unviewed = ["j"]
+previous-unviewed = ["J"]
+edit-comment = ["alt-e"]
+
+popup-move-down = ["n", "down"]
+popup-move-up = ["e", "up"]
+comment-list-new-general = ["ctrl-n"]
+draft-edit = ["alt-e"]
+zen-artifact = ["i"]
 ```
+
+See [docs/keybindings.md](docs/keybindings.md) for the complete action/context
+inventory, validation rules, aliases, modal defaults, and this example's
+collision analysis.
 
 Print a non-interactive summary:
 
@@ -406,8 +464,12 @@ killed terminal does not lose review progress.
 
 The defaults below can be overridden in the `[keybindings]` config section.
 Key names support single characters plus `esc`, `enter`, `tab`, `backspace`,
-arrow keys, `pageup`, `pagedown`, and `space`. Press `?` in the TUI for the
-full grouped keymap; the footer only shows the everyday hints.
+arrow keys, `pageup`, `pagedown`, and `space`, with `ctrl-`, `alt-`, and
+`shift-` modifiers. Canonical aliases such as `escape`/`esc`, `return`/`enter`,
+and `control-j`/`ctrl-j` are equivalent. Unknown keybinding fields, invalid key
+syntax, and duplicate canonical assignments in an overlapping input context are
+errors; the same key may be reused in disjoint modes. Press `?` in the TUI for
+the full grouped keymap; the footer only shows the everyday hints.
 
 | Key | Action |
 | --- | --- |
@@ -435,6 +497,8 @@ full grouped keymap; the footer only shows the everyday hints.
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
 | `T` / `Z` | zen mode: focused walkthrough of authored steps (or files), marking files viewed |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
+| `V` | View Options popup for word highlights, line backgrounds, gutter bar, soft wrap, file pane, and side-by-side view |
+| `w` / `\|` | hide/show the file pane / toggle unified vs side-by-side diff view |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
 | `+` / `=` / `-` | expand the nearest hidden-context gap by `context-step` / fully / re-collapse it |
@@ -447,10 +511,11 @@ full grouped keymap; the footer only shows the everyday hints.
 | `a` | mark all visible files viewed |
 | `u` / PageUp | scroll diff up |
 | `d` / PageDown | scroll diff down |
+| Shift-Left / Shift-Right | scroll diff content horizontally when soft wrap is off; gutters, line numbers, and the split divider stay fixed |
 | `g` | top of diff |
 | Tab | switch focus between file tree and diff |
 | `c` | open an empty comment editor for a file comment in file focus, or line/range comment in diff focus |
-| `n` | add a general session comment with no file location or excerpt |
+| `C`, then `n` | add a general session comment with no file location or excerpt (`comment-list-new-general`) |
 | `Y` | mark the current hunk/range as a walkthrough step |
 | `e` / `x` | edit / delete the selected comment |
 | `C` | comment list popup (jump, `s` cycle state, `a` cycle action, `K` cycle kind, `x` delete) |

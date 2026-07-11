@@ -6,13 +6,13 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
 │  • mod     app.rs                        ││@@ -1 +1 @@                                           │
 │                                          ││1   1 - old                                           │
-│                                          ││      ↳ line-not [todo] [fix] [question] Line note    │
+│                                          ││      ↳ line-not [todo] [fix] [question] Line note tha│
 │         ┌comments──────────────────────────────────────────────────────────────────────┐         │
 │         │  [ draft  ] src/app.rs File-level note                                       │         │
 │         │› [  todo  ] [fix] [question] src/app.rs:1 Line note that needs fixing        │         │
 │         │                                                                              │         │
-│         │↑/↓ or j/k move · n general · enter jump · e edit · s state · R ready drafts ·│         │
-│         │a action · K kind · x delete · esc close                                      │         │
+│         │j/k move · n general · enter jump · e edit · s state · R ready drafts · a     │         │
+│         │action · K kind · x delete · esc close                                        │         │
 │         │                                                                              │         │
 │         │                                                                              │         │
 │         │                                                                              │         │

@@ -19,4 +19,4 @@ expression: "render_tui_text(&session, &Mode::Normal, 100, 18)"
 │                                          ││                                                      │
 └──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +2/-1, 0 comments · following @
-trunk()..@ · focus diff (range active) · j/k line · d/u scroll · r range · Y walkthrough · c comment
+trunk()..@ · focus diff (range active) (wrap) · j/k line · d/u scroll · V view/wrap · r range · Y wa

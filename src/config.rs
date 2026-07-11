@@ -66,6 +66,8 @@ pub struct DiffConfig {
     /// Diff layout: unified (default) or side-by-side removed/added panes.
     /// Side-by-side falls back to unified on narrow terminals.
     pub view: DiffViewModeConfig,
+    /// Soft-wrap diff text instead of requiring horizontal scrolling.
+    pub soft_wrap: bool,
     /// Lines revealed per press when expanding hidden hunk context (`+`).
     pub context_step: usize,
     pub theme: DiffThemeConfig,
@@ -87,6 +89,7 @@ impl Default for DiffConfig {
             line_background: true,
             gutter_bar: false,
             view: DiffViewModeConfig::default(),
+            soft_wrap: true,
             context_step: 10,
             theme: DiffThemeConfig::default(),
         }
@@ -236,8 +239,19 @@ pub struct KeybindingsConfig {
     pub walkthrough_list: Vec<String>,
     pub zen: Vec<String>,
     pub draft_list: Vec<String>,
+    /// Movement in text-filter popups. Literal `j`/`k` remain text input;
+    /// arrows and Ctrl-J/Ctrl-K are permanent safety bindings.
     pub target_picker_down: Vec<String>,
     pub target_picker_up: Vec<String>,
+    /// Shared controls for non-text list popups.
+    pub popup_move_down: Vec<String>,
+    pub popup_move_up: Vec<String>,
+    pub popup_select: Vec<String>,
+    pub popup_toggle: Vec<String>,
+    pub popup_close: Vec<String>,
+    /// Secondary close key only for help, View Options, and zen artifacts,
+    /// where `q` was already established before popup bindings were unified.
+    pub popup_close_q: Vec<String>,
     pub next_unviewed: Vec<String>,
     pub previous_unviewed: Vec<String>,
     pub next_comment: Vec<String>,
@@ -250,6 +264,8 @@ pub struct KeybindingsConfig {
     pub previous_changed_hunk: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
+    pub scroll_diff_left: Vec<String>,
+    pub scroll_diff_right: Vec<String>,
     pub mark_viewed: Vec<String>,
     pub toggle_viewed: Vec<String>,
     pub mark_all_viewed: Vec<String>,
@@ -266,6 +282,7 @@ pub struct KeybindingsConfig {
     pub toggle_word_highlight: Vec<String>,
     pub toggle_line_background: Vec<String>,
     pub toggle_gutter_bar: Vec<String>,
+    pub toggle_diff_wrap: Vec<String>,
     pub toggle_file_pane: Vec<String>,
     pub toggle_diff_view: Vec<String>,
     pub range_comment: Vec<String>,
@@ -276,6 +293,26 @@ pub struct KeybindingsConfig {
     pub edit_comment: Vec<String>,
     pub delete_comment: Vec<String>,
     pub comment_list: Vec<String>,
+    pub comment_list_new_general: Vec<String>,
+    pub comment_list_ready: Vec<String>,
+    pub comment_list_cycle_action: Vec<String>,
+    pub comment_list_cycle_kind: Vec<String>,
+    pub draft_accept: Vec<String>,
+    pub draft_edit: Vec<String>,
+    pub draft_discard: Vec<String>,
+    pub walkthrough_delete: Vec<String>,
+    pub walkthrough_move_down: Vec<String>,
+    pub walkthrough_move_up: Vec<String>,
+    pub zen_next: Vec<String>,
+    pub zen_previous: Vec<String>,
+    pub zen_toggle_view: Vec<String>,
+    pub zen_glance: Vec<String>,
+    pub zen_artifact: Vec<String>,
+    pub zen_toggle_details: Vec<String>,
+    pub zen_refocus: Vec<String>,
+    pub zen_acknowledge: Vec<String>,
+    pub zen_artifact_next: Vec<String>,
+    pub zen_artifact_previous: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
@@ -335,6 +372,7 @@ struct DiffConfigPatch {
     line_background: Option<bool>,
     gutter_bar: Option<bool>,
     view: Option<DiffViewModeConfig>,
+    soft_wrap: Option<bool>,
     context_step: Option<usize>,
     theme: DiffThemeConfigPatch,
 }
@@ -396,7 +434,7 @@ struct ArtifactConfigPatch {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct KeybindingsConfigPatch {
     quit: Option<Vec<String>>,
     help: Option<Vec<String>>,
@@ -418,6 +456,7 @@ struct KeybindingsConfigPatch {
     toggle_large_diff: Option<Vec<String>>,
     toggle_agent_order: Option<Vec<String>>,
     flag_list: Option<Vec<String>>,
+    #[serde(alias = "task-list")]
     open_work: Option<Vec<String>>,
     activity: Option<Vec<String>>,
     walkthrough_list: Option<Vec<String>>,
@@ -427,6 +466,12 @@ struct KeybindingsConfigPatch {
     draft_list: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
+    popup_move_down: Option<Vec<String>>,
+    popup_move_up: Option<Vec<String>>,
+    popup_select: Option<Vec<String>>,
+    popup_toggle: Option<Vec<String>>,
+    popup_close: Option<Vec<String>>,
+    popup_close_q: Option<Vec<String>>,
     next_unviewed: Option<Vec<String>>,
     previous_unviewed: Option<Vec<String>>,
     next_comment: Option<Vec<String>>,
@@ -439,6 +484,8 @@ struct KeybindingsConfigPatch {
     previous_changed_hunk: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
+    scroll_diff_left: Option<Vec<String>>,
+    scroll_diff_right: Option<Vec<String>>,
     mark_viewed: Option<Vec<String>>,
     toggle_viewed: Option<Vec<String>>,
     mark_all_viewed: Option<Vec<String>>,
@@ -455,6 +502,7 @@ struct KeybindingsConfigPatch {
     toggle_word_highlight: Option<Vec<String>>,
     toggle_line_background: Option<Vec<String>>,
     toggle_gutter_bar: Option<Vec<String>>,
+    toggle_diff_wrap: Option<Vec<String>>,
     toggle_file_pane: Option<Vec<String>>,
     toggle_diff_view: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
@@ -465,6 +513,26 @@ struct KeybindingsConfigPatch {
     edit_comment: Option<Vec<String>>,
     delete_comment: Option<Vec<String>>,
     comment_list: Option<Vec<String>>,
+    comment_list_new_general: Option<Vec<String>>,
+    comment_list_ready: Option<Vec<String>>,
+    comment_list_cycle_action: Option<Vec<String>>,
+    comment_list_cycle_kind: Option<Vec<String>>,
+    draft_accept: Option<Vec<String>>,
+    draft_edit: Option<Vec<String>>,
+    draft_discard: Option<Vec<String>>,
+    walkthrough_delete: Option<Vec<String>>,
+    walkthrough_move_down: Option<Vec<String>>,
+    walkthrough_move_up: Option<Vec<String>>,
+    zen_next: Option<Vec<String>>,
+    zen_previous: Option<Vec<String>>,
+    zen_toggle_view: Option<Vec<String>>,
+    zen_glance: Option<Vec<String>>,
+    zen_artifact: Option<Vec<String>>,
+    zen_toggle_details: Option<Vec<String>>,
+    zen_refocus: Option<Vec<String>>,
+    zen_acknowledge: Option<Vec<String>>,
+    zen_artifact_next: Option<Vec<String>>,
+    zen_artifact_previous: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
     insert_newline: Option<Vec<String>>,
@@ -529,6 +597,12 @@ impl Default for KeybindingsConfig {
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
+            popup_move_down: keys(["j", "down"]),
+            popup_move_up: keys(["k", "up"]),
+            popup_select: keys(["enter"]),
+            popup_toggle: keys(["space"]),
+            popup_close: keys(["esc"]),
+            popup_close_q: keys(["q"]),
             next_unviewed: keys(["n"]),
             previous_unviewed: keys(["N"]),
             next_comment: keys(["m"]),
@@ -541,6 +615,8 @@ impl Default for KeybindingsConfig {
             previous_changed_hunk: keys(["{"]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
+            scroll_diff_left: keys(["shift-left"]),
+            scroll_diff_right: keys(["shift-right"]),
             mark_viewed: keys(["enter"]),
             toggle_viewed: keys(["v"]),
             mark_all_viewed: keys(["a"]),
@@ -559,6 +635,7 @@ impl Default for KeybindingsConfig {
             toggle_word_highlight: keys([]),
             toggle_line_background: keys([]),
             toggle_gutter_bar: keys([]),
+            toggle_diff_wrap: keys([]),
             toggle_file_pane: keys(["w"]),
             toggle_diff_view: keys(["|"]),
             range_comment: keys(["r"]),
@@ -569,6 +646,26 @@ impl Default for KeybindingsConfig {
             edit_comment: keys(["e"]),
             delete_comment: keys(["x"]),
             comment_list: keys(["C"]),
+            comment_list_new_general: keys(["n"]),
+            comment_list_ready: keys(["R"]),
+            comment_list_cycle_action: keys(["a"]),
+            comment_list_cycle_kind: keys(["K"]),
+            draft_accept: keys(["enter", "a"]),
+            draft_edit: keys(["e"]),
+            draft_discard: keys(["x"]),
+            walkthrough_delete: keys(["d"]),
+            walkthrough_move_down: keys(["J"]),
+            walkthrough_move_up: keys(["K"]),
+            zen_next: keys(["n", "enter", "right", "space"]),
+            zen_previous: keys(["p", "left"]),
+            zen_toggle_view: keys(["tab"]),
+            zen_glance: keys(["g"]),
+            zen_artifact: keys(["e"]),
+            zen_toggle_details: keys(["d"]),
+            zen_refocus: keys(["."]),
+            zen_acknowledge: keys(["a"]),
+            zen_artifact_next: keys(["l", "right", "tab"]),
+            zen_artifact_previous: keys(["h", "left"]),
             submit_comment: keys(["ctrl-s"]),
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
@@ -706,6 +803,9 @@ impl Config {
         if let Some(view) = patch.diff.view {
             self.diff.view = view;
         }
+        if let Some(soft_wrap) = patch.diff.soft_wrap {
+            self.diff.soft_wrap = soft_wrap;
+        }
         if let Some(context_step) = patch.diff.context_step {
             self.diff.context_step = context_step;
         }
@@ -771,6 +871,12 @@ impl KeybindingsConfig {
         apply_optional(&mut self.draft_list, patch.draft_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
+        apply_optional(&mut self.popup_move_down, patch.popup_move_down);
+        apply_optional(&mut self.popup_move_up, patch.popup_move_up);
+        apply_optional(&mut self.popup_select, patch.popup_select);
+        apply_optional(&mut self.popup_toggle, patch.popup_toggle);
+        apply_optional(&mut self.popup_close, patch.popup_close);
+        apply_optional(&mut self.popup_close_q, patch.popup_close_q);
         apply_optional(&mut self.next_unviewed, patch.next_unviewed);
         apply_optional(&mut self.previous_unviewed, patch.previous_unviewed);
         apply_optional(&mut self.next_comment, patch.next_comment);
@@ -783,6 +889,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.previous_changed_hunk, patch.previous_changed_hunk);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
+        apply_optional(&mut self.scroll_diff_left, patch.scroll_diff_left);
+        apply_optional(&mut self.scroll_diff_right, patch.scroll_diff_right);
         apply_optional(&mut self.mark_viewed, patch.mark_viewed);
         apply_optional(&mut self.toggle_viewed, patch.toggle_viewed);
         apply_optional(&mut self.mark_all_viewed, patch.mark_all_viewed);
@@ -802,6 +910,7 @@ impl KeybindingsConfig {
             patch.toggle_line_background,
         );
         apply_optional(&mut self.toggle_gutter_bar, patch.toggle_gutter_bar);
+        apply_optional(&mut self.toggle_diff_wrap, patch.toggle_diff_wrap);
         apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
         apply_optional(&mut self.toggle_diff_view, patch.toggle_diff_view);
         apply_optional(&mut self.range_comment, patch.range_comment);
@@ -812,6 +921,35 @@ impl KeybindingsConfig {
         apply_optional(&mut self.edit_comment, patch.edit_comment);
         apply_optional(&mut self.delete_comment, patch.delete_comment);
         apply_optional(&mut self.comment_list, patch.comment_list);
+        apply_optional(
+            &mut self.comment_list_new_general,
+            patch.comment_list_new_general,
+        );
+        apply_optional(&mut self.comment_list_ready, patch.comment_list_ready);
+        apply_optional(
+            &mut self.comment_list_cycle_action,
+            patch.comment_list_cycle_action,
+        );
+        apply_optional(
+            &mut self.comment_list_cycle_kind,
+            patch.comment_list_cycle_kind,
+        );
+        apply_optional(&mut self.draft_accept, patch.draft_accept);
+        apply_optional(&mut self.draft_edit, patch.draft_edit);
+        apply_optional(&mut self.draft_discard, patch.draft_discard);
+        apply_optional(&mut self.walkthrough_delete, patch.walkthrough_delete);
+        apply_optional(&mut self.walkthrough_move_down, patch.walkthrough_move_down);
+        apply_optional(&mut self.walkthrough_move_up, patch.walkthrough_move_up);
+        apply_optional(&mut self.zen_next, patch.zen_next);
+        apply_optional(&mut self.zen_previous, patch.zen_previous);
+        apply_optional(&mut self.zen_toggle_view, patch.zen_toggle_view);
+        apply_optional(&mut self.zen_glance, patch.zen_glance);
+        apply_optional(&mut self.zen_artifact, patch.zen_artifact);
+        apply_optional(&mut self.zen_toggle_details, patch.zen_toggle_details);
+        apply_optional(&mut self.zen_refocus, patch.zen_refocus);
+        apply_optional(&mut self.zen_acknowledge, patch.zen_acknowledge);
+        apply_optional(&mut self.zen_artifact_next, patch.zen_artifact_next);
+        apply_optional(&mut self.zen_artifact_previous, patch.zen_artifact_previous);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
         apply_optional(&mut self.insert_newline, patch.insert_newline);
@@ -1040,12 +1178,14 @@ prompt = "review {repo} at {base}..{rev}"
         assert!(defaults.line_background);
         assert!(!defaults.gutter_bar);
         assert_eq!(defaults.view, DiffViewModeConfig::Unified);
+        assert!(defaults.soft_wrap);
         assert_eq!(defaults.context_step, 10);
         assert_eq!(defaults.theme.added_line_bg, "#12261e");
         assert_eq!(defaults.theme.removed_word, "bold on #6b2b2b");
         assert_eq!(Config::default().keybindings.expand_context, ["+"]);
         assert_eq!(Config::default().keybindings.expand_context_all, ["="]);
         assert_eq!(Config::default().keybindings.collapse_context, ["-"]);
+        assert!(Config::default().keybindings.toggle_diff_wrap.is_empty());
 
         let repo = tempfile::tempdir().unwrap();
         let config_path = repo.path().join("config.toml");
@@ -1056,6 +1196,7 @@ prompt = "review {repo} at {base}..{rev}"
 word-highlight = false
 gutter-bar = true
 view = "side-by-side"
+soft-wrap = false
 context-step = 25
 
 [diff.theme]
@@ -1065,6 +1206,9 @@ gutter-added = "cyan"
 [keybindings]
 view-options = ["ctrl-v"]
 toggle-gutter-bar = ["B"]
+toggle-diff-wrap = ["alt-w"]
+scroll-diff-left = ["alt-h"]
+scroll-diff-right = ["alt-l"]
 expand-context = ["ctrl-e"]
 "##,
         )
@@ -1080,6 +1224,7 @@ expand-context = ["ctrl-e"]
         assert!(config.diff.line_background);
         assert!(config.diff.gutter_bar);
         assert_eq!(config.diff.view, DiffViewModeConfig::SideBySide);
+        assert!(!config.diff.soft_wrap);
         assert_eq!(config.diff.context_step, 25);
         assert_eq!(config.diff.theme.added_line_bg, "#103010");
         assert_eq!(config.diff.theme.gutter_added, "cyan");
@@ -1087,6 +1232,9 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.diff.theme.removed_line_bg, "#301b1f");
         assert_eq!(config.keybindings.view_options, ["ctrl-v"]);
         assert_eq!(config.keybindings.toggle_gutter_bar, ["B"]);
+        assert_eq!(config.keybindings.toggle_diff_wrap, ["alt-w"]);
+        assert_eq!(config.keybindings.scroll_diff_left, ["alt-h"]);
+        assert_eq!(config.keybindings.scroll_diff_right, ["alt-l"]);
         assert_eq!(config.keybindings.expand_context, ["ctrl-e"]);
         assert_eq!(config.keybindings.expand_context_all, ["="]);
     }
@@ -1118,6 +1266,8 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.toggle_fold, ["space"]);
         assert_eq!(config.keybindings.collapse_fold, ["left"]);
         assert_eq!(config.keybindings.expand_fold, ["right"]);
+        assert_eq!(config.keybindings.scroll_diff_left, ["shift-left"]);
+        assert_eq!(config.keybindings.scroll_diff_right, ["shift-right"]);
         assert_eq!(config.keybindings.range_comment, ["r"]);
         assert_eq!(config.keybindings.cancel_range_comment, ["ctrl-g", "esc"]);
         assert_eq!(config.keybindings.edit_comment, ["e"]);
@@ -1215,5 +1365,43 @@ move-down = ["n", "down"]
         }])
         .unwrap_err();
         assert!(error.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn keybindings_reject_unknown_fields_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown-key.toml");
+        fs::write(&path, "[keybindings]\nmove-sideways = [\"h\"]\n").unwrap();
+
+        let error = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("unknown field `move-sideways`"),
+            "{message}"
+        );
+        assert!(message.contains("failed to parse config"), "{message}");
+    }
+
+    #[test]
+    fn legacy_tour_and_task_list_keybinding_aliases_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aliases.toml");
+        fs::write(
+            &path,
+            "[keybindings]\ntour = [\"alt-z\"]\ntask-list = [\"alt-x\"]\n",
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap();
+        assert_eq!(config.keybindings.zen, ["alt-z"]);
+        assert_eq!(config.keybindings.open_work, ["alt-x"]);
     }
 }

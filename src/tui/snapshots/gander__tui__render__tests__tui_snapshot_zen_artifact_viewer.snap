@@ -16,7 +16,7 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
          re-checked.          │ new: ready                           │
                               │ extra: ready                         │
              1   fn main() {  │                                      │
-             2 -     old();   ╰ j/k scroll · esc close ──────────────╯
+             2 -     old();   ╰ j/k scroll · esc/q close ────────────╯
              2 +     new();
              3 +     extra();
              4   }
@@ -26,4 +26,4 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 
 
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @
-zen artifact 1/1 · j/k scroll · h/l switch · esc close
+zen artifact 1/1 · j/k scroll · h/l switch · esc/q close
