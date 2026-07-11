@@ -272,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn bundled_skills_share_the_current_review_model() {
+        let review = show("gander-review").unwrap();
+        assert!(review.contains("gander reviews create"));
+        assert!(review.contains("gander hunks show '<path>:<index>' --format diff"));
+        assert!(review.contains("Todo comments are the normal feedback primitive"));
+        assert!(review.contains("MCP is an optional adapter"));
+
+        let address = show("gander-address-review").unwrap();
+        assert!(address.contains("Closing a parent action item does not resolve"));
+        assert!(address.contains("comments reply <comment-prefix> --body"));
+
+        for skill in [review, address] {
+            assert!(!skill.contains("minimum 8 chars"));
+            assert!(skill.contains("full ID or any unambiguous prefix"));
+        }
+    }
+
+    #[test]
     fn frontmatter_rejects_bad_names_and_missing_description() {
         assert!(parse_frontmatter("---\nname: ../x\ndescription: d\n---\n").is_err());
         assert!(parse_frontmatter("---\nname: x\n---\n").is_err());

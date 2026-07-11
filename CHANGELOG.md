@@ -20,6 +20,10 @@
   literal `j`/`k`, and popup, Comment Center, walkthrough, draft, and zen
   controls are configurable and documented with a collision-free Colemak
   Mod-DH override (#168).
+- Bundled review skills now establish the durable session before writing state,
+  show targeted hunk inspection, treat todo comments as the primary feedback
+  primitive, reserve action items for coordination, and require resolving
+  satisfied linked todos separately from closing their parent action item.
 
 ## v0.7.1 - 2026-07-10
 
