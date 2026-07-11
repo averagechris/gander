@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     agent::{AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, DraftState, ReviewChunk},
-    anchor::{CommentAnchor, RangeLineAnchor, comment_anchor_for_file_lines, fingerprint_range},
+    anchor::{
+        CommentAnchor, DiffSide, RangeLineAnchor, comment_anchor_for_file_lines,
+        comment_anchor_for_sided_lines, fingerprint_range, line_anchor_for_side_line,
+    },
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
@@ -122,11 +125,6 @@ pub struct ReviewSession {
     pub comment_initial_state: CommentState,
     pub selected: usize,
     pub diff_scroll: u16,
-    /// Visual continuation within the logical row at `diff_scroll`.
-    /// The TUI reconciles this against its measured layout after reflow.
-    pub diff_visual_offset: usize,
-    /// Display-cell offset into diff code while soft wrapping is disabled.
-    pub diff_horizontal_scroll: usize,
     pub diff_cursor: usize,
     pub focus: Focus,
     pub syntax: SyntaxConfig,
@@ -219,19 +217,112 @@ pub struct RefreshedFileChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FileViewport {
     diff_scroll: u16,
-    diff_visual_offset: usize,
-    diff_horizontal_scroll: usize,
     diff_cursor: usize,
     top_identity: Option<DiffRowIdentity>,
     cursor_identity: Option<DiffRowIdentity>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiffRowIdentity {
+#[derive(Debug, Clone)]
+pub(crate) struct DiffRowIdentity {
     old_lineno: Option<usize>,
     new_lineno: Option<usize>,
     text: String,
     kind: DiffRowKind,
+    hunk_index: Option<usize>,
+    semantic_key: Option<String>,
+    semantic_parent_key: Option<String>,
+    semantic_occurrence: usize,
+    semantic_total: usize,
+    logical_range: Option<std::ops::Range<usize>>,
+    old_logical_range: Option<std::ops::Range<usize>>,
+}
+
+impl PartialEq for DiffRowIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        if self.semantic_key.is_some() || other.semantic_key.is_some() {
+            let same_source_location = self.logical_range.is_some()
+                && self.logical_range == other.logical_range
+                || self.old_logical_range.is_some()
+                    && self.old_logical_range == other.old_logical_range
+                || self.new_lineno.is_some()
+                    && self.new_lineno == other.new_lineno
+                    && self.old_lineno == other.old_lineno;
+            return self.semantic_key == other.semantic_key
+                && (self.semantic_parent_key.is_none()
+                    || other.semantic_parent_key.is_none()
+                    || self.semantic_parent_key == other.semantic_parent_key)
+                && (same_source_location
+                    || self.semantic_total == other.semantic_total
+                        && self.semantic_occurrence == other.semantic_occurrence);
+        }
+        match (self.kind, other.kind) {
+            (DiffRowKind::FileHeader, DiffRowKind::FileHeader)
+            | (DiffRowKind::Placeholder, DiffRowKind::Placeholder) => true,
+            (DiffRowKind::HunkHeader, DiffRowKind::HunkHeader)
+            | (DiffRowKind::ContextFold, DiffRowKind::ContextFold) => {
+                self.hunk_index == other.hunk_index
+            }
+            (
+                DiffRowKind::ExpandGap { gap_id, .. },
+                DiffRowKind::ExpandGap {
+                    gap_id: other_gap, ..
+                },
+            ) => gap_id == other_gap,
+            _ => {
+                self.kind == other.kind
+                    && self.old_lineno == other.old_lineno
+                    && self.new_lineno == other.new_lineno
+                    && self.text == other.text
+            }
+        }
+    }
+}
+
+impl Eq for DiffRowIdentity {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshFileLineage {
+    path: String,
+    status: FileStatus,
+    old_path: Option<String>,
+}
+
+fn refresh_path_mapping(
+    previous: &[RefreshFileLineage],
+    current: &[RefreshFileLineage],
+) -> BTreeMap<String, String> {
+    let mut mapping = BTreeMap::new();
+    let mut used = BTreeSet::new();
+    let mut assign = |matches: &dyn Fn(&RefreshFileLineage, &RefreshFileLineage) -> bool| {
+        for file in current {
+            if mapping.contains_key(&file.path) {
+                continue;
+            }
+            if let Some(prior) = previous
+                .iter()
+                .find(|prior| !used.contains(&prior.path) && matches(prior, file))
+            {
+                used.insert(prior.path.clone());
+                mapping.insert(file.path.clone(), prior.path.clone());
+            }
+        }
+    };
+    assign(&|prior, file| {
+        prior.status == FileStatus::Renamed
+            && file.status == FileStatus::Renamed
+            && prior.old_path.is_some()
+            && prior.old_path == file.old_path
+    });
+    assign(&|prior, file| {
+        prior.status == FileStatus::Renamed
+            && !matches!(file.status, FileStatus::Renamed | FileStatus::Copied)
+            && prior.old_path.as_ref() == Some(&file.path)
+    });
+    assign(&|prior, file| {
+        file.status == FileStatus::Renamed && file.old_path.as_ref() == Some(&prior.path)
+    });
+    assign(&|prior, file| prior.path == file.path);
+    mapping
 }
 
 impl From<&DiffRow> for DiffRowIdentity {
@@ -239,8 +330,19 @@ impl From<&DiffRow> for DiffRowIdentity {
         Self {
             old_lineno: row.old_lineno,
             new_lineno: row.new_lineno,
-            text: row.text.clone(),
+            text: if row.semantic_key.is_some() {
+                String::new()
+            } else {
+                row.text.clone()
+            },
             kind: row.kind,
+            hunk_index: row.hunk_index,
+            semantic_key: row.semantic_key.clone(),
+            semantic_parent_key: row.semantic_parent_key.clone(),
+            semantic_occurrence: row.semantic_occurrence,
+            semantic_total: row.semantic_total,
+            logical_range: row.logical_range.clone(),
+            old_logical_range: row.old_logical_range.clone(),
         }
     }
 }
@@ -256,29 +358,190 @@ fn resolve_diff_row_identity(
     let Some(identity) = identity else {
         return (fallback.min(rows.len() - 1), false);
     };
-    if let Some(index) = rows.iter().position(|row| {
-        row.kind == identity.kind
-            && row.old_lineno == identity.old_lineno
-            && row.new_lineno == identity.new_lineno
-            && row.text == identity.text
-    }) {
+    // Source location is stronger than projection occurrence: inserting or
+    // removing an earlier duplicate renumbers later occurrences.
+    if let Some(key) = identity.semantic_key.as_ref() {
+        let source_matches = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.semantic_key.as_ref() == Some(key)
+                    && ((identity.logical_range.is_some()
+                        && row.logical_range == identity.logical_range)
+                        || (identity.new_lineno.is_some()
+                            && row.new_lineno == identity.new_lineno
+                            && row.old_lineno == identity.old_lineno))
+            })
+            .collect::<Vec<_>>();
+        if let Some(parent) = identity.semantic_parent_key.as_ref()
+            && let Some((index, _)) = source_matches
+                .iter()
+                .copied()
+                .find(|(_, row)| row.semantic_parent_key.as_ref() == Some(parent))
+        {
+            return (index, true);
+        }
+        if let [(index, _)] = source_matches.as_slice() {
+            return (*index, true);
+        }
+    }
+    if let Some(key) = identity.semantic_key.as_ref() {
+        let mut candidates = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.semantic_key.as_ref() == Some(key))
+            .collect::<Vec<_>>();
+        if let Some(parent) = identity.semantic_parent_key.as_ref() {
+            let parent_matches = candidates
+                .iter()
+                .copied()
+                .filter(|(_, row)| row.semantic_parent_key.as_ref() == Some(parent))
+                .collect::<Vec<_>>();
+            if !parent_matches.is_empty() {
+                candidates = parent_matches;
+                if let [(index, _)] = candidates.as_slice() {
+                    return (*index, true);
+                }
+            }
+        }
+        if candidates.len() == identity.semantic_total {
+            if let Some((index, _)) = candidates
+                .iter()
+                .copied()
+                .find(|(_, row)| row.semantic_occurrence == identity.semantic_occurrence)
+            {
+                return (index, true);
+            }
+        } else if candidates.len() > identity.semantic_total {
+            let target = identity
+                .logical_range
+                .as_ref()
+                .map(|range| range.start)
+                .or(identity.new_lineno)
+                .or(identity.old_lineno)
+                .unwrap_or(fallback);
+            let mut by_distance = candidates
+                .into_iter()
+                .map(|(index, row)| {
+                    let candidate = row
+                        .logical_range
+                        .as_ref()
+                        .map(|range| range.start)
+                        .or(row.new_lineno)
+                        .or(row.old_lineno)
+                        .unwrap_or(index);
+                    (index, candidate.abs_diff(target))
+                })
+                .collect::<Vec<_>>();
+            by_distance.sort_by_key(|(index, distance)| (*distance, index.abs_diff(fallback)));
+            if let [best, rest @ ..] = by_distance.as_slice()
+                && rest.first().is_none_or(|next| next.1 != best.1)
+            {
+                return (best.0, true);
+            }
+        }
+    }
+    if matches!(
+        identity.kind,
+        DiffRowKind::ContextFold | DiffRowKind::ExpandGap { .. }
+    ) && let Some(range) = identity.logical_range.as_ref()
+        && let Some((index, _)) = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let candidate = row.logical_range.as_ref()?;
+                let overlap = range.start < candidate.end && candidate.start < range.end;
+                overlap.then_some((index, candidate.start.abs_diff(range.start)))
+            })
+            .min_by_key(|(index, distance)| (*distance, index.abs_diff(fallback)))
+    {
+        return (index, true);
+    }
+    if matches!(
+        identity.kind,
+        DiffRowKind::ContextFold | DiffRowKind::ExpandGap { .. }
+    ) && let Some(range) = identity.logical_range.as_ref()
+        && let Some(index) = rows.iter().position(|row| {
+            row.new_lineno
+                .or(row.old_lineno)
+                .is_some_and(|line| range.contains(&line))
+        })
+    {
+        return (index, true);
+    }
+    if identity.semantic_key.is_none()
+        && let Some(index) = rows.iter().position(|row| {
+            row.kind == identity.kind
+                && row.old_lineno == identity.old_lineno
+                && row.new_lineno == identity.new_lineno
+                && row.text == identity.text
+        })
+    {
         return (index, true);
     }
     let old_line = identity
         .old_lineno
         .or(identity.new_lineno)
         .unwrap_or(fallback);
-    if let Some((index, _)) = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.kind == identity.kind && row.text == identity.text)
-        .map(|(index, row)| {
-            let line = row.old_lineno.or(row.new_lineno).unwrap_or(index);
-            (index, line.abs_diff(old_line))
-        })
-        .min_by_key(|(index, distance)| (*distance, index.abs_diff(fallback)))
+    if identity.semantic_key.is_none()
+        && let Some((index, _)) = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.kind == identity.kind && row.text == identity.text)
+            .map(|(index, row)| {
+                let line = row.old_lineno.or(row.new_lineno).unwrap_or(index);
+                (index, line.abs_diff(old_line))
+            })
+            .min_by_key(|(index, distance)| (*distance, index.abs_diff(fallback)))
     {
         return (index, true);
+    }
+    if let Some(line) = identity.new_lineno
+        && let Some((index, _)) = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let range = row.logical_range.as_ref()?;
+                range
+                    .contains(&line)
+                    .then_some((index, range.end.saturating_sub(range.start)))
+            })
+            .min_by_key(|(index, width)| (*width, index.abs_diff(fallback)))
+    {
+        return (index, true);
+    }
+    if let Some(line) = identity.old_lineno
+        && let Some((index, _)) = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let range = row.old_logical_range.as_ref()?;
+                range
+                    .contains(&line)
+                    .then_some((index, range.end.saturating_sub(range.start)))
+            })
+            .min_by_key(|(index, width)| (*width, index.abs_diff(fallback)))
+    {
+        return (index, true);
+    }
+    if matches!(identity.kind, DiffRowKind::HunkHeader) {
+        if let Some(range) = identity.logical_range.as_ref()
+            && let Some(index) = rows
+                .iter()
+                .position(|row| row.new_lineno.is_some_and(|line| range.contains(&line)))
+        {
+            return (index, true);
+        }
+        if let Some(range) = identity.old_logical_range.as_ref()
+            && let Some(index) = rows
+                .iter()
+                .position(|row| row.old_lineno.is_some_and(|line| range.contains(&line)))
+        {
+            return (index, true);
+        }
+    }
+    if identity.semantic_key.is_some() {
+        return (fallback.min(rows.len() - 1), false);
     }
     if let Some(index) = rows.iter().position(|row| {
         row.kind == identity.kind
@@ -301,6 +564,24 @@ struct ReviewSessionOptions {
 pub enum Focus {
     Files,
     Diff,
+}
+
+/// Viewport placement required after selecting a located comment.
+///
+/// This is logical navigation only: terminal geometry remains owned by the
+/// TUI viewport controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommentSelection {
+    File,
+    Diff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum NavigationPlacement {
+    Keep,
+    Top,
+    Cursor,
 }
 
 /// Which files remain visible in the tree based on their viewed mark.
@@ -389,6 +670,69 @@ pub struct ReviewFile {
 }
 
 impl ReviewSession {
+    /// Stable logical identity of the row currently anchoring the diff top.
+    /// Terminal geometry deliberately does not participate in this identity.
+    pub(crate) fn diff_top_identity(&self) -> Option<DiffRowIdentity> {
+        self.diff_rows_for_file_index(self.selected)
+            .get(self.diff_scroll as usize)
+            .map(DiffRowIdentity::from)
+    }
+
+    pub(crate) fn diff_cursor_identity(&self) -> Option<DiffRowIdentity> {
+        self.diff_rows_for_file_index(self.selected)
+            .get(self.diff_cursor)
+            .map(DiffRowIdentity::from)
+    }
+
+    /// Re-resolve a durable logical top after the selected file's row
+    /// projection changes. Visual continuation remains TUI-owned.
+    pub(crate) fn restore_diff_top_identity(
+        &mut self,
+        identity: Option<&DiffRowIdentity>,
+        fallback: u16,
+    ) -> bool {
+        let rows = self.diff_rows_for_file_index(self.selected);
+        let (top, recovered) = resolve_diff_row_identity(&rows, identity, fallback as usize);
+        self.diff_scroll = top.min(u16::MAX as usize) as u16;
+        recovered
+    }
+
+    pub(crate) fn restore_diff_cursor_identity(
+        &mut self,
+        identity: Option<&DiffRowIdentity>,
+        fallback: usize,
+    ) -> bool {
+        let rows = self.diff_rows_for_file_index(self.selected);
+        let (cursor, recovered) = resolve_diff_row_identity(&rows, identity, fallback);
+        self.diff_cursor = cursor;
+        recovered
+    }
+
+    /// App-owned logical viewport anchors for active and inactive files.
+    /// The TUI uses this only to pair its visual continuation with a durable
+    /// logical identity across refreshes.
+    pub(crate) fn logical_viewport_anchors(
+        &self,
+    ) -> BTreeMap<String, (u16, Option<DiffRowIdentity>)> {
+        let mut anchors = self
+            .viewport_by_path
+            .iter()
+            .map(|(path, viewport)| {
+                (
+                    path.clone(),
+                    (viewport.diff_scroll, viewport.top_identity.clone()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if let Some(file) = self.selected_file() {
+            anchors.insert(
+                file.path.clone(),
+                (self.diff_scroll, self.diff_top_identity()),
+            );
+        }
+        anchors
+    }
+
     #[cfg(test)]
     pub fn new(repo: PathBuf, target: ReviewTarget, diff: DiffSet, state: ReviewState) -> Self {
         Self::new_with_syntax(repo, target, diff, state, SyntaxConfig::default())
@@ -487,8 +831,6 @@ impl ReviewSession {
             comment_initial_state,
             selected: 0,
             diff_scroll: 0,
-            diff_visual_offset: 0,
-            diff_horizontal_scroll: 0,
             diff_cursor: 0,
             focus: Focus::Files,
             syntax,
@@ -526,6 +868,30 @@ impl ReviewSession {
     }
 
     pub fn replace_diff(&mut self, target: ReviewTarget, diff: DiffSet) {
+        let previous = self
+            .files
+            .iter()
+            .map(|file| RefreshFileLineage {
+                path: file.path.clone(),
+                status: file.status,
+                old_path: file.old_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.replace_diff_without_comment_refresh(target, diff);
+        let current = self
+            .files
+            .iter()
+            .map(|file| RefreshFileLineage {
+                path: file.path.clone(),
+                status: file.status,
+                old_path: file.old_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mapping = refresh_path_mapping(&previous, &current);
+        self.refresh_comment_anchors_for_current_diff(Some(&mapping));
+    }
+
+    fn replace_diff_without_comment_refresh(&mut self, target: ReviewTarget, diff: DiffSet) {
         let mut state = self.to_state();
         state.meta = ReviewStateMeta::default();
         *self = Self::new_with_options(
@@ -544,7 +910,6 @@ impl ReviewSession {
                 comment_initial_state: self.comment_initial_state,
             },
         );
-        self.refresh_comment_anchors_for_current_diff();
     }
 
     /// Like [`Self::replace_diff`], but for background refreshes of the
@@ -565,7 +930,17 @@ impl ReviewSession {
         let force_rendered = std::mem::take(&mut self.force_rendered);
         let mut viewports = std::mem::take(&mut self.viewport_by_path);
         let zen_focus = self.zen_focus.take();
+        let selected_index = self.selected;
         let selected_path = self.selected_file().map(|file| file.path.clone());
+        let previous_lineage = self
+            .files
+            .iter()
+            .map(|file| RefreshFileLineage {
+                path: file.path.clone(),
+                status: file.status,
+                old_path: file.old_path.clone(),
+            })
+            .collect::<Vec<_>>();
         struct PreviousFile {
             fingerprint: String,
             changed_since_look: bool,
@@ -603,7 +978,18 @@ impl ReviewSession {
             })
             .collect();
 
-        self.replace_diff(target, diff);
+        self.replace_diff_without_comment_refresh(target, diff);
+        let current_lineage = self
+            .files
+            .iter()
+            .map(|file| RefreshFileLineage {
+                path: file.path.clone(),
+                status: file.status,
+                old_path: file.old_path.clone(),
+            })
+            .collect::<Vec<_>>();
+        let path_mapping = refresh_path_mapping(&previous_lineage, &current_lineage);
+        self.refresh_comment_anchors_for_current_diff(Some(&path_mapping));
 
         let mut refresh_changes = Vec::new();
         for file in &mut self.files {
@@ -613,6 +999,8 @@ impl ReviewSession {
                 .iter()
                 .map(|hunk| hunk.content_fingerprint())
                 .collect();
+            // Freshness tracking retains its existing path-based semantics;
+            // rename lineage here is only for logical viewport restoration.
             let previous = old_files.get(&file.path);
             let file_changed = previous.is_none_or(|old| old.fingerprint != file.fingerprint);
             let carried_file = previous.is_some_and(|old| old.changed_since_look);
@@ -681,30 +1069,43 @@ impl ReviewSession {
         self.use_agent_order = use_agent_order;
         self.collapsed_dirs = collapsed_dirs;
         self.force_rendered = force_rendered;
-        let selected_match = selected_path.as_deref().and_then(|path| {
+        let selected_match = selected_path.as_ref().and_then(|path| {
+            self.files.iter().position(|file| {
+                path_mapping
+                    .get(&file.path)
+                    .is_some_and(|prior| prior == path)
+            })
+        });
+        // Use the same deterministic one-to-one lineage mapping for logical
+        // viewports. Everything unmapped is stale and deliberately dropped.
+        let mut current_viewports = BTreeMap::new();
+        for file in &self.files {
+            if let Some(prior_path) = path_mapping.get(&file.path)
+                && let Some(viewport) = viewports.remove(prior_path)
+            {
+                current_viewports.insert(file.path.clone(), viewport);
+            }
+        }
+        self.viewport_by_path = current_viewports;
+        let visible_selected_match = selected_match.filter(|index| {
+            self.files
+                .get(*index)
+                .is_some_and(|file| self.file_visible(file))
+        });
+        let restore_index = visible_selected_match.or_else(|| {
+            if self.files.is_empty() {
+                return None;
+            }
+            let fallback = selected_match.unwrap_or(selected_index.min(self.files.len() - 1));
             self.files
                 .iter()
-                .position(|file| file.path == path)
-                .map(|index| (index, false))
-                .or_else(|| {
-                    self.files
-                        .iter()
-                        .position(|file| {
-                            file.status == FileStatus::Renamed
-                                && file.old_path.as_deref() == Some(path)
-                        })
-                        .map(|index| (index, true))
-                })
+                .enumerate()
+                .filter(|(_, file)| self.file_visible(file))
+                .min_by_key(|(index, _)| index.abs_diff(fallback))
+                .map(|(index, _)| index)
+                .or(Some(fallback))
         });
-        if let Some((index, renamed)) = selected_match
-            && renamed
-            && let Some(old_path) = selected_path.as_ref()
-            && let Some(viewport) = viewports.remove(old_path)
-        {
-            viewports.insert(self.files[index].path.clone(), viewport);
-        }
-        self.viewport_by_path = viewports;
-        if let Some((index, _)) = selected_match {
+        if let Some(index) = restore_index {
             self.reveal_file_in_tree(index);
             self.tree_cursor = Some(TreeRowId::File { file_index: index });
             self.selected = index;
@@ -713,26 +1114,42 @@ impl ReviewSession {
         self.focus = focus;
         if self.focus == Focus::Diff {
             // Row counts may have shifted; keep the cursor on a real row.
-            let rows = self.diff_rows_for_selected_file().len();
+            let rows = self.diff_rows_for_file_index(self.selected).len();
             if self.diff_cursor >= rows {
                 self.diff_cursor = rows.saturating_sub(1);
             }
             self.ensure_diff_cursor_commentable();
         }
         // The zen frame only survives when its file is still in the diff.
-        self.zen_focus =
-            zen_focus.filter(|focus| self.files.iter().any(|file| file.path == focus.path));
+        self.zen_focus = zen_focus.and_then(|mut focus| {
+            let path = self.files.iter().find_map(|file| {
+                path_mapping
+                    .get(&file.path)
+                    .is_some_and(|prior| prior == &focus.path)
+                    .then(|| file.path.clone())
+            })?;
+            focus.path = path;
+            Some(focus)
+        });
     }
 
-    fn refresh_comment_anchors_for_current_diff(&mut self) {
+    fn refresh_comment_anchors_for_current_diff(
+        &mut self,
+        path_mapping: Option<&BTreeMap<String, String>>,
+    ) {
         for comment in &mut self.comments {
             let Some(path) = comment.path.clone() else {
                 continue;
             };
-            let file = self
-                .files
-                .iter()
-                .find(|file| file.path == path)
+            let file = path_mapping
+                .and_then(|mapping| {
+                    self.files.iter().find(|file| {
+                        mapping
+                            .get(&file.path)
+                            .is_some_and(|previous| previous == &path)
+                    })
+                })
+                .or_else(|| self.files.iter().find(|file| file.path == path))
                 .or_else(|| {
                     self.files.iter().find(|file| {
                         file.status == FileStatus::Renamed
@@ -742,14 +1159,31 @@ impl ReviewSession {
             let Some(file) = file else {
                 continue;
             };
-            let Some(anchor) = comment_anchor_for_file_lines(file, comment.line, comment.end_line)
-            else {
-                continue;
+            let anchor = match comment.anchor.as_ref() {
+                Some(CommentAnchor::Line { side, line, .. }) => {
+                    line_anchor_for_side_line(file, *side, *line)
+                }
+                Some(CommentAnchor::Range { lines, .. }) => comment_anchor_for_sided_lines(
+                    file,
+                    &lines
+                        .iter()
+                        .map(|line| (line.side, line.line))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => comment_anchor_for_file_lines(file, comment.line, comment.end_line),
             };
+            let anchor = anchor.unwrap_or_else(|| CommentAnchor::File {
+                path: file.path.clone(),
+                old_path: file.old_path.clone(),
+                diff_fingerprint: file.fingerprint.clone(),
+            });
             comment.line = anchor.line();
-            comment.end_line = anchor
-                .end_line()
-                .filter(|end_line| Some(*end_line) != anchor.line());
+            comment.end_line = match &anchor {
+                CommentAnchor::Range { end_line, .. } => Some(*end_line),
+                _ => anchor
+                    .end_line()
+                    .filter(|end_line| Some(*end_line) != anchor.line()),
+            };
             comment.path = Some(file.path.clone());
             comment.anchor = Some(anchor);
         }
@@ -766,7 +1200,6 @@ impl ReviewSession {
         }
         self.diff_cursor = 0;
         self.diff_scroll = 0;
-        self.diff_visual_offset = 0;
         self.ensure_diff_cursor_commentable();
     }
 
@@ -786,11 +1219,13 @@ impl ReviewSession {
     }
 
     pub fn apply_review_state(&mut self, mut state: ReviewState) {
+        self.save_current_viewport();
         state.normalize_legacy_file_state();
         self.persisted_files = state.files;
         self.comments = state.comments;
         self.sessions = state.sessions;
         self.apply_state_files();
+        self.ensure_selected_file_visible();
     }
 
     pub fn selected_file(&self) -> Option<&ReviewFile> {
@@ -853,9 +1288,6 @@ impl ReviewSession {
     /// projection changes.
     pub fn toggle_diff_wrap(&mut self) {
         self.diff_cues.soft_wrap = !self.diff_cues.soft_wrap;
-        if self.diff_cues.soft_wrap {
-            self.diff_horizontal_scroll = 0;
-        }
     }
 
     /// Toggle between the unified and side-by-side diff layouts.
@@ -953,6 +1385,15 @@ impl ReviewSession {
         self.restore_current_viewport();
     }
 
+    pub(crate) fn select_file_revealed(&mut self, index: usize) -> bool {
+        if index >= self.files.len() {
+            return false;
+        }
+        self.reveal_filtered_file(index);
+        self.select_file_index(index);
+        true
+    }
+
     fn select_tree_row(&mut self, tree: &FileTreeView, row_index: usize) {
         let Some(row) = tree.rows.get(row_index) else {
             return;
@@ -980,13 +1421,16 @@ impl ReviewSession {
 
     /// Jump straight to a file by index, revealing it in the tree and moving
     /// focus to the files pane.
-    pub fn jump_to_file(&mut self, file_index: usize) {
-        self.select_file_index(file_index);
+    pub fn jump_to_file(&mut self, file_index: usize) -> bool {
+        if !self.select_file_revealed(file_index) {
+            return false;
+        }
         self.focus = Focus::Files;
+        true
     }
 
     pub fn select_diff_row(&mut self, row_index: usize) {
-        let rows = self.diff_rows_for_selected_file();
+        let rows = self.diff_rows_for_file_index(self.selected);
         if rows.is_empty() {
             self.diff_cursor = 0;
             return;
@@ -1007,13 +1451,11 @@ impl ReviewSession {
         let Some(path) = self.selected_file().map(|file| file.path.clone()) else {
             return;
         };
-        let rows = self.diff_rows_for_selected_file();
+        let rows = self.diff_rows_for_file_index(self.selected);
         self.viewport_by_path.insert(
             path,
             FileViewport {
                 diff_scroll: self.diff_scroll,
-                diff_visual_offset: self.diff_visual_offset,
-                diff_horizontal_scroll: self.diff_horizontal_scroll,
                 diff_cursor: self.diff_cursor,
                 top_identity: rows
                     .get(self.diff_scroll as usize)
@@ -1028,8 +1470,8 @@ impl ReviewSession {
             .selected_file()
             .and_then(|file| self.viewport_by_path.get(&file.path).cloned())
             .unwrap_or_default();
-        let rows = self.diff_rows_for_selected_file();
-        let (top, top_recovered) = resolve_diff_row_identity(
+        let rows = self.diff_rows_for_file_index(self.selected);
+        let (top, _) = resolve_diff_row_identity(
             &rows,
             viewport.top_identity.as_ref(),
             viewport.diff_scroll as usize,
@@ -1040,12 +1482,6 @@ impl ReviewSession {
             viewport.diff_cursor,
         );
         self.diff_scroll = top.min(u16::MAX as usize) as u16;
-        self.diff_visual_offset = if top_recovered {
-            viewport.diff_visual_offset
-        } else {
-            0
-        };
-        self.diff_horizontal_scroll = viewport.diff_horizontal_scroll;
         self.diff_cursor = cursor;
     }
 
@@ -1136,7 +1572,8 @@ impl ReviewSession {
             return None;
         }
         let file_index = self.files.iter().position(|file| file.path == draft.path)?;
-        self.select_file_index(file_index);
+        self.reveal_filtered_file(file_index);
+        self.select_file_revealed(file_index);
         let anchor = draft
             .line
             .and_then(|line| {
@@ -1182,21 +1619,30 @@ impl ReviewSession {
 
     /// Jump to a chunk part: select its file and move the diff cursor to
     /// the part's first line (or the top of the file without line info).
-    pub fn jump_to_chunk_part(&mut self, part: &ChunkPart) {
-        let Some(file_index) = self.files.iter().position(|file| file.path == part.path) else {
-            return;
-        };
-        self.select_file_index(file_index);
-        let Some(start_line) = part.start_line else {
+    pub fn jump_to_chunk_part(&mut self, part: &ChunkPart) -> Option<NavigationPlacement> {
+        let file_index = self.files.iter().position(|file| file.path == part.path)?;
+        let row_index = part.start_line.and_then(|start_line| {
+            self.projected_row_for_range(
+                file_index,
+                start_line,
+                part.end_line.unwrap_or(start_line),
+            )
+        });
+        if part.start_line.is_some() && row_index.is_none() {
+            return None;
+        }
+        self.reveal_filtered_file(file_index);
+        self.select_file_revealed(file_index);
+        let Some(_start_line) = part.start_line else {
             self.focus = Focus::Files;
             self.diff_scroll = 0;
-            self.diff_visual_offset = 0;
-            return;
+            return Some(NavigationPlacement::Top);
         };
-        if let Some(row_index) = self.diff_rows_for_selected_file().iter().position(|row| {
-            row.anchor.is_some() && row.new_lineno.is_some_and(|line| line >= start_line)
-        }) {
+        if let Some(row_index) = row_index {
             self.jump_to_diff_row(row_index);
+            Some(NavigationPlacement::Cursor)
+        } else {
+            None
         }
     }
 
@@ -1258,24 +1704,156 @@ impl ReviewSession {
 
     /// Jump to a flagged section: select the file and move the diff cursor
     /// to the flagged line (or the top of the file for file-level flags).
-    pub fn jump_to_flag(&mut self, flag: &AgentFlag) {
-        let Some(file_index) = self.files.iter().position(|file| file.path == flag.path) else {
-            return;
-        };
+    pub fn jump_to_flag(&mut self, flag: &AgentFlag) -> Option<NavigationPlacement> {
+        let file_index = self.files.iter().position(|file| file.path == flag.path)?;
+        let row_index = flag
+            .line
+            .and_then(|line| self.projected_row_for_new_line(file_index, line, true));
+        if flag.line.is_some() && row_index.is_none() {
+            return None;
+        }
+        self.reveal_filtered_file(file_index);
         self.select_file_index(file_index);
-        let Some(line) = flag.line else {
+        let Some(_line) = flag.line else {
             self.focus = Focus::Files;
             self.diff_scroll = 0;
-            self.diff_visual_offset = 0;
-            return;
+            return Some(NavigationPlacement::Top);
         };
-        if let Some(row_index) = self
-            .diff_rows_for_selected_file()
-            .iter()
-            .position(|row| row.new_lineno == Some(line) && row.anchor.is_some())
-        {
+        if let Some(row_index) = row_index {
             self.jump_to_diff_row(row_index);
+            Some(NavigationPlacement::Cursor)
+        } else {
+            None
         }
+    }
+
+    /// Resolve a logical new-side destination into the current row
+    /// projection. Validity comes from the parsed diff, not from presentation:
+    /// folded context and large-diff placeholders may hide the exact row.
+    fn projected_row_for_new_line(
+        &self,
+        file_index: usize,
+        line: usize,
+        exact: bool,
+    ) -> Option<usize> {
+        let file = self.files.get(file_index)?;
+        let logical_exists = file
+            .diff
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|diff| {
+                diff.new_lineno.is_some_and(|candidate| {
+                    if exact {
+                        candidate == line
+                    } else {
+                        candidate >= line
+                    }
+                })
+            });
+        if !logical_exists {
+            return None;
+        }
+
+        let rows = self.diff_rows_for_file_index(file_index);
+        rows.iter()
+            .position(|row| {
+                row.new_lineno.is_some_and(|candidate| {
+                    if exact {
+                        candidate == line
+                    } else {
+                        candidate >= line
+                    }
+                })
+            })
+            .or_else(|| {
+                rows.iter()
+                    .position(|row| matches!(row.kind, DiffRowKind::Placeholder))
+            })
+            .or_else(|| {
+                rows.iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| row.new_lineno.map(|candidate| (index, candidate)))
+                    .min_by_key(|(_, candidate)| candidate.abs_diff(line))
+                    .map(|(index, _)| index)
+            })
+    }
+
+    pub(crate) fn projected_row_for_range(
+        &self,
+        file_index: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<usize> {
+        let file = self.files.get(file_index)?;
+        let (start, end) = (start.min(end), start.max(end));
+        let lines = file
+            .diff
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .collect::<Vec<_>>();
+        let source = lines
+            .iter()
+            .copied()
+            .find(|line| {
+                line.new_lineno
+                    .is_some_and(|line| (start..=end).contains(&line))
+            })
+            .or_else(|| {
+                lines.iter().copied().find(|line| {
+                    line.old_lineno
+                        .is_some_and(|line| (start..=end).contains(&line))
+                })
+            })?;
+        let rows = self.diff_rows_for_file_index(file_index);
+        rows.iter()
+            .position(|row| {
+                row.kind == DiffRowKind::DiffLine(source.kind)
+                    && row.old_lineno == source.old_lineno
+                    && row.new_lineno == source.new_lineno
+                    && row.text == source.text
+            })
+            .or_else(|| {
+                source.new_lineno.and_then(|line| {
+                    rows.iter().position(|row| {
+                        row.logical_range
+                            .as_ref()
+                            .is_some_and(|range| range.contains(&line))
+                    })
+                })
+            })
+            .or_else(|| {
+                rows.iter()
+                    .position(|row| matches!(row.kind, DiffRowKind::Placeholder))
+            })
+    }
+
+    pub(crate) fn projected_row_for_side_line(
+        &self,
+        file_index: usize,
+        side: DiffSide,
+        line: usize,
+    ) -> Option<usize> {
+        let rows = self.diff_rows_for_file_index(file_index);
+        rows.iter()
+            .position(|row| match side {
+                DiffSide::Old => row.old_lineno == Some(line),
+                DiffSide::New => row.new_lineno == Some(line),
+            })
+            .or_else(|| {
+                rows.iter().position(|row| {
+                    match side {
+                        DiffSide::Old => row.old_logical_range.as_ref(),
+                        DiffSide::New => row.logical_range.as_ref(),
+                    }
+                    .is_some_and(|range| range.contains(&line))
+                })
+            })
+            .or_else(|| {
+                rows.iter()
+                    .position(|row| matches!(row.kind, DiffRowKind::Placeholder))
+            })
     }
 
     pub fn agent_order_active(&self) -> bool {
@@ -1512,6 +2090,18 @@ impl ReviewSession {
             && self.viewed_filter.admits(file.viewed || file.caught_up)
     }
 
+    fn reveal_filtered_file(&mut self, file_index: usize) {
+        let Some(file) = self.files.get(file_index) else {
+            return;
+        };
+        if file.generated {
+            self.hide_generated = false;
+        }
+        if !self.viewed_filter.admits(file.viewed || file.caught_up) {
+            self.viewed_filter = ViewedFilter::All;
+        }
+    }
+
     fn ensure_selected_file_visible(&mut self) {
         if self
             .selected_file()
@@ -1523,9 +2113,6 @@ impl ReviewSession {
             self.select_file_index(index);
         } else {
             self.tree_cursor = None;
-            self.diff_cursor = 0;
-            self.diff_scroll = 0;
-            self.diff_visual_offset = 0;
             self.clear_diff_range_selection();
         }
     }
@@ -1537,7 +2124,6 @@ impl ReviewSession {
         } else {
             self.diff_scroll.saturating_add(delta as u16)
         };
-        self.diff_visual_offset = 0;
         self.clamp_diff_scroll();
     }
 
@@ -1554,7 +2140,6 @@ impl ReviewSession {
         let rows = self.diff_rows_for_selected_file();
         if rows.is_empty() {
             self.diff_scroll = 0;
-            self.diff_visual_offset = 0;
             return;
         }
         if self.focus == Focus::Diff
@@ -1567,7 +2152,6 @@ impl ReviewSession {
             .saturating_sub(DIFF_CURSOR_SCROLL_MARGIN)
             .min(rows.len().saturating_sub(1))
             .min(u16::MAX as usize) as u16;
-        self.diff_visual_offset = 0;
     }
 
     pub fn toggle_focus(&mut self) {
@@ -1592,11 +2176,10 @@ impl ReviewSession {
         }
     }
 
-    pub fn move_diff_cursor(&mut self, delta: isize) {
+    pub fn move_diff_cursor(&mut self, delta: isize) -> bool {
         let rows = self.diff_rows_for_selected_file();
         if rows.is_empty() {
-            self.diff_cursor = 0;
-            return;
+            return false;
         }
 
         let max = rows.len() as isize - 1;
@@ -1608,15 +2191,24 @@ impl ReviewSession {
             }
             cursor = next;
         }
+        if rows
+            .get(cursor)
+            .and_then(|row| row.anchor.as_ref())
+            .is_none()
+        {
+            cursor = self.diff_cursor;
+        }
 
+        if cursor == self.diff_cursor {
+            return false;
+        }
         self.diff_cursor = cursor;
         if self.diff_cursor < self.diff_scroll as usize {
             self.diff_scroll = self.diff_cursor as u16;
-            self.diff_visual_offset = 0;
         } else if self.diff_cursor > self.diff_scroll as usize + DIFF_CURSOR_SCROLL_MARGIN {
             self.diff_scroll = self.diff_cursor.saturating_sub(DIFF_CURSOR_SCROLL_MARGIN) as u16;
-            self.diff_visual_offset = 0;
         }
+        true
     }
 
     pub fn toggle_diff_range_selection(&mut self) {
@@ -1717,10 +2309,16 @@ impl ReviewSession {
     }
 
     /// Cycle the diff cursor between changed symbols (wrapping).
-    pub fn jump_to_changed_symbol(&mut self, delta: isize) {
+    pub fn jump_to_changed_symbol(&mut self, delta: isize) -> bool {
+        let before = (
+            self.selected,
+            self.diff_cursor,
+            self.diff_scroll,
+            self.focus,
+        );
         let targets = self.changed_symbol_targets();
         if targets.is_empty() {
-            return;
+            return false;
         }
         let at_diff_cursor = self.focus == Focus::Diff;
         let current = self.diff_cursor;
@@ -1737,13 +2335,29 @@ impl ReviewSession {
                 .or_else(|| targets.first())
         };
         if let Some(target) = next {
+            if self.focus == Focus::Diff && target.row_index == self.diff_cursor {
+                return false;
+            }
             self.jump_to_diff_row(target.row_index);
         }
+        before
+            != (
+                self.selected,
+                self.diff_cursor,
+                self.diff_scroll,
+                self.focus,
+            )
     }
 
-    pub fn jump_to_changed_hunk(&mut self, delta: isize) {
+    pub fn jump_to_changed_hunk(&mut self, delta: isize) -> bool {
+        let before = (
+            self.selected,
+            self.diff_cursor,
+            self.diff_scroll,
+            self.focus,
+        );
         if self.files.is_empty() {
-            return;
+            return false;
         }
         let direction = if delta.is_negative() { -1 } else { 1 };
         let start_file = self.selected;
@@ -1758,15 +2372,7 @@ impl ReviewSession {
             {
                 continue;
             }
-            if file_index != self.selected {
-                self.reveal_file_in_tree(file_index);
-                self.tree_cursor = Some(TreeRowId::File { file_index });
-                self.save_current_viewport();
-                self.clear_diff_range_selection();
-                self.selected = file_index;
-                self.restore_current_viewport();
-            }
-            let rows = self.diff_rows_for_selected_file();
+            let rows = self.diff_rows_for_file_index(file_index);
             let mut targets: Vec<usize> = rows
                 .iter()
                 .enumerate()
@@ -1781,6 +2387,13 @@ impl ReviewSession {
                     _ => None,
                 })
                 .collect();
+            if targets.is_empty()
+                && let Some(placeholder) = rows
+                    .iter()
+                    .position(|row| matches!(row.kind, DiffRowKind::Placeholder))
+            {
+                targets.push(placeholder);
+            }
             if targets.is_empty() {
                 continue;
             }
@@ -1818,13 +2431,34 @@ impl ReviewSession {
                 Some(*targets.last().unwrap())
             };
             if let Some(target) = target {
+                if file_index != self.selected {
+                    self.select_file_revealed(file_index);
+                }
+                if file_index == start_file
+                    && self.focus == Focus::Diff
+                    && target == self.diff_cursor
+                {
+                    return false;
+                }
                 self.focus = Focus::Diff;
                 self.diff_cursor = target;
                 self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
-                self.diff_visual_offset = 0;
-                return;
+                return before
+                    != (
+                        self.selected,
+                        self.diff_cursor,
+                        self.diff_scroll,
+                        self.focus,
+                    );
             }
         }
+        before
+            != (
+                self.selected,
+                self.diff_cursor,
+                self.diff_scroll,
+                self.focus,
+            )
     }
 
     /// Move to a diff row (from outline/symbol navigation), focusing the diff
@@ -1832,7 +2466,6 @@ impl ReviewSession {
     pub fn jump_to_diff_row(&mut self, row_index: usize) {
         self.select_diff_row(row_index);
         self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
-        self.diff_visual_offset = 0;
     }
 
     pub fn selected_comment_anchor(&self) -> Option<CommentAnchor> {
@@ -1933,19 +2566,32 @@ impl ReviewSession {
         }
     }
 
-    pub fn move_to_comment(&mut self, delta: isize) {
+    pub fn move_to_comment(&mut self, delta: isize) -> Option<CommentSelection> {
         if self.comments.is_empty() {
-            return;
+            return None;
         }
 
         let current = self.current_comment_index();
-        let next = match (current, delta.is_negative()) {
+        let start = match (current, delta.is_negative()) {
             (Some(index), false) => (index + 1) % self.comments.len(),
             (Some(index), true) => (index + self.comments.len() - 1) % self.comments.len(),
             (None, false) => 0,
             (None, true) => self.comments.len() - 1,
         };
-        self.select_comment(next);
+        for offset in 0..self.comments.len() {
+            let next = if delta.is_negative() {
+                (start + self.comments.len() - offset) % self.comments.len()
+            } else {
+                (start + offset) % self.comments.len()
+            };
+            if current == Some(next) && self.comments.len() == 1 {
+                return None;
+            }
+            if let Some(selection) = self.select_comment(next) {
+                return Some(selection);
+            }
+        }
+        None
     }
 
     pub fn selected_comment(&self) -> Option<&Comment> {
@@ -2066,10 +2712,11 @@ impl ReviewSession {
     }
 
     /// Select a comment by id, moving the file/diff cursors to its anchor.
-    pub fn select_comment_by_id(&mut self, id: &str) {
+    pub(crate) fn select_comment_by_id(&mut self, id: &str) -> Option<CommentSelection> {
         if let Some(index) = self.comments.iter().position(|comment| comment.id == id) {
-            self.select_comment(index);
+            return self.select_comment(index);
         }
+        None
     }
 
     pub fn delete_comment(&mut self, id: &str) -> bool {
@@ -2123,9 +2770,12 @@ impl ReviewSession {
                 session_id,
                 path: Some(anchor.path().to_owned()),
                 line: anchor.line(),
-                end_line: anchor
-                    .end_line()
-                    .filter(|end_line| Some(*end_line) != anchor.line()),
+                end_line: match &anchor {
+                    CommentAnchor::Range { end_line, .. } => Some(*end_line),
+                    _ => anchor
+                        .end_line()
+                        .filter(|end_line| Some(*end_line) != anchor.line()),
+                },
                 anchor: Some(anchor),
                 observation: Some(observation),
                 body,
@@ -2208,40 +2858,28 @@ impl ReviewSession {
         self.selected_comment_index()
     }
 
-    fn select_comment(&mut self, index: usize) {
-        let Some(comment) = self.comments.get(index).cloned() else {
-            return;
-        };
-        self.selected_comment_id = Some(comment.id.clone());
-        let Some(target_path) = comment
+    fn select_comment(&mut self, index: usize) -> Option<CommentSelection> {
+        let comment = self.comments.get(index).cloned()?;
+        let target_path = comment
             .anchor
             .as_ref()
             .map(CommentAnchor::path)
-            .or(comment.path.as_deref())
-        else {
-            return;
-        };
-        let Some(file_index) = self.files.iter().position(|file| file.path == target_path) else {
-            return;
-        };
+            .or(comment.path.as_deref())?;
+        let file_index = self
+            .files
+            .iter()
+            .position(|file| file.path == target_path)?;
 
-        self.select_file_index(file_index);
-        match comment.anchor {
-            Some(anchor @ CommentAnchor::Line { .. }) => {
-                self.focus = Focus::Diff;
-                if let Some(row_index) = self
-                    .diff_rows_for_selected_file()
-                    .iter()
-                    .position(|row| row.anchor.as_ref() == Some(&anchor))
-                {
-                    self.diff_cursor = row_index;
-                    self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
-                    self.diff_visual_offset = 0;
-                }
-            }
-            Some(CommentAnchor::Range { lines, .. }) => {
-                self.focus = Focus::Diff;
-                if let Some(row_index) = self.diff_rows_for_selected_file().iter().position(|row| {
+        let row_index = match &comment.anchor {
+            Some(anchor @ CommentAnchor::Line { side, line, .. }) => self
+                .diff_rows_for_file_index(file_index)
+                .iter()
+                .position(|row| row.anchor.as_ref() == Some(anchor))
+                .or_else(|| self.projected_row_for_side_line(file_index, *side, *line)),
+            Some(CommentAnchor::Range { lines, .. }) => self
+                .diff_rows_for_file_index(file_index)
+                .iter()
+                .position(|row| {
                     row.anchor.as_ref().is_some_and(|anchor| {
                         matches!(
                             anchor,
@@ -2249,18 +2887,37 @@ impl ReviewSession {
                                 if lines.iter().any(|line| &line.line_fingerprint == line_fingerprint)
                         )
                     })
-                }) {
-                    self.diff_cursor = row_index;
-                    self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
-                    self.diff_visual_offset = 0;
-                }
-            }
-            _ => self.focus = Focus::Files,
+                })
+                .or_else(|| {
+                    lines.iter().find_map(|line| {
+                        self.projected_row_for_side_line(file_index, line.side, line.line)
+                    })
+                }),
+            _ => None,
+        };
+        let line_anchored = matches!(
+            comment.anchor,
+            Some(CommentAnchor::Line { .. } | CommentAnchor::Range { .. })
+        );
+        if line_anchored && row_index.is_none() {
+            return None;
+        }
+
+        self.select_file_revealed(file_index);
+        self.selected_comment_id = Some(comment.id.clone());
+        if let Some(row_index) = row_index {
+            self.focus = Focus::Diff;
+            self.diff_cursor = row_index;
+            self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+            Some(CommentSelection::Diff)
+        } else {
+            self.focus = Focus::Files;
+            Some(CommentSelection::File)
         }
     }
 
     fn ensure_diff_cursor_commentable(&mut self) {
-        let rows = self.diff_rows_for_selected_file();
+        let rows = self.diff_rows_for_file_index(self.selected);
         if rows
             .get(self.diff_cursor)
             .and_then(|row| row.anchor.as_ref())
@@ -2571,8 +3228,6 @@ diff --git a/README.md b/README.md
             .unwrap();
         session.select_file_index(index);
         session.diff_scroll = 2;
-        session.diff_visual_offset = 4;
-        session.diff_horizontal_scroll = 7;
         session.diff_cursor = 3;
         session.zen_focus = Some(ZenFocus {
             path: "README.md".to_owned(),
@@ -2611,8 +3266,6 @@ diff --git a/src/new.rs b/src/new.rs
         assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
         assert_eq!(session.selected_file().unwrap().path, "README.md");
         assert_eq!(session.diff_scroll, 2);
-        assert_eq!(session.diff_visual_offset, 4);
-        assert_eq!(session.diff_horizontal_scroll, 7);
         assert_eq!(session.diff_cursor, 3);
         assert_eq!(session.zen_focus.as_ref().unwrap().path, "README.md");
         // Viewed marks still carry over by fingerprint, and the new file
@@ -2655,7 +3308,6 @@ diff --git a/src/new.rs b/src/new.rs
         session.focus = Focus::Diff;
         session.diff_cursor = old_cursor;
         session.diff_scroll = old_cursor as u16;
-        session.diff_visual_offset = 2;
 
         let refreshed = DiffSet::parse(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+after\n@@ -10,2 +10,2 @@\n keep\n-old\n+target\n",
@@ -2667,7 +3319,6 @@ diff --git a/src/new.rs b/src/new.rs
         assert_eq!(rows[session.diff_cursor].text, "target");
         assert_eq!(rows[session.diff_scroll as usize].text, "target");
         assert!(session.diff_cursor > old_cursor);
-        assert_eq!(session.diff_visual_offset, 2);
     }
 
     #[test]
@@ -2701,6 +3352,262 @@ diff --git a/src/new.rs b/src/new.rs
         let rows = session.diff_rows_for_selected_file();
         assert_eq!(rows[session.diff_cursor].text, "target");
         assert_eq!(rows[session.diff_scroll as usize].text, "target");
+    }
+
+    #[test]
+    fn refresh_preserves_cursor_while_every_file_is_hidden() {
+        let mut session = session();
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "new")
+            .unwrap();
+        session.diff_cursor = target;
+        session.diff_scroll = target as u16;
+        session.mark_all_viewed();
+        session.viewed_filter = ViewedFilter::Unviewed;
+        let refreshed = DiffSet::parse(
+            "diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        assert!(session.selected_visible_file().is_none());
+        assert_eq!(
+            session.diff_rows_for_file_index(session.selected)[session.diff_cursor].text,
+            "new"
+        );
+    }
+
+    #[test]
+    fn refresh_prunes_removed_logical_viewports_before_same_path_returns() {
+        let original = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10 +10 @@\n-old\n+target\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.diff_cursor = target;
+        session.diff_scroll = target as u16;
+        session.select_file_index(1);
+
+        let without_a = DiffSet::parse(
+            "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), without_a);
+
+        let unrelated_a = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-before\n+unrelated\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), unrelated_a);
+        let a = session
+            .files
+            .iter()
+            .position(|file| file.path == "a.txt")
+            .unwrap();
+        session.select_file_index(a);
+
+        assert_eq!(session.diff_scroll, 0);
+        assert_eq!(session.diff_cursor, 0);
+    }
+
+    #[test]
+    fn refresh_follows_successive_base_relative_rename_lineage() {
+        let mid = DiffSet::parse(
+            "diff --git a/old.rs b/mid.rs\nsimilarity index 90%\nrename from old.rs\nrename to mid.rs\n--- a/old.rs\n+++ b/mid.rs\n@@ -10 +10 @@\n-old\n+target\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            mid,
+            ReviewState::default(),
+        );
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.diff_scroll = target as u16;
+        session.diff_cursor = target;
+
+        let new = DiffSet::parse(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-before\n+after\n@@ -10 +10 @@\n-old\n+target\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), new);
+
+        assert_eq!(session.selected_file().unwrap().path, "new.rs");
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_scroll as usize].text, "target");
+        assert_eq!(rows[session.diff_cursor].text, "target");
+    }
+
+    #[test]
+    fn refresh_reserves_rename_destination_before_recreated_source() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ b/old.rs\n@@ -10 +10 @@\n-old\n+target\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.diff_scroll = target as u16;
+        session.diff_cursor = target;
+
+        let refreshed = DiffSet::parse(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -10 +10 @@\n-old\n+target\ndiff --git a/old.rs b/old.rs\nnew file mode 100644\n--- /dev/null\n+++ b/old.rs\n@@ -0,0 +1 @@\n+recreated\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert_eq!(session.selected_file().unwrap().path, "new.rs");
+        assert_eq!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].text,
+            "target"
+        );
+    }
+
+    #[test]
+    fn successive_rename_with_recreated_source_keeps_lineage_reserved() {
+        let first = DiffSet::parse(
+            "diff --git a/old.rs b/mid.rs\nsimilarity index 90%\nrename from old.rs\nrename to mid.rs\n--- a/old.rs\n+++ b/mid.rs\n@@ -1 +1 @@\n-old\n+target\ndiff --git a/old.rs b/old.rs\nnew file mode 100644\n--- /dev/null\n+++ b/old.rs\n@@ -0,0 +1 @@\n+recreated\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            first,
+            ReviewState::default(),
+        );
+        let mid = session
+            .files
+            .iter()
+            .position(|file| file.path == "mid.rs")
+            .unwrap();
+        session.select_file_index(mid);
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.add_comment("rename lineage comment".into());
+        let comment_id = session.comments.last().unwrap().id.clone();
+        let second = DiffSet::parse(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-old\n+target\ndiff --git a/old.rs b/old.rs\nnew file mode 100644\n--- /dev/null\n+++ b/old.rs\n@@ -0,0 +1 @@\n+recreated again\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), second);
+        assert_eq!(session.selected_file().unwrap().path, "new.rs");
+        assert_eq!(session.comments[0].path.as_deref(), Some("new.rs"));
+        assert_eq!(
+            session.select_comment_by_id(&comment_id),
+            Some(CommentSelection::Diff)
+        );
+    }
+
+    #[test]
+    fn rename_return_restores_state_and_comment_to_base_path() {
+        let first = DiffSet::parse(
+            "diff --git a/old.rs b/mid.rs\nsimilarity index 90%\nrename from old.rs\nrename to mid.rs\n--- a/old.rs\n+++ b/mid.rs\n@@ -10 +10 @@\n-old\n+target\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            first,
+            ReviewState::default(),
+        );
+        session.focus = Focus::Diff;
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.diff_scroll = target as u16;
+        session.diff_cursor = target;
+        session.add_comment("lineage".into());
+        let returned = DiffSet::parse(
+            "diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ b/old.rs\n@@ -10 +10 @@\n-old\n+target\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), returned);
+        assert_eq!(session.selected_file().unwrap().path, "old.rs");
+        assert_eq!(session.diff_cursor, target);
+        assert_eq!(session.comments[0].path.as_deref(), Some("old.rs"));
+    }
+
+    #[test]
+    fn refresh_disappeared_selection_restores_surviving_fallback_viewport() {
+        let original = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old a\n+new a\ndiff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-old b\n+new b\ndiff --git a/c.txt b/c.txt\n--- a/c.txt\n+++ b/c.txt\n@@ -10 +10 @@\n-old c\n+target c\n",
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            original,
+            ReviewState::default(),
+        );
+        session.select_file_index(2);
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target c")
+            .unwrap();
+        session.diff_scroll = target as u16;
+        session.diff_cursor = target;
+        session.select_file_index(1);
+
+        let refreshed = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old a\n+new a\ndiff --git a/c.txt b/c.txt\n--- a/c.txt\n+++ b/c.txt\n@@ -10 +10 @@\n-old c\n+target c\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert_eq!(session.selected_file().unwrap().path, "c.txt");
+        let rows = session.diff_rows_for_selected_file();
+        assert_eq!(rows[session.diff_scroll as usize].text, "target c");
+        assert_eq!(rows[session.diff_cursor].text, "target c");
+        assert!(matches!(
+            session.tree_cursor,
+            Some(TreeRowId::File { file_index: 1 })
+        ));
+    }
+
+    #[test]
+    fn refresh_disappeared_selection_prefers_visible_fallback() {
+        let mut session = session();
+        session.select_file_index(1);
+        session.hide_generated = true;
+        let refreshed = DiffSet::parse(
+            "diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/generated.rs b/generated.rs\n--- a/generated.rs\n+++ b/generated.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        session.files[1].generated = true;
+        session.ensure_selected_file_visible();
+
+        assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
+        assert!(session.selected_visible_file().is_some());
     }
 
     #[test]
@@ -2743,6 +3650,83 @@ diff --git a/README.md b/README.md
             1,
             "line comments must be attached to the refreshed diff row so the gutter marker and inline body render after watch refresh"
         );
+    }
+
+    #[test]
+    fn comment_refresh_and_navigation_preserve_anchor_side() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old text\n+new text\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "old text")
+            .unwrap();
+        session.add_comment("old-side".into());
+        let id = session.comments[0].id.clone();
+        let refreshed = DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old changed\n+new changed\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+        assert!(matches!(
+            session.comments[0].anchor,
+            Some(CommentAnchor::Line {
+                side: DiffSide::Old,
+                ..
+            })
+        ));
+        assert_eq!(
+            session.select_comment_by_id(&id),
+            Some(CommentSelection::Diff)
+        );
+        assert_eq!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].text,
+            "old changed"
+        );
+        let vanished = DiffSet::parse(
+            "diff --git a/a.txt b/renamed.txt\nsimilarity index 90%\nrename from a.txt\nrename to renamed.txt\n--- a/a.txt\n+++ b/renamed.txt\n@@ -50 +50 @@\n-other\n+replacement\n",
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), vanished);
+        assert_eq!(session.comments[0].path.as_deref(), Some("renamed.txt"));
+        assert!(matches!(
+            session.comments[0].anchor,
+            Some(CommentAnchor::File { .. })
+        ));
+    }
+
+    #[test]
+    fn replace_diff_comment_lineage_prefers_rename_over_recreated_source() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/old.rs b/old.rs\n--- a/old.rs\n+++ b/old.rs\n@@ -1 +1 @@\n-old\n+target\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "target")
+            .unwrap();
+        session.add_comment("follow rename".into());
+        let next = DiffSet::parse(
+            "diff --git a/old.rs b/new.rs\nsimilarity index 90%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-old\n+target\ndiff --git a/old.rs b/old.rs\nnew file mode 100644\n--- /dev/null\n+++ b/old.rs\n@@ -0,0 +1 @@\n+recreated\n",
+        )
+        .unwrap();
+        session.replace_diff(ReviewTarget::trunk_to_current(), next);
+        assert_eq!(session.comments[0].path.as_deref(), Some("new.rs"));
     }
 
     #[test]
@@ -3518,6 +4502,59 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
+    fn chunk_range_requires_inclusive_old_or_new_intersection() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -100 +100 @@\n-removed\n+added\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let before = (session.selected, session.diff_cursor, session.diff_scroll);
+        assert!(
+            session
+                .jump_to_chunk_part(&ChunkPart {
+                    path: "a.txt".into(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                })
+                .is_none()
+        );
+        assert_eq!(
+            (session.selected, session.diff_cursor, session.diff_scroll),
+            before
+        );
+        assert!(
+            session
+                .jump_to_chunk_part(&ChunkPart {
+                    path: "a.txt".into(),
+                    start_line: Some(100),
+                    end_line: Some(100),
+                })
+                .is_some()
+        );
+        assert_eq!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].text,
+            "added"
+        );
+    }
+
+    #[test]
+    fn changed_hunk_navigation_targets_large_diff_placeholder() {
+        let mut session = session();
+        session.max_diff_lines = 1;
+        session.files[0].changed_hunks.insert(0);
+        session.rows_cache.borrow_mut().clear();
+        assert!(session.jump_to_changed_hunk(1));
+        assert!(matches!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].kind,
+            DiffRowKind::Placeholder
+        ));
+    }
+
+    #[test]
     fn large_change_nudge_triggers_on_thresholds_only() {
         let mut session = session();
 
@@ -3898,54 +4935,42 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn preserves_diff_viewport_per_file() {
+    fn preserves_logical_diff_viewport_per_file() {
         let mut session = session();
         session.diff_scroll = 2;
-        session.diff_visual_offset = 4;
-        session.diff_horizontal_scroll = 11;
         session.diff_cursor = 3;
 
         session.move_selection(1);
         session.diff_scroll = 1;
-        session.diff_visual_offset = 1;
-        session.diff_horizontal_scroll = 5;
         session.diff_cursor = 1;
         session.move_selection(-1);
 
         assert_eq!(session.selected_file().unwrap().path, "src/tui.rs");
         assert_eq!(session.diff_scroll, 2);
-        assert_eq!(session.diff_visual_offset, 4);
-        assert_eq!(session.diff_horizontal_scroll, 11);
         assert_eq!(session.diff_cursor, 3);
 
         session.move_selection(1);
 
         assert_eq!(session.selected_file().unwrap().path, "README.md");
         assert_eq!(session.diff_scroll, 1);
-        assert_eq!(session.diff_visual_offset, 1);
-        assert_eq!(session.diff_horizontal_scroll, 5);
         assert_eq!(session.diff_cursor, 1);
     }
 
     #[test]
-    fn wrap_toggle_leaves_visual_offset_for_tui_reconciliation() {
+    fn wrap_toggle_preserves_logical_viewport() {
         let mut session = multi_line_session();
         session.toggle_focus();
         session.diff_scroll = 3;
-        session.diff_visual_offset = 7;
-        session.diff_horizontal_scroll = 9;
         let cursor = session.diff_cursor;
 
         session.toggle_diff_wrap();
         assert!(!session.diff_cues.soft_wrap);
         assert_eq!(session.diff_scroll, 3);
-        assert_eq!(session.diff_visual_offset, 7);
         assert_eq!(session.diff_cursor, cursor);
-        assert_eq!(session.diff_horizontal_scroll, 9);
 
         session.toggle_diff_wrap();
         assert!(session.diff_cues.soft_wrap);
-        assert_eq!(session.diff_horizontal_scroll, 0);
+        assert_eq!(session.diff_scroll, 3);
         assert_eq!(session.diff_cursor, cursor);
     }
 
@@ -4297,6 +5322,472 @@ diff --git a/src/c.rs b/src/c.rs
         session.annotate_generated_where(|file| file.path == "README.md");
 
         assert!(session.summary_line().contains("1 generated/noisy"));
+    }
+
+    #[test]
+    fn logical_line_navigation_survives_large_diff_projection() {
+        let mut session = multi_line_session();
+        session.max_diff_lines = 1;
+        let part = ChunkPart {
+            path: session.selected_file().unwrap().path.clone(),
+            start_line: Some(2),
+            end_line: None,
+        };
+
+        assert!(session.jump_to_chunk_part(&part).is_some());
+        let rows = session.diff_rows_for_selected_file();
+        assert!(matches!(
+            rows[session.diff_cursor].kind,
+            DiffRowKind::Placeholder
+        ));
+    }
+
+    #[test]
+    fn comment_navigation_survives_large_diff_projection() {
+        let mut session = multi_line_session();
+        let anchor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .find(|row| row.new_lineno == Some(2))
+            .and_then(|row| row.anchor.clone())
+            .unwrap();
+        session.comments.push(Comment {
+            id: "hidden-line".into(),
+            path: Some(anchor.path().into()),
+            line: anchor.line(),
+            anchor: Some(anchor),
+            body: "remember this line".into(),
+            ..Comment::default()
+        });
+        session.max_diff_lines = 1;
+        session.rows_cache.borrow_mut().clear();
+
+        assert_eq!(
+            session.select_comment_by_id("hidden-line"),
+            Some(CommentSelection::Diff)
+        );
+        let rows = session.diff_rows_for_selected_file();
+        assert!(matches!(
+            rows[session.diff_cursor].kind,
+            DiffRowKind::Placeholder
+        ));
+    }
+
+    #[test]
+    fn later_hunk_header_identity_does_not_fall_back_to_first_hunk() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = original.diff_rows_for_selected_file();
+        let headers = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
+            .collect::<Vec<_>>();
+        let identity = DiffRowIdentity::from(headers[1].1);
+
+        let refreshed = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-new-before\n+new-after\n@@ -2 +2 @@\n-a\n+b\n@@ -11 +11 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let refreshed_rows = refreshed.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&refreshed_rows, Some(&identity), headers[1].0);
+
+        assert!(recovered);
+        assert_eq!(refreshed_rows[resolved].hunk_index, Some(2));
+    }
+
+    #[test]
+    fn synthetic_identity_tracks_shifted_gap_and_line_into_containing_fold() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = original.diff_rows_for_selected_file();
+        let gap = rows
+            .iter()
+            .find(|row| matches!(row.kind, DiffRowKind::ExpandGap { gap_id: 1, .. }))
+            .unwrap();
+        let gap_identity = DiffRowIdentity::from(gap);
+
+        let shifted = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -0,0 +1 @@\n+before\n@@ -2 +2 @@\n-a\n+b\n@@ -21 +21 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let shifted_rows = shifted.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&shifted_rows, Some(&gap_identity), 0);
+        assert!(recovered);
+        assert!(matches!(
+            shifted_rows[resolved].kind,
+            DiffRowKind::ExpandGap { gap_id: 2, .. }
+        ));
+
+        let mut folded = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,10 @@\n one\n two\n three\n four\n five\n six\n seven\n eight\n-nine\n+changed\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let unfolded = folded.diff_rows_for_selected_file();
+        let line_identity =
+            DiffRowIdentity::from(unfolded.iter().find(|row| row.text == "five").unwrap());
+        folded.toggle_context_fold();
+        let folded_rows = folded.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&folded_rows, Some(&line_identity), 0);
+        assert!(recovered);
+        assert!(matches!(
+            folded_rows[resolved].kind,
+            DiffRowKind::ContextFold
+        ));
+    }
+
+    #[test]
+    fn vanished_interior_hunk_header_maps_to_first_hunk_row() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old one\n+new one\n@@ -10 +10 @@\n-old ten\n+new ten\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let second_header = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
+            .nth(1)
+            .unwrap();
+        let identity = DiffRowIdentity::from(second_header.1);
+        let fallback = second_header.0;
+        session.diff_scroll = fallback as u16;
+        session.diff_cursor = fallback;
+        session.store_file_contents(
+            "a.txt",
+            Some((1..=10).map(|line| format!("line {line}\n")).collect()),
+        );
+        assert!(session.expand_nearest_gap(None));
+        let expanded = session.diff_rows_for_selected_file();
+        assert!(!expanded.iter().any(|row| {
+            matches!(row.kind, DiffRowKind::HunkHeader) && row.hunk_index == Some(1)
+        }));
+        let (resolved, recovered) = resolve_diff_row_identity(&expanded, Some(&identity), fallback);
+        assert!(recovered);
+        assert_eq!(expanded[resolved].new_lineno, Some(10));
+        assert!(session.restore_diff_top_identity(Some(&identity), fallback as u16));
+        assert_eq!(session.diff_scroll as usize, resolved);
+    }
+
+    #[test]
+    fn duplicate_semantic_candidates_resolve_by_source_proximity() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10 +10 @@\n-x\n+y\n@@ -30 +30 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = original.diff_rows_for_selected_file();
+        let identity = DiffRowIdentity::from(
+            rows.iter()
+                .filter(|row| matches!(row.kind, DiffRowKind::HunkHeader))
+                .nth(1)
+                .unwrap(),
+        );
+        let shifted = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -11 +11 @@\n-x\n+y\n@@ -31 +31 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let shifted_rows = shifted.diff_rows_for_selected_file();
+        let (resolved, recovered) = resolve_diff_row_identity(&shifted_rows, Some(&identity), 0);
+        assert!(recovered);
+        assert_eq!(
+            shifted_rows[resolved].logical_range.as_ref().unwrap().start,
+            31
+        );
+        let removed = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -11 +11 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let (_, recovered) =
+            resolve_diff_row_identity(&removed.diff_rows_for_selected_file(), Some(&identity), 0);
+        assert!(!recovered);
+
+        let earlier_removed = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -30 +30 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let earlier_removed_rows = earlier_removed.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&earlier_removed_rows, Some(&identity), 0);
+        assert!(recovered);
+        assert_eq!(
+            earlier_removed_rows[resolved]
+                .logical_range
+                .as_ref()
+                .unwrap()
+                .start,
+            30
+        );
+
+        let identical_inserted = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n@@ -10 +10 @@\n-x\n+y\n@@ -30 +30 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let identical_rows = identical_inserted.diff_rows_for_selected_file();
+        let (resolved, recovered) = resolve_diff_row_identity(&identical_rows, Some(&identity), 0);
+        assert!(recovered);
+        assert_eq!(
+            identical_rows[resolved]
+                .logical_range
+                .as_ref()
+                .unwrap()
+                .start,
+            30
+        );
+
+        let identical_inserted_and_shifted = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n@@ -11 +11 @@\n-x\n+y\n@@ -31 +31 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let inserted_shifted_rows = identical_inserted_and_shifted.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&inserted_shifted_rows, Some(&identity), 0);
+        assert!(recovered);
+        assert_eq!(
+            inserted_shifted_rows[resolved]
+                .logical_range
+                .as_ref()
+                .unwrap()
+                .start,
+            31
+        );
+
+        let mut first = shifted_rows
+            .iter()
+            .find(|row| row.new_lineno == Some(11))
+            .unwrap()
+            .clone();
+        first.semantic_key = Some("gap-line:repeated".into());
+        first.semantic_occurrence = 0;
+        first.new_lineno = Some(12);
+        let mut second = first.clone();
+        second.new_lineno = Some(31);
+        second.semantic_occurrence = 1;
+        let repeated_identity = DiffRowIdentity::from(&second);
+        second.new_lineno = Some(32);
+        let repeated = vec![first, second];
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&repeated, Some(&repeated_identity), 1);
+        assert!(recovered);
+        assert_eq!(repeated[resolved].new_lineno, Some(32));
+    }
+
+    #[test]
+    fn duplicate_diff_line_identity_follows_containing_hunk_across_reorder() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let original_rows = original.diff_rows_for_selected_file();
+        let identity = DiffRowIdentity::from(
+            original_rows
+                .iter()
+                .filter(|row| row.text == "shared")
+                .nth(1)
+                .unwrap(),
+        );
+
+        let reordered = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let reordered_rows = reordered.diff_rows_for_selected_file();
+        let (resolved, recovered) = resolve_diff_row_identity(&reordered_rows, Some(&identity), 0);
+
+        assert!(recovered);
+        assert_eq!(reordered_rows[resolved].text, "shared");
+        assert_eq!(reordered_rows[resolved].hunk_index, Some(0));
+        assert_eq!(reordered_rows[resolved + 1].text, "context beta");
+    }
+
+    #[test]
+    fn semantic_identity_does_not_retain_large_row_text() {
+        let long = "x".repeat(100_000);
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(&format!(
+                "diff --git a/a.bin b/a.bin\nold mode 100644\nnew mode 100755\n{long}\n"
+            ))
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let raw = rows
+            .iter()
+            .find(|row| matches!(row.kind, DiffRowKind::Raw))
+            .unwrap();
+        let identity = DiffRowIdentity::from(raw);
+        assert!(identity.text.is_empty());
+        assert!(identity.semantic_key.unwrap().len() < 80);
+    }
+
+    #[test]
+    fn explicit_navigation_reveals_filtered_destination() {
+        let mut session = session();
+        session.files[1].generated = true;
+        session.hide_generated = true;
+        session.files[1].viewed = true;
+        session.viewed_filter = ViewedFilter::Unviewed;
+        let path = session.files[1].path.clone();
+        let flag = AgentFlag {
+            id: "filtered".into(),
+            path,
+            line: None,
+            reason: "navigate".into(),
+            priority: crate::agent::FlagPriority::High,
+        };
+
+        assert!(session.jump_to_flag(&flag).is_some());
+        assert_eq!(session.selected, 1);
+        assert!(!session.hide_generated);
+        assert_eq!(session.viewed_filter, ViewedFilter::All);
+        assert!(session.selected_visible_file().is_some());
+    }
+
+    #[test]
+    fn clamped_cursor_movement_does_not_rewrite_detached_scroll() {
+        let mut session = session();
+        session.focus = Focus::Diff;
+        let rows = session.diff_rows_for_selected_file();
+        session.diff_cursor = rows.iter().rposition(|row| row.anchor.is_some()).unwrap();
+        session.diff_scroll = 0;
+        assert!(!session.move_diff_cursor(1));
+        assert_eq!(session.diff_scroll, 0);
+
+        session.diff_cursor = rows.iter().position(|row| row.anchor.is_some()).unwrap();
+        session.diff_scroll = 3;
+        assert!(!session.move_diff_cursor(-1));
+        assert_eq!(session.diff_scroll, 3);
+    }
+
+    #[test]
+    fn external_state_auto_advance_preserves_hidden_file_identity() {
+        let mut session = session();
+        let target = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .rposition(|row| row.anchor.is_some())
+            .unwrap();
+        let target_identity = DiffRowIdentity::from(&session.diff_rows_for_selected_file()[target]);
+        session.diff_scroll = target as u16;
+        session.diff_cursor = target;
+        session.viewed_filter = ViewedFilter::Unviewed;
+        let original_path = session.selected_file().unwrap().path.clone();
+        let mut external = session.to_state();
+        let fingerprint = session.files[0].fingerprint.clone();
+        external
+            .files
+            .entry(original_path.clone())
+            .or_default()
+            .viewed_fingerprints
+            .insert(fingerprint);
+
+        session.apply_review_state(external);
+        assert_ne!(session.selected_file().unwrap().path, original_path);
+        assert_eq!(
+            session.viewport_by_path[&original_path].diff_scroll,
+            target as u16
+        );
+        assert_eq!(
+            session.viewport_by_path[&original_path].top_identity,
+            Some(target_identity)
+        );
+        let original = session
+            .files
+            .iter()
+            .position(|file| file.path == original_path)
+            .unwrap();
+        let rows = session.diff_rows_for_file_index(original);
+        let (resolved, _) = resolve_diff_row_identity(
+            &rows,
+            session.viewport_by_path[&original_path]
+                .top_identity
+                .as_ref(),
+            target,
+        );
+        assert_eq!(resolved, target);
+        session.viewed_filter = ViewedFilter::All;
+        session.select_file_index(original);
+
+        assert_eq!(session.diff_scroll, target as u16);
+        assert_eq!(session.diff_cursor, target);
     }
 
     #[test]

@@ -220,6 +220,43 @@ fn find_line_anchor(file: &FileDiff, wanted: usize, new_side: bool) -> Option<Co
     None
 }
 
+pub(crate) fn line_anchor_for_side_line(
+    file: &ReviewFile,
+    side: DiffSide,
+    wanted: usize,
+) -> Option<CommentAnchor> {
+    let mut anchor = find_line_anchor(&file.diff, wanted, matches!(side, DiffSide::New))?;
+    if let CommentAnchor::Line {
+        side: anchor_side,
+        line,
+        line_text,
+        line_fingerprint,
+        ..
+    } = &mut anchor
+    {
+        *anchor_side = side;
+        *line = wanted;
+        *line_fingerprint =
+            fingerprint_line(&file.path, side, wanted, line_text, &file.fingerprint);
+    }
+    Some(anchor)
+}
+
+pub(crate) fn comment_anchor_for_sided_lines(
+    file: &ReviewFile,
+    lines: &[(DiffSide, usize)],
+) -> Option<CommentAnchor> {
+    let anchors = lines
+        .iter()
+        .filter_map(|(side, line)| line_anchor_for_side_line(file, *side, *line))
+        .collect::<Vec<_>>();
+    match anchors.as_slice() {
+        [] => None,
+        [single] => Some(single.clone()),
+        _ => range_anchor_from_lines(&file.diff, anchors),
+    }
+}
+
 fn range_anchor_from_lines(file: &FileDiff, anchors: Vec<CommentAnchor>) -> Option<CommentAnchor> {
     let mut range_lines = Vec::new();
     for (row_index, anchor) in anchors.into_iter().enumerate() {
@@ -397,6 +434,22 @@ mod tests {
                 line_kind,
                 ..
             } if line_kind == "removed"
+        ));
+    }
+
+    #[test]
+    fn requested_old_side_is_preserved_for_context_line() {
+        let file = sample_file();
+        let anchor = line_anchor_for_side_line(&file, DiffSide::Old, 1).unwrap();
+        assert!(matches!(
+            anchor,
+            CommentAnchor::Line {
+                side: DiffSide::Old,
+                line: 1,
+                old_line: Some(1),
+                new_line: Some(1),
+                ..
+            }
         ));
     }
 

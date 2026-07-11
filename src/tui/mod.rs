@@ -24,11 +24,11 @@ mod revset;
 mod search;
 mod text_layout;
 mod view_options;
+mod viewport;
 mod walkthroughs;
 mod zen;
 
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     path::{Path, PathBuf},
@@ -52,7 +52,7 @@ use ratatui::{
 
 use crate::{
     agent::{AgentProcess, ChunkPart},
-    app::{Focus, ReviewSession},
+    app::{CommentSelection, Focus, NavigationPlacement, ReviewSession},
     artifact::{
         ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
         render_handoff_markdown,
@@ -77,15 +77,16 @@ use helpers::JjHelperState;
 use keymap::{Action, KeyContext, KeyMap};
 use ops::OperationPickerState;
 use outline::SymbolOutlineState;
+#[cfg(test)]
+use render::diff_cursor_is_visible;
 use render::{
-    comment_editor_inner, diff_cursor_is_visible, downgrade_diff_theme, draw,
-    ensure_diff_cursor_visible, inner_bordered, point_in_rect, reconcile_diff_viewport,
-    row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual, scroll_diff_visual,
-    terminal_supports_truecolor, ui_layout,
+    comment_editor_inner, downgrade_diff_theme, draw, ensure_diff_cursor_visible, inner_bordered,
+    point_in_rect, row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual,
+    scroll_diff_visual, terminal_supports_truecolor, ui_layout,
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
-use view_options::ViewOptionsState;
+use view_options::{ViewOption, ViewOptionsState};
 use walkthroughs::WalkthroughListState;
 use zen::ZenState;
 
@@ -176,7 +177,7 @@ enum CommentInputTarget {
 
 #[derive(Debug, Default)]
 struct TuiState {
-    diff_layout_cache: RefCell<render::DiffLayoutCache>,
+    diff_viewport: viewport::DiffViewportController,
     help_scroll: usize,
     terminal_size: ratatui::prelude::Size,
     launch_target: Option<ReviewTarget>,
@@ -362,6 +363,7 @@ pub fn run(
     enter_interactive_screen(&mut stderr)?;
     let backend = CrosstermBackend::new(stderr);
     let mut terminal = Terminal::new(backend)?;
+    let initial_terminal_size = terminal.size()?;
     raw_mode_guard.disarm();
     let mut terminal_lifecycle = TerminalLifecycle::new(&mut terminal);
     let mut mode = Mode::Normal;
@@ -375,6 +377,7 @@ pub fn run(
         state_mtime: state_path.as_deref().and_then(state_file_mtime),
         agent_log_path,
         agent_config,
+        terminal_size: initial_terminal_size,
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
             message,
@@ -525,7 +528,10 @@ pub fn render_tour_text(
         generated_matcher: matcher,
         jj,
     };
-    let mut tui_state = TuiState::default();
+    let mut tui_state = TuiState {
+        terminal_size: ratatui::prelude::Size::new(width, height),
+        ..TuiState::default()
+    };
     seed_zen_tour(session, &loader, &mut tui_state);
     let Some(mut zen) = tui_state.zen.clone() else {
         return Ok(
@@ -643,11 +649,63 @@ fn seed_zen_tour(
         .unwrap_or_default();
     stack.retain(|change| !change.matches_rev(&session.target.base));
     load_change_diffs_for_stack(review_loader, session, &stack);
+    if let Some(change_id) = session
+        .review_chunks
+        .iter()
+        .find_map(|chunk| chunk.change_id.as_ref())
+    {
+        let desired = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
+        let mut probe = session.clone();
+        if review_loader.load(&mut probe, desired).is_err() {
+            tui_state.zen = None;
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: "zen could not start — initial stop is unavailable".into(),
+            });
+            return;
+        }
+    }
     match ZenState::new(session, &stack) {
         Some(mut zen) => {
+            let prior_session = session.clone();
+            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
+            if let Some(stop) = zen
+                .stops
+                .iter()
+                .find(|stop| matches!(stop, zen::ZenStop::Chunk(_)))
+                .cloned()
+            {
+                let desired = zen::stop_target(&stop, &zen.home_target);
+                let mut probe = session.clone();
+                let available = (probe.target == desired
+                    || review_loader.load(&mut probe, desired).is_ok())
+                    && zen::jump_to_stop(&mut probe, &stop)
+                        != zen::ZenViewportPlacement::Unavailable;
+                if !available {
+                    *session = prior_session.clone();
+                    tui_state
+                        .diff_viewport
+                        .restore_transaction(prior_viewport.clone());
+                    tui_state.zen = None;
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Error,
+                        message: "zen could not start — initial stop is unavailable".into(),
+                    });
+                    return;
+                }
+            }
             session.file_pane_visible = false;
-            if let Some(stop) = zen.current().cloned() {
-                let _ = zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            if let Some(stop) = zen.current().cloned()
+                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+            {
+                *session = prior_session;
+                tui_state.diff_viewport.restore_transaction(prior_viewport);
+                tui_state.zen = None;
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: "zen could not start — initial stop is unavailable".into(),
+                });
+                return;
             }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
@@ -702,6 +760,11 @@ fn run_loop(
         });
     }
     loop {
+        // Observe geometry before any queued command can place the viewport.
+        // This is the single path that advances stored terminal dimensions;
+        // stale Resize payloads are never allowed to move them backwards.
+        observe_terminal_size(terminal.size()?, session, mode, tui_state);
+
         // Answer queued agent requests against the live session before
         // drawing so their effects render this frame.
         #[cfg(unix)]
@@ -741,17 +804,22 @@ fn run_loop(
             .as_ref()
             .is_some_and(|zen| zen.is_stale(session))
         {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             let zen = tui_state.zen.take().expect("checked above");
             zen::end(session, &zen);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "zen ended — review target changed".to_owned(),
             });
         }
 
-        let terminal_size = terminal.size()?;
-        tui_state.terminal_size = terminal_size;
-        resize_comment_editor(mode, terminal_size);
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -797,16 +865,15 @@ fn run_loop(
             }
             Event::Key(_) => {}
             Event::Mouse(mouse) => {
-                handle_mouse_event(mouse, terminal.size()?, session, mode, tui_state)
+                handle_mouse_event(mouse, tui_state.terminal_size, session, mode, tui_state)
             }
             Event::Resize(width, height) => {
-                let old_inner = current_diff_inner(session, tui_state);
-                let cursor_was_visible = diff_cursor_is_visible(session, old_inner, tui_state);
-                let size = ratatui::prelude::Size::new(width, height);
-                tui_state.terminal_size = size;
-                resize_comment_editor(mode, size);
-                let new_inner = current_diff_inner(session, tui_state);
-                reconcile_diff_viewport(session, new_inner, cursor_was_visible, tui_state);
+                let queued = ratatui::prelude::Size::new(width, height);
+                let observed = terminal.size()?;
+                // Crossterm may leave older Resize events queued. Trust the
+                // backend's observed size and use the payload only when it
+                // still describes that same current terminal.
+                dispatch_resize_event(queued, observed, session, mode, tui_state);
             }
             _ => {}
         }
@@ -830,6 +897,50 @@ fn run_loop(
         }
     }
     Ok(())
+}
+
+fn resize_event_observed_size(
+    queued: ratatui::prelude::Size,
+    observed: ratatui::prelude::Size,
+) -> ratatui::prelude::Size {
+    if queued == observed { queued } else { observed }
+}
+
+fn dispatch_resize_event(
+    queued: ratatui::prelude::Size,
+    observed: ratatui::prelude::Size,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    tui_state: &mut TuiState,
+) {
+    observe_terminal_size(
+        resize_event_observed_size(queued, observed),
+        session,
+        mode,
+        tui_state,
+    );
+}
+
+fn observe_terminal_size(
+    observed: ratatui::prelude::Size,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    tui_state: &mut TuiState,
+) {
+    if tui_state.terminal_size != observed {
+        let transition = tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state));
+        tui_state.terminal_size = observed;
+        resize_comment_editor(mode, observed);
+        tui_state.diff_viewport.finish_transition(
+            transition,
+            session,
+            current_diff_inner(session, tui_state),
+        );
+    } else {
+        resize_comment_editor(mode, observed);
+    }
 }
 
 fn resize_comment_editor(mode: &mut Mode, terminal_size: ratatui::prelude::Size) {
@@ -971,8 +1082,16 @@ fn maybe_reload_agent_overlay(
     tui_state.overlay_mtime = mtime;
     match crate::agent::AgentOverlay::load_or_default(overlay_path) {
         Ok(overlay) => {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
             session.apply_agent_overlay(&overlay);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             tui_state.invalid_chunk_parts = invalid.clone();
             if notify {
                 let message = if let Some(first) = invalid.first() {
@@ -1017,6 +1136,9 @@ fn maybe_reload_review_state(
     }
     match ReviewState::load_or_default(state_path) {
         Ok(external) => {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             let before_comments: BTreeSet<String> = session
                 .comments
                 .iter()
@@ -1030,6 +1152,11 @@ fn maybe_reload_review_state(
                 .filter(|comment| !before_comments.contains(&comment.id))
                 .count();
             session.apply_review_state(merged);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             tui_state.state_mtime = mtime;
             tui_state.last_autosave = Some(state_fingerprint(session));
             if notify && added_comments > 0 {
@@ -1251,7 +1378,27 @@ fn apply_present_command(
         }
         PresentCommand::End => {
             if let Some(zen) = tui_state.zen.take() {
+                let prior_session = session.clone();
+                let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
+                if session.target != zen.home_target {
+                    if let Err(error) = review_loader.load(session, zen.home_target.clone()) {
+                        *session = prior_session;
+                        tui_state.diff_viewport.restore_transaction(prior_viewport);
+                        tui_state.zen = Some(zen);
+                        return Err((-32002, format!("failed to restore zen home: {error:?}")));
+                    }
+                    tui_state.diff_viewport.reset(session);
+                    reapply_agent_overlay(session, review_loader, tui_state);
+                }
+                let transition = tui_state
+                    .diff_viewport
+                    .transition_snapshot(session, current_diff_inner(session, tui_state));
                 zen::end(session, &zen);
+                tui_state.diff_viewport.finish_transition(
+                    transition,
+                    session,
+                    current_diff_inner(session, tui_state),
+                );
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "zen ended by presenter".to_owned(),
@@ -1263,24 +1410,38 @@ fn apply_present_command(
             let Some(mut zen) = tui_state.zen.take() else {
                 return Err((-32002, "tour is not active".to_owned()));
             };
+            let previous = zen.index;
+            let mut failed = false;
             if zen.advance()
                 && let Some(stop) = zen.current().cloned()
+                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
             {
-                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+                zen.index = previous;
+                failed = true;
             }
             tui_state.zen = Some(zen);
+            if failed {
+                return Err((-32002, "zen stop is unavailable".into()));
+            }
             Ok(present_status(session, tui_state))
         }
         PresentCommand::Prev => {
             let Some(mut zen) = tui_state.zen.take() else {
                 return Err((-32002, "tour is not active".to_owned()));
             };
+            let previous = zen.index;
+            let mut failed = false;
             if zen.back()
                 && let Some(stop) = zen.current().cloned()
+                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
             {
-                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+                zen.index = previous;
+                failed = true;
             }
             tui_state.zen = Some(zen);
+            if failed {
+                return Err((-32002, "zen stop is unavailable".into()));
+            }
             Ok(present_status(session, tui_state))
         }
         PresentCommand::GotoIndex(index) => {
@@ -1288,13 +1449,22 @@ fn apply_present_command(
                 return Err((-32002, "tour is not active".to_owned()));
             };
             if index >= zen.stops.len() {
+                tui_state.zen = Some(zen);
                 return Err((-32602, format!("slide index {index} out of range")));
             }
+            let previous = zen.index;
             zen.index = index;
-            if let Some(stop) = zen.current().cloned() {
-                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            let mut failed = false;
+            if let Some(stop) = zen.current().cloned()
+                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+            {
+                zen.index = previous;
+                failed = true;
             }
             tui_state.zen = Some(zen);
+            if failed {
+                return Err((-32002, "zen stop is unavailable".into()));
+            }
             Ok(present_status(session, tui_state))
         }
         PresentCommand::GotoStep(step_id) => {
@@ -1308,11 +1478,19 @@ fn apply_present_command(
                 tui_state.zen = Some(zen);
                 return Err((-32602, format!("unknown step_id: {step_id}")));
             };
+            let previous = zen.index;
             zen.index = index;
-            if let Some(stop) = zen.current().cloned() {
-                zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+            let mut failed = false;
+            if let Some(stop) = zen.current().cloned()
+                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+            {
+                zen.index = previous;
+                failed = true;
             }
             tui_state.zen = Some(zen);
+            if failed {
+                return Err((-32002, "zen stop is unavailable".into()));
+            }
             Ok(present_status(session, tui_state))
         }
         PresentCommand::Focus {
@@ -1324,12 +1502,21 @@ fn apply_present_command(
             if !session.files.iter().any(|file| file.path == path) {
                 return Err((-32602, format!("path is not in the diff: {path}")));
             }
-            session.jump_to_chunk_part(&ChunkPart {
-                path: path.clone(),
-                start_line: Some(line),
-                end_line,
-            });
+            if session
+                .jump_to_chunk_part(&ChunkPart {
+                    path: path.clone(),
+                    start_line: Some(line),
+                    end_line,
+                })
+                .is_none()
+            {
+                return Err((
+                    -32602,
+                    format!("location is not in the diff: {path}:{line}"),
+                ));
+            }
             session.focus = Focus::Diff;
+            transition_to_logical_selection(session, tui_state);
             if let Some(note) = note {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
@@ -1409,9 +1596,13 @@ fn start_present_tour(
             "nothing to review — no changed files in this target".to_owned(),
         ));
     };
+    let prior_pane = session.file_pane_visible;
     session.file_pane_visible = false;
-    if let Some(stop) = zen.current().cloned() {
-        zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+    if let Some(stop) = zen.current().cloned()
+        && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+    {
+        session.file_pane_visible = prior_pane;
+        return Err((-32002, "initial zen stop is unavailable".into()));
     }
     tui_state.zen = Some(zen);
     Ok(())
@@ -1422,6 +1613,7 @@ fn reload_present_tour(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
 ) -> Result<(), (i64, String)> {
+    let prior_zen = tui_state.zen.clone();
     let mut stack = review_loader
         .jj
         .stack_changes(&session.repo, &session.target)
@@ -1432,12 +1624,24 @@ fn reload_present_tour(
         return start_present_tour(review_loader, session, tui_state);
     };
     if !zen.refresh(session, &stack) {
-        tui_state.zen = None;
+        let transition = tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state));
+        let zen = tui_state.zen.take().expect("checked above");
+        zen::end(session, &zen);
+        tui_state.diff_viewport.finish_transition(
+            transition,
+            session,
+            current_diff_inner(session, tui_state),
+        );
         return Err((-32002, "tour has no slides after reload".to_owned()));
     }
     if let Some(mut zen) = tui_state.zen.take() {
-        if let Some(stop) = zen.current().cloned() {
-            zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state);
+        if let Some(stop) = zen.current().cloned()
+            && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
+        {
+            tui_state.zen = prior_zen;
+            return Err((-32002, "current zen stop is unavailable".into()));
         }
         tui_state.zen = Some(zen);
     }
@@ -1455,7 +1659,7 @@ fn refresh_current_target(
     fingerprint: &str,
 ) {
     let old_inner = current_diff_inner(session, tui_state);
-    let cursor_was_visible = diff_cursor_is_visible(session, old_inner, tui_state);
+    let viewport_snapshot = tui_state.diff_viewport.refresh_snapshot(session, old_inner);
     if let Err(error) = review_loader.load_in_place(session, session.target.clone()) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Error,
@@ -1463,11 +1667,10 @@ fn refresh_current_target(
         });
         return;
     }
-    reconcile_diff_viewport(
+    tui_state.diff_viewport.refreshed(
+        viewport_snapshot,
         session,
         current_diff_inner(session, tui_state),
-        cursor_was_visible,
-        tui_state,
     );
     refresh_identity_chip(review_loader, session, tui_state);
     reapply_agent_overlay(session, review_loader, tui_state);
@@ -1505,11 +1708,20 @@ fn refresh_current_target(
             if zen.phase != zen::ZenPhase::Glance
                 && let Some(stop) = zen.current().cloned()
             {
-                zen::jump_to_stop(session, &stop);
+                let placement = zen::jump_to_stop(session, &stop);
+                apply_zen_viewport_placement(session, placement, tui_state);
             }
             tui_state.zen = Some(zen);
         } else {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             zen::end(session, &zen);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             message.push_str(" · zen ended (nothing left to walk through)");
         }
     }
@@ -1722,6 +1934,9 @@ fn reapply_agent_overlay(
         return;
     };
     if let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&overlay_path) {
+        let transition = tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state));
         let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
         if !invalid.is_empty() {
             let message = invalid_chunk_notice(invalid.len());
@@ -1733,6 +1948,11 @@ fn reapply_agent_overlay(
         }
         tui_state.invalid_chunk_parts = invalid;
         session.apply_agent_overlay(&overlay);
+        tui_state.diff_viewport.finish_transition(
+            transition,
+            session,
+            current_diff_inner(session, tui_state),
+        );
     }
     // Our own read is not news; suppress the poll-based reload notice.
     tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
@@ -1765,8 +1985,16 @@ fn autosave_state(session: &mut ReviewSession, state_path: &Path, tui_state: &mu
     if disk_mtime != tui_state.state_mtime
         && let Ok(on_disk) = crate::state::ReviewState::load_or_default(state_path)
     {
+        let transition = tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state));
         state.merge_external(on_disk, &tui_state.state_tombstones);
         session.apply_review_state(state.clone());
+        tui_state.diff_viewport.finish_transition(
+            transition,
+            session,
+            current_diff_inner(session, tui_state),
+        );
     }
     match state.save(state_path) {
         Ok(()) => {
@@ -1802,6 +2030,9 @@ fn handle_key_event(
             if let Some(mut zen) = tui_state.zen.take() {
                 match handle_zen_key(key, &mut zen, session, keymap, review_loader, tui_state) {
                     ZenKeyOutcome::Consumed => {
+                        if !matches!(zen.phase, zen::ZenPhase::Reading) {
+                            tui_state.diff_drag = None;
+                        }
                         tui_state.zen = Some(zen);
                         return Ok(false);
                     }
@@ -1813,6 +2044,7 @@ fn handle_key_event(
                         if restore_target && session.target != zen.home_target {
                             match review_loader.load(session, zen.home_target.clone()) {
                                 Ok(()) => {
+                                    tui_state.diff_viewport.reset(session);
                                     reapply_agent_overlay(session, review_loader, tui_state);
                                     zen::mark_glance_viewed(session, &zen);
                                 }
@@ -1827,7 +2059,16 @@ fn handle_key_event(
                                 }
                             }
                         }
+                        let transition = tui_state
+                            .diff_viewport
+                            .transition_snapshot(session, current_diff_inner(session, tui_state));
                         zen::end(session, &zen);
+                        tui_state.diff_viewport.finish_transition(
+                            transition,
+                            session,
+                            current_diff_inner(session, tui_state),
+                        );
+                        tui_state.diff_drag = None;
                         return Ok(false);
                     }
                     ZenKeyOutcome::Fallthrough => {
@@ -1878,12 +2119,12 @@ fn handle_key_event(
             }
         }
         Mode::FlagList(list) => {
-            if handle_flag_list_key(key, list, session, keymap) {
+            if handle_flag_list_key(key, list, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
         Mode::OpenWork(list) => {
-            if handle_open_work_key(key, list, session, keymap) {
+            if handle_open_work_key(key, list, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1903,7 +2144,7 @@ fn handle_key_event(
             }
         }
         Mode::FileSearch(search) => {
-            if handle_file_search_key(key, search, session, keymap) {
+            if handle_file_search_key(key, search, session, keymap, tui_state) {
                 *mode = Mode::Normal;
             }
         }
@@ -1953,6 +2194,14 @@ fn handle_key_event(
             }
         }
     }
+    if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal
+        || tui_state
+            .zen
+            .as_ref()
+            .is_some_and(|zen| !matches!(zen.phase, zen::ZenPhase::Reading))
+    {
+        tui_state.diff_drag = None;
+    }
     Ok(false)
 }
 
@@ -1963,8 +2212,55 @@ fn handle_normal_action(
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) -> Result<bool> {
+    if action == Action::Quit {
+        return Ok(true);
+    }
+    let explicit_viewport_action = matches!(
+        action,
+        Action::DiffTop
+            | Action::DiffBottom
+            | Action::NextSymbol
+            | Action::PreviousSymbol
+            | Action::NextChangedHunk
+            | Action::PreviousChangedHunk
+            | Action::NextComment
+            | Action::PreviousComment
+            | Action::ScrollDown
+            | Action::ScrollUp
+            | Action::ScrollDiffLeft
+            | Action::ScrollDiffRight
+            | Action::ToggleLargeDiff
+    ) || matches!(action, Action::MoveDown | Action::MoveUp)
+        && session.focus == Focus::Diff;
+    let indirect_viewport_action = matches!(
+        action,
+        Action::ToggleFocus
+            | Action::NextUnviewed
+            | Action::PreviousUnviewed
+            | Action::MarkViewed
+            | Action::ToggleViewed
+            | Action::MarkAllViewed
+            | Action::ToggleGenerated
+            | Action::CycleViewedFilter
+            | Action::ToggleContextFold
+            | Action::ExpandContext
+            | Action::ExpandContextAll
+            | Action::CollapseContext
+            | Action::ToggleDiffWrap
+            | Action::ToggleFilePane
+            | Action::ToggleDiffView
+            | Action::CycleCommentState
+            | Action::DeleteComment
+    ) || matches!(action, Action::MoveDown | Action::MoveUp)
+        && session.focus == Focus::Files;
+    let transition = (!explicit_viewport_action && indirect_viewport_action).then(|| {
+        tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state))
+    });
+    let top_only_transition = matches!(action, Action::ToggleFocus | Action::ToggleFilePane);
     match action {
-        Action::Quit => return Ok(true),
+        Action::Quit => unreachable!("handled above"),
         Action::Help => {
             tui_state.help_scroll = 0;
             *mode = Mode::Help;
@@ -1974,29 +2270,32 @@ fn handle_normal_action(
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => {
-                session.move_diff_cursor(1);
-                ensure_diff_cursor_visible(
-                    session,
-                    current_diff_inner(session, tui_state),
-                    tui_state,
-                );
+                if session.move_diff_cursor(1) {
+                    ensure_diff_cursor_visible(
+                        session,
+                        current_diff_inner(session, tui_state),
+                        tui_state,
+                    );
+                }
             }
         },
         Action::MoveUp => match session.focus {
             Focus::Files => session.move_selection(-1),
             Focus::Diff => {
-                session.move_diff_cursor(-1);
-                ensure_diff_cursor_visible(
-                    session,
-                    current_diff_inner(session, tui_state),
-                    tui_state,
-                );
+                if session.move_diff_cursor(-1) {
+                    ensure_diff_cursor_visible(
+                        session,
+                        current_diff_inner(session, tui_state),
+                        tui_state,
+                    );
+                }
             }
         },
         Action::ToggleFocus => session.toggle_focus(),
         Action::DiffTop => {
-            session.diff_scroll = 0;
-            session.diff_visual_offset = 0;
+            tui_state
+                .diff_viewport
+                .place_top(session, current_diff_inner(session, tui_state));
         }
         Action::DiffBottom => {
             let inner = current_diff_inner(session, tui_state);
@@ -2134,31 +2433,67 @@ fn handle_normal_action(
             }
         }
         Action::NextSymbol => {
-            session.jump_to_changed_symbol(1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if session.jump_to_changed_symbol(1) {
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         }
         Action::PreviousSymbol => {
-            session.jump_to_changed_symbol(-1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if session.jump_to_changed_symbol(-1) {
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         }
         Action::NextChangedHunk => {
-            session.jump_to_changed_hunk(1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if session.jump_to_changed_hunk(1) {
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         }
         Action::PreviousChangedHunk => {
-            session.jump_to_changed_hunk(-1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if session.jump_to_changed_hunk(-1) {
+                ensure_diff_cursor_visible(
+                    session,
+                    current_diff_inner(session, tui_state),
+                    tui_state,
+                );
+            }
         }
         Action::CommentList => {
             *mode = Mode::CommentList(CommentListState::default());
         }
         Action::NextComment => {
-            session.move_to_comment(1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if let Some(selection) = session.move_to_comment(1) {
+                apply_navigation_viewport_placement(
+                    session,
+                    match selection {
+                        CommentSelection::File => NavigationViewportPlacement::Keep,
+                        CommentSelection::Diff => NavigationViewportPlacement::Cursor,
+                    },
+                    tui_state,
+                );
+            }
         }
         Action::PreviousComment => {
-            session.move_to_comment(-1);
-            ensure_diff_cursor_visible(session, current_diff_inner(session, tui_state), tui_state);
+            if let Some(selection) = session.move_to_comment(-1) {
+                apply_navigation_viewport_placement(
+                    session,
+                    match selection {
+                        CommentSelection::File => NavigationViewportPlacement::Keep,
+                        CommentSelection::Diff => NavigationViewportPlacement::Cursor,
+                    },
+                    tui_state,
+                );
+            }
         }
         Action::ScrollDown => scroll_diff_visual(
             session,
@@ -2206,45 +2541,20 @@ fn handle_normal_action(
         }
         Action::ToggleContextFold => {
             session.toggle_context_fold();
-            reconcile_diff_viewport(
-                session,
-                current_diff_inner(session, tui_state),
-                true,
-                tui_state,
-            );
         }
         Action::ExpandContext => {
             if session.focus == Focus::Diff {
                 let step = session.diff_cues.context_step;
                 expand_diff_context(session, review_loader, tui_state, Some(step));
-                reconcile_diff_viewport(
-                    session,
-                    current_diff_inner(session, tui_state),
-                    true,
-                    tui_state,
-                );
             }
         }
         Action::ExpandContextAll => {
             if session.focus == Focus::Diff {
                 expand_diff_context(session, review_loader, tui_state, None);
-                reconcile_diff_viewport(
-                    session,
-                    current_diff_inner(session, tui_state),
-                    true,
-                    tui_state,
-                );
             }
         }
         Action::CollapseContext => {
-            if session.focus == Focus::Diff && session.collapse_nearest_gap() {
-                reconcile_diff_viewport(
-                    session,
-                    current_diff_inner(session, tui_state),
-                    true,
-                    tui_state,
-                );
-            } else if session.focus == Focus::Diff {
+            if session.focus == Focus::Diff && !session.collapse_nearest_gap() {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "no expanded context to collapse here".to_owned(),
@@ -2257,32 +2567,19 @@ fn handle_normal_action(
         Action::ToggleGutterBar => session.toggle_gutter_bar(),
         Action::ToggleDiffWrap => {
             session.toggle_diff_wrap();
-            reconcile_diff_viewport(
-                session,
-                current_diff_inner(session, tui_state),
-                true,
-                tui_state,
-            );
         }
         Action::ToggleFilePane => {
             session.toggle_file_pane();
-            reconcile_diff_viewport(
-                session,
-                current_diff_inner(session, tui_state),
-                true,
-                tui_state,
-            );
         }
         Action::ToggleDiffView => {
             session.toggle_diff_view();
-            reconcile_diff_viewport(
-                session,
-                current_diff_inner(session, tui_state),
-                true,
-                tui_state,
-            );
         }
-        Action::ToggleLargeDiff => session.toggle_large_diff_render(),
+        Action::ToggleLargeDiff => {
+            session.toggle_large_diff_render();
+            tui_state
+                .diff_viewport
+                .place_cursor(session, current_diff_inner(session, tui_state));
+        }
         Action::ToggleAgentOrder => {
             session.toggle_agent_order();
             tui_state.notice = Some(UiNotice {
@@ -2410,15 +2707,29 @@ fn handle_normal_action(
         | Action::ZenArtifactPrevious
         | Action::ZenClose => {}
     }
+    // Only indirect row/file/geometry mutations need a snapshot pair.
+    // Explicit scrolling and placement already cross the controller boundary,
+    // while popup/help/style actions must not rescan annotations on every key.
+    if let Some(transition) = transition {
+        if top_only_transition {
+            tui_state.diff_viewport.finish_transition_top_only(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
+        } else {
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
+        }
+    }
     Ok(false)
 }
 
 fn current_diff_inner(session: &ReviewSession, tui_state: &TuiState) -> Rect {
-    let size = if tui_state.terminal_size.width == 0 || tui_state.terminal_size.height == 0 {
-        ratatui::prelude::Size::new(120, 40)
-    } else {
-        tui_state.terminal_size
-    };
+    let size = tui_state.terminal_size;
     inner_bordered(
         ui_layout(
             Rect::new(0, 0, size.width, size.height),
@@ -2426,6 +2737,47 @@ fn current_diff_inner(session: &ReviewSession, tui_state: &TuiState) -> Rect {
         )
         .diff,
     )
+}
+
+fn transition_to_logical_selection(session: &mut ReviewSession, tui_state: &TuiState) {
+    tui_state.diff_viewport.file_restored(session);
+    tui_state
+        .diff_viewport
+        .place_cursor(session, current_diff_inner(session, tui_state));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationViewportPlacement {
+    Keep,
+    Top,
+    Cursor,
+}
+
+fn apply_navigation_viewport_placement(
+    session: &mut ReviewSession,
+    placement: NavigationViewportPlacement,
+    tui_state: &TuiState,
+) {
+    let inner = current_diff_inner(session, tui_state);
+    match placement {
+        NavigationViewportPlacement::Keep => {
+            tui_state.diff_viewport.file_restored(session);
+            tui_state.diff_viewport.reflow(session, inner, false);
+        }
+        NavigationViewportPlacement::Top => tui_state.diff_viewport.place_top(session, inner),
+        NavigationViewportPlacement::Cursor => {
+            tui_state.diff_viewport.file_restored(session);
+            tui_state.diff_viewport.place_cursor(session, inner);
+        }
+    }
+}
+
+fn core_navigation_placement(placement: NavigationPlacement) -> NavigationViewportPlacement {
+    match placement {
+        NavigationPlacement::Keep => NavigationViewportPlacement::Keep,
+        NavigationPlacement::Top => NavigationViewportPlacement::Top,
+        NavigationPlacement::Cursor => NavigationViewportPlacement::Cursor,
+    }
 }
 
 fn ensure_tui_review_session(session: &mut ReviewSession) -> &mut crate::state::ReviewSession {
@@ -2611,6 +2963,7 @@ fn step_stack(
     let target = ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone());
     match review_loader.load(session, target) {
         Ok(()) => {
+            tui_state.diff_viewport.reset(session);
             let description = if change.description.is_empty() {
                 "(no description)"
             } else {
@@ -2838,6 +3191,9 @@ fn apply_incremental_review(
     tui_state: &mut TuiState,
 ) {
     let target = session.target.clone();
+    let viewport_snapshot = tui_state
+        .diff_viewport
+        .refresh_snapshot(session, current_diff_inner(session, tui_state));
     if let Err(error) = review_loader.load_in_place(session, target.clone()) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Error,
@@ -2847,6 +3203,11 @@ fn apply_incremental_review(
         });
         return;
     }
+    tui_state.diff_viewport.refreshed(
+        viewport_snapshot,
+        session,
+        current_diff_inner(session, tui_state),
+    );
     let prior_fingerprints = match load_prior_fingerprints(review_loader, session, operation) {
         Ok(prior_fingerprints) => prior_fingerprints,
         Err(error) => {
@@ -2860,8 +3221,16 @@ fn apply_incremental_review(
             return;
         }
     };
+    let transition = tui_state
+        .diff_viewport
+        .transition_snapshot(session, current_diff_inner(session, tui_state));
     let (caught_up, already_viewed, changed) =
         session.apply_incremental_review(&prior_fingerprints);
+    tui_state.diff_viewport.finish_transition(
+        transition,
+        session,
+        current_diff_inner(session, tui_state),
+    );
     tui_state.notice = Some(UiNotice {
         level: UiNoticeLevel::Info,
         message: format!(
@@ -2920,6 +3289,9 @@ fn run_jj_helper(
     match review_loader.jj.run_command(&session.repo, &option.args) {
         Ok(_) => {
             let reload = review_loader.load(session, session.target.clone());
+            if reload.is_ok() {
+                tui_state.diff_viewport.reset(session);
+            }
             tui_state.notice = Some(match reload {
                 Ok(()) => UiNotice {
                     level: UiNoticeLevel::Info,
@@ -2958,12 +3330,22 @@ fn handle_view_options_key(
     match keymap.popup_action_for(KeyContext::ViewOptions, &key) {
         Some(Action::PopupClose | Action::PopupCloseQ) => true,
         Some(Action::PopupSelect | Action::PopupToggle) => {
-            state.selected_option().toggle(session);
-            reconcile_diff_viewport(
+            let option = state.selected_option();
+            if matches!(
+                option,
+                ViewOption::WordHighlight | ViewOption::LineBackground | ViewOption::GutterBar
+            ) {
+                option.toggle(session);
+                return false;
+            }
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
+            option.toggle(session);
+            tui_state.diff_viewport.finish_transition_top_only(
+                transition,
                 session,
                 current_diff_inner(session, tui_state),
-                true,
-                tui_state,
             );
             false
         }
@@ -2984,6 +3366,7 @@ fn handle_flag_list_key(
     list: &mut FlagListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    tui_state: &TuiState,
 ) -> bool {
     if let Some(action) = keymap.popup_action_for(KeyContext::FlagList, &key) {
         match action {
@@ -2991,8 +3374,14 @@ fn handle_flag_list_key(
             Action::PopupMoveUp => list.move_selection(-1),
             Action::PopupClose => return true,
             Action::PopupSelect => {
-                if let Some(flag) = list.selected_flag().cloned() {
-                    session.jump_to_flag(&flag);
+                if let Some(flag) = list.selected_flag().cloned()
+                    && let Some(placement) = session.jump_to_flag(&flag)
+                {
+                    apply_navigation_viewport_placement(
+                        session,
+                        core_navigation_placement(placement),
+                        tui_state,
+                    );
                 }
                 return true;
             }
@@ -3027,15 +3416,28 @@ fn zen_goto_stop(
     stop: &zen::ZenStop,
     tui_state: &mut TuiState,
 ) -> bool {
+    let previous_target = session.target.clone();
+    let previous_session = session.clone();
+    let previous_target_key = zen.target_key.clone();
+    let viewport_transaction = tui_state.diff_viewport.transaction_snapshot();
     let desired = zen::stop_target(stop, &zen.home_target);
     if session.target != desired {
-        if let Err(error) = review_loader.load(session, desired.clone()) {
+        let mut probe = session.clone();
+        let probe_result = review_loader.load(&mut probe, desired.clone());
+        if probe_result.is_err()
+            || zen::jump_to_stop(&mut probe, stop) == zen::ZenViewportPlacement::Unavailable
+        {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
-                message: format!("failed to load {desired}: {error:?}"),
+                message: format!("zen stop no longer resolves in {desired}"),
             });
             return false;
         }
+        // The probe is already the fully loaded, validated destination. Move
+        // it into place rather than querying the backend a second time (and
+        // risking a different diff between validation and navigation).
+        *session = probe;
+        tui_state.diff_viewport.reset(session);
         // A zen-driven load is not a user retarget: keep the walkthrough
         // alive (staleness key), its chrome (hidden file pane), and the
         // agent's suggestions (the loader reset all three).
@@ -3043,8 +3445,52 @@ fn zen_goto_stop(
         session.file_pane_visible = false;
         reapply_agent_overlay(session, review_loader, tui_state);
     }
-    zen::jump_to_stop(session, stop);
+    let placement = zen::jump_to_stop(session, stop);
+    if placement == zen::ZenViewportPlacement::Unavailable {
+        if session.target != previous_target
+            && review_loader.load(session, previous_target.clone()).is_ok()
+        {
+            tui_state.diff_viewport.reset(session);
+            session.file_pane_visible = false;
+            reapply_agent_overlay(session, review_loader, tui_state);
+        }
+        *session = previous_session;
+        zen.target_key = previous_target_key;
+        tui_state
+            .diff_viewport
+            .restore_transaction(viewport_transaction);
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Error,
+            message: "zen stop no longer resolves in the loaded diff".into(),
+        });
+        return false;
+    }
+    apply_zen_viewport_placement(session, placement, tui_state);
     true
+}
+
+fn apply_zen_viewport_placement(
+    session: &mut ReviewSession,
+    placement: zen::ZenViewportPlacement,
+    tui_state: &TuiState,
+) {
+    match placement {
+        zen::ZenViewportPlacement::Top => tui_state
+            .diff_viewport
+            .place_top(session, current_diff_inner(session, tui_state)),
+        zen::ZenViewportPlacement::Cursor { margin } => {
+            let inner = current_diff_inner(session, tui_state);
+            tui_state
+                .diff_viewport
+                .place_cursor_with_margin(session, margin, inner);
+        }
+        zen::ZenViewportPlacement::Keep => {
+            tui_state
+                .diff_viewport
+                .reflow(session, current_diff_inner(session, tui_state), false)
+        }
+        zen::ZenViewportPlacement::Unavailable => {}
+    }
 }
 
 /// Zen layer keys, phase-aware. On the focus card and reading view:
@@ -3092,14 +3538,25 @@ fn handle_zen_key(
                     restore_target: true,
                 };
             };
+            let prior_session = session.clone();
+            let prior_zen = zen.clone();
+            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             zen::mark_stop_viewed(session, &stop);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             if zen.advance() {
                 if let Some(next) = zen.current().cloned()
                     && !zen_goto_stop(review_loader, session, zen, &next, tui_state)
                 {
-                    // The next stop's change failed to load: stay put
-                    // rather than showing a card over the wrong diff.
-                    zen.back();
+                    *session = prior_session;
+                    *zen = prior_zen;
+                    tui_state.diff_viewport.restore_transaction(prior_viewport);
                     return ZenKeyOutcome::Consumed;
                 }
                 tui_state.notice = None;
@@ -3121,11 +3578,16 @@ fn handle_zen_key(
             };
         }
         Some(Action::ZenPrevious) => {
+            let prior_session = session.clone();
+            let prior_zen = zen.clone();
+            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
             if zen.back()
                 && let Some(stop) = zen.current().cloned()
                 && !zen_goto_stop(review_loader, session, zen, &stop, tui_state)
             {
-                zen.advance();
+                *session = prior_session;
+                *zen = prior_zen;
+                tui_state.diff_viewport.restore_transaction(prior_viewport);
             }
             return ZenKeyOutcome::Consumed;
         }
@@ -3219,33 +3681,57 @@ fn handle_zen_glance_key(
             ZenKeyOutcome::Consumed
         }
         Some(Action::PopupSelect) => {
-            if let Some(row) = zen.selected_glance().cloned()
-                && let Some(part) = &row.part
-            {
-                // The entry may live in another change of the stack: load
-                // its diff first so the jump lands on real rows. This is a
-                // deliberate jump, so the home target is not restored.
-                let desired = zen::row_target(&row, &zen.home_target);
-                if session.target != desired {
-                    match review_loader.load(session, desired.clone()) {
-                        Ok(()) => reapply_agent_overlay(session, review_loader, tui_state),
-                        Err(error) => {
-                            tui_state.notice = Some(UiNotice {
-                                level: UiNoticeLevel::Error,
-                                message: format!("failed to load {desired}: {error:?}"),
-                            });
-                            return ZenKeyOutcome::End {
-                                restore_target: false,
-                            };
-                        }
-                    }
-                }
-                session.jump_to_chunk_part(part);
+            let Some(row) = zen.selected_glance().cloned() else {
                 tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: format!("zen ended — jumped to {}", part.path),
+                    level: UiNoticeLevel::Error,
+                    message: "selected glance target is no longer available".to_owned(),
                 });
+                return ZenKeyOutcome::Consumed;
+            };
+            let Some(part) = row.part.as_ref() else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: "selected glance item has no code target".to_owned(),
+                });
+                return ZenKeyOutcome::Consumed;
+            };
+            // Validate the complete load-and-jump transaction on a clone.
+            // A stale row must not end zen or leave the live review parked on
+            // unrelated content from a newly loaded target.
+            let desired = zen::row_target(&row, &zen.home_target);
+            let target_changed = session.target != desired;
+            let mut probe = session.clone();
+            if target_changed && review_loader.load(&mut probe, desired.clone()).is_err() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!("glance target no longer resolves in {desired}"),
+                });
+                return ZenKeyOutcome::Consumed;
             }
+            let Some(placement) = probe.jump_to_chunk_part(part) else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Error,
+                    message: format!(
+                        "glance target {} no longer resolves in {desired}",
+                        part.path
+                    ),
+                });
+                return ZenKeyOutcome::Consumed;
+            };
+            *session = probe;
+            if target_changed {
+                tui_state.diff_viewport.reset(session);
+                reapply_agent_overlay(session, review_loader, tui_state);
+            }
+            apply_navigation_viewport_placement(
+                session,
+                core_navigation_placement(placement),
+                tui_state,
+            );
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!("zen ended — jumped to {}", part.path),
+            });
             ZenKeyOutcome::End {
                 restore_target: false,
             }
@@ -3416,9 +3902,17 @@ fn accept_agent_draft(
         return false;
     };
     let body = body_override.unwrap_or_else(|| draft.body.clone());
+    let transition = tui_state
+        .diff_viewport
+        .transition_snapshot(session, current_diff_inner(session, tui_state));
     match session.accept_agent_draft(&draft, body) {
         Some(_comment_id) => {
             persist_draft_disposition(session, tui_state, draft_id);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "accepted agent draft as comment".to_owned(),
@@ -3478,6 +3972,7 @@ fn handle_file_search_key(
     search: &mut FileSearchState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    tui_state: &TuiState,
 ) -> bool {
     if let Some(action) = keymap.filter_action_for(KeyContext::FileSearch, &key) {
         match action {
@@ -3486,7 +3981,15 @@ fn handle_file_search_key(
             Action::PopupClose => return true,
             Action::PopupSelect => {
                 if let Some(file_index) = search.selected_file_index() {
+                    let transition = tui_state
+                        .diff_viewport
+                        .transition_snapshot(session, current_diff_inner(session, tui_state));
                     session.jump_to_file(file_index);
+                    tui_state.diff_viewport.finish_transition(
+                        transition,
+                        session,
+                        current_diff_inner(session, tui_state),
+                    );
                 }
                 return true;
             }
@@ -3547,26 +4050,36 @@ fn handle_comment_list_key(
 ) -> bool {
     if let Some(action) = keymap.popup_action_for(KeyContext::CommentList, &key) {
         match action {
-            Action::PopupMoveDown => list.move_selection(1, session),
-            Action::PopupMoveUp => list.move_selection(-1, session),
+            Action::PopupMoveDown => {
+                list.move_selection(1, session);
+                return false;
+            }
+            Action::PopupMoveUp => {
+                list.move_selection(-1, session);
+                return false;
+            }
             Action::PopupClose => return true,
             Action::PopupSelect => {
                 if let Some(id) = list.selected_comment_id(session)
-                    && session
-                        .comments
-                        .iter()
-                        .find(|comment| comment.id == id)
-                        .is_some_and(|comment| comment.is_located())
+                    && let Some(selection) = session.select_comment_by_id(&id)
                 {
-                    session.select_comment_by_id(&id);
-                    ensure_diff_cursor_visible(
+                    apply_navigation_viewport_placement(
                         session,
-                        current_diff_inner(session, tui_state),
+                        match selection {
+                            CommentSelection::File => NavigationViewportPlacement::Keep,
+                            CommentSelection::Diff => NavigationViewportPlacement::Cursor,
+                        },
                         tui_state,
                     );
                 }
                 return true;
             }
+            _ => {}
+        }
+        let transition = tui_state
+            .diff_viewport
+            .transition_snapshot(session, current_diff_inner(session, tui_state));
+        match action {
             Action::CycleCommentState => {
                 if let Some(id) = list.selected_comment_id(session)
                     && let Some(state) = session.cycle_comment_state(&id)
@@ -3619,6 +4132,11 @@ fn handle_comment_list_key(
             }
             _ => {}
         }
+        tui_state.diff_viewport.finish_transition(
+            transition,
+            session,
+            current_diff_inner(session, tui_state),
+        );
         return false;
     }
     false
@@ -3648,6 +4166,7 @@ fn handle_open_work_key(
     list: &mut OpenWorkListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
+    tui_state: &TuiState,
 ) -> bool {
     if let Some(action) = keymap.popup_action_for(KeyContext::OpenWork, &key) {
         match action {
@@ -3655,8 +4174,10 @@ fn handle_open_work_key(
             Action::PopupMoveUp => list.move_selection(-1),
             Action::PopupClose => return true,
             Action::PopupSelect => {
-                if let Some(row) = list.selected_row().cloned() {
-                    enter_open_work_row(session, &row);
+                if let Some(row) = list.selected_row().cloned()
+                    && let Some(placement) = enter_open_work_row(session, &row)
+                {
+                    apply_navigation_viewport_placement(session, placement, tui_state);
                 }
                 return true;
             }
@@ -3667,24 +4188,43 @@ fn handle_open_work_key(
     false
 }
 
-fn enter_open_work_row(session: &mut ReviewSession, row: &OpenWorkRow) {
+fn enter_open_work_row(
+    session: &mut ReviewSession,
+    row: &OpenWorkRow,
+) -> Option<NavigationViewportPlacement> {
     if let Some(comment_id) = row.comment_id() {
-        session.select_comment_by_id(comment_id);
-        return;
+        let valid = session.comments.iter().any(|comment| {
+            comment.id == comment_id
+                && comment.is_located()
+                && comment
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| session.files.iter().any(|file| &file.path == path))
+        });
+        if !valid {
+            return None;
+        }
+        return session
+            .select_comment_by_id(comment_id)
+            .map(|selection| match selection {
+                CommentSelection::File => NavigationViewportPlacement::Keep,
+                CommentSelection::Diff => NavigationViewportPlacement::Cursor,
+            });
     }
     let OpenWorkRow::ActionItem { id, target, .. } = row else {
-        return;
+        return None;
     };
     if let Some(target) = target.as_ref()
         && let Some(path) = target.file.as_ref()
         && session.files.iter().any(|file| file.path == *path)
     {
-        session.jump_to_chunk_part(&ChunkPart {
-            path: path.clone(),
-            start_line: target.line,
-            end_line: target.end_line,
-        });
-        return;
+        return session
+            .jump_to_chunk_part(&ChunkPart {
+                path: path.clone(),
+                start_line: target.line,
+                end_line: target.end_line,
+            })
+            .map(core_navigation_placement);
     }
     let linked_comment = session
         .sessions
@@ -3697,12 +4237,23 @@ fn enter_open_work_row(session: &mut ReviewSession, row: &OpenWorkRow) {
                     comment.id == *comment_id
                         && comment.state == crate::state::CommentState::Todo
                         && comment.has_location()
+                        && comment
+                            .path
+                            .as_ref()
+                            .is_some_and(|path| session.files.iter().any(|file| &file.path == path))
                 })
             })
         })
         .map(|comment| comment.id.clone());
     if let Some(comment_id) = linked_comment {
-        session.select_comment_by_id(&comment_id);
+        session
+            .select_comment_by_id(&comment_id)
+            .map(|selection| match selection {
+                CommentSelection::File => NavigationViewportPlacement::Keep,
+                CommentSelection::Diff => NavigationViewportPlacement::Cursor,
+            })
+    } else {
+        None
     }
 }
 
@@ -3726,7 +4277,15 @@ fn handle_activity_key(
                         .iter()
                         .position(|file| event.message.starts_with(&file.path))
                 {
-                    session.select_file_index(index);
+                    let transition = tui_state
+                        .diff_viewport
+                        .transition_snapshot(session, current_diff_inner(session, tui_state));
+                    session.select_file_revealed(index);
+                    tui_state.diff_viewport.finish_transition(
+                        transition,
+                        session,
+                        current_diff_inner(session, tui_state),
+                    );
                     return true;
                 }
                 tui_state.notice = Some(UiNotice {
@@ -3754,8 +4313,10 @@ fn handle_walkthrough_list_key(
             Action::PopupMoveUp => list.move_selection(-1),
             Action::PopupClose => return true,
             Action::PopupSelect => {
-                if let Some(step) = selected_walkthrough_step(session, list).cloned() {
-                    jump_to_walkthrough_step(session, &step);
+                if let Some(step) = selected_walkthrough_step(session, list).cloned()
+                    && let Some(placement) = jump_to_walkthrough_step(session, &step)
+                {
+                    apply_navigation_viewport_placement(session, placement, tui_state);
                 }
                 return true;
             }
@@ -3822,23 +4383,21 @@ fn move_selected_walkthrough_step(
     }
 }
 
-fn jump_to_walkthrough_step(session: &mut ReviewSession, step: &WalkthroughStep) {
+fn jump_to_walkthrough_step(
+    session: &mut ReviewSession,
+    step: &WalkthroughStep,
+) -> Option<NavigationViewportPlacement> {
     let Some(path) = &step.target.file else {
-        return;
+        return None;
     };
-    let Some(file_index) = session.files.iter().position(|file| &file.path == path) else {
-        return;
+    let part = ChunkPart {
+        path: path.clone(),
+        start_line: step.target.line,
+        end_line: step.target.end_line,
     };
-    session.select_file_index(file_index);
+    let placement = session.jump_to_chunk_part(&part)?;
     session.focus = Focus::Diff;
-    if let Some(line) = step.target.line
-        && let Some(row_index) = session
-            .diff_rows_for_selected_file()
-            .iter()
-            .position(|row| row.new_lineno == Some(line) || row.old_lineno == Some(line))
-    {
-        session.jump_to_diff_row(row_index);
-    }
+    Some(core_navigation_placement(placement))
 }
 
 impl ReviewLoader<'_> {
@@ -3890,6 +4449,7 @@ fn load_review_target(
 ) {
     match review_loader.load(session, target.clone()) {
         Ok(()) => {
+            tui_state.diff_viewport.reset(session);
             // Re-raise the large-change nudge when the newly loaded target
             // is itself big and unorganized.
             let message = match session.large_change_nudge() {
@@ -3921,16 +4481,26 @@ fn handle_comment_action(
         Action::CancelComment => return true,
         Action::SubmitComment => {
             let body = std::mem::take(editor).into_text();
+            if let CommentInputTarget::AcceptDraft { id } = target {
+                accept_agent_draft(session, tui_state, id, Some(body));
+                return true;
+            }
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
             match target {
                 CommentInputTarget::New => session.add_comment(body),
                 CommentInputTarget::NewGeneral => session.add_general_comment(body),
                 CommentInputTarget::Edit { id } => {
                     session.update_comment_body(id, body);
                 }
-                CommentInputTarget::AcceptDraft { id } => {
-                    accept_agent_draft(session, tui_state, id, Some(body));
-                }
+                CommentInputTarget::AcceptDraft { .. } => unreachable!("handled above"),
             }
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
             return true;
         }
         Action::InsertNewline => editor.insert_newline(),
@@ -4022,10 +4592,18 @@ fn handle_mouse_event(
     tui_state: &mut TuiState,
 ) {
     if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal {
+        tui_state.diff_drag = None;
         return;
     }
 
+    let zen_takeover = tui_state
+        .zen
+        .as_ref()
+        .is_some_and(|zen| !matches!(zen.phase, zen::ZenPhase::Reading));
     if handle_zen_mouse_event(mouse, terminal_size, session, tui_state) {
+        if zen_takeover {
+            tui_state.diff_drag = None;
+        }
         return;
     }
 
@@ -4071,7 +4649,8 @@ fn handle_zen_mouse_event(
         ..Rect::new(0, 0, terminal_size.width, terminal_size.height)
     };
 
-    match mouse.kind {
+    let takeover = !matches!(zen.phase, zen::ZenPhase::Reading);
+    let handled = match mouse.kind {
         MouseEventKind::ScrollDown => match zen.phase {
             zen::ZenPhase::Artifact { index, scroll }
                 if point_in_rect(mouse.column, mouse.row, body) =>
@@ -4087,8 +4666,12 @@ fn handle_zen_mouse_event(
                 true
             }
             zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
-                session.focus = Focus::Diff;
-                session.move_diff_cursor(3);
+                if session.zen_focus.is_some() && session.move_diff_cursor(3) {
+                    session.focus = Focus::Diff;
+                    tui_state
+                        .diff_viewport
+                        .logical_selection(session, inner_bordered(layout.diff));
+                }
                 true
             }
             zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
@@ -4112,8 +4695,12 @@ fn handle_zen_mouse_event(
                 true
             }
             zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
-                session.focus = Focus::Diff;
-                session.move_diff_cursor(-3);
+                if session.zen_focus.is_some() && session.move_diff_cursor(-3) {
+                    session.focus = Focus::Diff;
+                    tui_state
+                        .diff_viewport
+                        .logical_selection(session, inner_bordered(layout.diff));
+                }
                 true
             }
             zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
@@ -4123,7 +4710,8 @@ fn handle_zen_mouse_event(
             _ => false,
         },
         _ => false,
-    }
+    };
+    handled || takeover
 }
 
 fn handle_left_down(
@@ -4137,7 +4725,15 @@ fn handle_left_down(
     if point_in_rect(x, y, files_inner) {
         session.focus = Focus::Files;
         if let Some(row) = row_in_inner(y, files_inner) {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, inner_bordered(layout.diff));
             session.select_visible_tree_row(row);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                inner_bordered(layout.diff),
+            );
         }
         tui_state.diff_drag = None;
         return;
@@ -4152,6 +4748,9 @@ fn handle_left_down(
         session.clear_diff_range_selection();
         session.select_diff_row(row_index);
         let normalized = session.diff_cursor;
+        tui_state
+            .diff_viewport
+            .logical_selection(session, diff_inner);
         tui_state.diff_drag = Some(DiffDrag {
             start_row: normalized,
             current_row: normalized,
@@ -4586,7 +5185,7 @@ mod tests {
             })),
         };
 
-        enter_open_work_row(&mut session, &row);
+        let _ = enter_open_work_row(&mut session, &row);
 
         assert_eq!(session.selected_file().unwrap().path, "src/b.rs");
         assert_eq!(session.focus, Focus::Diff);
@@ -4616,7 +5215,7 @@ mod tests {
                 ..ActionItem::default()
             });
 
-        enter_open_work_row(
+        let _ = enter_open_work_row(
             &mut session,
             &OpenWorkRow::ActionItem {
                 id: "item".into(),
@@ -4627,7 +5226,7 @@ mod tests {
         );
         assert_eq!(session.selected_comment_index(), Some(0));
 
-        enter_open_work_row(
+        let _ = enter_open_work_row(
             &mut session,
             &OpenWorkRow::EvidenceComment {
                 id: "second".into(),
@@ -4635,7 +5234,7 @@ mod tests {
         );
         assert_eq!(session.selected_comment_index(), Some(1));
 
-        enter_open_work_row(
+        let _ = enter_open_work_row(
             &mut session,
             &OpenWorkRow::TodoComment { id: "first".into() },
         );
@@ -5365,18 +5964,21 @@ mod tests {
         );
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut search = FileSearchState::new(&session);
+        let tui_state = TuiState::default();
 
         assert!(!handle_file_search_key(
             KeyEvent::from(KeyCode::Char('j')),
             &mut search,
             &mut session,
             &keymap,
+            &tui_state,
         ));
         assert!(!handle_file_search_key(
             KeyEvent::from(KeyCode::Char('k')),
             &mut search,
             &mut session,
             &keymap,
+            &tui_state,
         ));
         assert_eq!(search.query, "jk");
 
@@ -5387,6 +5989,7 @@ mod tests {
             &mut search,
             &mut session,
             &keymap,
+            &tui_state,
         ));
         assert_eq!(search.query, "");
     }
@@ -6192,6 +6795,380 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn draft_acceptance_finishes_reflow_without_cursor_placement() {
+        let long = "wrapped draft target ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = row as u16;
+        session.diff_cursor = row;
+        session.agent_drafts.push(crate::agent::AgentDraft {
+            id: "draft-detached".into(),
+            path: "a.txt".into(),
+            line: Some(1),
+            body: "draft comment".into(),
+            state: crate::agent::DraftState::Pending,
+            accepted_comment_id: None,
+        });
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 2);
+        let continuation = tui_state.diff_viewport.visual_state(&session).0;
+        assert!(continuation > 0);
+
+        assert!(accept_agent_draft(
+            &mut session,
+            &mut tui_state,
+            "draft-detached",
+            None,
+        ));
+
+        assert_eq!(session.diff_cursor, row);
+        assert_eq!(
+            tui_state.diff_viewport.visual_state(&session).0,
+            continuation
+        );
+    }
+
+    #[test]
+    fn stale_flag_destination_does_not_reset_detached_viewport() {
+        let long = "detached flag target ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.agent_flags.push(crate::agent::AgentFlag {
+            id: "stale".into(),
+            path: "missing.txt".into(),
+            line: Some(10),
+            reason: "stale".into(),
+            priority: crate::agent::FlagPriority::High,
+        });
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = row as u16;
+        let tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 2);
+        let before = tui_state.diff_viewport.visual_state(&session);
+        let mut list = FlagListState::new(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert!(handle_flag_list_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut list,
+            &mut session,
+            &keymap,
+            &tui_state,
+        ));
+        assert_eq!(tui_state.diff_viewport.visual_state(&session), before);
+    }
+
+    #[test]
+    fn no_op_explicit_navigation_keeps_detached_viewport() {
+        let long = "plain text without symbols ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.focus = Focus::Diff;
+        session.diff_scroll = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap() as u16;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 2);
+        let before = (
+            session.diff_scroll,
+            tui_state.diff_viewport.visual_state(&session),
+        );
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::NextSymbol,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                session.diff_scroll,
+                tui_state.diff_viewport.visual_state(&session)
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn cursor_action_measures_once_and_help_does_not_measure() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+changed\n three\n",
+        );
+        session.focus = Focus::Diff;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(120, 20),
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(tui_state.diff_viewport.measurement_requests(), 1);
+
+        handle_normal_action(
+            Action::Help,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(tui_state.diff_viewport.measurement_requests(), 1);
+    }
+
+    #[test]
+    fn hidden_file_viewport_survives_intervening_normal_action() {
+        let long = "hidden viewport ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.mark_all_viewed();
+        session.diff_scroll = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap() as u16;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 2);
+        let before = (
+            session.diff_scroll,
+            tui_state.diff_viewport.visual_state(&session),
+        );
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::CycleViewedFilter,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.selected_visible_file().is_none());
+        handle_normal_action(
+            Action::ToggleGutterBar,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        handle_normal_action(
+            Action::CycleViewedFilter,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(session.selected_visible_file().is_some());
+        assert_eq!(
+            (
+                session.diff_scroll,
+                tui_state.diff_viewport.visual_state(&session)
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn file_comment_navigation_restores_file_viewport_without_revealing_cursor() {
+        let mut diff = String::new();
+        for path in ["a.txt", "b.txt"] {
+            diff.push_str(&format!(
+                "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1,20 +1,20 @@\n"
+            ));
+            for line in 1..=20 {
+                diff.push_str(&format!(" {path} line {line}\n"));
+            }
+        }
+        let mut session = snapshot_session(&diff);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(120, 8),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        session.select_file_index(1);
+        tui_state.diff_viewport.file_restored(&session);
+        session.add_file_comment("review b as a file".into());
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 10);
+        let b_top = session.diff_scroll;
+        assert!(b_top > 0);
+        session.select_file_index(0);
+        tui_state.diff_viewport.file_restored(&session);
+
+        let mut list = CommentListState::default();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        assert!(handle_comment_list_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut list,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+
+        assert_eq!(session.selected_file().unwrap().path, "b.txt");
+        assert_eq!(session.focus, Focus::Files);
+        assert_eq!(session.diff_scroll, b_top);
+    }
+
+    #[test]
+    fn file_level_flag_uses_top_placement_without_losing_horizontal_scroll() {
+        let long = "file level flag target ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        session.diff_cues.soft_wrap = false;
+        session.agent_flags.push(crate::agent::AgentFlag {
+            id: "file".into(),
+            path: "a.txt".into(),
+            line: None,
+            reason: "review the file".into(),
+            priority: crate::agent::FlagPriority::High,
+        });
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_cursor = row;
+        session.diff_scroll = row as u16;
+        let tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .horizontal_scroll(&session, inner, 7);
+        let mut list = FlagListState::new(&session);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+
+        assert!(handle_flag_list_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut list,
+            &mut session,
+            &keymap,
+            &tui_state,
+        ));
+        assert_eq!(session.diff_scroll, 0);
+        assert_eq!(tui_state.diff_viewport.visual_state(&session), (0, 7));
+    }
+
+    #[test]
+    fn autosave_external_merge_preserves_detached_viewport() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("review.json");
+        let long = "autosave merge target ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = row as u16;
+        session.diff_cursor = row;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 5),
+            state_mtime: Some(std::time::SystemTime::UNIX_EPOCH),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 2);
+        let continuation = tui_state.diff_viewport.visual_state(&session).0;
+
+        let mut external = session.clone();
+        external.focus = Focus::Diff;
+        external.add_comment("concurrent external comment".into());
+        external.to_state().save(&state_path).unwrap();
+        autosave_state(&mut session, &state_path, &mut tui_state);
+
+        assert!(
+            session
+                .comments
+                .iter()
+                .any(|comment| comment.body == "concurrent external comment")
+        );
+        assert_eq!(
+            tui_state.diff_viewport.visual_state(&session).0,
+            continuation
+        );
+    }
+
+    #[test]
     fn discarding_a_draft_persists_without_creating_comment() {
         let dir = tempfile::tempdir().unwrap();
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
@@ -6571,6 +7548,63 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn stale_glance_target_keeps_zen_and_live_review_unchanged() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n"
+                .to_owned(),
+        ));
+        let mut tui_state = TuiState::default();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.phase = zen::ZenPhase::Glance;
+        zen.glance_rows[0].change_id = Some("bbb".to_owned());
+        let before = (
+            session.target.clone(),
+            session.selected,
+            session.diff_cursor,
+            session.diff_scroll,
+            session.focus,
+            session.selected_file().map(|file| file.path.clone()),
+        );
+
+        assert!(matches!(
+            handle_zen_key(
+                KeyEvent::from(KeyCode::Enter),
+                &mut zen,
+                &mut session,
+                &keymap,
+                &zen_loader(&zen_backend),
+                &mut tui_state,
+            ),
+            ZenKeyOutcome::Consumed
+        ));
+
+        assert_eq!(zen.phase, zen::ZenPhase::Glance);
+        assert_eq!(
+            (
+                session.target.clone(),
+                session.selected,
+                session.diff_cursor,
+                session.diff_scroll,
+                session.focus,
+                session.selected_file().map(|file| file.path.clone()),
+            ),
+            before
+        );
+        assert!(
+            tui_state
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("no longer resolves"))
+        );
+        assert_eq!(
+            zen_backend.calls.borrow().as_slice(),
+            [ReviewTarget::new("bbb-", "bbb")]
+        );
+    }
+
+    #[test]
     fn zen_dot_refocuses_the_current_stop_after_wandering() {
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
@@ -6821,7 +7855,7 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn mouse_wheel_scrolls_zen_focus_snippet() {
+    fn mouse_wheel_on_zen_chapter_is_consumed_without_hidden_diff_move() {
         let mut session = zen_session_with_glance();
         let original_cursor = session.diff_cursor;
         let zen = ZenState::new(&session, &[]).unwrap();
@@ -6841,8 +7875,121 @@ diff --git a/b.rs b/b.rs
             &mut session,
             &mut tui_state,
         ));
-        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(session.diff_cursor, original_cursor);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_framed_zen_focus_snippet() {
+        let mut session = zen_session_with_glance();
+        session.zen_focus = Some(crate::app::ZenFocus {
+            path: session.selected_file().unwrap().path.clone(),
+            lines: Some((1, 1)),
+        });
+        let original_cursor = session.diff_cursor;
+        let zen = ZenState::new(&session, &[]).unwrap();
+        let mut tui_state = TuiState {
+            zen: Some(zen),
+            ..TuiState::default()
+        };
+        assert!(handle_zen_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 10,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            ratatui::prelude::Size::new(80, 24),
+            &mut session,
+            &mut tui_state,
+        ));
         assert!(session.diff_cursor > original_cursor);
+    }
+
+    #[test]
+    fn zen_full_screen_phases_own_unsupported_pointer_events() {
+        let size = ratatui::prelude::Size::new(80, 20);
+        for phase in [
+            zen::ZenPhase::Focus,
+            zen::ZenPhase::Glance,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 0,
+            },
+        ] {
+            let mut session = zen_session_with_glance();
+            let mut zen = ZenState::new(&session, &[]).unwrap();
+            zen.phase = phase;
+            let mut tui_state = TuiState {
+                terminal_size: size,
+                zen: Some(zen),
+                ..TuiState::default()
+            };
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Drag(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                assert!(handle_zen_mouse_event(
+                    MouseEvent {
+                        kind,
+                        column: 1,
+                        row: 1,
+                        modifiers: KeyModifiers::NONE,
+                    },
+                    size,
+                    &mut session,
+                    &mut tui_state,
+                ));
+            }
+        }
+
+        let mut session = zen_session_with_glance();
+        let mut takeover = ZenState::new(&session, &[]).unwrap();
+        takeover.phase = zen::ZenPhase::Focus;
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            zen: Some(takeover),
+            diff_drag: Some(DiffDrag {
+                start_row: 0,
+                current_row: 0,
+                saw_drag: true,
+            }),
+            ..TuiState::default()
+        };
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(tui_state.diff_drag, None);
+
+        let mut session = zen_session_with_glance();
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.phase = zen::ZenPhase::Reading;
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            zen: Some(zen),
+            ..TuiState::default()
+        };
+        assert!(!handle_zen_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut tui_state,
+        ));
     }
 
     #[test]
@@ -6896,14 +8043,7 @@ diff --git a/b.rs b/b.rs
             assert_eq!(session.diff_cursor, before_cursor);
             assert_eq!(session.diff_scroll, 0);
             assert_eq!(session.diff_range_bounds(), None);
-            assert_eq!(
-                tui_state.diff_drag,
-                Some(DiffDrag {
-                    start_row: before_cursor,
-                    current_row: before_cursor,
-                    saw_drag: false,
-                })
-            );
+            assert_eq!(tui_state.diff_drag, None);
         }
     }
 
@@ -6950,7 +8090,7 @@ diff --git a/b.rs b/b.rs
             &mut tui_state,
         );
         assert_eq!(session.diff_scroll as usize, owner);
-        assert!(session.diff_visual_offset > 0);
+        assert!(tui_state.diff_viewport.visual_state(&session).0 > 0);
     }
 
     #[test]
@@ -7022,9 +8162,17 @@ diff --git a/b.rs b/b.rs
 
     #[test]
     fn mouse_drag_start_uses_normalized_commentable_cursor() {
-        let mut session = snapshot_session(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
-        );
+        let long = "wrapped resize ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = row as u16;
+        session.diff_cursor = row;
         session.file_pane_visible = false;
         let rows = session.diff_rows_for_selected_file();
         let hunk = rows
@@ -7109,7 +8257,10 @@ diff --git a/b.rs b/b.rs
         let mut session = zen_session_with_glance();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 4),
+            ..TuiState::default()
+        };
         let mut zen = ZenState::new(&session, &[]).unwrap();
         zen.phase = zen::ZenPhase::Glance;
 
@@ -7125,7 +8276,36 @@ diff --git a/b.rs b/b.rs
             ZenKeyOutcome::End { .. }
         ));
         assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        assert_eq!(session.diff_scroll, 0);
         assert!(tui_state.notice.unwrap().message.contains("jumped to b.rs"));
+    }
+
+    #[test]
+    fn glance_line_target_places_visible_cursor() {
+        let mut session = zen_session_with_glance();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 4),
+            ..TuiState::default()
+        };
+        let mut zen = ZenState::new(&session, &[]).unwrap();
+        zen.phase = zen::ZenPhase::Glance;
+        zen.glance_rows[0].part.as_mut().unwrap().start_line = Some(1);
+
+        let _ = handle_zen_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut zen,
+            &mut session,
+            &keymap,
+            &zen_loader(&zen_backend),
+            &mut tui_state,
+        );
+        assert!(diff_cursor_is_visible(
+            &session,
+            current_diff_inner(&session, &tui_state),
+            &tui_state,
+        ));
     }
 
     #[test]
@@ -7605,6 +8785,10 @@ diff --git a/c.rs b/c.rs
             terminal_size: ratatui::prelude::Size::new(60, 8),
             ..TuiState::default()
         };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .logical_selection(&mut session, inner);
         let mut mode = Mode::Normal;
 
         handle_normal_action(
@@ -7625,6 +8809,163 @@ diff --git a/c.rs b/c.rs
             current_diff_inner(&session, &tui_state),
             &tui_state,
         ));
+    }
+
+    #[test]
+    fn wrap_handler_preserves_a_detached_manual_viewport() {
+        let mut body = String::from(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,20 +1,20 @@\n",
+        );
+        for line in 1..=20 {
+            body.push_str(&format!(" line {line} {}\n", "wide ".repeat(10)));
+        }
+        let mut session = snapshot_session(&body);
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .rposition(|row| row.anchor.is_some())
+            .unwrap();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(50, 8),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        tui_state.diff_viewport.reflow(&mut session, inner, false);
+        let detached_top = session.diff_top_identity();
+        assert!(!diff_cursor_is_visible(&session, inner, &tui_state));
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::ToggleDiffWrap,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(session.diff_top_identity(), detached_top);
+        assert!(!diff_cursor_is_visible(
+            &session,
+            current_diff_inner(&session, &tui_state),
+            &tui_state,
+        ));
+    }
+
+    #[test]
+    fn large_diff_toggle_finishes_with_cursor_visible_in_short_pane() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n-old 1\n-old 2\n-old 3\n+new 1\n+new 2\n+new 3\n",
+        );
+        session.focus = Focus::Diff;
+        session.max_diff_lines = 1;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(30, 4),
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::ToggleLargeDiff,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(diff_cursor_is_visible(
+            &session,
+            current_diff_inner(&session, &tui_state),
+            &tui_state,
+        ));
+    }
+
+    #[test]
+    fn observed_resize_transition_ignores_stale_event_dimensions() {
+        let queued = ratatui::prelude::Size::new(50, 8);
+        let observed = ratatui::prelude::Size::new(90, 12);
+        assert_eq!(resize_event_observed_size(queued, observed), observed);
+
+        let long = "wrapped resize row ".repeat(30);
+        let mut session = snapshot_session(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{long}\n"
+        ));
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == long)
+            .unwrap();
+        session.diff_scroll = row as u16;
+        session.diff_cursor = row;
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: queued,
+            ..TuiState::default()
+        };
+        let old_inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, old_inner, 2);
+        let top = session.diff_top_identity();
+        let continuation = tui_state.diff_viewport.visual_state(&session).0;
+        assert!(continuation > 0);
+        dispatch_resize_event(queued, observed, &mut session, &mut mode, &mut tui_state);
+        assert_eq!(tui_state.terminal_size, observed);
+        assert_eq!(session.diff_top_identity(), top);
+        assert!(tui_state.diff_viewport.visual_state(&session).0 <= continuation);
+
+        let followed_inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .logical_selection(&mut session, followed_inner);
+        let followed_top = session.diff_top_identity();
+        let newer = ratatui::prelude::Size::new(40, 7);
+        dispatch_resize_event(queued, newer, &mut session, &mut mode, &mut tui_state);
+        assert_eq!(tui_state.terminal_size, newer);
+        assert_eq!(session.diff_top_identity(), followed_top);
+        assert!(diff_cursor_is_visible(
+            &session,
+            current_diff_inner(&session, &tui_state),
+            &tui_state,
+        ));
+    }
+
+    #[test]
+    fn style_only_view_option_does_not_measure_or_reflow_viewport() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(80, 12),
+            ..TuiState::default()
+        };
+        let inner = current_diff_inner(&session, &tui_state);
+        let _ = tui_state.diff_viewport.cursor_is_visible(&session, inner);
+        let builds = tui_state.diff_viewport.cache_builds();
+        let mut options = ViewOptionsState::default();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        assert!(!handle_view_options_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut options,
+            &mut session,
+            &keymap,
+            &tui_state,
+        ));
+        assert_eq!(tui_state.diff_viewport.cache_builds(), builds);
     }
 
     #[test]
@@ -7662,7 +9003,14 @@ diff --git a/c.rs b/c.rs
             jj: &backend,
         };
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let mut tui_state = TuiState::default();
+        let mut tui_state = TuiState {
+            diff_drag: Some(DiffDrag {
+                start_row: 0,
+                current_row: 0,
+                saw_drag: false,
+            }),
+            ..TuiState::default()
+        };
         let mut mode = Mode::Help;
 
         handle_key_event(
@@ -7676,6 +9024,7 @@ diff --git a/c.rs b/c.rs
         .unwrap();
         assert!(matches!(mode, Mode::Help));
         assert_eq!(tui_state.help_scroll, 1);
+        assert_eq!(tui_state.diff_drag, None);
 
         handle_key_event(
             KeyEvent::from(KeyCode::Esc),
@@ -7830,6 +9179,53 @@ diff --git a/c.rs b/c.rs
                 .unwrap()
                 .message
                 .contains("touring 2 file(s)")
+        );
+    }
+
+    #[test]
+    fn unavailable_initial_zen_stop_restores_startup_state() {
+        let mut session = zen_session();
+        for chunk in &mut session.review_chunks {
+            chunk.change_id = Some("abc".into());
+        }
+        session.change_diffs.push((
+            "abc".into(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+        ));
+        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
+        backend.stack = vec![stack_change("abc", "change")];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let before = (
+            session.selected,
+            session.diff_scroll,
+            session.diff_cursor,
+            session.file_pane_visible,
+        );
+        seed_zen_tour(&mut session, &loader, &mut tui_state);
+        assert!(tui_state.zen.is_none());
+        assert_eq!(
+            (
+                session.selected,
+                session.diff_scroll,
+                session.diff_cursor,
+                session.file_pane_visible,
+            ),
+            before
+        );
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("could not start")
         );
     }
 

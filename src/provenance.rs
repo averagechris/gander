@@ -136,11 +136,31 @@ impl CommentReplyResult {
                 .find(|file| file.path == path)
         });
         let current_file = original_path.and_then(|path| {
-            snapshot
-                .files
-                .iter()
-                .find(|file| file.path == path)
-                .map(|file| (file, false))
+            let observed_lineage = observed_file
+                .filter(|file| file.status == FileStatus::Renamed)
+                .and_then(|file| file.old_path.as_deref());
+            observed_lineage
+                .and_then(|lineage| {
+                    snapshot
+                        .files
+                        .iter()
+                        .find(|file| {
+                            file.status == FileStatus::Renamed
+                                && file.old_path.as_deref() == Some(lineage)
+                        })
+                        .map(|file| (file, true))
+                })
+                .or_else(|| {
+                    let lineage = observed_lineage?;
+                    snapshot
+                        .files
+                        .iter()
+                        .find(|file| {
+                            file.path == lineage
+                                && !matches!(file.status, FileStatus::Renamed | FileStatus::Copied)
+                        })
+                        .map(|file| (file, true))
+                })
                 .or_else(|| {
                     snapshot
                         .files
@@ -152,18 +172,11 @@ impl CommentReplyResult {
                         .map(|file| (file, true))
                 })
                 .or_else(|| {
-                    let observed =
-                        observed_file.filter(|file| file.status == FileStatus::Renamed)?;
-                    let lineage = observed.old_path.as_deref()?;
                     snapshot
                         .files
                         .iter()
-                        .find(|file| {
-                            file.status == FileStatus::Renamed
-                                && file.old_path.as_deref() == Some(lineage)
-                        })
-                        .or_else(|| snapshot.files.iter().find(|file| file.path == lineage))
-                        .map(|file| (file, true))
+                        .find(|file| file.path == path)
+                        .map(|file| (file, false))
                 })
         });
         let related = match (original_path, current_file) {
@@ -427,7 +440,7 @@ mod tests {
             }),
         );
         let b = DiffSet::parse(
-            "diff --git a/old.rs b/new.rs\nsimilarity index 50%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-old\n+new",
+            "diff --git a/old.rs b/new.rs\nsimilarity index 50%\nrename from old.rs\nrename to new.rs\n--- a/old.rs\n+++ b/new.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/mid.rs b/mid.rs\nnew file mode 100644\n--- /dev/null\n+++ b/mid.rs\n@@ -0,0 +1 @@\n+recreated",
         )
         .unwrap();
         let result = CommentReplyResult::compare(

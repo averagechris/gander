@@ -1301,37 +1301,45 @@ pub(super) fn stop_target(stop: &ZenStop, home: &ReviewTarget) -> ReviewTarget {
     }
 }
 
-/// Jump the session to a stop's location and frame it: the diff pane takes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ZenViewportPlacement {
+    Top,
+    Cursor { margin: usize },
+    Keep,
+    Unavailable,
+}
+
+/// Jump the session to a stop's logical location and frame it: the diff pane takes
 /// focus and `zen_focus` records the file/range so out-of-range rows dim.
 /// Chapter cards frame nothing — they park at the top of the change with
-/// the whole diff undimmed for the reading view.
-pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ZenStop) {
+/// the whole diff undimmed for the reading view. Visual placement is returned
+/// to the viewport controller rather than written here.
+pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ZenStop) -> ZenViewportPlacement {
     let part = match stop {
         ZenStop::Chapter(_) => {
             session.zen_focus = None;
             // Park at the top of the change (first file, no line frame) so
             // the reading view starts at the beginning of the chapter.
             if let Some(path) = session.ordered_visible_file_paths().into_iter().next() {
-                session.jump_to_chunk_part(&ChunkPart {
+                let _ = session.jump_to_chunk_part(&ChunkPart {
                     path,
                     start_line: None,
                     end_line: None,
                 });
             }
             session.focus = Focus::Diff;
-            session.diff_scroll = 0;
-            return;
+            return ZenViewportPlacement::Top;
         }
         ZenStop::Chunk(row) => &row.part,
     };
     let Some(part) = part else {
         session.zen_focus = None;
-        return;
+        return ZenViewportPlacement::Keep;
     };
-    session.jump_to_chunk_part(part);
-    if part.start_line.is_some() {
-        session.diff_scroll = session.diff_cursor.saturating_sub(12) as u16;
-    }
+    let Some(placement) = session.jump_to_chunk_part(part) else {
+        session.zen_focus = None;
+        return ZenViewportPlacement::Unavailable;
+    };
     // Chunk parts without line info leave focus on the files pane, which
     // would re-show the hidden pane (never-trap); zen reads in the diff.
     session.focus = Focus::Diff;
@@ -1341,6 +1349,11 @@ pub(super) fn jump_to_stop(session: &mut ReviewSession, stop: &ZenStop) {
             .start_line
             .map(|start| (start, part.end_line.unwrap_or(start))),
     });
+    match placement {
+        crate::app::NavigationPlacement::Cursor => ZenViewportPlacement::Cursor { margin: 12 },
+        crate::app::NavigationPlacement::Top => ZenViewportPlacement::Top,
+        crate::app::NavigationPlacement::Keep => ZenViewportPlacement::Keep,
+    }
 }
 
 /// Mark the file a stop belongs to as viewed (used when advancing past it).

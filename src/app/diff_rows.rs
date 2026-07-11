@@ -1,10 +1,11 @@
 //! Construction of the flattened diff rows rendered in the diff pane,
 //! including per-line comment anchors and symbol-aware context folding.
 
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::Range, rc::Rc};
 
 use crate::{
-    anchor::{CommentAnchor, line_anchor_for_diff_row},
+    anchor::{CommentAnchor, diff_line_kind_label, line_anchor_for_diff_row},
     diff::{DiffLineKind, Hunk},
     syntax::{SymbolSpan, SyntaxSpan},
 };
@@ -40,6 +41,19 @@ pub struct DiffRow {
     /// expanded gap reveals, so `+`/`=`/`-` can find the gap nearest the
     /// cursor even when the gap row itself has disappeared.
     pub gap: Option<usize>,
+    /// Stable semantic identity for synthetic projection rows. Ordinal hunk
+    /// and gap indices remain operational only and are never durable anchors.
+    pub semantic_key: Option<String>,
+    /// Semantic identity of the containing hunk. Diff-line identities use
+    /// this to disambiguate identical text at identical coordinates when
+    /// hunks are reordered, without making the line key depend on all of the
+    /// hunk's content.
+    pub semantic_parent_key: Option<String>,
+    pub semantic_occurrence: usize,
+    pub semantic_total: usize,
+    /// New-side source interval represented by a synthetic fold/gap.
+    pub logical_range: Option<Range<usize>>,
+    pub old_logical_range: Option<Range<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +81,14 @@ impl ReviewSession {
     /// config. Rebuilding on every draw and cursor move was the main hot spot
     /// on large files.
     pub fn diff_rows_for_selected_file(&self) -> Rc<Vec<DiffRow>> {
-        let Some(file) = self.selected_visible_file() else {
+        if self.selected_visible_file().is_none() {
+            return Rc::new(Vec::new());
+        }
+        self.diff_rows_for_file_index(self.selected)
+    }
+
+    pub(crate) fn diff_rows_for_file_index(&self, file_index: usize) -> Rc<Vec<DiffRow>> {
+        let Some(file) = self.files.get(file_index) else {
             return Rc::new(Vec::new());
         };
 
@@ -98,6 +119,12 @@ impl ReviewSession {
             hunk_index: None,
             anchor: None,
             gap: None,
+            semantic_key: None,
+            semantic_parent_key: None,
+            semantic_occurrence: 0,
+            semantic_total: 0,
+            logical_range: None,
+            old_logical_range: None,
         }];
 
         if file.diff.is_binary() {
@@ -139,6 +166,12 @@ impl ReviewSession {
                 hunk_index: None,
                 anchor: None,
                 gap: None,
+                semantic_key: None,
+                semantic_parent_key: None,
+                semantic_occurrence: 0,
+                semantic_total: 0,
+                logical_range: None,
+                old_logical_range: None,
             });
         }
 
@@ -159,17 +192,25 @@ impl ReviewSession {
             file_lines.as_ref().map(|lines| lines.len()),
         );
         let gap_spec = |gap_id: usize| gaps.iter().find(|gap| gap.gap_id == gap_id).copied();
+        let hunk_keys = file
+            .diff
+            .hunks
+            .iter()
+            .map(hunk_semantic_key)
+            .collect::<Vec<_>>();
 
         for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
             let mut skip_header = false;
             if let Some(spec) = gap_spec(hunk_index) {
-                let closed = self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref());
+                let closed =
+                    self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref(), &hunk_keys);
                 // A fully expanded interior gap merges the two hunks into
                 // one contiguous block: drop the interior header. Hunks and
                 // anchors are untouched.
                 skip_header = closed && hunk_index > 0;
             }
             if !skip_header {
+                let semantic_key = hunk_keys[hunk_index].clone();
                 rows.push(DiffRow {
                     old_lineno: None,
                     new_lineno: None,
@@ -181,6 +222,14 @@ impl ReviewSession {
                     hunk_index: Some(hunk_index),
                     anchor: None,
                     gap: None,
+                    semantic_key: Some(semantic_key),
+                    semantic_parent_key: None,
+                    semantic_occurrence: 0,
+                    semantic_total: 0,
+                    logical_range: (hunk.new_len > 0)
+                        .then(|| hunk.new_start..hunk.new_start.saturating_add(hunk.new_len)),
+                    old_logical_range: (hunk.old_len > 0)
+                        .then(|| hunk.old_start..hunk.old_start.saturating_add(hunk.old_len)),
                 });
             }
             let folds = if self.fold_context {
@@ -216,6 +265,12 @@ impl ReviewSession {
                         hunk_index: Some(hunk_index),
                         anchor: None,
                         gap: None,
+                        semantic_key: Some(fold_semantic_key(hunk, line_index, fold_end)),
+                        semantic_parent_key: Some(hunk_keys[hunk_index].clone()),
+                        semantic_occurrence: 0,
+                        semantic_total: 0,
+                        logical_range: fold_logical_range(hunk, line_index, fold_end),
+                        old_logical_range: fold_old_logical_range(hunk, line_index, fold_end),
                     });
                     line_index = fold_end;
                     continue;
@@ -252,13 +307,19 @@ impl ReviewSession {
                     hunk_index: Some(hunk_index),
                     anchor: self.line_anchor(file, hunk_index, line_index),
                     gap: None,
+                    semantic_key: Some(format!("line:{}", compact_line_key(line.kind, &line.text))),
+                    semantic_parent_key: Some(hunk_keys[hunk_index].clone()),
+                    semantic_occurrence: 0,
+                    semantic_total: 0,
+                    logical_range: None,
+                    old_logical_range: None,
                 });
                 line_index += 1;
             }
         }
 
         if let Some(spec) = gap_spec(file.diff.hunks.len()) {
-            self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref());
+            self.push_gap_rows(&mut rows, file, &spec, file_lines.as_deref(), &hunk_keys);
         }
 
         if file.diff.hunks.is_empty() {
@@ -273,9 +334,19 @@ impl ReviewSession {
                 hunk_index: None,
                 anchor: None,
                 gap: None,
+                semantic_key: Some(format!(
+                    "raw:{}",
+                    compact_local_digest([file.diff.raw.as_bytes()])
+                )),
+                semantic_parent_key: None,
+                semantic_occurrence: 0,
+                semantic_total: 0,
+                logical_range: None,
+                old_logical_range: None,
             });
         }
 
+        assign_semantic_occurrences(&mut rows);
         rows
     }
 
@@ -288,16 +359,18 @@ impl ReviewSession {
         file: &ReviewFile,
         spec: &GapSpec,
         lines: Option<&Vec<String>>,
+        hunk_keys: &[String],
     ) -> bool {
         let expansion = lines.and_then(|_| {
             self.context_expansion
                 .get(&(file.path.clone(), spec.gap_id))
                 .copied()
         });
+        let gap_key = gap_semantic_key(hunk_keys, spec);
         let view = gap_view(spec, expansion);
         if let Some(lines) = lines {
             for new_lineno in view.top.clone() {
-                rows.push(expanded_context_row(lines, new_lineno, spec));
+                rows.push(expanded_context_row(lines, new_lineno, spec, &gap_key));
             }
         }
         if view.hidden > 0 {
@@ -325,11 +398,20 @@ impl ReviewSession {
                 hunk_index: None,
                 anchor: None,
                 gap: Some(spec.gap_id),
+                semantic_key: Some(gap_key.clone()),
+                semantic_parent_key: None,
+                semantic_occurrence: 0,
+                semantic_total: 0,
+                logical_range: Some(view.top.end..view.bottom.start),
+                old_logical_range: Some(
+                    ((view.top.end as isize - spec.offset).max(1) as usize)
+                        ..((view.bottom.start as isize - spec.offset).max(1) as usize),
+                ),
             });
         }
         if let Some(lines) = lines {
             for new_lineno in view.bottom.clone() {
-                rows.push(expanded_context_row(lines, new_lineno, spec));
+                rows.push(expanded_context_row(lines, new_lineno, spec, &gap_key));
             }
         }
         view.hidden == 0
@@ -357,13 +439,24 @@ fn placeholder_row(text: &str) -> DiffRow {
         hunk_index: None,
         anchor: None,
         gap: None,
+        semantic_key: None,
+        semantic_parent_key: None,
+        semantic_occurrence: 0,
+        semantic_total: 0,
+        logical_range: None,
+        old_logical_range: None,
     }
 }
 
 /// A synthetic context row revealed by gap expansion: real old/new line
 /// numbers (old derives from the gap's hunk offset) but no comment anchor —
 /// expanded context is not commentable in v1 (docs/focused-diff-ux.md §5).
-fn expanded_context_row(lines: &[String], new_lineno: usize, spec: &GapSpec) -> DiffRow {
+fn expanded_context_row(
+    lines: &[String],
+    new_lineno: usize,
+    spec: &GapSpec,
+    gap_key: &str,
+) -> DiffRow {
     let old_lineno = new_lineno as isize - spec.offset;
     DiffRow {
         old_lineno: (old_lineno > 0).then_some(old_lineno as usize),
@@ -376,7 +469,101 @@ fn expanded_context_row(lines: &[String], new_lineno: usize, spec: &GapSpec) -> 
         hunk_index: None,
         anchor: None,
         gap: Some(spec.gap_id),
+        semantic_key: Some(format!(
+            "gap-line:{}",
+            compact_local_digest([
+                gap_key.as_bytes(),
+                lines
+                    .get(new_lineno - 1)
+                    .map(String::as_bytes)
+                    .unwrap_or_default(),
+            ])
+        )),
+        semantic_parent_key: None,
+        semantic_occurrence: 0,
+        semantic_total: 0,
+        logical_range: None,
+        old_logical_range: None,
     }
+}
+
+fn hunk_semantic_key(hunk: &Hunk) -> String {
+    let parts = hunk.lines.iter().flat_map(|line| {
+        [
+            diff_line_kind_label(line.kind).as_bytes(),
+            line.text.as_bytes(),
+        ]
+    });
+    format!("hunk:{}", compact_local_digest(parts))
+}
+
+fn compact_line_key(kind: DiffLineKind, text: &str) -> String {
+    compact_local_digest([diff_line_kind_label(kind).as_bytes(), text.as_bytes()])
+}
+
+fn fold_semantic_key(hunk: &Hunk, start: usize, end: usize) -> String {
+    let parts = hunk.lines[start..end].iter().flat_map(|line| {
+        [
+            diff_line_kind_label(line.kind).as_bytes(),
+            line.text.as_bytes(),
+        ]
+    });
+    format!("fold:{}", compact_local_digest(parts))
+}
+
+fn compact_local_digest<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part);
+    }
+    format!("{:x}", digest.finalize())
+}
+
+fn assign_semantic_occurrences(rows: &mut [DiffRow]) {
+    let totals = rows
+        .iter()
+        .filter_map(|row| row.semantic_key.as_ref())
+        .fold(BTreeMap::<String, usize>::new(), |mut totals, key| {
+            *totals.entry(key.clone()).or_default() += 1;
+            totals
+        });
+    let mut occurrences = BTreeMap::<String, usize>::new();
+    for row in rows {
+        if let Some(key) = row.semantic_key.as_ref() {
+            let occurrence = occurrences.entry(key.clone()).or_default();
+            row.semantic_occurrence = *occurrence;
+            row.semantic_total = totals.get(key).copied().unwrap_or(1);
+            *occurrence += 1;
+        }
+    }
+}
+
+fn gap_semantic_key(hunk_keys: &[String], spec: &GapSpec) -> String {
+    let before = spec
+        .gap_id
+        .checked_sub(1)
+        .and_then(|index| hunk_keys.get(index).cloned())
+        .unwrap_or_else(|| "<start>".into());
+    let after = hunk_keys
+        .get(spec.gap_id)
+        .cloned()
+        .unwrap_or_else(|| "<end>".into());
+    format!("gap:{before}:{after}")
+}
+
+fn fold_logical_range(hunk: &Hunk, start: usize, end: usize) -> Option<Range<usize>> {
+    let lines = &hunk.lines[start..end];
+    let first = lines.iter().filter_map(|line| line.new_lineno).min()?;
+    let last = lines.iter().filter_map(|line| line.new_lineno).max()?;
+    Some(first..last.saturating_add(1))
+}
+
+fn fold_old_logical_range(hunk: &Hunk, start: usize, end: usize) -> Option<Range<usize>> {
+    let lines = &hunk.lines[start..end];
+    let first = lines.iter().filter_map(|line| line.old_lineno).min()?;
+    let last = lines.iter().filter_map(|line| line.old_lineno).max()?;
+    Some(first..last.saturating_add(1))
 }
 
 pub(super) fn nearest_commentable_row(rows: &[DiffRow], target: usize) -> Option<usize> {
@@ -420,4 +607,33 @@ fn enclosing_symbol(symbols: &[SymbolSpan], source_line: usize) -> Option<&Symbo
         .iter()
         .filter(|symbol| source_line >= symbol.start_line && source_line <= symbol.end_line)
         .min_by_key(|symbol| symbol.end_line - symbol.start_line)
+}
+
+#[cfg(test)]
+mod semantic_key_tests {
+    use super::*;
+    use crate::diff::DiffSet;
+
+    #[test]
+    fn long_fold_and_gap_line_keys_are_bounded() {
+        let long = "x".repeat(20_000);
+        let diff = DiffSet::parse(&format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n {long}\n {long}\n {long}\n"
+        ))
+        .unwrap();
+        let hunk = &diff.files[0].hunks[0];
+        assert!(fold_semantic_key(hunk, 0, hunk.lines.len()).len() < 80);
+        let row = expanded_context_row(
+            &[long],
+            1,
+            &GapSpec {
+                gap_id: 0,
+                new_start: 1,
+                hidden: 1,
+                offset: 0,
+            },
+            "gap-key",
+        );
+        assert!(row.semantic_key.unwrap().len() < 90);
+    }
 }

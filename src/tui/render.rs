@@ -1,6 +1,8 @@
 //! All drawing code: panes, popups, styles, and layout math.
 
-use std::{collections::HashMap, ops::Range, rc::Rc};
+#[cfg(test)]
+use std::rc::Rc;
+use std::{collections::HashMap, ops::Range};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -374,13 +376,24 @@ fn draw_diff(
         return;
     }
 
-    let rows = session.diff_rows_for_selected_file();
     let inner = inner_bordered(area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     let split_requested = session.diff_cues.view == DiffViewModeConfig::SideBySide;
-    let split_active = split_requested && inner.width >= MIN_SPLIT_WIDTH;
-    let measured = cached_diff_layout(session, rows.clone(), inner, split_active, tui_state);
-    let start = measured.viewport_start(session, inner.height as usize);
-    let lines = materialize_diff_window(session, &rows, &measured, start, inner.height as usize);
+    let split_active = diff_split_is_active(session, inner);
+    let measured = tui_state
+        .diff_viewport
+        .measure(session, inner, split_active);
+    let window = tui_state
+        .diff_viewport
+        .window(session, &measured, inner.height as usize);
+    let lines = measured.materialize(
+        session,
+        window.start,
+        inner.height as usize,
+        window.horizontal,
+    );
 
     let mut title = diff_pane_title(session);
     if split_requested && !split_active {
@@ -388,7 +401,7 @@ fn draw_diff(
         // narrow terminals and say so in the title.
         title.push_str(" · unified (narrow)");
     }
-    let horizontal = measured.effective_horizontal_scroll(session);
+    let horizontal = window.horizontal;
     if !session.diff_cues.soft_wrap && horizontal > 0 {
         title.push_str(&format!(" · x:{horizontal}"));
     }
@@ -398,7 +411,12 @@ fn draw_diff(
 }
 
 /// Minimum inner width (columns) for the side-by-side layout.
-const MIN_SPLIT_WIDTH: u16 = 100;
+pub(super) const MIN_SPLIT_WIDTH: u16 = 100;
+
+/// The single split/fallback decision shared by drawing and viewport geometry.
+pub(super) fn diff_split_is_active(session: &ReviewSession, inner: Rect) -> bool {
+    session.diff_cues.view == DiffViewModeConfig::SideBySide && inner.width >= MIN_SPLIT_WIDTH
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiffVisualHit {
@@ -486,7 +504,7 @@ enum DiffVisualSource {
 }
 
 #[derive(Debug, Clone)]
-struct DiffVisualLine {
+pub(super) struct DiffVisualLine {
     source: DiffVisualSource,
     hit: DiffVisualHit,
     block_anchor: usize,
@@ -494,20 +512,11 @@ struct DiffVisualLine {
 }
 
 #[derive(Debug, Clone, Default)]
-struct MeasuredDiffLayout {
-    lines: Vec<DiffVisualLine>,
-    line_number_width: usize,
+pub(super) struct MeasuredDiffLayout {
+    pub(super) lines: Vec<DiffVisualLine>,
+    pub(super) line_number_width: usize,
     width: usize,
-    horizontal_limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DiffLayoutCacheKey {
-    rows_ptr: usize,
-    width: u16,
-    split_active: bool,
-    soft_wrap: bool,
-    annotations: AnnotationLayoutInput,
+    pub(super) horizontal_limit: usize,
 }
 
 /// Selected-file review state that can change measured diff geometry.
@@ -518,8 +527,8 @@ struct DiffLayoutCacheKey {
 /// replies, timestamps, unrelated files, and presentation-only session state
 /// deliberately do not participate in equality.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct AnnotationLayoutInput {
-    changed_hunks: Vec<usize>,
+pub(super) struct AnnotationLayoutInput {
+    pub(super) changed_hunks: Vec<usize>,
     comments: Vec<AnnotationCommentInput>,
 }
 
@@ -534,33 +543,47 @@ struct AnnotationCommentInput {
 /// rendered comment instead of retaining a fragile index into session-wide
 /// comments.
 #[derive(Debug, Clone, Default)]
-struct SelectedFileAnnotations {
-    input: AnnotationLayoutInput,
+pub(super) struct SelectedFileAnnotations {
+    pub(super) input: AnnotationLayoutInput,
     rendered_summaries: Vec<Line<'static>>,
 }
 
-#[derive(Debug, Clone)]
-struct CachedDiffLayout {
-    key: DiffLayoutCacheKey,
-    /// Retain the allocation named by `key.rows_ptr` so its address cannot be
-    /// recycled for different rows while this cache entry remains live.
-    _rows: Rc<Vec<DiffRow>>,
-    layout: Rc<MeasuredDiffLayout>,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct DiffLayoutCache {
-    entry: Option<CachedDiffLayout>,
-    #[cfg(test)]
-    builds: usize,
-}
-
 impl MeasuredDiffLayout {
-    fn viewport_start(&self, session: &ReviewSession, viewport_height: usize) -> usize {
+    pub(super) fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub(super) fn cursor_bounds(&self, cursor: usize) -> Option<(usize, usize)> {
+        let first = self
+            .lines
+            .iter()
+            .position(|line| !line.is_comment && line.hit.contains(cursor))?;
+        let last = self
+            .lines
+            .iter()
+            .rposition(|line| !line.is_comment && line.hit.contains(cursor))?;
+        Some((first, last))
+    }
+
+    pub(super) fn cursor_visible(&self, cursor: usize, start: usize, height: usize) -> bool {
+        self.lines[start.min(self.lines.len())..start.saturating_add(height).min(self.lines.len())]
+            .iter()
+            .any(|line| !line.is_comment && line.hit.contains(cursor))
+    }
+
+    pub(super) fn row_at(&self, line: usize, column: usize) -> Option<usize> {
+        self.lines.get(line)?.hit.row_at(column)
+    }
+
+    pub(super) fn viewport_start(
+        &self,
+        logical: usize,
+        continuation: usize,
+        viewport_height: usize,
+    ) -> usize {
         if self.lines.is_empty() {
             return 0;
         }
-        let logical = session.diff_scroll as usize;
         let first = self
             .lines
             .iter()
@@ -578,79 +601,48 @@ impl MeasuredDiffLayout {
             .map(|offset| first + offset)
             .unwrap_or(self.lines.len());
         let requested = first
-            .saturating_add(session.diff_visual_offset)
+            .saturating_add(continuation)
             .min(block_end.saturating_sub(1));
         let maximum_top = self.lines.len().saturating_sub(viewport_height.max(1));
         requested.min(maximum_top)
     }
 
-    fn effective_horizontal_scroll(&self, session: &ReviewSession) -> usize {
-        if session.diff_cues.soft_wrap {
-            0
-        } else {
-            session.diff_horizontal_scroll.min(self.horizontal_limit)
-        }
-    }
-
-    fn set_viewport_from_line(&self, session: &mut ReviewSession, index: usize) {
+    pub(super) fn viewport_from_line(&self, index: usize) -> (u16, usize) {
         let index = index.min(self.lines.len().saturating_sub(1));
         let Some(line) = self.lines.get(index) else {
-            session.diff_scroll = 0;
-            session.diff_visual_offset = 0;
-            return;
+            return (0, 0);
         };
         let first = self.lines[..=index]
             .iter()
             .rposition(|candidate| candidate.block_anchor != line.block_anchor)
             .map_or(0, |prior| prior + 1);
-        session.diff_scroll = line.block_anchor.min(u16::MAX as usize) as u16;
-        session.diff_visual_offset = index.saturating_sub(first);
+        (
+            line.block_anchor.min(u16::MAX as usize) as u16,
+            index.saturating_sub(first),
+        )
     }
 }
 
 /// Build the complete terminal-row projection. Drawing, visual scrolling,
 /// and mouse hit testing all consume this exact measured geometry.
-fn cached_diff_layout(
+#[cfg(test)]
+pub(super) fn cached_diff_layout(
     session: &ReviewSession,
     rows: Rc<Vec<DiffRow>>,
     inner: Rect,
     split_active: bool,
     tui_state: &TuiState,
 ) -> Rc<MeasuredDiffLayout> {
-    let annotations = selected_file_annotations(session, &rows);
-    let key = DiffLayoutCacheKey {
-        rows_ptr: Rc::as_ptr(&rows) as usize,
-        width: inner.width,
-        split_active,
-        soft_wrap: session.diff_cues.soft_wrap,
-        annotations: annotations.input.clone(),
-    };
-    if let Some(cached) = tui_state.diff_layout_cache.borrow().entry.as_ref()
-        && cached.key == key
-    {
-        return Rc::clone(&cached.layout);
-    }
-    let layout = Rc::new(measured_diff_layout_with_annotations(
-        session,
-        &rows,
-        inner,
-        split_active,
-        &annotations,
-    ));
-    let mut cache = tui_state.diff_layout_cache.borrow_mut();
-    cache.entry = Some(CachedDiffLayout {
-        key,
-        _rows: rows,
-        layout: Rc::clone(&layout),
-    });
-    #[cfg(test)]
-    {
-        cache.builds += 1;
-    }
-    layout
+    tui_state
+        .diff_viewport
+        .measure_rows(session, rows, inner, split_active)
+        .test_layout_rc()
 }
 
-fn selected_file_annotations(session: &ReviewSession, rows: &[DiffRow]) -> SelectedFileAnnotations {
+pub(super) fn selected_file_annotations(
+    session: &ReviewSession,
+    rows: &[DiffRow],
+) -> SelectedFileAnnotations {
     let changed_hunks = session
         .selected_visible_file()
         .map(|file| file.changed_hunks.iter().copied().collect())
@@ -689,7 +681,7 @@ fn measured_diff_layout(
     measured_diff_layout_with_annotations(session, rows, inner, split_active, &annotations)
 }
 
-fn measured_diff_layout_with_annotations(
+pub(super) fn measured_diff_layout_with_annotations(
     session: &ReviewSession,
     rows: &[DiffRow],
     inner: Rect,
@@ -1006,14 +998,14 @@ fn comment_summary_text(comment: &Comment) -> String {
     spans_text(&comment_summary_line(comment).spans)
 }
 
-fn materialize_diff_window(
+pub(super) fn materialize_diff_window(
     session: &ReviewSession,
     rows: &[DiffRow],
     layout: &MeasuredDiffLayout,
     start: usize,
     height: usize,
+    horizontal: usize,
 ) -> Vec<Line<'static>> {
-    let horizontal = layout.effective_horizontal_scroll(session);
     let mut prepared = HashMap::new();
     layout
         .lines
@@ -1296,10 +1288,6 @@ fn pad_spans(mut spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> 
     spans
 }
 
-fn split_is_active(session: &ReviewSession, inner: Rect) -> bool {
-    session.diff_cues.view == DiffViewModeConfig::SideBySide && inner.width >= MIN_SPLIT_WIDTH
-}
-
 pub(super) fn diff_row_at_point(
     session: &ReviewSession,
     inner: Rect,
@@ -1307,18 +1295,9 @@ pub(super) fn diff_row_at_point(
     visible_row: usize,
     tui_state: &TuiState,
 ) -> Option<usize> {
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    let line = layout
-        .lines
-        .get(layout.viewport_start(session, inner.height as usize) + visible_row)?;
-    line.hit.row_at(x.saturating_sub(inner.x) as usize)
+    tui_state
+        .diff_viewport
+        .row_at_point(session, inner, x, visible_row)
 }
 
 pub(super) fn scroll_diff_visual(
@@ -1327,24 +1306,7 @@ pub(super) fn scroll_diff_visual(
     delta: isize,
     tui_state: &TuiState,
 ) {
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    if layout.lines.is_empty() {
-        return;
-    }
-    let start = layout.viewport_start(session, inner.height as usize);
-    let maximum_top = layout
-        .lines
-        .len()
-        .saturating_sub(inner.height.max(1) as usize);
-    let target = start.saturating_add_signed(delta).min(maximum_top);
-    layout.set_viewport_from_line(session, target);
+    tui_state.diff_viewport.visual_scroll(session, inner, delta);
 }
 
 pub(super) fn scroll_diff_horizontal_visual(
@@ -1353,21 +1315,9 @@ pub(super) fn scroll_diff_horizontal_visual(
     delta: isize,
     tui_state: &TuiState,
 ) {
-    if session.diff_cues.soft_wrap {
-        return;
-    }
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    let current = layout.effective_horizontal_scroll(session);
-    session.diff_horizontal_scroll = current
-        .saturating_add_signed(delta)
-        .min(layout.horizontal_limit);
+    tui_state
+        .diff_viewport
+        .horizontal_scroll(session, inner, delta);
 }
 
 pub(super) fn scroll_diff_to_bottom_visual(
@@ -1375,20 +1325,7 @@ pub(super) fn scroll_diff_to_bottom_visual(
     inner: Rect,
     tui_state: &TuiState,
 ) {
-    session.scroll_diff_to_bottom();
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    let target = layout
-        .lines
-        .len()
-        .saturating_sub(inner.height.max(1) as usize);
-    layout.set_viewport_from_line(session, target);
+    tui_state.diff_viewport.scroll_to_bottom(session, inner);
 }
 
 pub(super) fn ensure_diff_cursor_visible(
@@ -1396,78 +1333,28 @@ pub(super) fn ensure_diff_cursor_visible(
     inner: Rect,
     tui_state: &TuiState,
 ) {
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    let start = layout.viewport_start(session, inner.height as usize);
-    let end = start.saturating_add(inner.height.max(1) as usize);
-    let first = layout
-        .lines
-        .iter()
-        .position(|line| !line.is_comment && line.hit.contains(session.diff_cursor));
-    let last = layout
-        .lines
-        .iter()
-        .rposition(|line| !line.is_comment && line.hit.contains(session.diff_cursor));
-    let height = inner.height.max(1) as usize;
-    match (first, last) {
-        (Some(first), Some(last)) if last - first + 1 > height && first != start => {
-            layout.set_viewport_from_line(session, first);
-        }
-        (Some(first), Some(last)) if last - first + 1 > height && first == start => {}
-        (Some(first), Some(_)) if first < start => layout.set_viewport_from_line(session, first),
-        (Some(_), Some(last)) if last >= end => {
-            layout.set_viewport_from_line(session, last.saturating_add(1).saturating_sub(height))
-        }
-        _ => {}
-    }
+    tui_state.diff_viewport.logical_selection(session, inner);
 }
 
+#[cfg(test)]
 pub(super) fn reconcile_diff_viewport(
     session: &mut ReviewSession,
     inner: Rect,
     keep_cursor_visible: bool,
     tui_state: &TuiState,
 ) {
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    session.diff_horizontal_scroll = layout.effective_horizontal_scroll(session);
-    let start = layout.viewport_start(session, inner.height as usize);
-    layout.set_viewport_from_line(session, start);
-    if keep_cursor_visible {
-        ensure_diff_cursor_visible(session, inner, tui_state);
-    }
+    tui_state
+        .diff_viewport
+        .reflow(session, inner, keep_cursor_visible);
 }
 
+#[cfg(test)]
 pub(super) fn diff_cursor_is_visible(
     session: &ReviewSession,
     inner: Rect,
     tui_state: &TuiState,
 ) -> bool {
-    let rows = session.diff_rows_for_selected_file();
-    let layout = cached_diff_layout(
-        session,
-        rows,
-        inner,
-        split_is_active(session, inner),
-        tui_state,
-    );
-    let start = layout.viewport_start(session, inner.height as usize);
-    let end = start.saturating_add(inner.height.max(1) as usize);
-    layout.lines[start.min(layout.lines.len())..end.min(layout.lines.len())]
-        .iter()
-        .any(|line| !line.is_comment && line.hit.contains(session.diff_cursor))
+    tui_state.diff_viewport.cursor_is_visible(session, inner)
 }
 
 /// One full-width line for a diff row in the unified layout (also used for
@@ -7027,13 +6914,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let painted: Vec<_> = visual
             .iter()
             .map(|line| {
-                materialize_diff_source(
-                    &session,
-                    &rows,
-                    layout.line_number_width,
-                    layout.effective_horizontal_scroll(&session),
-                    &line.source,
-                )
+                materialize_diff_source(&session, &rows, layout.line_number_width, 0, &line.source)
             })
             .collect();
 
@@ -7079,7 +6960,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                         &session,
                         &rows,
                         before_layout.line_number_width,
-                        before_layout.effective_horizontal_scroll(&session),
+                        0,
                         &line.source,
                     )
                     .spans,
@@ -7090,6 +6971,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let tui_state = TuiState::default();
         scroll_diff_horizontal_visual(&mut session, inner, 10, &tui_state);
         let after_layout = measured_diff_layout(&session, &rows, inner, false);
+        let horizontal = tui_state.diff_viewport.visual_state(&session).1;
         let after = after_layout
             .lines
             .iter()
@@ -7100,7 +6982,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                         &session,
                         &rows,
                         after_layout.line_number_width,
-                        after_layout.effective_horizontal_scroll(&session),
+                        horizontal,
                         &line.source,
                     )
                     .spans,
@@ -7144,7 +7026,11 @@ diff --git a/Cargo.toml b/Cargo.toml
             .iter()
             .position(|line| line.hit.contains(left) && line.hit.contains(right))
             .unwrap()
-            .saturating_sub(split.viewport_start(&session, inner.height as usize));
+            .saturating_sub(split.viewport_start(
+                session.diff_scroll as usize,
+                0,
+                inner.height as usize,
+            ));
         assert_eq!(
             materialize_diff_source(&session, &rows, split.line_number_width, 0, &pair.source,)
                 .width(),
@@ -7255,7 +7141,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             &session,
             &rows,
             before_layout.line_number_width,
-            before_layout.effective_horizontal_scroll(&session),
+            0,
             &before_line.source,
         );
         let before_text = spans_text(&before_painted.spans);
@@ -7263,6 +7149,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let tui_state = TuiState::default();
         scroll_diff_horizontal_visual(&mut session, inner, 10, &tui_state);
         let after_layout = measured_diff_layout(&session, &rows, inner, true);
+        let horizontal = tui_state.diff_viewport.visual_state(&session).1;
         let after_line = after_layout
             .lines
             .iter()
@@ -7272,7 +7159,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             &session,
             &rows,
             after_layout.line_number_width,
-            after_layout.effective_horizontal_scroll(&session),
+            horizontal,
             &after_line.source,
         );
         let after_text = spans_text(&after_painted.spans);
@@ -7329,10 +7216,9 @@ diff --git a/Cargo.toml b/Cargo.toml
             .position(|row| row.text == long)
             .unwrap();
         session.diff_scroll = owner as u16;
-        session.diff_visual_offset = 100;
         let rows = session.diff_rows_for_selected_file();
         let wide = measured_diff_layout(&session, &rows, Rect::new(0, 0, 90, 10), false);
-        let start = wide.viewport_start(&session, 10);
+        let start = wide.viewport_start(session.diff_scroll as usize, 100, 10);
 
         let owner_start = wide
             .lines
@@ -7357,14 +7243,16 @@ diff --git a/Cargo.toml b/Cargo.toml
             .unwrap();
         session.select_diff_row(owner);
         session.diff_scroll = owner as u16;
-        session.diff_visual_offset = 5;
         let inner = Rect::new(0, 0, 28, 3);
         let tui_state = TuiState::default();
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, 5);
 
         ensure_diff_cursor_visible(&mut session, inner, &tui_state);
 
         assert_eq!(session.diff_scroll as usize, owner);
-        assert_eq!(session.diff_visual_offset, 0);
+        assert_eq!(tui_state.diff_viewport.visual_state(&session).0, 0);
     }
 
     #[test]
@@ -7420,7 +7308,10 @@ diff --git a/Cargo.toml b/Cargo.toml
             .position(|line| line.hit.contains(added))
             .unwrap();
 
-        assert_eq!(layout.viewport_start(&session, 2), expected);
+        assert_eq!(
+            layout.viewport_start(session.diff_scroll as usize, 0, 2),
+            expected
+        );
     }
 
     #[test]
@@ -7429,16 +7320,10 @@ diff --git a/Cargo.toml b/Cargo.toml
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+short\n",
         );
         session.diff_cues.soft_wrap = false;
-        session.diff_horizontal_scroll = 500;
         let rows = session.diff_rows_for_selected_file();
         let owner = rows.iter().position(|row| row.text == "short").unwrap();
         let inner = Rect::new(0, 0, 80, 10);
 
-        assert_eq!(
-            measured_diff_layout(&session, &rows, inner, false)
-                .effective_horizontal_scroll(&session),
-            0
-        );
         let layout = measured_diff_layout(&session, &rows, inner, false);
         let rendered = layout
             .lines
@@ -7450,7 +7335,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                         &session,
                         &rows,
                         layout.line_number_width,
-                        layout.effective_horizontal_scroll(&session),
+                        0,
                         &line.source,
                     )
                     .spans,
@@ -7460,8 +7345,8 @@ diff --git a/Cargo.toml b/Cargo.toml
         assert!(rendered.contains("short"));
 
         let tui_state = TuiState::default();
-        scroll_diff_horizontal_visual(&mut session, inner, 4, &tui_state);
-        assert_eq!(session.diff_horizontal_scroll, 0);
+        scroll_diff_horizontal_visual(&mut session, inner, 500, &tui_state);
+        assert_eq!(tui_state.diff_viewport.visual_state(&session).1, 0);
     }
 
     #[test]
@@ -7476,9 +7361,11 @@ diff --git a/Cargo.toml b/Cargo.toml
             .position(|row| row.text == long)
             .unwrap();
         session.diff_scroll = owner as u16;
-        session.diff_visual_offset = usize::MAX;
         let inner = Rect::new(0, 0, 40, 5);
         let tui_state = TuiState::default();
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, inner, isize::MAX);
         let rows = session.diff_rows_for_selected_file();
         let first = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
 
@@ -7486,14 +7373,15 @@ diff --git a/Cargo.toml b/Cargo.toml
         let second = cached_diff_layout(&session, rows, inner, false, &tui_state);
 
         assert!(Rc::ptr_eq(&first, &second));
-        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 1);
-        assert!(session.diff_visual_offset < first.lines.len());
+        assert_eq!(tui_state.diff_viewport.cache_builds(), 1);
+        assert!(tui_state.diff_viewport.visual_state(&session).0 < first.lines.len());
         let window = materialize_diff_window(
             &session,
             &session.diff_rows_for_selected_file(),
             &first,
             0,
             5,
+            0,
         );
         assert_eq!(window.len(), 5);
     }
@@ -7568,7 +7456,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.files[0].changed_hunks.insert(0);
         let changed_hunk = cached_diff_layout(&session, rows, inner, false, &tui_state);
         assert!(!Rc::ptr_eq(&previous, &changed_hunk));
-        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 9);
+        assert_eq!(tui_state.diff_viewport.cache_builds(), 9);
     }
 
     #[test]
@@ -7656,7 +7544,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.syntax.theme.keyword = "red bold".to_owned();
         let detail_and_style = cached_diff_layout(&session, rows, inner, false, &tui_state);
         assert!(Rc::ptr_eq(&first, &detail_and_style));
-        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 1);
+        assert_eq!(tui_state.diff_viewport.cache_builds(), 1);
     }
 
     #[test]
@@ -7710,7 +7598,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             &tui_state,
         );
         assert!(!Rc::ptr_eq(&wrap, &replaced));
-        assert_eq!(tui_state.diff_layout_cache.borrow().builds, 5);
+        assert_eq!(tui_state.diff_viewport.cache_builds(), 5);
     }
 
     #[test]
@@ -7754,7 +7642,6 @@ diff --git a/Cargo.toml b/Cargo.toml
         let new_inner = Rect::new(0, 0, 60, 5);
 
         session.diff_scroll = 0;
-        session.diff_visual_offset = 0;
         session.diff_cursor = session
             .diff_rows_for_selected_file()
             .iter()
@@ -7802,7 +7689,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let tui_state = TuiState::default();
         scroll_diff_visual(&mut session, inner, 2, &tui_state);
         assert_eq!(session.diff_scroll as usize, owner);
-        assert!(session.diff_visual_offset > 0);
+        assert!(tui_state.diff_viewport.visual_state(&session).0 > 0);
         assert_eq!(
             diff_row_at_point(&session, inner, inner.x + 10, 0, &tui_state),
             Some(owner)
@@ -7823,7 +7710,8 @@ diff --git a/Cargo.toml b/Cargo.toml
         scroll_diff_visual(&mut session, inner, isize::MAX, &tui_state);
         let rows = session.diff_rows_for_selected_file();
         let layout = measured_diff_layout(&session, &rows, inner, false);
-        let start = layout.viewport_start(&session, 6);
+        let continuation = tui_state.diff_viewport.visual_state(&session).0;
+        let start = layout.viewport_start(session.diff_scroll as usize, continuation, 6);
 
         assert_eq!(start, layout.lines.len().saturating_sub(6));
         assert_eq!(layout.lines.len().saturating_sub(start), 6);

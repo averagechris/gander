@@ -24,10 +24,11 @@ pub(super) struct FileSearchRow {
 impl FileSearchState {
     pub(super) fn new(session: &ReviewSession) -> Self {
         let files: Vec<FileSearchRow> = session
-            .visible_file_indices()
-            .into_iter()
+            .files
+            .iter()
+            .enumerate()
             .map(|file_index| {
-                let file = &session.files[file_index];
+                let (file_index, file) = file_index;
                 FileSearchRow {
                     file_index,
                     path: file.path.clone(),
@@ -152,13 +153,13 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn excludes_hidden_generated_files() {
+    fn includes_hidden_generated_files_for_explicit_reveal() {
         let mut session = search_session();
         session.annotate_generated_where(|file| file.path == "README.md");
         session.toggle_generated_visibility();
 
         let search = FileSearchState::new(&session);
 
-        assert!(search.files.iter().all(|row| row.path != "README.md"));
+        assert!(search.files.iter().any(|row| row.path == "README.md"));
     }
 }
