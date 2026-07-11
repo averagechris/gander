@@ -183,11 +183,89 @@ pub(super) fn is_grapheme_boundary(text: &str, byte: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn row_texts<'a>(layout: &'a VisualTextLayout<'a>) -> Vec<&'a str> {
         (0..layout.rows().len())
             .map(|row| layout.row_text(row))
             .collect()
+    }
+
+    fn text_without_newline_graphemes(text: &str) -> String {
+        text.graphemes(true)
+            .filter(|grapheme| !grapheme.ends_with('\n'))
+            .collect()
+    }
+
+    fn grapheme_boundary_bytes(text: &str) -> Vec<usize> {
+        let mut boundaries = vec![text.len()];
+        boundaries.extend(text.grapheme_indices(true).map(|(byte, _)| byte));
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        boundaries
+    }
+
+    fn assert_layout_invariants(
+        text: &str,
+        width: usize,
+        cursor_row: bool,
+    ) -> Result<(), TestCaseError> {
+        let layout = if cursor_row {
+            VisualTextLayout::new(text, width)
+        } else {
+            VisualTextLayout::read_only(text, width)
+        };
+
+        prop_assert!(!layout.rows().is_empty());
+
+        let mut previous_start = 0;
+        let mut previous_end = 0;
+        let mut preserved = String::new();
+        for row_index in 0..layout.rows().len() {
+            let range = layout.row_byte_range(row_index);
+            prop_assert!(range.start <= range.end);
+            prop_assert!(range.end <= text.len());
+            prop_assert!(text.is_char_boundary(range.start));
+            prop_assert!(text.is_char_boundary(range.end));
+            prop_assert!(is_grapheme_boundary(text, range.start));
+            prop_assert!(is_grapheme_boundary(text, range.end));
+            prop_assert!(range.start >= previous_start);
+            prop_assert!(range.start >= previous_end || range.start == range.end);
+
+            let row_text = layout.row_text(row_index);
+            prop_assert_eq!(
+                layout.rows()[row_index].display_width,
+                UnicodeWidthStr::width(row_text)
+            );
+            preserved.push_str(row_text);
+
+            previous_start = range.start;
+            previous_end = range.end;
+        }
+        prop_assert_eq!(preserved, text_without_newline_graphemes(text));
+
+        for cursor in grapheme_boundary_bytes(text) {
+            let position = layout.cursor_position(cursor);
+            prop_assert!(position.row < layout.rows().len());
+            prop_assert!(position.column <= UnicodeWidthStr::width(text));
+        }
+
+        for row in 0..layout.rows().len() {
+            let display_width = layout.rows()[row].display_width;
+            for column in [0, 1, width, display_width, display_width.saturating_add(1)] {
+                let byte = layout.byte_at_column(row, column);
+                prop_assert!(byte <= text.len());
+                prop_assert!(text.is_char_boundary(byte));
+                prop_assert!(is_grapheme_boundary(text, byte));
+                prop_assert_eq!(layout.cursor_position(byte).row, row);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn bounded_unicode_text() -> impl Strategy<Value = String> {
+        prop::collection::vec(any::<char>(), 0..80).prop_map(|chars| chars.into_iter().collect())
     }
 
     #[test]
@@ -275,6 +353,41 @@ mod tests {
                     layout.byte_at_column(row, column)
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn covers_unicode_layout_edge_cases_explicitly() {
+        let cases = [
+            ("\u{200d}\u{200b}x", 0),
+            ("e\u{301}o\u{308}\n", 1),
+            ("👨‍👩‍👧‍👦👩🏽‍💻", 1),
+            ("a\r\nb\rc\n\n", 2),
+            ("abc", 3),
+            ("ab\n", 2),
+            ("界", 1),
+        ];
+
+        for (text, width) in cases {
+            assert_layout_invariants(text, width, true).unwrap();
+            assert_layout_invariants(text, width, false).unwrap();
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            max_shrink_iters: 2048,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn arbitrary_unicode_layout_preserves_boundaries_and_bytes(
+            text in bounded_unicode_text(),
+            width in 0usize..=16,
+            cursor_row in any::<bool>(),
+        ) {
+            assert_layout_invariants(&text, width, cursor_row)?;
         }
     }
 }
