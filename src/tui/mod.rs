@@ -129,6 +129,38 @@ enum Mode {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewPointerPolicy {
+    Enabled,
+    BlockedByModal,
+}
+
+impl Mode {
+    /// Whether mouse input may reach the review surface behind this mode.
+    /// Keep this exhaustive: adding a modal must make its pointer ownership an
+    /// explicit decision rather than inheriting review mutations by omission.
+    fn review_pointer_policy(&self) -> ReviewPointerPolicy {
+        match self {
+            Self::Normal => ReviewPointerPolicy::Enabled,
+            Self::Help
+            | Self::TargetChooser(_)
+            | Self::RevsetInput(_)
+            | Self::OperationPicker(_)
+            | Self::JjHelpers(_)
+            | Self::FlagList(_)
+            | Self::OpenWork(_)
+            | Self::Activity(_)
+            | Self::DraftList(_)
+            | Self::FileSearch(_)
+            | Self::SymbolOutline(_)
+            | Self::CommentList(_)
+            | Self::ViewOptions(_)
+            | Self::WalkthroughList(_)
+            | Self::CommentInput { .. } => ReviewPointerPolicy::BlockedByModal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommentInputTarget {
     New,
@@ -2375,7 +2407,8 @@ fn handle_normal_action(
         | Action::ZenRefocus
         | Action::ZenAcknowledge
         | Action::ZenArtifactNext
-        | Action::ZenArtifactPrevious => {}
+        | Action::ZenArtifactPrevious
+        | Action::ZenClose => {}
     }
     Ok(false)
 }
@@ -3037,7 +3070,8 @@ fn handle_zen_key(
     if let zen::ZenPhase::Artifact { index, scroll } = zen.phase {
         return handle_zen_artifact_key(key, zen, index, scroll, keymap);
     }
-    if key.code == KeyCode::Esc {
+    let actions = keymap.layered_actions_for(&key, session.focus == Focus::Diff);
+    if actions.zen == Some(Action::ZenClose) {
         // Esc peels layers in order: an active range selection is more
         // transient than the walkthrough, so cancel it first.
         if session.has_active_diff_range() {
@@ -3051,7 +3085,7 @@ fn handle_zen_key(
             restore_target: true,
         };
     }
-    match keymap.action_for_context(KeyContext::ZenFocus, &key) {
+    match actions.zen {
         Some(Action::ZenNext) => {
             let Some(stop) = zen.current().cloned() else {
                 return ZenKeyOutcome::End {
@@ -3150,7 +3184,7 @@ fn handle_zen_key(
         _ => {}
     }
     // Pressing the zen key again also ends the walkthrough.
-    if keymap.normal_action_for(&key, true) == Some(Action::Zen) {
+    if actions.normal == Some(Action::Zen) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
             message: "zen ended".to_owned(),
@@ -3909,26 +3943,74 @@ fn handle_comment_action(
 }
 
 fn handle_comment_key(key: KeyEvent, editor: &mut CommentEditor) {
+    if let Some(command) = editor_command_for(key) {
+        apply_editor_command(editor, command);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorCommand {
+    Insert(char),
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    MoveLineStart,
+    MoveLineEnd,
+    MoveWordLeft,
+    MoveWordRight,
+    Backspace,
+    DeleteForward,
+    DeleteLineStart,
+    DeleteLineEnd,
+    DeletePreviousWord,
+}
+
+fn editor_command_for(key: KeyEvent) -> Option<EditorCommand> {
+    use EditorCommand::*;
     match (key.code, key.modifiers) {
-        (KeyCode::Char('u'), KeyModifiers::CONTROL) => editor.delete_to_line_start(),
-        (KeyCode::Char('k'), KeyModifiers::CONTROL) => editor.delete_to_line_end(),
-        (KeyCode::Char('w'), KeyModifiers::CONTROL) => editor.delete_previous_word(),
-        (KeyCode::Char('a'), KeyModifiers::CONTROL) => editor.move_to_line_start(),
-        (KeyCode::Char('e'), KeyModifiers::CONTROL) => editor.move_to_line_end(),
-        (KeyCode::Char('b'), KeyModifiers::ALT) | (KeyCode::Left, KeyModifiers::CONTROL) => {
-            editor.move_word_left();
+        (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => Some(MoveLineStart),
+        (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => Some(MoveLineEnd),
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Char('b'), KeyModifiers::ALT) => {
+            Some(MoveWordLeft)
         }
-        (KeyCode::Char('f'), KeyModifiers::ALT) | (KeyCode::Right, KeyModifiers::CONTROL) => {
-            editor.move_word_right();
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Char('f'), KeyModifiers::ALT) => {
+            Some(MoveWordRight)
         }
+        (KeyCode::Left, _) | (KeyCode::Char('b'), KeyModifiers::CONTROL) => Some(MoveLeft),
+        (KeyCode::Right, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => Some(MoveRight),
+        (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => Some(MoveUp),
+        (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(MoveDown),
+        (KeyCode::Backspace, KeyModifiers::ALT) => Some(DeletePreviousWord),
+        (KeyCode::Backspace, _) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => Some(Backspace),
+        (KeyCode::Delete, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(DeleteForward),
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(DeleteLineStart),
+        (KeyCode::Char('k'), KeyModifiers::CONTROL) => Some(DeleteLineEnd),
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => Some(DeletePreviousWord),
         (KeyCode::Char(ch), modifiers) if modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-            editor.insert_char(ch);
+            Some(Insert(ch))
         }
-        (KeyCode::Left, _) => editor.move_left(),
-        (KeyCode::Right, _) => editor.move_right(),
-        (KeyCode::Up, _) => editor.move_up(),
-        (KeyCode::Down, _) => editor.move_down(),
-        _ => {}
+        _ => None,
+    }
+}
+
+fn apply_editor_command(editor: &mut CommentEditor, command: EditorCommand) {
+    use EditorCommand::*;
+    match command {
+        Insert(ch) => editor.insert_char(ch),
+        MoveLeft => editor.move_left(),
+        MoveRight => editor.move_right(),
+        MoveUp => editor.move_up(),
+        MoveDown => editor.move_down(),
+        MoveLineStart => editor.move_to_line_start(),
+        MoveLineEnd => editor.move_to_line_end(),
+        MoveWordLeft => editor.move_word_left(),
+        MoveWordRight => editor.move_word_right(),
+        Backspace => editor.backspace(),
+        DeleteForward => editor.delete_forward(),
+        DeleteLineStart => editor.delete_to_line_start(),
+        DeleteLineEnd => editor.delete_to_line_end(),
+        DeletePreviousWord => editor.delete_previous_word(),
     }
 }
 
@@ -3939,26 +4021,11 @@ fn handle_mouse_event(
     mode: &mut Mode,
     tui_state: &mut TuiState,
 ) {
-    if handle_zen_mouse_event(mouse, terminal_size, session, tui_state) {
+    if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal {
         return;
     }
 
-    if matches!(
-        mode,
-        Mode::Help
-            | Mode::CommentInput { .. }
-            | Mode::RevsetInput(_)
-            | Mode::OperationPicker(_)
-            | Mode::JjHelpers(_)
-            | Mode::FlagList(_)
-            | Mode::OpenWork(_)
-            | Mode::Activity(_)
-            | Mode::WalkthroughList(_)
-            | Mode::DraftList(_)
-            | Mode::FileSearch(_)
-            | Mode::SymbolOutline(_)
-            | Mode::CommentList(_)
-    ) {
+    if handle_zen_mouse_event(mouse, terminal_size, session, tui_state) {
         return;
     }
 
@@ -4159,6 +4226,169 @@ mod tests {
 
     use crate::jj::{JjBackend, JjChangeSummary, ReviewTarget};
     use crate::state::{ActionIntent, ActionItem, Comment, CommentKind, CommentState};
+
+    #[test]
+    fn every_mode_declares_review_pointer_ownership() {
+        let session = snapshot_session("");
+        let modes = vec![
+            ("normal", Mode::Normal, ReviewPointerPolicy::Enabled),
+            ("help", Mode::Help, ReviewPointerPolicy::BlockedByModal),
+            (
+                "target chooser",
+                Mode::TargetChooser(TargetChooserState::new(Vec::new(), "trunk()", "@")),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "revset input",
+                Mode::RevsetInput(RevsetInputState::new("trunk()", "@")),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "operation picker",
+                Mode::OperationPicker(OperationPickerState::new(Vec::new())),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "jj helpers",
+                Mode::JjHelpers(JjHelperState::for_session(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "flags",
+                Mode::FlagList(FlagListState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "open work",
+                Mode::OpenWork(OpenWorkListState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "activity",
+                Mode::Activity(ActivityListState::new()),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "drafts",
+                Mode::DraftList(DraftListState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "file search",
+                Mode::FileSearch(FileSearchState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "outline",
+                Mode::SymbolOutline(SymbolOutlineState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "comments",
+                Mode::CommentList(CommentListState::default()),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "view options",
+                Mode::ViewOptions(ViewOptionsState::default()),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "walkthrough",
+                Mode::WalkthroughList(WalkthroughListState::new(&session)),
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+            (
+                "comment input",
+                Mode::CommentInput {
+                    editor: CommentEditor::default(),
+                    target: CommentInputTarget::New,
+                },
+                ReviewPointerPolicy::BlockedByModal,
+            ),
+        ];
+
+        for (name, mode, expected) in modes {
+            assert_eq!(mode.review_pointer_policy(), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn local_editor_key_events_map_to_table_driven_commands() {
+        let cases = [
+            (KeyEvent::from(KeyCode::Home), EditorCommand::MoveLineStart),
+            (KeyEvent::from(KeyCode::End), EditorCommand::MoveLineEnd),
+            (
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                EditorCommand::MoveLineStart,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+                EditorCommand::MoveLineEnd,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                EditorCommand::MoveLeft,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+                EditorCommand::MoveRight,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                EditorCommand::MoveUp,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+                EditorCommand::MoveDown,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+                EditorCommand::Backspace,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                EditorCommand::DeleteForward,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                EditorCommand::DeleteLineStart,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+                EditorCommand::DeleteLineEnd,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                EditorCommand::DeletePreviousWord,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT),
+                EditorCommand::MoveWordLeft,
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT),
+                EditorCommand::MoveWordRight,
+            ),
+            (
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+                EditorCommand::DeletePreviousWord,
+            ),
+            (KeyEvent::from(KeyCode::Left), EditorCommand::MoveLeft),
+            (KeyEvent::from(KeyCode::Right), EditorCommand::MoveRight),
+            (KeyEvent::from(KeyCode::Up), EditorCommand::MoveUp),
+            (KeyEvent::from(KeyCode::Down), EditorCommand::MoveDown),
+            (
+                KeyEvent::from(KeyCode::Char('界')),
+                EditorCommand::Insert('界'),
+            ),
+        ];
+
+        for (key, expected) in cases {
+            assert_eq!(editor_command_for(key), Some(expected), "{key:?}");
+        }
+        assert_eq!(editor_command_for(KeyEvent::from(KeyCode::Enter)), None);
+    }
 
     #[derive(Clone, Default)]
     struct SharedWriter(Rc<RefCell<Vec<u8>>>);
@@ -4504,6 +4734,39 @@ mod tests {
                 .as_ref()
                 .is_some_and(|notice| notice.message.contains("readied 1"))
         );
+    }
+
+    #[test]
+    fn comment_mode_routes_local_ctrl_d_through_the_editor_command_map() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut session = snapshot_session("diff --git a/a.txt b/a.txt\n");
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::CommentInput {
+            editor: CommentEditor::with_cursor_for_test(&format!("a{family}b"), 1),
+            target: CommentInputTarget::New,
+        };
+
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut TuiState::default(),
+        )
+        .unwrap();
+
+        let Mode::CommentInput { editor, .. } = mode else {
+            panic!("comment mode should remain open");
+        };
+        assert_eq!(editor.text, "ab");
+        assert_eq!(editor.cursor, 1);
     }
 
     #[test]
@@ -6580,6 +6843,68 @@ diff --git a/b.rs b/b.rs
         ));
         assert_eq!(session.focus, Focus::Diff);
         assert!(session.diff_cursor > original_cursor);
+    }
+
+    #[test]
+    fn target_and_view_modals_block_click_wheel_and_drag_from_review() {
+        let diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n-old\n-old2\n-old3\n-old4\n+new\n+new2\n+new3\n+new4\n";
+        let size = ratatui::prelude::Size::new(80, 12);
+        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), true);
+        let files = inner_bordered(layout.files);
+        let diff_area = inner_bordered(layout.diff);
+
+        for mut mode in [
+            Mode::TargetChooser(TargetChooserState::new(Vec::new(), "trunk()", "@")),
+            Mode::ViewOptions(ViewOptionsState::default()),
+        ] {
+            let mut session = snapshot_session(diff);
+            session.focus = Focus::Diff;
+            let before_cursor = session.diff_cursor;
+            let mut tui_state = TuiState {
+                diff_drag: Some(DiffDrag {
+                    start_row: before_cursor,
+                    current_row: before_cursor,
+                    saw_drag: false,
+                }),
+                ..TuiState::default()
+            };
+
+            for mouse in [
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: files.x,
+                    row: files.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: diff_area.x,
+                    row: diff_area.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column: diff_area.x,
+                    row: diff_area.y.saturating_add(2),
+                    modifiers: KeyModifiers::NONE,
+                },
+            ] {
+                handle_mouse_event(mouse, size, &mut session, &mut mode, &mut tui_state);
+            }
+
+            assert_eq!(session.focus, Focus::Diff);
+            assert_eq!(session.diff_cursor, before_cursor);
+            assert_eq!(session.diff_scroll, 0);
+            assert_eq!(session.diff_range_bounds(), None);
+            assert_eq!(
+                tui_state.diff_drag,
+                Some(DiffDrag {
+                    start_row: before_cursor,
+                    current_row: before_cursor,
+                    saw_drag: false,
+                })
+            );
+        }
     }
 
     #[test]

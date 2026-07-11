@@ -2055,7 +2055,7 @@ fn draw_footer(
                             keymap.hint(Action::ZenPrevious),
                             keymap.hint(Action::ZenToggleView),
                             keymap.hint(Action::ZenGlance),
-                            keymap.hint(Action::PopupClose),
+                            keymap.layered_hint(Action::ZenClose, true),
                         ));
                         text
                     }
@@ -2074,15 +2074,15 @@ fn draw_footer(
                         };
                         format!(
                             "zen {current_stop}/{total} · {next} next (marks viewed) · {previous} back · {down}/{up} lines · {refocus} refocus · {view} full diff · {glance} glance{artifact_hint} · {comment} comment · {close} end",
-                            next = keymap.hint(Action::ZenNext),
-                            previous = keymap.hint(Action::ZenPrevious),
-                            down = keymap.hint(Action::MoveDown),
-                            up = keymap.hint(Action::MoveUp),
-                            refocus = keymap.hint(Action::ZenRefocus),
-                            view = keymap.hint(Action::ZenToggleView),
-                            glance = keymap.hint(Action::ZenGlance),
-                            comment = keymap.hint(Action::Comment),
-                            close = keymap.hint(Action::PopupClose),
+                            next = keymap.layered_hint(Action::ZenNext, true),
+                            previous = keymap.layered_hint(Action::ZenPrevious, true),
+                            down = keymap.layered_hint(Action::MoveDown, true),
+                            up = keymap.layered_hint(Action::MoveUp, true),
+                            refocus = keymap.layered_hint(Action::ZenRefocus, true),
+                            view = keymap.layered_hint(Action::ZenToggleView, true),
+                            glance = keymap.layered_hint(Action::ZenGlance, true),
+                            comment = keymap.layered_hint(Action::Comment, true),
+                            close = keymap.layered_hint(Action::ZenClose, true),
                         )
                     }
                 },
@@ -2094,7 +2094,7 @@ fn draw_footer(
                         keymap.hint(Action::ZenPrevious),
                         keymap.hint(Action::ZenRefocus),
                         keymap.hint(Action::ZenToggleView),
-                        keymap.hint(Action::PopupClose),
+                        keymap.layered_hint(Action::ZenClose, true),
                     )
                 }
                 ZenPhase::Glance => format!(
@@ -2563,7 +2563,7 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, 
         ),
         entry(&[Action::ZenRefocus], "refocus current stop"),
         entry(&[Action::ZenAcknowledge], "acknowledge glance items"),
-        entry(&[Action::PopupClose], "leave zen / close artifact"),
+        entry(&[Action::ZenClose], "leave zen; close modal zen"),
         section("comments"),
         entry(&[Action::Comment], "comment at cursor"),
         entry(&[Action::RangeComment], "start/finish range comment"),

@@ -15,6 +15,14 @@ pub struct KeyMap {
 struct KeyBinding {
     key: KeyPress,
     action: Action,
+    context: KeyContext,
+    source: BindingSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingSource {
+    Configured,
+    SafetyFallback,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +136,8 @@ pub(super) enum Action {
     ZenAcknowledge,
     ZenArtifactNext,
     ZenArtifactPrevious,
+    /// Immutable Esc action for the layered zen focus/reading surface.
+    ZenClose,
     SubmitComment,
     CancelComment,
     InsertNewline,
@@ -159,6 +169,14 @@ pub(super) enum KeyContext {
     ZenFocus,
     ZenGlance,
     ZenArtifact,
+}
+
+/// Runtime action layers for zen focus/reading. Zen actions are considered
+/// first; normal review remains available as an explicit fallthrough layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LayeredActions {
+    pub(super) zen: Option<Action>,
+    pub(super) normal: Option<Action>,
 }
 
 impl TryFrom<&KeybindingsConfig> for KeyMap {
@@ -428,6 +446,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
         add_bindings(&mut bindings, Action::InsertNewline, &config.insert_newline)?;
         add_bindings(&mut bindings, Action::DeleteChar, &config.delete_char)?;
+        add_safety_fallbacks(&mut bindings)?;
         validate_collisions(&bindings)?;
         Ok(Self { bindings })
     }
@@ -440,18 +459,17 @@ impl KeyMap {
         self.bindings
             .iter()
             .find(|binding| {
-                binding.action.contexts().iter().any(|context| {
-                    matches!(context, KeyContext::NormalFiles | KeyContext::NormalDiff)
-                }) && binding.key.matches(key)
+                matches!(
+                    binding.context,
+                    KeyContext::NormalFiles | KeyContext::NormalDiff
+                ) && binding.key.matches(key)
             })
             .map(|binding| binding.action)
-            .or_else(|| normal_movement_action_for(key))
     }
 
     pub(super) fn action_for_context(&self, context: KeyContext, key: &KeyEvent) -> Option<Action> {
         self.bindings.iter().find_map(|binding| {
-            (binding.action.contexts().contains(&context) && binding.key.matches(key))
-                .then_some(binding.action)
+            (binding.context == context && binding.key.matches(key)).then_some(binding.action)
         })
     }
 
@@ -462,7 +480,6 @@ impl KeyMap {
             KeyContext::NormalFiles
         };
         self.action_for_context(context, key)
-            .or_else(|| normal_movement_action_for(key))
     }
 
     pub(super) fn comment_action_for(&self, key: &KeyEvent) -> Option<Action> {
@@ -471,14 +488,10 @@ impl KeyMap {
 
     pub(super) fn filter_action_for(&self, context: KeyContext, key: &KeyEvent) -> Option<Action> {
         self.action_for_context(context, key)
-            .or_else(|| filter_movement_action_for(key))
-            .or_else(|| popup_safety_action_for(key))
     }
 
     pub(super) fn popup_action_for(&self, context: KeyContext, key: &KeyEvent) -> Option<Action> {
         self.action_for_context(context, key)
-            .or_else(|| popup_movement_action_for(key))
-            .or_else(|| popup_safety_action_for(key))
     }
 
     #[cfg(test)]
@@ -490,6 +503,30 @@ impl KeyMap {
         self.bindings
             .iter()
             .find(|binding| binding.action == action)
+            .map(|binding| binding.key.label.as_str())
+            .unwrap_or("?")
+    }
+
+    /// Resolve both effective layers used by zen focus/reading dispatch.
+    /// Callers may consume the zen action when it applies to the current zen
+    /// phase, then deliberately fall through to `normal` otherwise.
+    pub(super) fn layered_actions_for(&self, key: &KeyEvent, diff_focus: bool) -> LayeredActions {
+        LayeredActions {
+            zen: self.action_for_context(KeyContext::ZenFocus, key),
+            normal: self.normal_action_for(key, diff_focus),
+        }
+    }
+
+    /// Return a hint that is present in the same layered action model used by
+    /// zen dispatch. This includes intentional normal fallthrough actions.
+    pub(super) fn layered_hint(&self, action: Action, diff_focus: bool) -> &str {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.action == action)
+            .find(|binding| {
+                let layers = self.layered_actions_for(&binding.key.as_key_event(), diff_focus);
+                layers.zen == Some(action) || layers.normal == Some(action)
+            })
             .map(|binding| binding.key.label.as_str())
             .unwrap_or("?")
     }
@@ -603,6 +640,7 @@ impl Action {
             ZenPrevious => &[KeyContext::ZenFocus, KeyContext::ZenGlance],
             ZenAcknowledge => &[KeyContext::ZenGlance],
             ZenArtifactNext | ZenArtifactPrevious => &[KeyContext::ZenArtifact],
+            ZenClose => &[KeyContext::ZenFocus],
             SubmitComment | CancelComment | InsertNewline | DeleteChar => {
                 &[KeyContext::CommentEditor]
             }
@@ -610,80 +648,71 @@ impl Action {
     }
 }
 
-fn normal_movement_action_for(key: &KeyEvent) -> Option<Action> {
-    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
-        _ => None,
-    }
-}
-
-fn filter_movement_action_for(key: &KeyEvent) -> Option<Action> {
-    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Down => Some(Action::TargetPickerMoveDown),
-        KeyCode::Up => Some(Action::TargetPickerMoveUp),
-        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::TargetPickerMoveDown)
-        }
-        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            Some(Action::TargetPickerMoveUp)
-        }
-        _ => None,
-    }
-}
-
-fn popup_movement_action_for(key: &KeyEvent) -> Option<Action> {
-    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::PopupMoveDown),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::PopupMoveUp),
-        _ => None,
-    }
-}
-
-fn popup_safety_action_for(key: &KeyEvent) -> Option<Action> {
-    if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
-        return None;
-    }
-    match key.code {
-        KeyCode::Enter => Some(Action::PopupSelect),
-        KeyCode::Esc => Some(Action::PopupClose),
-        _ => None,
-    }
-}
-
 impl KeyPress {
     fn matches(&self, key: &KeyEvent) -> bool {
-        if self.code != key.code {
-            return false;
-        }
-        // Character keys already encode shift in the character itself
-        // (`G` vs `g`), but terminals may or may not report the SHIFT
-        // modifier alongside the uppercase char. Ignore SHIFT for char keys
-        // unless the binding explicitly asks for it.
-        if let KeyCode::Char(_) = self.code
-            && !self.modifiers.contains(KeyModifiers::SHIFT)
-        {
-            return self.modifiers == key.modifiers.difference(KeyModifiers::SHIFT);
-        }
-        self.modifiers == key.modifiers
+        let (code, modifiers) = canonical_key_event(key.code, key.modifiers);
+        self.code == code && self.modifiers == modifiers
+    }
+
+    fn as_key_event(&self) -> KeyEvent {
+        KeyEvent::new(self.code, self.modifiers)
     }
 }
 
 fn add_bindings(bindings: &mut Vec<KeyBinding>, action: Action, keys: &[String]) -> Result<()> {
     for key in keys {
-        bindings.push(KeyBinding {
-            key: parse_key(key)?,
-            action,
-        });
+        let key = parse_key(key)?;
+        for &context in action.contexts() {
+            bindings.push(KeyBinding {
+                key: key.clone(),
+                action,
+                context,
+                source: BindingSource::Configured,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn add_safety_fallbacks(bindings: &mut Vec<KeyBinding>) -> Result<()> {
+    add_action_fallbacks(bindings, Action::MoveDown, &["j", "down"])?;
+    add_action_fallbacks(bindings, Action::MoveUp, &["k", "up"])?;
+    add_action_fallbacks(bindings, Action::TargetPickerMoveDown, &["down", "ctrl-j"])?;
+    add_action_fallbacks(bindings, Action::TargetPickerMoveUp, &["up", "ctrl-k"])?;
+    add_action_fallbacks(bindings, Action::PopupMoveDown, &["j", "down"])?;
+    add_action_fallbacks(bindings, Action::PopupMoveUp, &["k", "up"])?;
+    add_action_fallbacks(bindings, Action::PopupSelect, &["enter"])?;
+    // Draft acceptance is the select gesture for this popup.
+    add_action_fallbacks(bindings, Action::DraftAccept, &["enter"])?;
+    add_action_fallbacks(bindings, Action::PopupClose, &["esc"])?;
+    add_action_fallbacks(bindings, Action::ZenClose, &["esc"])?;
+    Ok(())
+}
+
+fn add_action_fallbacks(
+    bindings: &mut Vec<KeyBinding>,
+    action: Action,
+    keys: &[&str],
+) -> Result<()> {
+    add_fallbacks(bindings, action, keys, action.contexts())
+}
+
+fn add_fallbacks(
+    bindings: &mut Vec<KeyBinding>,
+    action: Action,
+    keys: &[&str],
+    contexts: &[KeyContext],
+) -> Result<()> {
+    for raw in keys {
+        let key = parse_key(raw)?;
+        for &context in contexts {
+            bindings.push(KeyBinding {
+                key: key.clone(),
+                action,
+                context,
+                source: BindingSource::SafetyFallback,
+            });
+        }
     }
     Ok(())
 }
@@ -691,28 +720,98 @@ fn add_bindings(bindings: &mut Vec<KeyBinding>, action: Action, keys: &[String])
 fn validate_collisions(bindings: &[KeyBinding]) -> Result<()> {
     for (index, left) in bindings.iter().enumerate() {
         for right in &bindings[index + 1..] {
-            if left.key.code != right.key.code || left.key.modifiers != right.key.modifiers {
+            if left.action == right.action
+                || left.key.code != right.key.code
+                || left.key.modifiers != right.key.modifiers
+            {
                 continue;
             }
-            let Some(context) = left
-                .action
-                .contexts()
-                .iter()
-                .find(|context| right.action.contexts().contains(context))
-            else {
+            let Some(overlap) = binding_overlap(left, right) else {
                 continue;
             };
+            if overlap.layered && intentional_zen_override(left.action, right.action, &left.key) {
+                continue;
+            }
             bail!(
-                "duplicate keybinding `{}` (canonical `{}`) for {:?} and {:?} in {} context",
+                "duplicate keybinding `{}` (canonical `{}`) for {:?} ({}) and {:?} ({}) in {} context",
                 right.key.label,
                 left.key.canonical_label(),
                 left.action,
+                left.source.label(),
                 right.action,
-                context.label(),
+                right.source.label(),
+                overlap.label,
             );
         }
     }
     Ok(())
+}
+
+struct BindingOverlap {
+    label: &'static str,
+    layered: bool,
+}
+
+fn binding_overlap(left: &KeyBinding, right: &KeyBinding) -> Option<BindingOverlap> {
+    if left.context == right.context {
+        return Some(BindingOverlap {
+            label: left.context.label(),
+            layered: false,
+        });
+    }
+    let (zen, normal) = if left.context == KeyContext::ZenFocus {
+        (left.context, right.context)
+    } else if right.context == KeyContext::ZenFocus {
+        (right.context, left.context)
+    } else {
+        return None;
+    };
+    debug_assert_eq!(zen, KeyContext::ZenFocus);
+    if !matches!(normal, KeyContext::NormalFiles | KeyContext::NormalDiff) {
+        return None;
+    }
+    Some(BindingOverlap {
+        label: match normal {
+            KeyContext::NormalFiles => "zen focus layered over normal/files",
+            KeyContext::NormalDiff => "zen focus layered over normal/diff",
+            _ => unreachable!(),
+        },
+        layered: true,
+    })
+}
+
+/// Exact, intentional zen-first shadows. Every other zen/normal collision is
+/// rejected, including custom keys that happen to shadow a normal action.
+fn intentional_zen_override(left: Action, right: Action, key: &KeyPress) -> bool {
+    let (zen, normal) = if left.contexts().contains(&KeyContext::ZenFocus) {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let canonical = key.canonical_label();
+    matches!(
+        (zen, normal, canonical.as_str()),
+        (Action::ZenNext, Action::NextUnviewed, "n")
+            | (Action::ZenNext, Action::MarkViewed, "enter")
+            | (Action::ZenNext, Action::ExpandFold, "right")
+            | (Action::ZenNext, Action::ToggleFold, "space")
+            | (Action::ZenPrevious, Action::CompareParent, "p")
+            | (Action::ZenPrevious, Action::CollapseFold, "left")
+            | (Action::ZenToggleView, Action::ToggleFocus, "tab")
+            | (Action::ZenGlance, Action::DiffTop, "g")
+            | (Action::ZenArtifact, Action::EditComment, "e")
+            | (Action::ZenToggleDetails, Action::ScrollDown, "d")
+            | (Action::ZenClose, Action::CancelRangeComment, "esc")
+    )
+}
+
+impl BindingSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Configured => "configured",
+            Self::SafetyFallback => "immutable fallback",
+        }
+    }
 }
 
 impl KeyContext {
@@ -778,9 +877,13 @@ fn parse_key(raw: &str) -> Result<KeyPress> {
     // Bare single characters (including `+` and `-`, which double as
     // modifier separators below) bind directly.
     if raw.trim().chars().count() == 1 {
+        let (code, modifiers) = canonical_key_event(
+            KeyCode::Char(raw.trim().chars().next().unwrap()),
+            KeyModifiers::empty(),
+        );
         return Ok(KeyPress {
-            code: KeyCode::Char(raw.trim().chars().next().unwrap()),
-            modifiers: KeyModifiers::empty(),
+            code,
+            modifiers,
             label: raw.to_owned(),
         });
     }
@@ -818,11 +921,38 @@ fn parse_key(raw: &str) -> Result<KeyPress> {
         }
         _ => bail!("unsupported keybinding `{raw}`"),
     };
+    if modifiers.contains(KeyModifiers::SHIFT)
+        && let KeyCode::Char(ch) = code
+        && !ch.is_ascii_alphabetic()
+    {
+        bail!(
+            "unsupported keybinding `{raw}`: use the emitted nonalphabetic character directly instead of `shift-`"
+        );
+    }
+    let (code, modifiers) = canonical_key_event(code, modifiers);
     Ok(KeyPress {
         code,
         modifiers,
         label: raw.to_owned(),
     })
+}
+
+fn canonical_key_event(code: KeyCode, mut modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    let code = match code {
+        KeyCode::Char(ch) if ch.is_ascii_uppercase() => {
+            modifiers |= KeyModifiers::SHIFT;
+            KeyCode::Char(ch.to_ascii_lowercase())
+        }
+        KeyCode::Char(ch) if !ch.is_ascii_alphabetic() => {
+            // Terminals disagree about retaining SHIFT after translating a
+            // layout key to its emitted punctuation. Bind the emitted
+            // character (`?`, `>`, `!`) and ignore that incidental modifier.
+            modifiers.remove(KeyModifiers::SHIFT);
+            KeyCode::Char(ch)
+        }
+        other => other,
+    };
+    (code, modifiers)
 }
 
 fn parse_key_parts<'a>(parts: &'a [&'a str], raw: &str) -> Result<(KeyModifiers, &'a str)> {
@@ -850,7 +980,8 @@ mod tests {
         assert_eq!(parse_key("down").unwrap().code, KeyCode::Down);
         assert_eq!(parse_key("pagedown").unwrap().code, KeyCode::PageDown);
         assert_eq!(parse_key("page-down").unwrap().code, KeyCode::PageDown);
-        assert_eq!(parse_key("N").unwrap().code, KeyCode::Char('N'));
+        assert_eq!(parse_key("N").unwrap().code, KeyCode::Char('n'));
+        assert_eq!(parse_key("N").unwrap().modifiers, KeyModifiers::SHIFT);
         assert_eq!(parse_key("space").unwrap().code, KeyCode::Char(' '));
         assert_eq!(parse_key("+").unwrap().code, KeyCode::Char('+'));
         assert_eq!(parse_key("-").unwrap().code, KeyCode::Char('-'));
@@ -881,6 +1012,38 @@ mod tests {
             keymap.action_for(&KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)),
             Some(Action::RevsetInput)
         );
+    }
+
+    #[test]
+    fn shifted_alphabetic_keys_share_one_canonical_form() {
+        let aliases = ["G", "shift-g", "shift+g"];
+        for alias in aliases {
+            assert_eq!(
+                parse_key(alias).unwrap(),
+                parse_key("G").unwrap(),
+                "{alias}"
+            );
+        }
+        let binding = parse_key("G").unwrap();
+        for event in [
+            KeyEvent::from(KeyCode::Char('G')),
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT),
+        ] {
+            assert!(binding.matches(&event), "{event:?}");
+        }
+        assert!(!binding.matches(&KeyEvent::from(KeyCode::Char('g'))));
+        assert_eq!(binding.canonical_label(), "shift-g");
+    }
+
+    #[test]
+    fn shifted_nonalphabetic_keys_use_the_emitted_character() {
+        let binding = parse_key("?").unwrap();
+        assert!(binding.matches(&KeyEvent::from(KeyCode::Char('?'))));
+        assert!(binding.matches(&KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+        assert!(parse_key("shift-?").is_err());
+        assert!(parse_key("shift-1").is_err());
+        assert!(parse_key("shift-left").is_ok());
     }
 
     #[test]
@@ -1045,6 +1208,175 @@ mod tests {
     }
 
     #[test]
+    fn shifted_aliases_collide_after_canonicalization() {
+        let config = KeybindingsConfig {
+            diff_top: vec!["G".to_owned()],
+            diff_bottom: vec!["shift-g".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+
+        let error = KeyMap::try_from(&config).unwrap_err().to_string();
+        assert!(error.contains("canonical `shift-g`"), "{error}");
+        assert!(error.contains("normal/diff"), "{error}");
+    }
+
+    #[test]
+    fn zen_layer_allows_only_declared_builtin_overrides() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let cases = [
+            ('n', Action::ZenNext, Action::NextUnviewed),
+            ('p', Action::ZenPrevious, Action::CompareParent),
+            ('g', Action::ZenGlance, Action::DiffTop),
+            ('e', Action::ZenArtifact, Action::EditComment),
+            ('d', Action::ZenToggleDetails, Action::ScrollDown),
+        ];
+        for (key, zen, normal) in cases {
+            let actions = keymap.layered_actions_for(&KeyEvent::from(KeyCode::Char(key)), true);
+            assert_eq!(
+                actions,
+                LayeredActions {
+                    zen: Some(zen),
+                    normal: Some(normal)
+                }
+            );
+        }
+
+        let config = KeybindingsConfig {
+            zen_next: vec!["c".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let error = KeyMap::try_from(&config).unwrap_err().to_string();
+        assert!(error.contains("ZenNext"), "{error}");
+        assert!(error.contains("Comment"), "{error}");
+        assert!(error.contains("zen focus layered over normal/"), "{error}");
+
+        let configured_popup_close = KeybindingsConfig {
+            popup_close: vec!["alt-q".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&configured_popup_close).unwrap();
+        assert_eq!(keymap.hint(Action::ZenClose), "esc");
+        assert_eq!(
+            keymap
+                .layered_actions_for(&KeyEvent::from(KeyCode::Esc), true)
+                .zen,
+            Some(Action::ZenClose)
+        );
+        assert_eq!(
+            keymap
+                .layered_actions_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT), true,)
+                .zen,
+            None
+        );
+    }
+
+    #[test]
+    fn immutable_fallback_families_dispatch_and_report_provenance() {
+        let config = KeybindingsConfig {
+            move_down: Vec::new(),
+            move_up: Vec::new(),
+            target_picker_down: Vec::new(),
+            target_picker_up: Vec::new(),
+            popup_move_down: Vec::new(),
+            popup_move_up: Vec::new(),
+            popup_select: Vec::new(),
+            draft_accept: Vec::new(),
+            popup_close: Vec::new(),
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let dispatch_cases = [
+            (KeyContext::NormalDiff, "j", Action::MoveDown),
+            (KeyContext::NormalFiles, "up", Action::MoveUp),
+            (
+                KeyContext::TargetChooser,
+                "ctrl-j",
+                Action::TargetPickerMoveDown,
+            ),
+            (KeyContext::FileSearch, "up", Action::TargetPickerMoveUp),
+            (KeyContext::CommentList, "j", Action::PopupMoveDown),
+            (KeyContext::ViewOptions, "up", Action::PopupMoveUp),
+            (KeyContext::WalkthroughList, "enter", Action::PopupSelect),
+            (KeyContext::DraftList, "enter", Action::DraftAccept),
+            (KeyContext::TargetChooser, "esc", Action::PopupClose),
+            (KeyContext::ZenFocus, "esc", Action::ZenClose),
+        ];
+        for (context, raw, action) in dispatch_cases {
+            let key = parse_key(raw).unwrap().as_key_event();
+            assert_eq!(
+                keymap.action_for_context(context, &key),
+                Some(action),
+                "{context:?} {raw}"
+            );
+        }
+
+        let collision_cases = [
+            (
+                Action::NextUnviewed,
+                KeyContext::NormalFiles,
+                Action::MoveDown,
+                "j",
+            ),
+            (
+                Action::PopupSelect,
+                KeyContext::TargetChooser,
+                Action::TargetPickerMoveDown,
+                "down",
+            ),
+            (
+                Action::PopupSelect,
+                KeyContext::FileSearch,
+                Action::TargetPickerMoveUp,
+                "ctrl-k",
+            ),
+            (
+                Action::DraftEdit,
+                KeyContext::DraftList,
+                Action::PopupMoveDown,
+                "j",
+            ),
+            (
+                Action::DraftEdit,
+                KeyContext::DraftList,
+                Action::PopupMoveUp,
+                "up",
+            ),
+            (
+                Action::WalkthroughDelete,
+                KeyContext::WalkthroughList,
+                Action::PopupSelect,
+                "enter",
+            ),
+            (
+                Action::DraftDiscard,
+                KeyContext::DraftList,
+                Action::PopupClose,
+                "esc",
+            ),
+        ];
+        for (custom, context, fallback, raw) in collision_cases {
+            let key = parse_key(raw).unwrap();
+            let bindings = vec![
+                KeyBinding {
+                    key: key.clone(),
+                    action: custom,
+                    context,
+                    source: BindingSource::Configured,
+                },
+                KeyBinding {
+                    key,
+                    action: fallback,
+                    context,
+                    source: BindingSource::SafetyFallback,
+                },
+            ];
+            let error = validate_collisions(&bindings).unwrap_err().to_string();
+            assert!(error.contains("immutable fallback"), "{raw}: {error}");
+            assert!(error.contains(context.label()), "{raw}: {error}");
+        }
+    }
+
+    #[test]
     fn allows_reuse_across_disjoint_modal_contexts() {
         let config = KeybindingsConfig {
             quit: vec!["q".to_owned()],
@@ -1087,7 +1419,7 @@ mod tests {
         let config = KeybindingsConfig {
             move_down: vec!["n".to_owned(), "down".to_owned()],
             move_up: vec!["e".to_owned(), "up".to_owned()],
-            next_unviewed: vec!["j".to_owned()],
+            next_unviewed: vec!["alt-j".to_owned()],
             previous_unviewed: vec!["J".to_owned()],
             edit_comment: vec!["alt-e".to_owned()],
             popup_move_down: vec!["n".to_owned(), "down".to_owned()],
@@ -1095,6 +1427,7 @@ mod tests {
             comment_list_new_general: vec!["ctrl-n".to_owned()],
             draft_edit: vec!["alt-e".to_owned()],
             zen_artifact: vec!["i".to_owned()],
+            zen_next: vec!["enter".to_owned(), "right".to_owned(), "space".to_owned()],
             ..KeybindingsConfig::default()
         };
 

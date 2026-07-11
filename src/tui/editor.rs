@@ -47,6 +47,11 @@ impl CommentEditor {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn with_cursor_for_test(text: &str, cursor: usize) -> Self {
+        Self::with_cursor(text, cursor)
+    }
+
     /// Reflow at the current popup geometry without changing text or its byte
     /// cursor. This is called before every draw, including after a resize.
     pub(super) fn resize(&mut self, width: usize, height: usize) {
@@ -91,6 +96,15 @@ impl CommentEditor {
         }
         self.text.drain(previous..self.cursor);
         self.cursor = previous;
+        self.after_non_vertical_action();
+    }
+
+    pub(super) fn delete_forward(&mut self) {
+        let next = next_grapheme_boundary(&self.text, self.cursor.saturating_add(1));
+        if next == self.cursor {
+            return;
+        }
+        self.text.drain(self.cursor..next);
         self.after_non_vertical_action();
     }
 
@@ -301,6 +315,24 @@ mod tests {
     }
 
     #[test]
+    fn delete_forward_removes_one_grapheme_or_newline() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut editor = CommentEditor::with_cursor(&format!("e\u{301}{family}\n界"), 0);
+
+        editor.delete_forward();
+        assert_eq!(editor.text, format!("{family}\n界"));
+        assert_eq!(editor.cursor, 0);
+        editor.delete_forward();
+        assert_eq!(editor.text, "\n界");
+        editor.delete_forward();
+        assert_eq!(editor.text, "界");
+        editor.delete_forward();
+        assert!(editor.text.is_empty());
+        editor.delete_forward();
+        assert_eq!(editor.cursor, 0);
+    }
+
+    #[test]
     fn edits_that_resegment_neighboring_text_leave_cursor_on_a_grapheme_boundary() {
         let mut editor = CommentEditor::with_cursor("🇺X🇸", "🇺X".len());
 
@@ -336,6 +368,17 @@ mod tests {
         assert_eq!(editor.cursor, "alpha ".len());
         editor.move_word_right();
         assert_eq!(editor.cursor, "alpha e\u{301}ta".len());
+    }
+
+    #[test]
+    fn deleting_previous_word_preserves_complete_graphemes() {
+        let mut editor = CommentEditor::new("alpha 👩🏽‍💻 e\u{301}ta".to_owned());
+
+        editor.delete_previous_word();
+        assert_eq!(editor.text, "alpha 👩🏽‍💻 ");
+        editor.delete_previous_word();
+        assert_eq!(editor.text, "alpha ");
+        assert!(is_grapheme_boundary(&editor.text, editor.cursor));
     }
 
     #[test]

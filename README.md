@@ -370,14 +370,15 @@ failures fall back to unhighlighted text without interrupting review.
 
 Personal keybindings belong in the XDG user config
 (`~/.config/gander/config.toml`), which applies across all repositories.
-This complete Colemak Mod-DH movement override resolves every affected normal
-and popup binding while leaving text-filter `j`/`k` available for typing:
+This complete Colemak Mod-DH movement override makes `n`/`e` the preferred
+normal and popup movement keys (immutable `j`/`k` remain safety aliases) while
+leaving text-filter `j`/`k` available for typing:
 
 ```toml
 [keybindings]
 move-down = ["n", "down"]
 move-up = ["e", "up"]
-next-unviewed = ["j"]
+next-unviewed = ["alt-j"]
 previous-unviewed = ["J"]
 edit-comment = ["alt-e"]
 
@@ -386,6 +387,7 @@ popup-move-up = ["e", "up"]
 comment-list-new-general = ["ctrl-n"]
 draft-edit = ["alt-e"]
 zen-artifact = ["i"]
+zen-next = ["enter", "right", "space"]
 ```
 
 See [docs/keybindings.md](docs/keybindings.md) for the complete action/context
@@ -468,8 +470,12 @@ arrow keys, `pageup`, `pagedown`, and `space`, with `ctrl-`, `alt-`, and
 `shift-` modifiers. Canonical aliases such as `escape`/`esc`, `return`/`enter`,
 and `control-j`/`ctrl-j` are equivalent. Unknown keybinding fields, invalid key
 syntax, and duplicate canonical assignments in an overlapping input context are
-errors; the same key may be reused in disjoint modes. Press `?` in the TUI for
-the full grouped keymap; the footer only shows the everyday hints.
+errors; `G` and `shift-g` are equivalent, while shifted punctuation is bound by
+its emitted character. Immutable movement/select/Esc fallbacks also participate
+in validation. Zen focus keys dispatch before—and otherwise fall through to—the
+normal review map, with only documented built-in shadows allowed. The same key
+may be reused in disjoint modes. Press `?` in the TUI for the full grouped
+keymap; the footer only shows the everyday hints.
 
 | Key | Action |
 | --- | --- |
@@ -522,6 +528,9 @@ the full grouped keymap; the footer only shows the everyday hints.
 | `R` in comment list | ready all active-session draft comments as todo atomically |
 | Enter in comment editor | insert newline |
 | Ctrl-S in comment editor | save comment |
+| Home/End, Ctrl-A/E in comment editor | move to line start/end |
+| Ctrl-B/F, Ctrl-P/N in comment editor | move left/right or up/down |
+| Ctrl-H/D, Alt-Backspace in comment editor | backspace/delete forward or delete previous word |
 | `q` | quit and save state |
 
 Mouse support:
@@ -529,6 +538,8 @@ Mouse support:
 - click the file tree to focus/select files or directories
 - click the diff pane to focus/select a diff line
 - click-drag across diff rows to open a range comment editor
+- modal surfaces own the pointer; clicks, drags, and wheel input never mutate
+  the hidden review beneath them
 
 ## Agent-collaborative review
 

@@ -21,7 +21,11 @@ Keys are single characters or `esc`, `enter`, `tab`, `backspace`, `space`,
 canonicalized, so `escape` = `esc`, `return` = `enter`, `bs` = `backspace`,
 `page-up` = `pageup`, and `control-j` = `ctrl-j`. Unknown `[keybindings]`
 fields and unsupported syntax fail config/keymap validation with the field or
-key in the error.
+key in the error. For ASCII letters, uppercase and Shift are one canonical
+form: `G` = `shift-g`, and terminal `G` events match with or without an
+explicit SHIFT flag. For punctuation, bind the emitted character (`?`, `>`,
+`!`) directly; terminal SHIFT is ignored after punctuation translation and
+forms such as `shift-1` are rejected rather than guessing a keyboard layout.
 
 Arrows, Enter, and Esc retain their conventional movement/select/dismiss
 behavior. Normal review also retains Vim `j`/`k` movement fallbacks. Non-text
@@ -30,6 +34,21 @@ chooser` and `file search`), literal `j` and `k` are query text; movement uses
 Up/Down or Ctrl-K/Ctrl-J. No popup gains `q` as an implicit close key.
 The existing `q` close behavior remains limited to help, View Options, and the
 zen artifact viewer and is configurable as `popup-close-q`.
+
+These are immutable safety bindings, not just defaults: normal `j`/`k` and
+arrows, filter arrows/Ctrl-J/Ctrl-K, list `j`/`k` and arrows, popup Enter, and
+popup Esc are part of collision validation even when their configurable action
+list is replaced. Repeating a safety key for the same action is valid; assigning
+it to another action in the same effective context reports an `immutable
+fallback` collision.
+
+Zen focus/reading is layered over normal review. Zen actions dispatch first and
+other keys fall through to the active normal files/diff context. Validation uses
+that same layering and permits only the declared built-in shadows (for example
+zen `n/p/g/e/d`, Enter, Tab, arrows, and Space over their established normal
+actions). A custom shadow such as `zen-next = ["c"]` is rejected because it
+would hide normal `comment`. Esc is an immutable zen-close action; changing
+`popup-close` does not change or mislabel the focus/reading close key.
 
 ## Context inventory
 
@@ -45,7 +64,7 @@ zen artifact viewer and is configurable as `popup-close-q`.
 | draft list | list movement/close plus accept, edit, and discard |
 | comment list | list movement/select/close plus general creation and comment metadata actions |
 | view options | list movement, toggle, select, close |
-| comment editor | text editing, newline, save, cancel, backspace |
+| comment editor | local text editing plus configurable newline, save, cancel, backspace |
 | zen focus/reading | configurable stop, card, glance, artifact, detail, and refocus actions; other normal actions fall through |
 | zen glance | list movement/select/close, acknowledge all, back |
 | zen artifact | scroll/select/close and previous/next artifact |
@@ -53,7 +72,8 @@ zen artifact viewer and is configurable as `popup-close-q`.
 ## Default action map
 
 These names are the exact `[keybindings]` fields. An empty list leaves the
-direct action unbound.
+direct configured action unbound; any immutable safety binding listed above
+remains effective.
 
 ### Global, target, and review navigation
 
@@ -114,7 +134,8 @@ direct action unbound.
 
 The editor also keeps ordinary text insertion, arrows, Home/End, Ctrl-A/E,
 Ctrl-B/F, Ctrl-P/N, Ctrl-H/D, Ctrl-K/U/W, Alt-B/F, and Alt-Backspace as local
-editing controls.
+editing controls. Ctrl-D deletes the next complete grapheme, so combining text
+and emoji clusters are never split.
 
 ### Popup controls
 
@@ -124,7 +145,7 @@ editing controls.
 | `popup-move-down` / `popup-move-up` | `j`, Down / `k`, Up | non-text lists, help, zen glance/artifact |
 | `popup-select` | Enter | selectable popups and zen glance/artifact |
 | `popup-toggle` | Space | View Options |
-| `popup-close` | Esc | popups and zen modal surfaces |
+| `popup-close` | Esc | popups and zen glance/artifact; focus/reading uses immutable zen Esc |
 | `popup-close-q` | `q` | help, View Options, and zen artifacts only (established compatibility) |
 | `draft-accept` / `draft-edit` / `draft-discard` | Enter, `a` / `e` / `x` | draft list |
 | `walkthrough-delete` | `d` | walkthrough list |
@@ -146,15 +167,16 @@ editing controls.
 
 ## Collision-free Colemak Mod-DH override
 
-This is a complete override for every binding affected by changing vertical
-movement from `j`/`k` to Colemak-DH `n`/`e`. It deliberately leaves filter
-movement on arrows/Ctrl-J/Ctrl-K so `j` and `k` remain literal search text.
+This is a complete override for every binding affected by making Colemak-DH
+`n`/`e` the preferred vertical movement keys (immutable normal/list `j`/`k`
+remain safety aliases). It deliberately leaves filter movement on
+arrows/Ctrl-J/Ctrl-K so `j` and `k` remain literal search text.
 
 ```toml
 [keybindings]
 move-down = ["n", "down"]
 move-up = ["e", "up"]
-next-unviewed = ["j"]
+next-unviewed = ["alt-j"]
 previous-unviewed = ["J"]
 edit-comment = ["alt-e"]
 
@@ -163,11 +185,13 @@ popup-move-up = ["e", "up"]
 comment-list-new-general = ["ctrl-n"]
 draft-edit = ["alt-e"]
 zen-artifact = ["i"]
+zen-next = ["enter", "right", "space"]
 ```
 
 The apparently repeated `alt-e` is valid: comment editing in normal/comment
-center and agent-draft editing are disjoint dispatch contexts. In contrast,
-leaving `edit-comment = ["e"]`, `comment-list-new-general = ["n"]`, or
-`draft-edit = ["e"]`, or `zen-artifact = ["e"]` would collide with popup
-movement where those actions are simultaneously effective, so the keymap
-validator rejects those incomplete overrides.
+center and agent-draft editing are disjoint dispatch contexts. `alt-j` avoids
+the immutable normal `j` movement fallback. In contrast, leaving
+`edit-comment = ["e"]`, `comment-list-new-general = ["n"]`,
+`draft-edit = ["e"]`, `zen-artifact = ["e"]`, or the default `n` in
+`zen-next` would collide with an effective popup or layered zen/normal action,
+so the keymap validator rejects those incomplete overrides.

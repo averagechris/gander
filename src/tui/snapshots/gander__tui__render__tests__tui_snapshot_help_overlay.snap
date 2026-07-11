@@ -15,7 +15,7 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │      ctrl-y  copy handoff when done             brief                                           │    │
 │     │diff & view                                                 .  refocus current stop              │    │
 │     │         j/k  move diff cursor                              a  acknowledge glance items          │    │
-│     │         d/u  vertical scroll                             esc  leave zen / close artifact        │    │
+│     │         d/u  vertical scroll                             esc  leave zen; close modal zen        │    │
 │     │  shift-left/shift-right  horizontal scroll when comments                                        │    │
 │     │wrap is off                                                 c  comment at cursor                 │    │
 │     │           V  soft wrap, layout, and visual cues            r  start/finish range comment        │    │
