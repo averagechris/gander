@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.7.2 - 2026-07-12
+
 ### Fixed
 
 - Diff lines now soft-wrap by default through one grapheme-width-aware measured
@@ -28,7 +31,6 @@
   show targeted hunk inspection, treat todo comments as the primary feedback
   primitive, reserve action items for coordination, and require resolving
   satisfied linked todos separately from closing their parent action item.
-
 ## v0.7.1 - 2026-07-10
 
 ### Fixed
