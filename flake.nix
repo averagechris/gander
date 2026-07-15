@@ -36,6 +36,7 @@
 
       fleetApps = fleet.lib.fleet.presets.rust {
         inherit pkgs self;
+        srhtPackage = fleet.packages.${system}.srht;
         pname = "gander";
       };
 

@@ -32,7 +32,7 @@ tasks:
   - upload-and-refresh: |
       set -eu
       cd gander
-      srht() { nix run 'git+https://git.sr.ht/~averagechris/srht' -- "$@"; }
+      srht() { nix run --inputs-from . fleet#srht -- "$@"; }
       set +x
       export SRHT_TOKEN="${SRHT_TOKEN:-${OAUTH2_TOKEN:-$(awk '/access-token/ { gsub(/"/, "", $2); print $2; exit }' ~/.config/hut/config 2>/dev/null || true)}}"
       set -x
