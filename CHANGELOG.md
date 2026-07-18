@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a contrast-guarded derived TUI theme with automatic OSC 11 light/dark
+  detection, terminal-background transparency, semantic annotation-channel
+  colors, and a shared truecolor-to-xterm-256 downgrade path.
 
 ## v0.7.2 - 2026-07-12
 

@@ -1115,6 +1115,7 @@ fn run() -> color_eyre::Result<()> {
                     workspace_root: Some(workspace_paths.workspace_root.clone()),
                 },
                 config.agent.clone(),
+                config.theme,
                 tour,
             )?;
             state = session.clone().into_state();
@@ -1162,6 +1163,7 @@ fn run() -> color_eyre::Result<()> {
                 let rendered = tui::render_tour_text(
                     &mut session,
                     &config.keybindings,
+                    config.theme,
                     &jj,
                     width,
                     height,

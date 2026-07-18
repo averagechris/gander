@@ -54,6 +54,7 @@ impl DiffMeasurement {
         start: usize,
         height: usize,
         horizontal: usize,
+        theme: &super::theme::AppTheme,
     ) -> Vec<ratatui::text::Line<'static>> {
         super::render::materialize_diff_window(
             session,
@@ -62,6 +63,7 @@ impl DiffMeasurement {
             start,
             height,
             horizontal,
+            theme,
         )
     }
 

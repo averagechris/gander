@@ -16,6 +16,7 @@ mod drafts;
 mod editor;
 mod flags;
 mod helpers;
+mod input;
 mod keymap;
 mod ops;
 mod outline;
@@ -23,6 +24,7 @@ mod render;
 mod revset;
 mod search;
 mod text_layout;
+mod theme;
 mod view_options;
 mod viewport;
 mod walkthroughs;
@@ -38,7 +40,7 @@ use std::{
 use color_eyre::eyre::{Context, Result};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
@@ -58,7 +60,7 @@ use crate::{
         render_handoff_markdown,
     },
     clipboard::{ClipboardMethod, copy_to_clipboard},
-    config::{AgentConfig, KeybindingsConfig},
+    config::{AgentConfig, KeybindingsConfig, ThemeConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
@@ -74,18 +76,20 @@ use drafts::DraftListState;
 use editor::CommentEditor;
 use flags::FlagListState;
 use helpers::JjHelperState;
+use input::TerminalInput;
 use keymap::{Action, KeyContext, KeyMap};
 use ops::OperationPickerState;
 use outline::SymbolOutlineState;
 #[cfg(test)]
 use render::diff_cursor_is_visible;
 use render::{
-    comment_editor_inner, downgrade_diff_theme, draw, ensure_diff_cursor_visible, inner_bordered,
-    point_in_rect, row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual,
-    scroll_diff_visual, terminal_supports_truecolor, ui_layout,
+    comment_editor_inner, draw, ensure_diff_cursor_visible, inner_bordered, point_in_rect,
+    row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual, scroll_diff_visual,
+    terminal_supports_truecolor, ui_layout,
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
+use theme::AppTheme;
 use view_options::{ViewOption, ViewOptionsState};
 use walkthroughs::WalkthroughListState;
 use zen::ZenState;
@@ -218,6 +222,9 @@ struct TuiState {
     /// [`FINGERPRINT_FAILURE_NOTICE_THRESHOLD`] so a broken watcher cannot
     /// freeze silently behind a "following @" indicator.
     fingerprint_failures: u32,
+    /// Fully resolved terminal palette. Named render colors are semantic
+    /// markers materialized through this theme after each draw.
+    theme: AppTheme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +292,7 @@ pub fn run(
     acp_jj: Option<Box<dyn JjBackend + Send>>,
     paths: TuiPaths,
     agent_config: AgentConfig,
+    theme_config: ThemeConfig,
     start_tour: bool,
 ) -> Result<()> {
     let TuiPaths {
@@ -296,11 +304,6 @@ pub fn run(
         workspace_root,
     } = paths;
     let keymap = KeyMap::try_from(keybindings)?;
-    // Truecolor cue defaults quantize to indexed colors on terminals that
-    // do not advertise 24-bit support (docs/focused-diff-ux.md §1).
-    if !terminal_supports_truecolor() {
-        downgrade_diff_theme(&mut session.diff_cues.theme);
-    }
     let review_loader = ReviewLoader {
         ignore_globs,
         generated_matcher,
@@ -355,8 +358,18 @@ pub fn run(
         None
     };
 
+    let mut input = TerminalInput::new()?;
     enable_raw_mode()?;
     let raw_mode_guard = RawModeGuard::armed();
+    let detected_background = (theme_config.mode == crate::config::ThemeModeConfig::Auto)
+        .then(|| input.query_background(Duration::from_millis(120)))
+        .flatten();
+    let app_theme = AppTheme::resolve(
+        theme_config,
+        &session.diff_cues.theme,
+        detected_background,
+        terminal_supports_truecolor(),
+    );
     // Render the interactive UI to stderr so stdout remains clean for artifacts.
     // This lets `gander > review.md` capture only the post-quit artifact.
     let mut stderr = io::stderr();
@@ -378,6 +391,7 @@ pub fn run(
         agent_log_path,
         agent_config,
         terminal_size: initial_terminal_size,
+        theme: app_theme,
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
             message,
@@ -400,6 +414,7 @@ pub fn run(
         &mut mode,
         &keymap,
         &review_loader,
+        &mut input,
         &mut tui_state,
         state_path.as_deref(),
         agent_overlay_path.as_deref(),
@@ -516,6 +531,7 @@ fn start_startup_tour_or_notice(
 pub fn render_tour_text(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
+    theme_config: ThemeConfig,
     jj: &dyn JjBackend,
     width: u16,
     height: u16,
@@ -530,6 +546,7 @@ pub fn render_tour_text(
     };
     let mut tui_state = TuiState {
         terminal_size: ratatui::prelude::Size::new(width, height),
+        theme: AppTheme::resolve(theme_config, &session.diff_cues.theme, None, true),
         ..TuiState::default()
     };
     seed_zen_tour(session, &loader, &mut tui_state);
@@ -740,6 +757,7 @@ fn run_loop(
     mode: &mut Mode,
     keymap: &KeyMap,
     review_loader: &ReviewLoader<'_>,
+    input: &mut TerminalInput,
     tui_state: &mut TuiState,
     state_path: Option<&Path>,
     agent_overlay_path: Option<&Path>,
@@ -832,7 +850,8 @@ fn run_loop(
             )
         })?;
 
-        if !event::poll(Duration::from_millis(150))? {
+        let event = input.next_event(Duration::from_millis(150))?;
+        let Some(event) = event else {
             // Idle ticks are the natural moment to pick up agent overlay
             // writes without competing with user input handling.
             if let Some(overlay_path) = agent_overlay_path {
@@ -852,9 +871,9 @@ fn run_loop(
                 }
             }
             continue;
-        }
+        };
 
-        match event::read()? {
+        match event {
             Event::Key(key)
                 if handle_key_event(key, session, mode, keymap, review_loader, tui_state)? =>
             {

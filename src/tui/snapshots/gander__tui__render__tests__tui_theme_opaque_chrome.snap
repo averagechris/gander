@@ -1,0 +1,15 @@
+---
+source: src/tui/render.rs
+assertion_line: 6871
+expression: render_theme_probe(opaque)
+---
+y=00 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="                                    "
+y=01 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="                                    "
+y=02 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     ┌ popup title ───────────┐     "
+y=03 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     │unstyled text           │     "
+y=04 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     │                        │     "
+y=05 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     │                        │     "
+y=06 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     │                        │     "
+y=07 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="     └────────────────────────┘     "
+y=08 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="                                    "
+y=09 x=00..35 fg=Some(Rgb(31, 35, 40)) bg=Some(Rgb(255, 255, 255)) add=NONE sub=NONE text="                                    "

@@ -173,6 +173,10 @@ max-diff-lines = 5000 # larger diffs render a placeholder until expanded with L
 nudge-diff-lines = 1000 # changed-line count that triggers the large-change nudge (0 disables)
 nudge-files = 25 # changed-file count that triggers the large-change nudge (0 disables)
 
+[theme]
+mode = "auto" # auto | dark | light; auto uses an OSC 11 terminal background query
+transparent = true # default: preserve the terminal background; false paints the derived base
+
 [diff]
 word-highlight = true
 line-background = true
@@ -310,6 +314,21 @@ autostart = false
 
 CLI `--ignore` values are appended to configured ignore globs. Use
 `--config <path>` to load a specific config file.
+
+Theme behavior is resolved only when the interactive TUI starts. `auto` sends
+an OSC 11 background query after raw mode is safely guarded, waits at most
+120ms, and falls back to `dark` when the terminal does not answer. Explicit
+`dark` and `light` skip the query. A maintained typed terminal parser retains
+input that arrives while the query is in flight for the normal event loop;
+late protocol replies are discarded as replies, never interpreted as keys. With
+`transparent = true` (the default), Gander leaves unpainted cells on the
+terminal background and uses a detected background for contrast calculations;
+`false` paints the derived base background. Render helpers receive `AppTheme`
+directly and resolve chrome before writing terminal cells. Explicit syntax and
+`[diff.theme]` values remain literal user styles while default diff colors come
+from the derived semantic slots. Without truecolor support, RGB colors are
+quantized through the xterm-256 path; derived colors are rechecked for contrast
+after quantization.
 
 `[jj].binary` controls which `jj` executable is used. The default is `"jj"`,
 which resolves through `$PATH`. Set it to an absolute path when you want a

@@ -60,11 +60,13 @@ gutter-removed = "#f85149"
 
 Defaults are GitHub-dark-inspired truecolor tints (the add/remove accents
 alpha-blended at ~15% for line backgrounds and ~40% for word emphasis).
-Terminals that do not advertise truecolor (`COLORTERM`) get the hex values
-quantized to the nearest xterm-256 indexed color at TUI startup, so the
-defaults stay usable in e.g. macOS Terminal.app. The existing style-spec
-parser (`render.rs::syntax_style_spec`) grows an `on <color>` background
-clause; syntax theme specs get it for free.
+The derived application theme now owns these defaults and resolves existing
+`[diff.theme]` values as semantic add/remove inputs. Terminals that do
+not advertise truecolor (`COLORTERM`) get all derived chrome plus explicit RGB
+syntax/diff values quantized to the nearest xterm-256 indexed color at TUI
+startup, so the defaults stay usable in e.g. macOS Terminal.app. The existing
+style-spec parser (`render.rs::syntax_style_spec`) supports an `on <color>`
+background clause; syntax theme specs get it for free.
 
 ### Word-level diff algorithm
 

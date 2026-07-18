@@ -17,6 +17,7 @@ clap = { version = "4.5.51", features = ["derive", "env"] }
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
 globset = "0.4.18"
+mio = { version = "1.1", features = ["os-ext", "os-poll"] }
 ratatui = "0.30.2"
 rmcp = { version = "2.1.0", features = [
   "server",
@@ -24,14 +25,19 @@ rmcp = { version = "2.1.0", features = [
   "transport-io",
   "schemars",
 ] }
+rustix = { version = "1.1", features = ["event", "std", "stdio", "termios"], default-features = false }
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10.9"
+signal-hook = "0.3.18"
 similar = { version = "3.1.1", default-features = false, features = [
   "text",
   "unicode",
 ] }
+termina = "0.3.3"
+terminput-crossterm = "0.4.11"
+terminput-termina = "0.3.1"
 tokio = { version = "1.52.3", features = [
   "rt-multi-thread",
   "macros",

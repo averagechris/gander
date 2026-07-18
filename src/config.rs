@@ -25,6 +25,37 @@ pub struct Config {
     pub agent: AgentConfig,
     pub diff: DiffConfig,
     pub comments: CommentsConfig,
+    pub theme: ThemeConfig,
+}
+
+/// Terminal theme selection. `auto` asks the terminal for its OSC 11
+/// background color when the interactive TUI starts and falls back to dark.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeModeConfig {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ThemeConfig {
+    pub mode: ThemeModeConfig,
+    /// Leave unpainted cells on the terminal's own background.
+    pub transparent: bool,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            mode: ThemeModeConfig::Auto,
+            // Preserve Gander's historical terminal-owned background unless
+            // the user explicitly asks the derived theme to paint it.
+            transparent: true,
+        }
+    }
 }
 
 /// Defaults for new durable comments. This deliberately cannot represent
@@ -122,8 +153,8 @@ impl Default for DiffThemeConfig {
             // GitHub-dark-inspired truecolor tints: line backgrounds are the
             // add/remove accents alpha-blended at ~15% over a dark base,
             // word emphasis at ~40%. Terminals without truecolor support get
-            // these quantized to the nearest indexed color at TUI startup
-            // (see tui::render::downgrade_diff_theme).
+            // these and the derived chrome quantized together by AppTheme at
+            // TUI startup.
             added_line_bg: "#12261e".to_owned(),
             removed_line_bg: "#301b1f".to_owned(),
             added_word: "bold on #1a4a29".to_owned(),
@@ -357,6 +388,14 @@ struct ConfigPatch {
     agent: AgentConfigPatch,
     diff: DiffConfigPatch,
     comments: CommentsConfigPatch,
+    theme: ThemeConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+struct ThemeConfigPatch {
+    mode: Option<ThemeModeConfig>,
+    transparent: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -789,6 +828,13 @@ impl Config {
 
         if let Some(initial_state) = patch.comments.initial_state {
             self.comments.initial_state = initial_state;
+        }
+
+        if let Some(mode) = patch.theme.mode {
+            self.theme.mode = mode;
+        }
+        if let Some(transparent) = patch.theme.transparent {
+            self.theme.transparent = transparent;
         }
 
         if let Some(word_highlight) = patch.diff.word_highlight {
@@ -1292,6 +1338,10 @@ format = "json"
 [comments]
 initial-state = "draft"
 
+[theme]
+mode = "light"
+transparent = true
+
 [keybindings]
 move-down = ["s"]
 move-up = ["r"]
@@ -1312,6 +1362,9 @@ presets = ["lockfiles"]
 
 [comments]
 initial-state = "todo"
+
+[theme]
+mode = "dark"
 "#,
         )
         .unwrap();
@@ -1347,6 +1400,27 @@ move-down = ["n", "down"]
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
         assert_eq!(config.comments.initial_state, InitialCommentState::Todo);
+        assert_eq!(config.theme.mode, ThemeModeConfig::Dark);
+        assert!(config.theme.transparent);
+    }
+
+    #[test]
+    fn theme_defaults_and_explicit_values_parse() {
+        let defaults = Config::default().theme;
+        assert_eq!(defaults.mode, ThemeModeConfig::Auto);
+        assert!(defaults.transparent);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        fs::write(&path, "[theme]\nmode = \"light\"\ntransparent = true\n").unwrap();
+        let config = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert_eq!(config.theme.mode, ThemeModeConfig::Light);
+        assert!(config.theme.transparent);
     }
 
     #[test]

@@ -375,10 +375,10 @@ Status: designed.
 
 Status: planned. Independent of milestones 17–18; can land in parallel.
 
-- [ ] derived theme system: an `AppTheme` with all chrome slots computed from
+- [x] derived theme system: an `AppTheme` with all chrome slots computed from
   a small base palette (bg/fg/accent/diff hues) via contrast-guarded
   blending; route all hardcoded render colors through it
-- [ ] auto light/dark via OSC 11 background query; transparent-background
+- [x] auto light/dark via OSC 11 background query; transparent-background
   mode; keep the xterm-256 downgrade path
 - [ ] keybinding presets (`preset = "gander" | "hunk"`) layered under the
   existing per-key overrides; adopt non-conflicting conventions as defaults

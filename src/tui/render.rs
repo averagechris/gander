@@ -44,6 +44,7 @@ use super::{
     zen::{ZenState, ZenStop},
 };
 
+use super::theme::AppTheme;
 use super::zen::ZenPhase;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,8 @@ pub(super) fn draw(
     notice: Option<&UiNotice>,
     zen: Option<&ZenState>,
 ) {
+    let theme = &tui_state.theme;
+    frame.render_widget(Block::default().style(theme.base_style()), frame.area());
     let layout = ui_layout(frame.area(), session.file_pane_visible);
 
     // The zen focus card and glance board are full-screen takeovers: the
@@ -94,86 +97,110 @@ pub(super) fn draw(
     match zen.map(|zen| zen.phase) {
         Some(ZenPhase::Focus) => {
             let body = body_area(frame.area());
-            draw_zen_focus(frame, body, session, zen.expect("checked above"), keymap);
+            draw_zen_focus(
+                frame,
+                body,
+                session,
+                zen.expect("checked above"),
+                keymap,
+                theme,
+            );
             draw_footer(
                 frame,
                 layout.footer,
                 session,
                 &footer_context(mode, keymap, tui_state, notice, zen),
+                theme,
             );
         }
         Some(ZenPhase::Artifact { index, scroll }) => {
             let body = body_area(frame.area());
             let zen = zen.expect("checked above");
-            draw_zen_focus(frame, body, session, zen, keymap);
-            draw_zen_artifact(frame, body, zen, index, scroll, keymap);
+            draw_zen_focus(frame, body, session, zen, keymap, theme);
+            draw_zen_artifact(frame, body, zen, index, scroll, keymap, theme);
             draw_footer(
                 frame,
                 layout.footer,
                 session,
                 &footer_context(mode, keymap, tui_state, notice, Some(zen)),
+                theme,
             );
         }
         Some(ZenPhase::Glance) => {
             let body = body_area(frame.area());
-            draw_zen_glance(frame, body, session, zen.expect("checked above"), keymap);
+            draw_zen_glance(
+                frame,
+                body,
+                session,
+                zen.expect("checked above"),
+                keymap,
+                theme,
+            );
             draw_footer(
                 frame,
                 layout.footer,
                 session,
                 &footer_context(mode, keymap, tui_state, notice, zen),
+                theme,
             );
         }
         _ => {
             if session.file_pane_visible {
-                draw_files(frame, layout.files, session);
+                draw_files(frame, layout.files, session, theme);
             }
-            draw_diff(frame, layout.diff, session, tui_state);
+            draw_diff(frame, layout.diff, session, tui_state, theme);
             draw_footer(
                 frame,
                 layout.footer,
                 session,
                 &footer_context(mode, keymap, tui_state, notice, zen),
+                theme,
             );
 
             // The zen reading panel is a layer under any popup: progress and
             // rationale stay visible while e.g. a comment is being written.
             if let Some(zen) = zen {
-                draw_zen_panel(frame, frame.area(), session, zen, keymap);
+                draw_zen_panel(frame, frame.area(), session, zen, keymap, theme);
             }
         }
     }
 
     match mode {
         Mode::TargetChooser(chooser) => {
-            draw_target_chooser_popup(frame, frame.area(), chooser, keymap)
+            draw_target_chooser_popup(frame, frame.area(), chooser, keymap, theme)
         }
-        Mode::RevsetInput(input) => draw_revset_input_popup(frame, frame.area(), input, keymap),
+        Mode::RevsetInput(input) => {
+            draw_revset_input_popup(frame, frame.area(), input, keymap, theme)
+        }
         Mode::OperationPicker(picker) => {
-            draw_operation_picker_popup(frame, frame.area(), picker, keymap)
+            draw_operation_picker_popup(frame, frame.area(), picker, keymap, theme)
         }
-        Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state, keymap),
-        Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list, keymap),
-        Mode::OpenWork(list) => draw_open_work_popup(frame, frame.area(), session, list, keymap),
-        Mode::Activity(list) => draw_activity_popup(frame, frame.area(), tui_state, list),
+        Mode::JjHelpers(state) => draw_jj_helpers_popup(frame, frame.area(), state, keymap, theme),
+        Mode::FlagList(list) => draw_flag_list_popup(frame, frame.area(), list, keymap, theme),
+        Mode::OpenWork(list) => {
+            draw_open_work_popup(frame, frame.area(), session, list, keymap, theme)
+        }
+        Mode::Activity(list) => draw_activity_popup(frame, frame.area(), tui_state, list, theme),
         Mode::WalkthroughList(list) => {
-            draw_walkthrough_list_popup(frame, frame.area(), session, list, keymap)
+            draw_walkthrough_list_popup(frame, frame.area(), session, list, keymap, theme)
         }
-        Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list, keymap),
-        Mode::FileSearch(search) => draw_file_search_popup(frame, frame.area(), search, keymap),
+        Mode::DraftList(list) => draw_draft_list_popup(frame, frame.area(), list, keymap, theme),
+        Mode::FileSearch(search) => {
+            draw_file_search_popup(frame, frame.area(), search, keymap, theme)
+        }
         Mode::SymbolOutline(outline) => {
-            draw_symbol_outline_popup(frame, frame.area(), outline, keymap)
+            draw_symbol_outline_popup(frame, frame.area(), outline, keymap, theme)
         }
         Mode::CommentList(list) => {
-            draw_comment_list_popup(frame, frame.area(), session, list, keymap)
+            draw_comment_list_popup(frame, frame.area(), session, list, keymap, theme)
         }
         Mode::ViewOptions(state) => {
-            draw_view_options_popup(frame, frame.area(), session, state, keymap)
+            draw_view_options_popup(frame, frame.area(), session, state, keymap, theme)
         }
         Mode::CommentInput { editor, target } => {
-            draw_comment_popup(frame, frame.area(), session, editor, target, keymap)
+            draw_comment_popup(frame, frame.area(), session, editor, target, keymap, theme)
         }
-        Mode::Help => draw_help_popup(frame, frame.area(), keymap, tui_state.help_scroll),
+        Mode::Help => draw_help_popup(frame, frame.area(), keymap, tui_state.help_scroll, theme),
         Mode::Normal => {}
     }
 }
@@ -214,6 +241,11 @@ pub(super) fn inner_bordered(area: Rect) -> Rect {
     }
 }
 
+fn clear_area(frame: &mut ratatui::Frame<'_>, area: Rect, theme: &AppTheme) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme.base_style()), area);
+}
+
 pub(super) fn point_in_rect(x: u16, y: u16, rect: Rect) -> bool {
     x >= rect.x
         && x < rect.x.saturating_add(rect.width)
@@ -225,7 +257,12 @@ pub(super) fn row_in_inner(y: u16, inner: Rect) -> Option<usize> {
     (y >= inner.y && y < inner.y.saturating_add(inner.height)).then_some((y - inner.y) as usize)
 }
 
-fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSession) {
+fn draw_files(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    session: &ReviewSession,
+    theme: &AppTheme,
+) {
     let tree = session.file_tree();
     if tree.rows.is_empty() {
         frame.render_widget(
@@ -234,7 +271,7 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
                 Line::from(""),
                 Line::from("Try t for trunk, p for parent, b for target chooser, or adjust --base/--rev/--ignore."),
             ])
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme.muted))
             .block(Block::default().borders(Borders::ALL).title("files"))
             .wrap(Wrap { trim: false }),
             area,
@@ -245,8 +282,12 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
         .rows
         .iter()
         .map(|row| match &row.kind {
-            FlatTreeRowKind::Directory { collapsed } => render_directory_row(row, *collapsed),
-            FlatTreeRowKind::File { file_index } => render_file_row(row, session, *file_index),
+            FlatTreeRowKind::Directory { collapsed } => {
+                render_directory_row(row, *collapsed, theme)
+            }
+            FlatTreeRowKind::File { file_index } => {
+                render_file_row(row, session, *file_index, theme)
+            }
         })
         .collect();
 
@@ -255,28 +296,28 @@ fn draw_files(frame: &mut ratatui::Frame<'_>, area: Rect, session: &ReviewSessio
         .block(Block::default().borders(Borders::ALL).title("files"))
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(theme.selection_bg)
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_directory_row(row: &FlatTreeRow, collapsed: bool) -> ListItem<'static> {
+fn render_directory_row(row: &FlatTreeRow, collapsed: bool, theme: &AppTheme) -> ListItem<'static> {
     let indent = "  ".repeat(row.depth.min(8));
     let glyph = if collapsed { " ▸ " } else { " ▾ " };
     ListItem::new(Line::from(vec![
         Span::raw(indent),
-        Span::styled(row.stats.mark(), Style::default().fg(Color::Green)),
+        Span::styled(row.stats.mark(), Style::default().fg(theme.positive)),
         Span::raw(glyph),
         Span::styled(
             row.label.clone(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" {}/{}", row.stats.viewed, row.stats.total),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         ),
     ]))
 }
@@ -285,36 +326,39 @@ fn render_file_row(
     row: &FlatTreeRow,
     session: &ReviewSession,
     file_index: usize,
+    theme: &AppTheme,
 ) -> ListItem<'static> {
     let file = &session.files[file_index];
     let reviewed = file.viewed || file.caught_up;
     let (mark, mark_style) = if file.changed_since_look && reviewed {
-        ("~", Style::default().fg(Color::Yellow))
+        ("~", Style::default().fg(theme.warning))
     } else if file.changed_since_look {
         (
             "±",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.warning)
                 .add_modifier(Modifier::BOLD),
         )
     } else if file.viewed_stale {
-        ("~", Style::default().fg(Color::Yellow))
+        ("~", Style::default().fg(theme.warning))
     } else if file.viewed {
-        ("✓", Style::default().fg(Color::Green))
+        ("✓", Style::default().fg(theme.positive))
     } else if file.caught_up {
-        ("◌", Style::default().fg(Color::DarkGray))
+        ("◌", Style::default().fg(theme.muted))
     } else {
-        ("•", Style::default().fg(Color::Green))
+        ("•", Style::default().fg(theme.positive))
     };
     let style = if reviewed {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.muted)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.foreground)
     };
     let flag_span = if session.file_has_flags(&file.path) {
         Span::styled(
             "!",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.negative)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         Span::raw(" ")
@@ -325,12 +369,12 @@ fn render_file_row(
         flag_span,
         Span::styled(
             format!("{:>7}", file.status),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.info),
         ),
         Span::raw(" "),
         Span::styled(
             if file.generated { "gen " } else { "    " },
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.secondary),
         ),
         Span::styled(row.label.clone(), style),
     ]))
@@ -341,6 +385,7 @@ fn draw_diff(
     area: Rect,
     session: &ReviewSession,
     tui_state: &TuiState,
+    theme: &AppTheme,
 ) {
     if session.selected_visible_file().is_none() {
         let generated_hint = if session.hide_generated {
@@ -353,7 +398,7 @@ fn draw_diff(
                 Line::from(Span::styled(
                     "No changed files",
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
@@ -364,7 +409,7 @@ fn draw_diff(
                 ),
                 Line::from(generated_hint),
             ])
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(theme.muted))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -393,6 +438,7 @@ fn draw_diff(
         window.start,
         inner.height as usize,
         window.horizontal,
+        theme,
     );
 
     let mut title = diff_pane_title(session);
@@ -497,7 +543,7 @@ enum DiffVisualSource {
     },
     Comment {
         owner: usize,
-        summary: Line<'static>,
+        comment: Box<Comment>,
         byte_range: Range<usize>,
         width: usize,
     },
@@ -545,7 +591,7 @@ struct AnnotationCommentInput {
 #[derive(Debug, Clone, Default)]
 pub(super) struct SelectedFileAnnotations {
     pub(super) input: AnnotationLayoutInput,
-    rendered_summaries: Vec<Line<'static>>,
+    comments: Vec<Comment>,
 }
 
 impl MeasuredDiffLayout {
@@ -648,7 +694,7 @@ pub(super) fn selected_file_annotations(
         .map(|file| file.changed_hunks.iter().copied().collect())
         .unwrap_or_default();
     let mut comments = Vec::new();
-    let mut rendered_summaries = Vec::new();
+    let mut rendered_comments = Vec::new();
     for (owner, row) in rows.iter().enumerate() {
         let Some(anchor) = row.anchor.as_ref() else {
             continue;
@@ -658,7 +704,7 @@ pub(super) fn selected_file_annotations(
                 owner,
                 summary: comment_summary_text(comment),
             });
-            rendered_summaries.push(comment_summary_line(comment));
+            rendered_comments.push(comment.clone());
         }
     }
     SelectedFileAnnotations {
@@ -666,7 +712,7 @@ pub(super) fn selected_file_annotations(
             changed_hunks,
             comments,
         },
-        rendered_summaries,
+        comments: rendered_comments,
     }
 }
 
@@ -860,7 +906,7 @@ fn append_comment_lines(
         .input
         .comments
         .iter()
-        .zip(&annotations.rendered_summaries)
+        .zip(&annotations.comments)
         .filter(|(comment, _)| comment.owner == owner)
     {
         for byte_range in visual_byte_ranges(&comment.summary, width.max(1), true)
@@ -870,7 +916,7 @@ fn append_comment_lines(
             lines.push(DiffVisualLine {
                 source: DiffVisualSource::Comment {
                     owner,
-                    summary: rendered.clone(),
+                    comment: Box::new(rendered.clone()),
                     byte_range,
                     width,
                 },
@@ -995,7 +1041,24 @@ fn plain_row_text(row: &DiffRow, annotations: &AnnotationLayoutInput) -> String 
 }
 
 fn comment_summary_text(comment: &Comment) -> String {
-    spans_text(&comment_summary_line(comment).spans)
+    let summary = comment
+        .body
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("(empty comment)")
+        .trim();
+    let short_id: String = comment.id.chars().take(8).collect();
+    let mut text = format!("      ↳ {short_id} [{}] ", comment.state.label());
+    if let Some(action) = comment.action
+        && action != crate::state::ActionIntent::None
+    {
+        text.push_str(&format!("[{}] ", action_intent_label(action)));
+    }
+    if let Some(kind) = comment.kind {
+        text.push_str(&format!("[{}] ", comment_kind_label(kind)));
+    }
+    text.push_str(summary);
+    text
 }
 
 pub(super) fn materialize_diff_window(
@@ -1005,6 +1068,7 @@ pub(super) fn materialize_diff_window(
     start: usize,
     height: usize,
     horizontal: usize,
+    theme: &AppTheme,
 ) -> Vec<Line<'static>> {
     let mut prepared = HashMap::new();
     layout
@@ -1020,6 +1084,7 @@ pub(super) fn materialize_diff_window(
                 horizontal,
                 &visual.source,
                 &mut prepared,
+                theme,
             )
         })
         .collect()
@@ -1033,6 +1098,7 @@ fn materialize_diff_source(
     horizontal: usize,
     source: &DiffVisualSource,
 ) -> Line<'static> {
+    let theme = AppTheme::default();
     materialize_diff_source_cached(
         session,
         rows,
@@ -1040,6 +1106,7 @@ fn materialize_diff_source(
         horizontal,
         source,
         &mut HashMap::new(),
+        &theme,
     )
 }
 
@@ -1050,13 +1117,14 @@ fn materialize_diff_source_cached(
     horizontal: usize,
     source: &DiffVisualSource,
     prepared: &mut HashMap<(usize, Option<usize>), PreparedDiffCell>,
+    theme: &AppTheme,
 ) -> Line<'static> {
     match source {
         DiffVisualSource::Plain {
             row, byte_range, ..
         } => {
             let comment_count = row_comment_count(session, &rows[*row]);
-            let spans = unified_row_line(session, &rows[*row], *row, comment_count).spans;
+            let spans = unified_row_line(session, &rows[*row], *row, comment_count, theme).spans;
             let visible = byte_range.as_ref().map_or_else(
                 || clip_spans(&spans, horizontal, source.width()),
                 |range| slice_spans_bytes(&spans, range.clone()),
@@ -1070,6 +1138,7 @@ fn materialize_diff_source_cached(
             horizontal,
             cell,
             prepared,
+            theme,
         )),
         DiffVisualSource::Split {
             left,
@@ -1087,13 +1156,11 @@ fn materialize_diff_source_cached(
                         horizontal,
                         cell,
                         prepared,
+                        theme,
                     )
                 },
             );
-            spans.push(Span::styled(
-                "\u{2502}",
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled("\u{2502}", Style::default().fg(theme.muted)));
             spans.extend(right.as_ref().map_or_else(
                 || vec![Span::raw(" ".repeat(*right_width))],
                 |cell| {
@@ -1104,19 +1171,23 @@ fn materialize_diff_source_cached(
                         horizontal,
                         cell,
                         prepared,
+                        theme,
                     )
                 },
             ));
             Line::from(spans)
         }
         DiffVisualSource::Comment {
-            summary,
+            comment,
             byte_range,
             ..
-        } => Line::from(pad_spans(
-            slice_spans_bytes(&summary.spans, byte_range.clone()),
-            source.width(),
-        )),
+        } => {
+            let summary = comment_summary_line(comment, theme);
+            Line::from(pad_spans(
+                slice_spans_bytes(&summary.spans, byte_range.clone()),
+                source.width(),
+            ))
+        }
     }
 }
 
@@ -1141,10 +1212,11 @@ fn materialize_diff_cell(
     horizontal: usize,
     cell: &DiffCellVisual,
     prepared: &mut HashMap<(usize, Option<usize>), PreparedDiffCell>,
+    theme: &AppTheme,
 ) -> Vec<Span<'static>> {
     let prepared = prepared
         .entry((cell.row, cell.lineno))
-        .or_insert_with(|| prepare_diff_cell(session, rows, line_number_width, cell));
+        .or_insert_with(|| prepare_diff_cell(session, rows, line_number_width, cell, theme));
     render_prepared_diff_cell(prepared, cell, line_number_width, horizontal)
 }
 
@@ -1160,6 +1232,7 @@ fn prepare_diff_cell(
     rows: &[DiffRow],
     line_number_width: usize,
     cell: &DiffCellVisual,
+    theme: &AppTheme,
 ) -> PreparedDiffCell {
     const CHROME_SPANS: usize = 5;
     let row = &rows[cell.row];
@@ -1171,6 +1244,7 @@ fn prepare_diff_cell(
         cell.lineno,
         comments,
         line_number_width,
+        theme,
     );
     if zen_row_dimmed(session, row, cell.row) {
         all = dim_spans(all);
@@ -1184,6 +1258,7 @@ fn prepare_diff_cell(
         row.kind,
         session.focus == Focus::Diff && session.diff_cursor == cell.row,
         session.diff_row_in_active_range(cell.row),
+        theme,
     );
     PreparedDiffCell {
         chrome: all,
@@ -1364,17 +1439,18 @@ fn unified_row_line(
     row: &DiffRow,
     index: usize,
     comment_count: usize,
+    theme: &AppTheme,
 ) -> Line<'static> {
     let line = match row.kind {
         DiffRowKind::FileHeader => Line::from(Span::styled(
             row.text.clone(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         DiffRowKind::SyntaxSummary => Line::from(Span::styled(
             row.text.clone(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.secondary),
         )),
         DiffRowKind::HunkHeader => Line::from(Span::styled(
             if row.hunk_index.is_some_and(|hunk| {
@@ -1386,21 +1462,19 @@ fn unified_row_line(
             } else {
                 row.text.clone()
             },
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         )),
         DiffRowKind::Raw => Line::from(row.text.clone()),
         DiffRowKind::Placeholder => Line::from(Span::styled(
             format!("  \u{2298} {}", row.text),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.muted)
                 .add_modifier(Modifier::ITALIC),
         )),
         DiffRowKind::ContextFold | DiffRowKind::ExpandGap { .. } => Line::from(Span::styled(
             format!("      {}", row.text),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.muted)
                 .add_modifier(Modifier::ITALIC),
         )),
         DiffRowKind::DiffLine(_) => Line::from(diff_line_cell_spans(
@@ -1409,6 +1483,7 @@ fn unified_row_line(
             index,
             row.new_lineno.or(row.old_lineno),
             comment_count,
+            theme,
         )),
     };
     if zen_row_dimmed(session, row, index) {
@@ -1467,8 +1542,9 @@ fn diff_line_cell_spans(
     index: usize,
     lineno: Option<usize>,
     comment_count: usize,
+    theme: &AppTheme,
 ) -> Vec<Span<'static>> {
-    diff_line_cell_spans_with_width(session, row, index, lineno, comment_count, 4)
+    diff_line_cell_spans_with_width(session, row, index, lineno, comment_count, 4, theme)
 }
 
 fn diff_line_cell_spans_with_width(
@@ -1478,13 +1554,14 @@ fn diff_line_cell_spans_with_width(
     lineno: Option<usize>,
     comment_count: usize,
     line_number_width: usize,
+    theme: &AppTheme,
 ) -> Vec<Span<'static>> {
     let DiffRowKind::DiffLine(line_kind) = row.kind else {
         return vec![Span::raw(row.text.clone())];
     };
     let selected = session.focus == Focus::Diff && session.diff_cursor == index;
     let in_range = session.diff_row_in_active_range(index);
-    let style = diff_row_style(row.kind, selected, in_range);
+    let style = diff_row_style(row.kind, selected, in_range, theme);
     let flagged = session.diff_row_flagged(row);
     let cues = &session.diff_cues;
     let (comment_mark, mark_style) = if comment_count > 0 {
@@ -1493,45 +1570,41 @@ fn diff_line_cell_spans_with_width(
                 1..=9 => comment_count.to_string(),
                 _ => "+".to_owned(),
             },
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.accent),
         )
     } else if flagged {
         // Agent-flagged section: pinned in the gutter.
         (
             "!".to_owned(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.negative)
+                .add_modifier(Modifier::BOLD),
         )
     } else if in_range {
-        ("|".to_owned(), Style::default().fg(Color::Yellow))
+        ("|".to_owned(), Style::default().fg(theme.accent))
     } else if cues.gutter_bar && matches!(line_kind, DiffLineKind::Added | DiffLineKind::Removed) {
         // The bar fills otherwise-empty gutter cells on changed lines.
         match line_kind {
-            DiffLineKind::Added => (
-                "\u{258e}".to_owned(),
-                syntax_style_spec(&cues.theme.gutter_added),
-            ),
-            _ => (
-                "\u{258e}".to_owned(),
-                syntax_style_spec(&cues.theme.gutter_removed),
-            ),
+            DiffLineKind::Added => ("\u{258e}".to_owned(), theme.gutter_added),
+            _ => ("\u{258e}".to_owned(), theme.gutter_removed),
         }
     } else {
-        (" ".to_owned(), Style::default().fg(Color::Yellow))
+        (" ".to_owned(), Style::default().fg(theme.accent))
     };
 
     // Cursor and range-selection backgrounds win over the cue backgrounds.
     let plain = !selected && !in_range;
     let line_bg = (plain && cues.line_background)
-        .then(|| match line_kind {
-            DiffLineKind::Added => spec_bg_color(&cues.theme.added_line_bg),
-            DiffLineKind::Removed => spec_bg_color(&cues.theme.removed_line_bg),
+        .then_some(match line_kind {
+            DiffLineKind::Added => Some(theme.positive_bg),
+            DiffLineKind::Removed => Some(theme.negative_bg),
             _ => None,
         })
         .flatten();
     let emphasis_style = (plain && cues.word_highlight && !row.emphasis.is_empty())
-        .then(|| match line_kind {
-            DiffLineKind::Added => Some(syntax_style_spec(&cues.theme.added_word)),
-            DiffLineKind::Removed => Some(syntax_style_spec(&cues.theme.removed_word)),
+        .then_some(match line_kind {
+            DiffLineKind::Added => Some(theme.added_word),
+            DiffLineKind::Removed => Some(theme.removed_word),
             _ => None,
         })
         .flatten();
@@ -1544,7 +1617,7 @@ fn diff_line_cell_spans_with_width(
         .unwrap_or_else(|| " ".repeat(line_number_width));
     let mut spans = vec![
         Span::styled(comment_mark, mark_style),
-        Span::styled(lineno, Style::default().fg(Color::DarkGray)),
+        Span::styled(lineno, Style::default().fg(theme.muted)),
         Span::raw(" "),
         Span::styled(row.prefix, style),
         Span::styled(" ", style),
@@ -1552,11 +1625,11 @@ fn diff_line_cell_spans_with_width(
     spans.extend(diff_text_spans(
         row,
         style,
-        selected,
-        in_range,
+        (selected, in_range),
         line_bg,
         emphasis_style,
         &session.syntax.theme,
+        theme,
     ));
     spans
 }
@@ -1583,7 +1656,7 @@ fn diff_pane_title(session: &ReviewSession) -> String {
     }
 }
 
-fn comment_summary_line(comment: &Comment) -> Line<'static> {
+fn comment_summary_line(comment: &Comment, theme: &AppTheme) -> Line<'static> {
     let summary = comment
         .body
         .lines()
@@ -1593,35 +1666,35 @@ fn comment_summary_line(comment: &Comment) -> Line<'static> {
     // Comment ids are UUIDs; show a short prefix so the gutter stays readable.
     let short_id: String = comment.id.chars().take(8).collect();
     let mut spans = vec![
-        Span::styled("      ↳ ", Style::default().fg(Color::Yellow)),
-        Span::styled(format!("{short_id} "), Style::default().fg(Color::DarkGray)),
+        Span::styled("      ↳ ", Style::default().fg(theme.accent)),
+        Span::styled(format!("{short_id} "), Style::default().fg(theme.muted)),
         Span::styled(
             format!("[{}] ", comment.state.label()),
-            comment_state_style(comment.state),
+            comment_state_style(comment.state, theme),
         ),
     ];
-    spans.extend(comment_badge_spans(comment));
+    spans.extend(comment_badge_spans(comment, theme));
     spans.push(Span::styled(
         summary.to_owned(),
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(theme.accent),
     ));
     Line::from(spans)
 }
 
-fn comment_badge_spans(comment: &Comment) -> Vec<Span<'static>> {
+fn comment_badge_spans(comment: &Comment, theme: &AppTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if let Some(action) = comment.action
         && action != crate::state::ActionIntent::None
     {
         spans.push(Span::styled(
             format!("[{}] ", action_intent_label(action)),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.secondary),
         ));
     }
     if let Some(kind) = comment.kind {
         spans.push(Span::styled(
             format!("[{}] ", comment_kind_label(kind)),
-            Style::default().fg(Color::Blue),
+            Style::default().fg(theme.info),
         ));
     }
     spans
@@ -1646,30 +1719,31 @@ fn comment_kind_label(kind: crate::state::CommentKind) -> &'static str {
     }
 }
 
-fn comment_state_style(state: crate::state::CommentState) -> Style {
+fn comment_state_style(state: crate::state::CommentState, theme: &AppTheme) -> Style {
     match state {
-        crate::state::CommentState::Draft => Style::default().fg(Color::DarkGray),
-        crate::state::CommentState::Todo => Style::default().fg(Color::Red),
-        crate::state::CommentState::Resolved => Style::default().fg(Color::Green),
+        crate::state::CommentState::Draft => Style::default().fg(theme.muted),
+        crate::state::CommentState::Todo => Style::default().fg(theme.negative),
+        crate::state::CommentState::Resolved => Style::default().fg(theme.positive),
     }
 }
 
 fn diff_text_spans(
     row: &DiffRow,
     fallback_style: Style,
-    selected: bool,
-    in_range: bool,
+    selection: (bool, bool),
     line_bg: Option<Color>,
     emphasis_style: Option<Style>,
     theme: &SyntaxThemeConfig,
+    app_theme: &AppTheme,
 ) -> Vec<Span<'static>> {
+    let (selected, in_range) = selection;
     let mut segments: Vec<(String, Style)> = if row.syntax.is_empty() {
         vec![(row.text.clone(), fallback_style)]
     } else {
         row.syntax
             .iter()
             .map(|span| {
-                let mut style = syntax_span_style(span, selected, in_range, theme);
+                let mut style = syntax_span_style(span, selected, in_range, theme, app_theme);
                 if let Some(bg) = line_bg
                     && style.bg.is_none()
                 {
@@ -1735,31 +1809,35 @@ fn syntax_span_style(
     selected: bool,
     in_range: bool,
     theme: &SyntaxThemeConfig,
+    app_theme: &AppTheme,
 ) -> Style {
     let style = match span.kind {
-        Some(HighlightKind::Attribute) => syntax_style_spec(&theme.attribute),
-        Some(HighlightKind::Comment) => syntax_style_spec(&theme.comment),
-        Some(HighlightKind::Constant) => syntax_style_spec(&theme.constant),
-        Some(HighlightKind::Function) => syntax_style_spec(&theme.function),
-        Some(HighlightKind::Keyword) => syntax_style_spec(&theme.keyword),
-        Some(HighlightKind::Number) => syntax_style_spec(&theme.number),
-        Some(HighlightKind::Operator) => syntax_style_spec(&theme.operator),
-        Some(HighlightKind::Property) => syntax_style_spec(&theme.property),
-        Some(HighlightKind::Punctuation) => syntax_style_spec(&theme.punctuation),
-        Some(HighlightKind::String) => syntax_style_spec(&theme.string),
-        Some(HighlightKind::Type) => syntax_style_spec(&theme.r#type),
-        Some(HighlightKind::Variable) | None => syntax_style_spec(&theme.variable),
+        Some(HighlightKind::Attribute) => app_theme.literal_style(&theme.attribute),
+        Some(HighlightKind::Comment) => app_theme.literal_style(&theme.comment),
+        Some(HighlightKind::Constant) => app_theme.literal_style(&theme.constant),
+        Some(HighlightKind::Function) => app_theme.literal_style(&theme.function),
+        Some(HighlightKind::Keyword) => app_theme.literal_style(&theme.keyword),
+        Some(HighlightKind::Number) => app_theme.literal_style(&theme.number),
+        Some(HighlightKind::Operator) => app_theme.literal_style(&theme.operator),
+        Some(HighlightKind::Property) => app_theme.literal_style(&theme.property),
+        Some(HighlightKind::Punctuation) => app_theme.literal_style(&theme.punctuation),
+        Some(HighlightKind::String) => app_theme.literal_style(&theme.string),
+        Some(HighlightKind::Type) => app_theme.literal_style(&theme.r#type),
+        Some(HighlightKind::Variable) | None => app_theme.literal_style(&theme.variable),
     };
 
     if selected {
-        style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        style
+            .bg(app_theme.selection_bg)
+            .add_modifier(Modifier::BOLD)
     } else if in_range {
-        style.bg(Color::Blue)
+        style.bg(app_theme.range_bg)
     } else {
         style
     }
 }
 
+#[cfg(test)]
 fn syntax_style_spec(spec: &str) -> Style {
     let mut style = Style::default();
     let mut background = false;
@@ -1789,6 +1867,7 @@ fn syntax_style_spec(spec: &str) -> Style {
 }
 
 /// One color token: a named color, an indexed value (`22`), or `#rrggbb`.
+#[cfg(test)]
 fn spec_color(token: &str) -> Option<Color> {
     match token {
         "black" => Some(Color::Black),
@@ -1820,6 +1899,7 @@ fn spec_color(token: &str) -> Option<Color> {
 
 /// Background color for `*-line-bg` theme entries: the spec's background if
 /// it uses `on <color>`, otherwise its first color read as a background.
+#[cfg(test)]
 fn spec_bg_color(spec: &str) -> Option<Color> {
     let style = syntax_style_spec(spec);
     style.bg.or(style.fg)
@@ -1835,111 +1915,19 @@ pub(super) fn terminal_supports_truecolor() -> bool {
         .unwrap_or(false)
 }
 
-/// Rewrite `#rrggbb` tokens in the diff cue theme to their nearest
-/// xterm-256 indexed colors, for terminals without truecolor support
-/// (docs/focused-diff-ux.md §1). Named and indexed tokens pass through.
-pub(super) fn downgrade_diff_theme(theme: &mut crate::config::DiffThemeConfig) {
-    for spec in [
-        &mut theme.added_line_bg,
-        &mut theme.removed_line_bg,
-        &mut theme.added_word,
-        &mut theme.removed_word,
-        &mut theme.gutter_added,
-        &mut theme.gutter_removed,
-    ] {
-        *spec = quantize_spec(spec);
-    }
-}
-
-fn quantize_spec(spec: &str) -> String {
-    spec.split_whitespace()
-        .map(|token| match token.strip_prefix('#') {
-            Some(hex) if hex.len() == 6 => match u32::from_str_radix(hex, 16) {
-                Ok(value) => nearest_indexed((value >> 16) as u8, (value >> 8) as u8, value as u8)
-                    .to_string(),
-                Err(_) => token.to_owned(),
-            },
-            _ => token.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Nearest xterm-256 color index for an RGB value, considering both the
-/// 6x6x6 color cube (16..=231) and the grayscale ramp (232..=255).
-fn nearest_indexed(red: u8, green: u8, blue: u8) -> u8 {
-    fn cube_component(value: u8) -> (u8, u8) {
-        // Cube levels: 0, 95, 135, 175, 215, 255.
-        let levels = [0u8, 95, 135, 175, 215, 255];
-        let mut best = (0u8, u16::MAX);
-        for (index, level) in levels.into_iter().enumerate() {
-            let distance = value.abs_diff(level) as u16;
-            if distance < best.1 {
-                best = (index as u8, distance);
-            }
-        }
-        (best.0, [0u8, 95, 135, 175, 215, 255][best.0 as usize])
-    }
-    fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
-        let dr = a.0.abs_diff(b.0) as u32;
-        let dg = a.1.abs_diff(b.1) as u32;
-        let db = a.2.abs_diff(b.2) as u32;
-        dr * dr + dg * dg + db * db
-    }
-
-    let (ri, rv) = cube_component(red);
-    let (gi, gv) = cube_component(green);
-    let (bi, bv) = cube_component(blue);
-    let cube_index = 16 + 36 * ri + 6 * gi + bi;
-
-    // Only near-gray colors may land on the grayscale ramp: dark tints are
-    // often numerically closer to a gray, but flattening the hue defeats
-    // the point of a green/red cue.
-    let spread = red.max(green).max(blue) - red.min(green).min(blue);
-    if spread >= 12 {
-        if cube_index == 16 {
-            // A dark tint should stay a tint: bump the dominant channel to
-            // the first cube level instead of flattening to black.
-            let max = red.max(green).max(blue);
-            return if red == max {
-                16 + 36
-            } else if green == max {
-                16 + 6
-            } else {
-                16 + 1
-            };
-        }
-        return cube_index;
-    }
-
-    let cube_distance = distance((red, green, blue), (rv, gv, bv));
-    // Grayscale ramp: 8, 18, ..., 238.
-    let gray = (red as u16 + green as u16 + blue as u16) / 3;
-    let gray_step = ((gray.saturating_sub(8)).div_ceil(10)).min(23) as u8;
-    let gray_value = 8 + 10 * gray_step;
-    let gray_index = 232 + gray_step;
-    let gray_distance = distance((red, green, blue), (gray_value, gray_value, gray_value));
-
-    if gray_distance < cube_distance {
-        gray_index
-    } else {
-        cube_index
-    }
-}
-
-fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool) -> Style {
+fn diff_row_style(kind: DiffRowKind, selected: bool, in_range: bool, theme: &AppTheme) -> Style {
     let style = match kind {
-        DiffRowKind::DiffLine(DiffLineKind::Context) => Style::default().fg(Color::Gray),
-        DiffRowKind::DiffLine(DiffLineKind::Added) => Style::default().fg(Color::Green),
-        DiffRowKind::DiffLine(DiffLineKind::Removed) => Style::default().fg(Color::Red),
-        DiffRowKind::DiffLine(DiffLineKind::Meta) => Style::default().fg(Color::DarkGray),
+        DiffRowKind::DiffLine(DiffLineKind::Context) => Style::default().fg(theme.subtle),
+        DiffRowKind::DiffLine(DiffLineKind::Added) => Style::default().fg(theme.positive),
+        DiffRowKind::DiffLine(DiffLineKind::Removed) => Style::default().fg(theme.negative),
+        DiffRowKind::DiffLine(DiffLineKind::Meta) => Style::default().fg(theme.muted),
         _ => Style::default(),
     };
 
     if selected {
-        style.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        style.bg(theme.selection_bg).add_modifier(Modifier::BOLD)
     } else if in_range {
-        style.bg(Color::Blue)
+        style.bg(theme.range_bg)
     } else {
         style
     }
@@ -1950,6 +1938,7 @@ fn draw_footer(
     area: Rect,
     session: &ReviewSession,
     context: &FooterContext<'_>,
+    theme: &AppTheme,
 ) {
     let mode = context.mode;
     let keymap = context.keymap;
@@ -2251,8 +2240,8 @@ fn draw_footer(
     let mut lines = vec![Line::from(summary), Line::from(mode_text)];
     if let Some(notice) = context.notice {
         let (label, style) = match notice.level {
-            UiNoticeLevel::Info => ("info", Style::default().fg(Color::Blue)),
-            UiNoticeLevel::Error => ("error", Style::default().fg(Color::Red)),
+            UiNoticeLevel::Info => ("info", Style::default().fg(theme.info)),
+            UiNoticeLevel::Error => ("error", Style::default().fg(theme.negative)),
         };
         let message_width = area.width.saturating_sub((label.len() + 2) as u16);
         lines[1] = Line::from(vec![
@@ -2264,7 +2253,7 @@ fn draw_footer(
         ]);
     }
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(lines).style(Style::default().fg(theme.muted)),
         area,
     );
 }
@@ -2378,15 +2367,21 @@ fn viewed_filter_label(session: &ReviewSession) -> String {
 /// Full keymap reference, grouped by workflow. The footer only shows the
 /// everyday hints; this popup is the complete map. Two independently wrapped
 /// columns share a scroll offset so every group remains reachable.
-fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, scroll: usize) {
+fn draw_help_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    keymap: &KeyMap,
+    scroll: usize,
+    theme: &AppTheme,
+) {
     let popup = centered_rect(90, 80, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let section = |title: &str| {
         Line::from(Span::styled(
             title.to_owned(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ))
     };
@@ -2395,18 +2390,15 @@ fn draw_help_popup(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, 
         Line::from(vec![
             Span::styled(
                 format!("  {:>10}  ", keys.join("/")),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.info),
             ),
-            Span::styled(label.to_owned(), Style::default().fg(Color::Gray)),
+            Span::styled(label.to_owned(), Style::default().fg(theme.subtle)),
         ])
     };
     let literal = |keys: &str, label: &str| {
         Line::from(vec![
-            Span::styled(
-                format!("  {:>10}  ", keys),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled(label.to_owned(), Style::default().fg(Color::Gray)),
+            Span::styled(format!("  {:>10}  ", keys), Style::default().fg(theme.info)),
+            Span::styled(label.to_owned(), Style::default().fg(theme.subtle)),
         ])
     };
 
@@ -2574,6 +2566,7 @@ fn draw_comment_popup(
     editor: &CommentEditor,
     target: &CommentInputTarget,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = comment_popup_rect(area);
     let inner = inner_bordered(popup);
@@ -2587,7 +2580,7 @@ fn draw_comment_popup(
         .take(inner.height as usize)
         .map(|(row, _)| Line::raw(layout.row_text(row)))
         .collect::<Vec<_>>();
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
     let title = comment_popup_title(session, target, popup.width.saturating_sub(4) as usize);
     let hint = format!(
         "{} save · {} cancel",
@@ -2601,7 +2594,7 @@ fn draw_comment_popup(
                 .title(title)
                 .title_bottom(Line::from(Span::styled(
                     hint,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ))),
         ),
         popup,
@@ -2666,26 +2659,27 @@ fn draw_revset_input_popup(
     area: Rect,
     input: &RevsetInputState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(70, 30, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let field_line = |label: &str, value: &str, active: bool| {
         let marker = if active { "›" } else { " " };
         let value_style = if active {
-            Style::default().fg(Color::White)
+            Style::default().fg(theme.foreground)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.subtle)
         };
         Line::from(vec![
             Span::styled(
                 format!("{marker} {label:>4}: "),
                 if active {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.muted)
                 },
             ),
             Span::styled(value.to_owned(), value_style),
@@ -2695,7 +2689,7 @@ fn draw_revset_input_popup(
     let lines = vec![
         Line::from(Span::styled(
             "Review an arbitrary revset range (jj revset syntax)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
         field_line("base", &input.base, input.editing == RevsetField::Base),
@@ -2707,7 +2701,7 @@ fn draw_revset_input_popup(
                 keymap.hint(Action::PopupSelect),
                 keymap.hint(Action::PopupClose)
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
     ];
 
@@ -2724,9 +2718,10 @@ fn draw_jj_helpers_popup(
     area: Rect,
     state: &JjHelperState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(76, 46, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let mut lines = Vec::new();
     if state.confirming {
@@ -2736,13 +2731,13 @@ fn draw_jj_helpers_popup(
             .unwrap_or_default();
         lines.push(Line::from(Span::styled(
             "About to run:",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {command}"),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
@@ -2752,12 +2747,12 @@ fn draw_jj_helpers_popup(
                 keymap.hint(Action::PopupSelect),
                 keymap.hint(Action::PopupClose)
             ),
-            Style::default().fg(Color::Red),
+            Style::default().fg(theme.negative),
         )));
     } else {
         lines.push(Line::from(Span::styled(
             "jj helpers (nothing runs until you confirm)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
         lines.push(Line::from(""));
         for (index, option) in state.options.iter().enumerate() {
@@ -2765,16 +2760,16 @@ fn draw_jj_helpers_popup(
             let marker = if selected { "›" } else { " " };
             let style = if selected {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.subtle)
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{marker} {}", option.label), style),
                 Span::styled(
                     format!("  ({})", option.command_line()),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ),
             ]));
         }
@@ -2783,7 +2778,7 @@ fn draw_jj_helpers_popup(
             list_popup_hint("", keymap, "select")
                 .trim_start_matches(" · ")
                 .to_owned(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
 
@@ -2801,13 +2796,14 @@ fn draw_view_options_popup(
     session: &ReviewSession,
     state: &ViewOptionsState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(56, 70, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let mut lines = vec![Line::from(Span::styled(
         "Diff visual cues (session only; gander.toml [diff] sets defaults)",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ))];
     lines.push(Line::from(""));
     for (index, option) in ViewOption::ALL.into_iter().enumerate() {
@@ -2820,10 +2816,10 @@ fn draw_view_options_popup(
         };
         let style = if selected {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.subtle)
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
@@ -2842,7 +2838,7 @@ fn draw_view_options_popup(
             keymap.hint(Action::PopupClose),
             keymap.hint(Action::PopupCloseQ),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -2858,9 +2854,10 @@ fn draw_flag_list_popup(
     area: Rect,
     list: &FlagListState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(80, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 4usize;
@@ -2869,18 +2866,18 @@ fn draw_flag_list_popup(
 
     let mut lines = vec![Line::from(Span::styled(
         "Sections flagged by agents, critical first",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ))];
     if list.flags.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no flags",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -2894,10 +2891,10 @@ fn draw_flag_list_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     let location = match flag.line {
                         Some(line) => format!("{}:{line}", flag.path),
@@ -2907,9 +2904,9 @@ fn draw_flag_list_popup(
                         Span::styled(format!("{marker} "), style),
                         Span::styled(
                             format!("[{:^8}] ", flag.priority.label()),
-                            flag_priority_style(flag.priority),
+                            flag_priority_style(flag.priority, theme),
                         ),
-                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{location} "), Style::default().fg(theme.info)),
                         Span::styled(flag.reason.clone(), style),
                     ])
                 }),
@@ -2917,7 +2914,7 @@ fn draw_flag_list_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -2926,7 +2923,7 @@ fn draw_flag_list_popup(
         list_popup_hint("", keymap, "jump")
             .trim_start_matches(" · ")
             .to_owned(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -2948,6 +2945,7 @@ fn draw_zen_panel(
     session: &ReviewSession,
     zen: &ZenState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let height = if zen.glance_rows.is_empty() { 6 } else { 8 }.min(area.height);
     let panel = Rect {
@@ -2958,7 +2956,7 @@ fn draw_zen_panel(
         width: area.width,
         height,
     };
-    frame.render_widget(Clear, panel);
+    clear_area(frame, panel, theme);
 
     let mut lines = Vec::new();
     let mut flagged = 0usize;
@@ -2973,14 +2971,12 @@ fn draw_zen_panel(
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("chapter {number}/{total}  "),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     truncate_tail(&headline, area.width.saturating_sub(18) as usize),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]));
@@ -2988,7 +2984,7 @@ fn draw_zen_panel(
                 chapter.summary.clone().unwrap_or_else(|| {
                     "(no change brief from the agent — @ summons one)".to_owned()
                 }),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.subtle),
             )));
         }
         Some(ZenStop::Chunk(stop)) => {
@@ -3016,16 +3012,16 @@ fn draw_zen_panel(
                         position
                     ),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(location, Style::default().fg(Color::Cyan)),
+                Span::styled(location, Style::default().fg(theme.info)),
             ]));
             lines.push(Line::from(Span::styled(
                 stop.rationale
                     .clone()
                     .unwrap_or_else(|| "(no rationale given)".to_owned()),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.subtle),
             )));
         }
         None => {}
@@ -3044,10 +3040,10 @@ fn draw_zen_panel(
             Span::styled(
                 "glance rail  ",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(theme.muted)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(glance, Style::default().fg(Color::DarkGray)),
+            Span::styled(glance, Style::default().fg(theme.muted)),
         ]));
     }
     lines.push(Line::from(""));
@@ -3060,7 +3056,7 @@ fn draw_zen_panel(
             keymap.hint(Action::ZenToggleView),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+Style::default().fg(theme.muted),
     )));
 
     let mut title = match zen.current() {
@@ -3202,12 +3198,13 @@ fn draw_zen_focus(
     session: &ReviewSession,
     zen: &ZenState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     match zen.current() {
         Some(ZenStop::Chapter(chapter)) => {
-            draw_zen_chapter(frame, area, session, zen, chapter, keymap)
+            draw_zen_chapter(frame, area, session, zen, chapter, keymap, theme)
         }
-        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop, keymap),
+        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop, keymap, theme),
         None => {}
     }
 }
@@ -3223,8 +3220,9 @@ fn draw_zen_chapter(
     zen: &ZenState,
     chapter: &super::zen::ChapterCard,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
-    frame.render_widget(Clear, area);
+    clear_area(frame, area, theme);
     let inner = slide_inner(area);
     let (number, total) = chapter.position;
 
@@ -3265,26 +3263,23 @@ fn draw_zen_chapter(
         Line::from(vec![
             Span::styled(
                 format!("chapter {number}/{total} · {location}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             ),
             Span::raw("  "),
-            Span::styled(
-                zen_progress_label(zen),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(zen_progress_label(zen), Style::default().fg(theme.muted)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             headline,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
     ];
     if !chapter.subtitle().is_empty() {
         body.push(Line::from(Span::styled(
             chapter.subtitle().to_owned(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     // The change's own words come right after the headline: the full
@@ -3296,25 +3291,25 @@ fn draw_zen_chapter(
                     "… d expands the description ({} more line(s))",
                     description_body.len()
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         } else {
             body.push(Line::from(""));
             push_text_lines(
                 &mut body,
                 &description_body.join("\n"),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.subtle),
             );
         }
     }
     body.push(Line::from(""));
     body.push(Line::from(Span::styled(
         stats,
-        Style::default().fg(Color::Cyan),
+        Style::default().fg(theme.info),
     )));
     body.push(Line::from(Span::styled(
         stops_hint,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     let has_curated_brief = chapter.summary.is_some();
     let summary = chapter.summary.clone().unwrap_or_else(|| {
@@ -3325,32 +3320,32 @@ fn draw_zen_chapter(
         body.push(Line::from(Span::styled(
             "what this change does",
             Style::default()
-                .fg(Color::Magenta)
+                .fg(theme.secondary)
                 .add_modifier(Modifier::BOLD),
         )));
         for line in summary.lines() {
             body.push(Line::from(Span::styled(
                 line.to_owned(),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(theme.subtle),
             )));
         }
     } else if !chapter.derived_lines.is_empty() {
         body.push(Line::from(""));
         body.push(Line::from(Span::styled(
             "derived facts",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
         for line in chapter.derived_lines.iter().take(3) {
             body.push(Line::from(Span::styled(
                 truncate_tail(&format!("  {line}"), inner.width as usize),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
     if !chapter.derived_lines.is_empty() && inner.height < 18 {
         body.push(Line::from(Span::styled(
             format!("derived: {}", derived_summary(&chapter.derived_lines)),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     if chapter.stop_count > 0 {
@@ -3361,7 +3356,7 @@ fn draw_zen_chapter(
                 keymap.hint(Action::ZenNext),
                 chapter.stop_count
             ),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.info),
         )));
     }
     if inner.height < 8 {
@@ -3485,13 +3480,14 @@ fn draw_zen_stop(
     zen: &ZenState,
     stop: &super::chunks::WalkthroughRow,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
-    frame.render_widget(Clear, area);
+    clear_area(frame, area, theme);
     let initial_inner = slide_inner(area);
     let (stop_number, stop_total) = zen.chunk_position();
     if initial_inner.height < 8 {
         frame.render_widget(
-            Paragraph::new(zen_focus_header_lines(zen, stop)).wrap(Wrap { trim: false }),
+            Paragraph::new(zen_focus_header_lines(zen, stop, theme)).wrap(Wrap { trim: false }),
             initial_inner,
         );
         return;
@@ -3503,7 +3499,7 @@ fn draw_zen_stop(
     let (probe_indices, _, _) = zen_excerpt_indices(&rows, stop, probe_rows, cursor);
     let probe_width = probe_indices
         .iter()
-        .map(|&index| line_width(&unified_row_line(session, &rows[index], index, 0)))
+        .map(|&index| line_width(&unified_row_line(session, &rows[index], index, 0, theme)))
         .max()
         .unwrap_or(0);
     let content_width = measured_content_width(area.width, probe_width);
@@ -3548,13 +3544,13 @@ fn draw_zen_stop(
                 chunk_row_location_width(stop, text_width / 2),
                 zen_progress_label(zen)
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )]),
         Line::from(""),
         Line::from(Span::styled(
             format!("{}{position}", stop.title),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -3570,20 +3566,20 @@ fn draw_zen_stop(
                 .unwrap_or_else(|| "other parts: part 1".to_owned());
             explanation_lines.push(Line::from(Span::styled(
                 format!("prose on part 1 · part {part}/{total} · {sibling}"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     } else if let Some(why) = stop.rationale.as_ref().filter(|s| !s.trim().is_empty()) {
         explanation_lines.push(Line::from(Span::styled(
             explanation_title.trim(),
             Style::default()
-                .fg(Color::Magenta)
+                .fg(theme.secondary)
                 .add_modifier(Modifier::ITALIC),
         )));
         explanation_lines.push(Line::from(Span::styled(
             why.clone(),
             Style::default()
-                .fg(Color::Magenta)
+                .fg(theme.secondary)
                 .add_modifier(Modifier::ITALIC),
         )));
     }
@@ -3596,24 +3592,24 @@ fn draw_zen_stop(
         push_text_lines(
             &mut explanation_lines,
             body_text,
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme.subtle),
         );
     } else if explanation_lines.is_empty() {
         explanation_lines.push(Line::from(Span::styled(
             explanation,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     if !abbreviated_part && let Some(sibling) = sibling_line {
         explanation_lines.push(Line::from(Span::styled(
             sibling,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     for comment in comment_lines {
         explanation_lines.push(Line::from(Span::styled(
             comment,
-            Style::default().fg(Color::Blue),
+            Style::default().fg(theme.info),
         )));
     }
     prose_lines.extend(explanation_lines);
@@ -3633,7 +3629,7 @@ fn draw_zen_stop(
     if indices.is_empty() {
         excerpt.push(Line::from(Span::styled(
             "  (no diff lines to excerpt — tab shows the full file)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     let last_excerpt_lineno = indices
@@ -3657,7 +3653,7 @@ fn draw_zen_stop(
         }
     }
     for index in indices {
-        excerpt.push(unified_row_line(session, &rows[index], index, 0));
+        excerpt.push(unified_row_line(session, &rows[index], index, 0, theme));
     }
     if let Some((more, end)) = forced_clip {
         excerpt.push(Line::from(Span::styled(
@@ -3666,7 +3662,7 @@ fn draw_zen_stop(
                 keymap.hint(Action::MoveDown),
                 keymap.hint(Action::MoveUp),
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     let mut lines = prose_lines;
@@ -3674,7 +3670,7 @@ fn draw_zen_stop(
     lines.extend(excerpt);
     lines.push(Line::from(Span::styled(
         "─".repeat(text_width),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     if !stop.artifacts.is_empty() {
         lines.push(Line::from(""));
@@ -3687,13 +3683,13 @@ fn draw_zen_stop(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     if wandered {
         lines.push(Line::from(Span::styled(
             "off the stop — . refocuses",
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.secondary),
         )));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -3703,24 +3699,25 @@ fn draw_zen_stop(
 fn zen_focus_header_lines(
     zen: &ZenState,
     stop: &super::chunks::WalkthroughRow,
+    theme: &AppTheme,
 ) -> Vec<Line<'static>> {
     let position = stop
         .part_position
         .map(|(part, total)| format!(" (part {part}/{total})"))
         .unwrap_or_default();
     vec![
-        zen_progress_line(zen),
+        zen_progress_line(zen, theme),
         Line::from(vec![
             Span::styled(
                 format!("{}{position}", truncate_tail(&stop.title, 48)),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(
                 chunk_row_location_width(stop, 48),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.info),
             ),
         ]),
         Line::from(""),
@@ -3754,7 +3751,7 @@ fn sibling_parts_line(
 
 /// The walkthrough progress strip: a dot per spotlight stop, grouped by
 /// chapter (`▎` bars introduce each chapter), the current station bold.
-fn zen_progress_line(zen: &ZenState) -> Line<'static> {
+fn zen_progress_line(zen: &ZenState, theme: &AppTheme) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (index, stop) in zen.stops.iter().take(40).enumerate() {
         let glyph = match stop {
@@ -3766,11 +3763,11 @@ fn zen_progress_line(zen: &ZenState) -> Line<'static> {
             Span::styled(
                 glyph,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(glyph, Style::default().fg(Color::DarkGray))
+            Span::styled(glyph, Style::default().fg(theme.muted))
         });
     }
     Line::from(spans)
@@ -3908,6 +3905,7 @@ fn draw_zen_artifact(
     index: usize,
     scroll: u16,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let Some(stop) = zen.current() else {
         return;
@@ -3936,17 +3934,17 @@ fn draw_zen_artifact(
         height,
     };
 
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
     let mut title_spans = vec![
         Span::styled(
             format!(" {} ", artifact.title),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("· {} ", artifact.kind.label()),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.secondary),
         ),
     ];
     if artifacts.len() > 1 {
@@ -3958,13 +3956,13 @@ fn draw_zen_artifact(
                 keymap.hint(Action::ZenArtifactPrevious),
                 keymap.hint(Action::ZenArtifactNext),
             ),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.info),
         ));
     }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Magenta))
+        .border_style(Style::default().fg(theme.secondary))
         .title(Line::from(title_spans))
         .title_bottom(Line::from(Span::styled(
             format!(
@@ -3974,7 +3972,7 @@ fn draw_zen_artifact(
                 keymap.hint(Action::PopupClose),
                 keymap.hint(Action::PopupCloseQ),
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -3983,7 +3981,7 @@ fn draw_zen_artifact(
     let max_scroll = (artifact.body.lines().count() as u16).saturating_sub(inner.height);
     frame.render_widget(
         Paragraph::new(artifact.body.clone())
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(theme.subtle))
             .block(Block::default().padding(Padding::horizontal(1)))
             .scroll((scroll.min(max_scroll), 0)),
         inner,
@@ -3998,8 +3996,9 @@ fn draw_zen_glance(
     session: &ReviewSession,
     zen: &ZenState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
-    frame.render_widget(Clear, area);
+    clear_area(frame, area, theme);
     let inner = slide_inner(area);
 
     let curated_rows = zen
@@ -4026,7 +4025,7 @@ fn draw_zen_glance(
         Line::from(Span::styled(
             "At a glance",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -4035,20 +4034,20 @@ fn draw_zen_glance(
                 curated_rows.len(),
                 auto_rows.len()
             ),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
         Line::from(""),
     ];
     if window.hidden_above > 0 {
         lines.push(Line::from(Span::styled(
             format!("  ↑ {} more", window.hidden_above),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     lines.push(Line::from(Span::styled(
         "curated",
         Style::default()
-            .fg(Color::Magenta)
+            .fg(theme.secondary)
             .add_modifier(Modifier::BOLD),
     )));
     let mut rendered = 0usize;
@@ -4072,12 +4071,12 @@ fn draw_zen_glance(
         let check = if viewed { "✓" } else { "•" };
         let style = if selected {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else if viewed {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.muted)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.subtle)
         };
         let rationale = row
             .rationale
@@ -4102,40 +4101,40 @@ fn draw_zen_glance(
         let detail = truncate_tail(&format!("{title}{rationale}"), row_width);
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} "), style),
-            Span::styled(format!("{check} "), Style::default().fg(Color::Green)),
+            Span::styled(format!("{check} "), Style::default().fg(theme.positive)),
             Span::styled(
                 truncate_tail(&locations, row_width),
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(theme.info),
             ),
         ]));
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(detail, Style::default().fg(Color::DarkGray)),
+            Span::styled(detail, Style::default().fg(theme.muted)),
         ]));
     }
     if rendered == 0 {
         lines.push(Line::from(Span::styled(
             "  (none)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("not toured — {} files", auto_rows.len()),
         Style::default()
-            .fg(Color::Magenta)
+            .fg(theme.secondary)
             .add_modifier(Modifier::BOLD),
     )));
     for line in glance_auto_role_lines(&auto_rows, inner.width.saturating_sub(4) as usize) {
         lines.push(Line::from(Span::styled(
             format!("  {line}"),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(theme.subtle),
         )));
     }
     if window.hidden_below > 0 {
         lines.push(Line::from(Span::styled(
             format!("  ↓ {} more", window.hidden_below),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     lines.push(Line::from(""));
@@ -4147,7 +4146,7 @@ fn draw_zen_glance(
             keymap.hint(Action::PopupSelect),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -4230,9 +4229,10 @@ fn draw_draft_list_popup(
     area: Rect,
     list: &DraftListState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(82, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 3usize;
@@ -4241,18 +4241,18 @@ fn draw_draft_list_popup(
 
     let mut lines = vec![Line::from(Span::styled(
         "Agent-drafted comments awaiting your decision",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ))];
     if list.drafts.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no pending drafts",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -4266,10 +4266,10 @@ fn draw_draft_list_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     let location = match draft.line {
                         Some(line) => format!("{}:{line}", draft.path),
@@ -4286,9 +4286,9 @@ fn draw_draft_list_popup(
                         Span::styled(format!("{marker} "), style),
                         Span::styled(
                             format!("[{:^8}] ", draft.state.label()),
-                            Style::default().fg(Color::Magenta),
+                            Style::default().fg(theme.secondary),
                         ),
-                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{location} "), Style::default().fg(theme.info)),
                         Span::styled(summary, style),
                     ])
                 }),
@@ -4296,7 +4296,7 @@ fn draw_draft_list_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4311,7 +4311,7 @@ fn draw_draft_list_popup(
             keymap.hint(Action::DraftDiscard),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -4322,14 +4322,14 @@ fn draw_draft_list_popup(
     );
 }
 
-fn flag_priority_style(priority: crate::agent::FlagPriority) -> Style {
+fn flag_priority_style(priority: crate::agent::FlagPriority, theme: &AppTheme) -> Style {
     match priority {
-        crate::agent::FlagPriority::Critical => {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        }
-        crate::agent::FlagPriority::High => Style::default().fg(Color::Red),
-        crate::agent::FlagPriority::Medium => Style::default().fg(Color::Yellow),
-        crate::agent::FlagPriority::Low => Style::default().fg(Color::DarkGray),
+        crate::agent::FlagPriority::Critical => Style::default()
+            .fg(theme.negative)
+            .add_modifier(Modifier::BOLD),
+        crate::agent::FlagPriority::High => Style::default().fg(theme.negative),
+        crate::agent::FlagPriority::Medium => Style::default().fg(theme.warning),
+        crate::agent::FlagPriority::Low => Style::default().fg(theme.muted),
     }
 }
 
@@ -4338,9 +4338,10 @@ fn draw_operation_picker_popup(
     area: Rect,
     picker: &OperationPickerState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(80, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 3usize;
@@ -4350,18 +4351,18 @@ fn draw_operation_picker_popup(
 
     let mut lines = vec![Line::from(Span::styled(
         "Compare against a prior operation: unchanged files are marked caught up",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     ))];
     if picker.operations.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no operations",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -4376,10 +4377,10 @@ fn draw_operation_picker_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     let description = if operation.description.is_empty() {
                         "(no description)"
@@ -4397,7 +4398,7 @@ fn draw_operation_picker_popup(
                         Span::styled(format!("{marker} {:<14}", operation.operation_id), style),
                         Span::styled(
                             format!("{:<18}", operation.time),
-                            Style::default().fg(Color::Cyan),
+                            Style::default().fg(theme.info),
                         ),
                         Span::styled(description, style),
                     ])
@@ -4406,7 +4407,7 @@ fn draw_operation_picker_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4416,7 +4417,7 @@ fn draw_operation_picker_popup(
             .preview
             .as_deref()
             .unwrap_or("select an operation to preview catch-up"),
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(theme.accent),
     )));
     lines.push(Line::from(Span::styled(
         format!(
@@ -4426,7 +4427,7 @@ fn draw_operation_picker_popup(
             keymap.hint(Action::PopupSelect),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -4444,9 +4445,10 @@ fn draw_file_search_popup(
     area: Rect,
     search: &FileSearchState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(72, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 3usize;
@@ -4454,7 +4456,7 @@ fn draw_file_search_popup(
     let visible_window = picker_visible_window(search.selected, search.filtered.len(), list_height);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled("search: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("search: ", Style::default().fg(theme.muted)),
         Span::styled(
             if search.query.is_empty() {
                 "type to fuzzy match files".to_owned()
@@ -4462,22 +4464,22 @@ fn draw_file_search_popup(
                 search.query.clone()
             },
             if search.query.is_empty() {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(theme.muted)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.foreground)
             },
         ),
     ])];
     if search.filtered.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no matching files",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -4495,16 +4497,16 @@ fn draw_file_search_popup(
                     let viewed_mark = if row.viewed { "✓" } else { "•" };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else if row.viewed {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(theme.muted)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     Line::from(vec![
                         Span::styled(format!("{marker} "), style),
-                        Span::styled(viewed_mark, Style::default().fg(Color::Green)),
+                        Span::styled(viewed_mark, Style::default().fg(theme.positive)),
                         Span::styled(format!(" {}", row.path), style),
                     ])
                 }),
@@ -4512,7 +4514,7 @@ fn draw_file_search_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4525,7 +4527,7 @@ fn draw_file_search_popup(
             keymap.hint(Action::PopupSelect),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -4541,9 +4543,10 @@ fn draw_symbol_outline_popup(
     area: Rect,
     outline: &SymbolOutlineState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(60, 50, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 2usize;
@@ -4555,13 +4558,13 @@ fn draw_symbol_outline_popup(
     if outline.targets.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no changed symbols",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -4576,10 +4579,10 @@ fn draw_symbol_outline_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     Line::from(Span::styled(format!("{marker} {}", target.label), style))
                 }),
@@ -4587,7 +4590,7 @@ fn draw_symbol_outline_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4596,7 +4599,7 @@ fn draw_symbol_outline_popup(
         list_popup_hint("", keymap, "jump")
             .trim_start_matches(" · ")
             .to_owned(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -4628,9 +4631,10 @@ fn draw_comment_list_popup(
     session: &ReviewSession,
     list: &CommentListState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(80, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 2usize;
@@ -4641,13 +4645,13 @@ fn draw_comment_list_popup(
     if session.comments.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no comments",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -4662,10 +4666,10 @@ fn draw_comment_list_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::Gray)
+                        Style::default().fg(theme.subtle)
                     };
                     let location = comment_list_location(comment);
                     let summary = comment
@@ -4679,12 +4683,12 @@ fn draw_comment_list_popup(
                         Span::styled(format!("{marker} "), style),
                         Span::styled(
                             format!("[{:^8}] ", comment.state.label()),
-                            comment_state_style(comment.state),
+                            comment_state_style(comment.state, theme),
                         ),
                     ];
-                    spans.extend(comment_badge_spans(comment));
+                    spans.extend(comment_badge_spans(comment, theme));
                     spans.extend([
-                        Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{location} "), Style::default().fg(theme.info)),
                         Span::styled(summary, style),
                     ]);
                     Line::from(spans)
@@ -4693,7 +4697,7 @@ fn draw_comment_list_popup(
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4713,7 +4717,7 @@ fn draw_comment_list_popup(
             keymap.hint(Action::DeleteComment),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -4730,9 +4734,10 @@ fn draw_open_work_popup(
     session: &ReviewSession,
     list: &OpenWorkListState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(82, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 2usize;
@@ -4743,13 +4748,13 @@ fn draw_open_work_popup(
     if list.rows.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no open action items or todo feedback",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         for (index, row) in list
@@ -4763,17 +4768,17 @@ fn draw_open_work_popup(
             let marker = if selected { "›" } else { " " };
             let style = if selected {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(theme.subtle)
             };
-            lines.push(open_work_line(session, row, marker, style));
+            lines.push(open_work_line(session, row, marker, style, theme));
         }
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -4782,7 +4787,7 @@ fn draw_open_work_popup(
         list_popup_hint("", keymap, "jump")
             .trim_start_matches(" · ")
             .to_owned(),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     let paragraph = Paragraph::new(lines)
@@ -4801,6 +4806,7 @@ fn open_work_line(
     row: &OpenWorkRow,
     marker: &str,
     style: Style,
+    theme: &AppTheme,
 ) -> Line<'static> {
     match row {
         OpenWorkRow::ActionItem {
@@ -4811,20 +4817,20 @@ fn open_work_line(
         } => {
             let mut spans = vec![
                 Span::styled(format!("{marker} "), style),
-                Span::styled("[item] ", Style::default().fg(Color::Yellow)),
+                Span::styled("[item] ", Style::default().fg(theme.accent)),
             ];
             if let Some(action) = action
                 && *action != crate::state::ActionIntent::None
             {
                 spans.push(Span::styled(
                     format!("[{}] ", action_intent_label(*action)),
-                    Style::default().fg(Color::Magenta),
+                    Style::default().fg(theme.secondary),
                 ));
             }
             spans.extend([
                 Span::styled(
                     format!("{} ", action_item_location(target.as_ref().as_ref())),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.info),
                 ),
                 Span::styled(title.clone(), style),
             ]);
@@ -4838,7 +4844,7 @@ fn open_work_line(
                         "{marker} {}missing feedback {id}",
                         if nested { "  └ " } else { "" }
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.muted),
                 ));
             };
             let summary = comment
@@ -4855,18 +4861,18 @@ fn open_work_line(
                 ),
                 Span::styled(
                     if nested { "[evidence] " } else { "[feedback] " },
-                    Style::default().fg(Color::Blue),
+                    Style::default().fg(theme.info),
                 ),
                 Span::styled(
                     format!("{} ", comment_list_location(comment)),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.info),
                 ),
                 Span::styled(
                     format!("[{}] ", comment.state.label()),
-                    comment_state_style(comment.state),
+                    comment_state_style(comment.state, theme),
                 ),
             ];
-            spans.extend(comment_badge_spans(comment));
+            spans.extend(comment_badge_spans(comment, theme));
             spans.push(Span::styled(summary, style));
             Line::from(spans)
         }
@@ -4909,9 +4915,10 @@ fn draw_activity_popup(
     area: Rect,
     tui_state: &TuiState,
     state: &ActivityListState,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(72, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
     let block = Block::default()
         .title(" activity ")
         .borders(Borders::ALL)
@@ -4929,7 +4936,7 @@ fn draw_activity_popup(
                 event.message.clone()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(time, Style::default().fg(Color::DarkGray)),
+                Span::styled(time, Style::default().fg(theme.muted)),
                 Span::raw("  "),
                 Span::raw(truncate_tail(
                     &message,
@@ -4966,7 +4973,7 @@ fn draw_activity_popup(
     frame.render_widget(block, popup);
     let list = List::new(items).highlight_symbol("› ").highlight_style(
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     );
     frame.render_stateful_widget(list, regions[0], &mut list_state);
@@ -4979,7 +4986,7 @@ fn draw_activity_popup(
             event.message.clone()
         };
         let paragraph = Paragraph::new(detail)
-            .style(Style::default().fg(Color::Gray))
+            .style(Style::default().fg(theme.subtle))
             .wrap(Wrap { trim: false });
         frame.render_widget(paragraph, regions[1]);
     }
@@ -5003,9 +5010,10 @@ fn draw_walkthrough_list_popup(
     session: &ReviewSession,
     list: &WalkthroughListState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(84, 60, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
     let mut lines = Vec::new();
     for (index, id) in list.step_ids.iter().enumerate() {
         let Some(step) = session
@@ -5020,10 +5028,10 @@ fn draw_walkthrough_list_popup(
         let selected = index == list.selected;
         let style = if selected {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(theme.subtle)
         };
         let marker = if selected { "›" } else { " " };
         let file = step.target.file.as_deref().unwrap_or("<target>");
@@ -5044,14 +5052,14 @@ fn draw_walkthrough_list_popup(
         lines.push(Line::from(vec![
             Span::styled(format!("{marker} {}. ", index + 1), style),
             Span::styled(format!("{title} "), style),
-            Span::styled(format!("{location} "), Style::default().fg(Color::Cyan)),
-            Span::styled(why.to_owned(), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{location} "), Style::default().fg(theme.info)),
+            Span::styled(why.to_owned(), Style::default().fg(theme.muted)),
         ]));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no walkthrough steps",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     }
     lines.push(Line::from(""));
@@ -5066,7 +5074,7 @@ fn draw_walkthrough_list_popup(
             keymap.hint(Action::WalkthroughDelete),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
     let paragraph = Paragraph::new(lines)
         .block(
@@ -5084,9 +5092,10 @@ fn draw_target_chooser_popup(
     area: Rect,
     chooser: &TargetChooserState,
     keymap: &KeyMap,
+    theme: &AppTheme,
 ) {
     let popup = centered_rect(84, 64, area);
-    frame.render_widget(Clear, popup);
+    clear_area(frame, popup, theme);
 
     let inner_height = popup.height.saturating_sub(2) as usize;
     let fixed_lines = 6usize;
@@ -5097,22 +5106,16 @@ fn draw_target_chooser_popup(
     let mut lines = vec![
         Line::from(vec![
             Span::raw("Choose "),
-            Span::styled(
-                chooser.selecting.label(),
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(chooser.selecting.label(), Style::default().fg(theme.accent)),
             Span::raw(" for "),
             Span::styled(
                 format!("{}..{}", chooser.current_base, chooser.current_tip),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.accent),
             ),
-            Span::styled(
-                " (tab toggles base/tip)",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" (tab toggles base/tip)", Style::default().fg(theme.muted)),
         ]),
         Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("filter: ", Style::default().fg(theme.muted)),
             Span::styled(
                 if chooser.query.is_empty() {
                     "type to fuzzy match".to_owned()
@@ -5120,27 +5123,27 @@ fn draw_target_chooser_popup(
                     chooser.query.clone()
                 },
                 if chooser.query.is_empty() {
-                    Style::default().fg(Color::DarkGray)
+                    Style::default().fg(theme.muted)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.foreground)
                 },
             ),
         ]),
         Line::from(Span::styled(
             "   change id      bookmarks                 description",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )),
     ];
     if chooser.filtered.is_empty() {
         lines.push(Line::from(Span::styled(
             "  no matching changes",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.muted),
         )));
     } else {
         if visible_window.hidden_above > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↑ {} more", visible_window.hidden_above),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
         lines.extend(
@@ -5159,13 +5162,14 @@ fn draw_target_chooser_popup(
                         index == chooser.selected,
                         row.matches_rev(&chooser.current_base),
                         chooser.tip_matches_row(row, *row_index),
+                        theme,
                     )
                 }),
         );
         if visible_window.hidden_below > 0 {
             lines.push(Line::from(Span::styled(
                 format!("  ↓ {} more", visible_window.hidden_below),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.muted),
             )));
         }
     }
@@ -5178,7 +5182,7 @@ fn draw_target_chooser_popup(
             keymap.hint(Action::PopupSelect),
             keymap.hint(Action::PopupClose),
         ),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.muted),
     )));
 
     frame.render_widget(
@@ -5259,13 +5263,14 @@ fn base_picker_row(
     selected: bool,
     current_base: bool,
     current_tip: bool,
+    theme: &AppTheme,
 ) -> Line<'static> {
     let style = if selected {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(theme.subtle)
     };
     let marker = if selected { "›" } else { " " };
     let base_mark = if current_base { "B" } else { " " };
@@ -5286,7 +5291,7 @@ fn base_picker_row(
         ),
         Span::styled(
             format!("{:<26}", row.bookmarks),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme.info),
         ),
         Span::styled(description.to_owned(), style),
     ])
@@ -5524,6 +5529,27 @@ mod tests {
             }
         }
         out
+    }
+
+    fn render_theme_probe(theme: AppTheme) -> String {
+        let backend = TestBackend::new(36, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Block::default().style(theme.base_style()), frame.area());
+                let popup = Rect::new(5, 2, 26, 6);
+                clear_area(frame, popup, &theme);
+                frame.render_widget(
+                    Paragraph::new("unstyled text").block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(" popup title "),
+                    ),
+                    popup,
+                );
+            })
+            .unwrap();
+        buffer_style_runs(terminal.backend().buffer())
     }
 
     fn style_is_plain(style: Style) -> bool {
@@ -6759,47 +6785,6 @@ diff --git a/Cargo.toml b/Cargo.toml
     }
 
     #[test]
-    fn quantizes_hex_tokens_to_nearest_indexed_colors() {
-        // Exact cube colors map to their cube index.
-        assert_eq!(nearest_indexed(0, 0, 0), 16);
-        assert_eq!(nearest_indexed(255, 255, 255), 231);
-        assert_eq!(nearest_indexed(0, 95, 0), 22);
-        // Near-grays prefer the grayscale ramp over the coarse cube.
-        assert_eq!(nearest_indexed(0x12, 0x12, 0x12), 233);
-        // Dark tints keep their hue instead of flattening to black/gray.
-        assert_eq!(nearest_indexed(0x12, 0x26, 0x1e), 22);
-        assert_eq!(nearest_indexed(0x30, 0x1b, 0x1f), 52);
-
-        assert_eq!(quantize_spec("bold on #1a4a29"), "bold on 22");
-        assert_eq!(quantize_spec("#3fb950"), "71");
-        // Named and indexed tokens pass through untouched.
-        assert_eq!(quantize_spec("green bold"), "green bold");
-        assert_eq!(quantize_spec("28"), "28");
-    }
-
-    #[test]
-    fn downgrade_diff_theme_rewrites_all_hex_entries() {
-        let mut theme = crate::config::DiffThemeConfig::default();
-
-        downgrade_diff_theme(&mut theme);
-
-        for spec in [
-            &theme.added_line_bg,
-            &theme.removed_line_bg,
-            &theme.added_word,
-            &theme.removed_word,
-            &theme.gutter_added,
-            &theme.gutter_removed,
-        ] {
-            assert!(!spec.contains('#'), "hex survived downgrade: {spec}");
-            assert!(
-                syntax_style_spec(spec) != Style::default(),
-                "spec parses: {spec}"
-            );
-        }
-    }
-
-    #[test]
     fn overlay_emphasis_splits_segments_at_range_boundaries() {
         let base = Style::default().fg(Color::Green);
         let emphasis = Style::default().bg(Color::Indexed(28));
@@ -6834,6 +6819,34 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.diff_cues.gutter_bar = true;
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
+    }
+
+    #[test]
+    fn tui_snapshot_transparent_and_opaque_theme_chrome() {
+        let transparent = AppTheme::resolve(
+            crate::config::ThemeConfig {
+                mode: crate::config::ThemeModeConfig::Dark,
+                transparent: true,
+            },
+            &crate::config::DiffThemeConfig::default(),
+            None,
+            true,
+        );
+        let opaque = AppTheme::resolve(
+            crate::config::ThemeConfig {
+                mode: crate::config::ThemeModeConfig::Light,
+                transparent: false,
+            },
+            &crate::config::DiffThemeConfig::default(),
+            None,
+            true,
+        );
+
+        insta::assert_snapshot!(
+            "tui_theme_transparent_chrome",
+            render_theme_probe(transparent)
+        );
+        insta::assert_snapshot!("tui_theme_opaque_chrome", render_theme_probe(opaque));
     }
 
     #[test]
@@ -6927,7 +6940,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         assert!(painted.iter().skip(1).all(|line| {
             line.spans
                 .first()
-                .is_some_and(|span| span.style.bg == Some(Color::DarkGray))
+                .is_some_and(|span| span.style.bg == Some(AppTheme::default().selection_bg))
         }));
         let rendered = painted
             .iter()
@@ -7382,6 +7395,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             0,
             5,
             0,
+            &tui_state.theme,
         );
         assert_eq!(window.len(), 5);
     }
@@ -7769,7 +7783,8 @@ diff --git a/Cargo.toml b/Cargo.toml
             kind: Some(HighlightKind::Keyword),
         };
 
-        let style = syntax_span_style(&span, false, false, &theme);
+        let app_theme = AppTheme::default();
+        let style = syntax_span_style(&span, false, false, &theme, &app_theme);
 
         assert_eq!(style.fg, Some(Color::Red));
         assert!(style.add_modifier.contains(Modifier::ITALIC));
