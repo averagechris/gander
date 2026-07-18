@@ -36,7 +36,7 @@ use color_eyre::eyre::{Context, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentDraft, AgentOverlay, DraftState, chunk_line_space},
+    agent::{AgentOverlay, chunk_line_space},
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
@@ -53,8 +53,9 @@ use crate::{
     paths::{PathsEnv, WorkspacePaths},
     review::SessionTargetSpec,
     state::{
-        ActionIntent, ActionItemStatus, ClosedDisposition, CommentKind, CommentState, ReviewState,
-        ReviewTarget as StateReviewTarget, StepArtifact, StepImportance, StepKind, WalkthroughStep,
+        ActionIntent, ActionItemStatus, Channel, ClosedDisposition, CommentKind, CommentState,
+        Identity, ReviewState, ReviewTarget as StateReviewTarget, StepArtifact, StepImportance,
+        StepKind, WalkthroughStep,
     },
 };
 
@@ -298,9 +299,9 @@ enum Command {
         #[command(subcommand)]
         command: WalkthroughCommand,
     },
-    /// Author agent draft comments from JSON specs.
+    /// Author durable agent draft comments from JSON specs.
     #[command(
-        long_about = "Author draft comments. Add specs match review/draft_comment params, either one object like {\"path\":\"src/lib.rs\",\"line\":12,\"body\":\"Consider naming this after the invariant.\"} or {\"drafts\":[...]}. Use --file - (or omit --file) to read stdin."
+        long_about = "Author durable agent draft comments. Add specs match review/draft_comment params, either one object like {\"path\":\"src/lib.rs\",\"line\":12,\"body\":\"Consider naming this after the invariant.\"} or {\"drafts\":[...]}. Use --file - (or omit --file) to read stdin."
     )]
     Drafts {
         #[command(subcommand)]
@@ -332,7 +333,7 @@ struct WalkthroughSetSpec {
 
 #[derive(Debug, Subcommand)]
 enum DraftsCommand {
-    /// List current overlay drafts as pretty JSON, including state.
+    /// List current durable agent drafts as pretty JSON.
     List,
     /// Append pending drafts from a JSON spec file (or stdin with --file - / omitted).
     Add {
@@ -1061,23 +1062,31 @@ fn run() -> color_eyre::Result<()> {
 
     let state_path = cli.state.unwrap_or_else(|| workspace_paths.state_file());
     let mut state = ReviewState::load_or_default(&state_path)?;
-    // `gander mcp` rebuilds its snapshot session on a dedicated thread
-    // (ReviewSession is single-threaded); capture the Send ingredients
-    // before they move into the main-thread session below.
-    let mcp_ingredients = matches!(command, Command::Mcp).then(|| {
-        (
-            target.clone(),
-            diff.clone(),
-            state.clone(),
-            config.clone(),
-            generated_matcher.clone(),
-        )
-    });
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff.clone(), state.clone(), &config);
     session.annotate_generated_where(|file| {
         generated_matcher.is_match(&file.path)
             || crate::generated::diff_content_looks_generated(&file.diff)
+    });
+
+    // One-release M17 migration: this startup path is the narrowest shared
+    // place with both the durable session and legacy overlay available. Save
+    // folded comments before stripping the compatibility input so an
+    // interrupted migration retries without losing or duplicating drafts.
+    let overlay_path = workspace_paths.overlay_file();
+    migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path)?;
+
+    // `gander mcp` rebuilds its snapshot session on a dedicated thread
+    // (ReviewSession is single-threaded); capture the Send ingredients after
+    // legacy draft migration so the fallback sees the durable comments.
+    let mcp_ingredients = matches!(command, Command::Mcp).then(|| {
+        (
+            session.target.clone(),
+            diff.clone(),
+            session.to_state(),
+            config.clone(),
+            generated_matcher.clone(),
+        )
     });
 
     match command {
@@ -1355,8 +1364,9 @@ fn run() -> color_eyre::Result<()> {
             }
             eprintln!("gander acp: serving snapshot (no live TUI for this workspace)");
             let overlay_path = workspace_paths.overlay_file();
-            let mut server =
-                crate::acp::AcpServer::new(session, overlay_path)?.with_jj(Box::new(jj.clone()));
+            let mut server = crate::acp::AcpServer::new(session, overlay_path)?
+                .with_jj(Box::new(jj.clone()))
+                .with_state_path(state_path.clone());
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock())?;
@@ -1435,7 +1445,7 @@ fn run() -> color_eyre::Result<()> {
         }
         Command::Drafts { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_drafts_command(command, &workspace_paths.overlay_file())?
+            handle_drafts_command(command, &session, &repo, &mut state, &state_path)?
         }
         Command::Files { command } => match command {
             FilesCommand::List { format } => match format {
@@ -1525,6 +1535,9 @@ fn run() -> color_eyre::Result<()> {
                     provenance_snapshot(&session, &state.sessions[idx]),
                     anchor.clone(),
                 );
+                let initial_state = initial_state
+                    .map(Into::into)
+                    .unwrap_or_else(|| config.comments.initial_state.into());
                 let comment = review::add_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
@@ -1538,9 +1551,13 @@ fn run() -> color_eyre::Result<()> {
                         body,
                         kind: kind.map(Into::into),
                         action: action.and_then(action_intent_arg_to_option),
-                        state: initial_state
-                            .map(Into::into)
-                            .unwrap_or_else(|| config.comments.initial_state.into()),
+                        state: initial_state,
+                        author: Identity::local_human(),
+                        channel: if initial_state == CommentState::Todo {
+                            Channel::Delegation
+                        } else {
+                            Channel::Note
+                        },
                     },
                 )
                 .map_err(into_user_error)?;
@@ -1590,6 +1607,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         reply,
+                        Identity::local_human(),
                         true,
                         snapshot,
                     )
@@ -1620,6 +1638,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         body,
+                        Identity::local_human(),
                         true,
                         snapshot,
                     )
@@ -1629,6 +1648,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         body,
+                        Identity::local_human(),
                         snapshot,
                     )
                 }
@@ -2455,17 +2475,41 @@ fn drafts_spec_unknown_fields(value: &serde_json::Value) -> Vec<String> {
 
 fn handle_drafts_command(
     command: DraftsCommand,
-    overlay_path: &std::path::Path,
+    session: &ReviewSession,
+    repo: &std::path::Path,
+    state: &mut ReviewState,
+    state_path: &std::path::Path,
 ) -> color_eyre::Result<()> {
-    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
+    let target = session_target_spec(repo, &session.target);
+    let active_session_id =
+        review::find_session_for_target(state, &target).map(|item| item.id.clone());
     match command {
-        DraftsCommand::List => print_json(&overlay.drafts)?,
+        DraftsCommand::List => {
+            let drafts = state
+                .comments
+                .iter()
+                .filter(|comment| {
+                    active_session_id
+                        .as_deref()
+                        .is_some_and(|id| comment.belongs_to_session(id))
+                        && comment.author.kind == crate::state::AuthorKind::Agent
+                        && comment.state == CommentState::Draft
+                })
+                .collect::<Vec<_>>();
+            print_json(&drafts)?;
+        }
         DraftsCommand::Add { file } => {
             let spec: DraftsSpec = read_json_spec(file.as_ref(), "draft")?;
             let drafts = match spec {
                 DraftsSpec::One(draft) => vec![draft],
                 DraftsSpec::Many { drafts } => drafts,
             };
+            let id = review::ensure_session(state, &target, None).id.clone();
+            let idx = state
+                .sessions
+                .iter()
+                .position(|item| item.id == id)
+                .unwrap();
             let mut ids = Vec::new();
             for draft in drafts {
                 if draft.path.trim().is_empty() {
@@ -2474,25 +2518,56 @@ fn handle_drafts_command(
                 if draft.body.trim().is_empty() {
                     return Err(user_error("body must not be empty"));
                 }
-                let id = uuid::Uuid::new_v4().to_string();
-                overlay.drafts.push(AgentDraft {
-                    id: id.clone(),
-                    path: draft.path,
-                    line: draft.line,
-                    body: draft.body,
-                    state: DraftState::Pending,
-                    accepted_comment_id: None,
-                });
-                ids.push(id);
+                ensure_diff_file(session, &draft.path)?;
+                let anchor = session
+                    .files
+                    .iter()
+                    .find(|review_file| review_file.path == draft.path)
+                    .and_then(|review_file| {
+                        comment_anchor_for_file_lines(review_file, draft.line, draft.line)
+                    });
+                let observation = crate::provenance::CommentObservation::new(
+                    provenance_snapshot(session, &state.sessions[idx]),
+                    anchor.clone(),
+                );
+                let comment = review::add_comment(
+                    &mut state.sessions[idx],
+                    &mut state.comments,
+                    review::NewComment {
+                        session_id: id.clone(),
+                        path: Some(draft.path),
+                        line: draft.line,
+                        end_line: None,
+                        anchor,
+                        observation: Some(observation),
+                        body: draft.body,
+                        kind: None,
+                        action: None,
+                        state: CommentState::Draft,
+                        author: Identity::agent(),
+                        channel: Channel::Onboarding,
+                    },
+                )
+                .map_err(into_user_error)?;
+                ids.push(comment.id);
             }
-            merge_draft_dispositions_from_disk(&mut overlay, overlay_path);
-            overlay.save(overlay_path)?;
+            state.save(state_path)?;
             print_json(&serde_json::json!({ "ids": ids }))?;
         }
         DraftsCommand::Remove { ids } => {
+            let Some(active_session_id) = active_session_id else {
+                return Err(user_error("no active review session"));
+            };
             let unknown = ids
                 .iter()
-                .filter(|id| !overlay.drafts.iter().any(|draft| &draft.id == *id))
+                .filter(|id| {
+                    !state.comments.iter().any(|comment| {
+                        &comment.id == *id
+                            && comment.belongs_to_session(&active_session_id)
+                            && comment.author.kind == crate::state::AuthorKind::Agent
+                            && comment.state == CommentState::Draft
+                    })
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             if !unknown.is_empty() {
@@ -2501,12 +2576,46 @@ fn handle_drafts_command(
                     unknown.join(", ")
                 )));
             }
-            overlay.drafts.retain(|draft| !ids.contains(&draft.id));
-            overlay.save(overlay_path)?;
-            println!("Removed {}; remaining {}", ids.len(), overlay.drafts.len());
+            state.comments.retain(|comment| !ids.contains(&comment.id));
+            state.save(state_path)?;
+            let remaining = state
+                .comments
+                .iter()
+                .filter(|comment| {
+                    comment.belongs_to_session(&active_session_id)
+                        && comment.author.kind == crate::state::AuthorKind::Agent
+                        && comment.state == CommentState::Draft
+                })
+                .count();
+            println!("Removed {}; remaining {remaining}", ids.len());
         }
     }
     Ok(())
+}
+
+fn migrate_legacy_overlay_drafts(
+    session: &mut ReviewSession,
+    state: &mut ReviewState,
+    state_path: &std::path::Path,
+    overlay_path: &std::path::Path,
+) -> color_eyre::Result<usize> {
+    let mut overlay = AgentOverlay::load_or_default(overlay_path)?;
+    if !overlay.has_legacy_drafts() {
+        return Ok(0);
+    }
+    let before = session.to_state();
+    let folded = session.fold_legacy_agent_drafts(&overlay);
+    if folded > 0 {
+        let migrated = session.to_state();
+        if let Err(error) = migrated.save(state_path) {
+            session.apply_review_state(before);
+            return Err(error);
+        }
+        *state = migrated;
+    }
+    overlay.clear_legacy_drafts();
+    overlay.save(overlay_path)?;
+    Ok(folded)
 }
 
 fn read_spec_contents(file: Option<&PathBuf>, spec_name: &str) -> color_eyre::Result<String> {
@@ -2697,19 +2806,6 @@ fn warn_target_line_space(
         );
     }
     Ok(())
-}
-
-fn merge_draft_dispositions_from_disk(overlay: &mut AgentOverlay, overlay_path: &std::path::Path) {
-    if let Ok(on_disk) = AgentOverlay::load_or_default(overlay_path) {
-        for draft in &mut overlay.drafts {
-            if let Some(disk_draft) = on_disk.drafts.iter().find(|disk| disk.id == draft.id)
-                && draft.state == DraftState::Pending
-            {
-                draft.state = disk_draft.state;
-                draft.accepted_comment_id = disk_draft.accepted_comment_id.clone();
-            }
-        }
-    }
 }
 
 fn is_broken_pipe_report(error: &color_eyre::Report) -> bool {
@@ -3523,41 +3619,217 @@ mod tests {
     #[test]
     fn drafts_cli_adds_and_strictly_removes() {
         let dir = tempfile::tempdir().unwrap();
-        let overlay_path = dir.path().join("agent.json");
+        let state_path = dir.path().join("state.json");
         let spec_path = dir.path().join("draft.json");
         std::fs::write(
             &spec_path,
             r#"{"path":"src/lib.rs","line":12,"body":"Please check this."}"#,
         )
         .unwrap();
+        let session = crate::tui::test_support::snapshot_session(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -12 +12 @@\n-old\n+new\n",
+        );
+        let mut state = ReviewState::default();
 
         handle_drafts_command(
             DraftsCommand::Add {
                 file: Some(spec_path),
             },
-            &overlay_path,
+            &session,
+            &session.repo,
+            &mut state,
+            &state_path,
         )
         .unwrap();
-        let overlay = AgentOverlay::load_or_default(&overlay_path).unwrap();
-        assert_eq!(overlay.drafts.len(), 1);
-        assert_eq!(overlay.drafts[0].state, DraftState::Pending);
-        let id = overlay.drafts[0].id.clone();
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.comments[0].state, CommentState::Draft);
+        assert_eq!(state.comments[0].channel, Channel::Onboarding);
+        assert_eq!(state.comments[0].author, Identity::agent());
+        let id = state.comments[0].id.clone();
 
         let error = handle_drafts_command(
             DraftsCommand::Remove {
                 ids: vec!["missing".to_owned()],
             },
-            &overlay_path,
+            &session,
+            &session.repo,
+            &mut state,
+            &state_path,
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown draft id(s): missing"));
 
-        handle_drafts_command(DraftsCommand::Remove { ids: vec![id] }, &overlay_path).unwrap();
+        handle_drafts_command(
+            DraftsCommand::Remove { ids: vec![id] },
+            &session,
+            &session.repo,
+            &mut state,
+            &state_path,
+        )
+        .unwrap();
+        assert!(state.comments.is_empty());
+    }
+
+    #[test]
+    fn legacy_overlay_migration_persists_pending_once_and_consumes_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let overlay_path = dir.path().join("agent.json");
+        std::fs::write(
+            &overlay_path,
+            r#"{"version":1,"drafts":[{"id":"pending","path":"a.txt","line":1,"body":"review this","state":"pending"},{"id":"accepted","path":"a.txt","body":"old","state":"accepted","accepted_comment_id":"existing"},{"id":"discarded","path":"a.txt","body":"never","state":"discarded"}]}"#,
+        )
+        .unwrap();
+        let mut session = crate::tui::test_support::snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mut state = ReviewState::default();
+
+        assert_eq!(
+            migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path,)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path,)
+                .unwrap(),
+            0
+        );
+        let loaded = ReviewState::load_or_default(&state_path).unwrap();
+        assert_eq!(loaded.comments.len(), 1);
+        assert_eq!(loaded.comments[0].id, "pending");
+        assert_eq!(loaded.comments[0].author, Identity::agent());
+        assert_eq!(loaded.comments[0].channel, Channel::Onboarding);
+        let overlay_json = std::fs::read_to_string(&overlay_path).unwrap();
+        assert!(!overlay_json.contains("drafts"));
+        assert!(
+            !loaded
+                .comments
+                .iter()
+                .any(|comment| comment.id == "discarded")
+        );
+        assert!(
+            !loaded
+                .comments
+                .iter()
+                .any(|comment| comment.id == "accepted")
+        );
+    }
+
+    #[test]
+    fn legacy_overlay_migration_keeps_drafts_when_state_save_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let overlay_path = dir.path().join("agent.json");
+        std::fs::write(
+            &overlay_path,
+            r#"{"version":1,"drafts":[{"id":"pending","path":"a.txt","body":"review","state":"pending"},{"id":"accepted","path":"a.txt","body":"old","state":"accepted","accepted_comment_id":"existing"},{"id":"discarded","path":"a.txt","body":"never","state":"discarded"}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(state_path.with_extension("json.tmp")).unwrap();
+        let mut session = crate::tui::test_support::snapshot_session("");
+        let mut state = ReviewState::default();
+
+        assert!(
+            migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path,)
+                .is_err()
+        );
         assert!(
             AgentOverlay::load_or_default(&overlay_path)
                 .unwrap()
-                .drafts
-                .is_empty()
+                .has_legacy_drafts()
+        );
+        assert!(
+            !session
+                .comments
+                .iter()
+                .any(|comment| comment.id == "pending")
+        );
+
+        std::fs::remove_dir(state_path.with_extension("json.tmp")).unwrap();
+        assert_eq!(
+            migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path,)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .comments
+                .iter()
+                .filter(|comment| comment.id == "pending")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn legacy_overlay_save_failure_retries_without_duplicate_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let overlay_path = dir.path().join("agent.json");
+        std::fs::write(
+            &overlay_path,
+            r#"{"version":1,"drafts":[{"id":"pending","path":"a.txt","body":"review","state":"pending"}]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(overlay_path.with_extension("json.tmp")).unwrap();
+        let mut session = crate::tui::test_support::snapshot_session("");
+        let mut state = ReviewState::default();
+
+        assert!(
+            migrate_legacy_overlay_drafts(&mut session, &mut state, &state_path, &overlay_path,)
+                .is_err()
+        );
+        let persisted = ReviewState::load_or_default(&state_path).unwrap();
+        assert_eq!(
+            persisted
+                .comments
+                .iter()
+                .filter(|comment| comment.id == "pending")
+                .count(),
+            1
+        );
+        assert!(
+            AgentOverlay::load_or_default(&overlay_path)
+                .unwrap()
+                .has_legacy_drafts()
+        );
+
+        drop(session);
+        drop(state);
+        let mut restarted_state = ReviewState::load_or_default(&state_path).unwrap();
+        let mut restarted_session = crate::tui::test_support::snapshot_session("");
+        restarted_session.apply_review_state(restarted_state.clone());
+        std::fs::remove_dir(overlay_path.with_extension("json.tmp")).unwrap();
+        assert_eq!(
+            migrate_legacy_overlay_drafts(
+                &mut restarted_session,
+                &mut restarted_state,
+                &state_path,
+                &overlay_path,
+            )
+            .unwrap(),
+            0
+        );
+        let persisted = ReviewState::load_or_default(&state_path).unwrap();
+        assert_eq!(
+            persisted
+                .comments
+                .iter()
+                .filter(|comment| comment.id == "pending")
+                .count(),
+            1
+        );
+        assert!(
+            !persisted
+                .comments
+                .iter()
+                .any(|comment| comment.id == "accepted" || comment.id == "discarded")
+        );
+        assert!(
+            !AgentOverlay::load_or_default(&overlay_path)
+                .unwrap()
+                .has_legacy_drafts()
         );
     }
 
@@ -4393,6 +4665,8 @@ mod tests {
                 kind: None,
                 action: None,
                 state: CommentState::Todo,
+                author: Identity::local_human(),
+                channel: Channel::Delegation,
             },
         )
         .unwrap();
@@ -4501,6 +4775,8 @@ mod tests {
                 kind: None,
                 action: None,
                 state: CommentState::Todo,
+                author: Identity::local_human(),
+                channel: Channel::Delegation,
             },
         )
         .unwrap();

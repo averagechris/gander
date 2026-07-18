@@ -30,8 +30,8 @@ use crate::{
     jj::{JjBackend, ReviewTarget as JjReviewTarget},
     registry, review,
     state::{
-        ActionIntent, CommentKind, CommentState, ReviewState, ReviewTarget as StateReviewTarget,
-        WalkthroughStep,
+        ActionIntent, Channel, CommentKind, CommentState, Identity, ReviewState,
+        ReviewTarget as StateReviewTarget, WalkthroughStep,
     },
 };
 
@@ -391,12 +391,12 @@ impl GanderMcp {
         // ReviewSession itself is not Send (interior caches), so it is
         // constructed on the thread that owns it.
         std::thread::spawn(move || {
-            let session = session_factory();
+            let mut session = session_factory();
             while let Ok(request) = receiver.recv() {
-                // Pick up dispositions the TUI may have written to the
-                // shared overlay since the last call.
+                // Pick up non-comment overlay suggestions written since the
+                // last call.
                 handler.refresh_overlay();
-                let response = handler.handle_line(&session, &request.line);
+                let response = handler.handle_line(&mut session, &request.line);
                 let _ = request.reply.send(response);
             }
         });
@@ -434,7 +434,24 @@ impl GanderMcp {
 
     #[tool(description = "Human review comments recorded in this session")]
     fn comments(&self) -> Result<CallToolResult, McpError> {
-        self.call("review/comments", Value::Null)
+        let context = self.selected_review_context()?;
+        let state = self.load_state()?;
+        let target = review::SessionTargetSpec {
+            repo: Some(context.repo.display().to_string()),
+            base: Some(context.base.clone()),
+            revision: Some(context.revision.clone()),
+            revset: Some(format!("{}..{}", context.base, context.revision)),
+        };
+        let active_session_id =
+            review::find_session_for_target(&state, &target).map(|session| session.id.as_str());
+        let comments = state
+            .comments
+            .iter()
+            .filter(|comment| match active_session_id {
+                Some(id) => comment.belongs_to_session(id),
+                None => comment.session_id.is_none(),
+            });
+        json_result(crate::acp::comments_json(comments))
     }
 
     #[tool(
@@ -598,14 +615,40 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<DraftCommentParams>,
     ) -> Result<CallToolResult, McpError> {
-        self.call(
-            "review/draft_comment",
-            json!({
-                "path": params.path,
-                "line": params.line,
-                "body": params.body,
-            }),
-        )
+        let context = self.selected_review_context()?;
+        Self::ensure_selected_diff_file(&context, &params.path)?;
+        let line = params.line.map(|line| line as usize);
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let session_id = state.sessions[idx].id.clone();
+            let anchor = context
+                .files
+                .iter()
+                .find(|file| file.path == params.path)
+                .and_then(|file| crate::anchor::comment_anchor_for_file_diff(file, line, line));
+            let observation = crate::provenance::CommentObservation::new(
+                Self::provenance_snapshot(&context, &state.sessions[idx]),
+                anchor.clone(),
+            );
+            review::add_comment(
+                &mut state.sessions[idx],
+                &mut state.comments,
+                review::NewComment {
+                    session_id,
+                    path: Some(params.path),
+                    line,
+                    end_line: None,
+                    anchor,
+                    observation: Some(observation),
+                    body: params.body,
+                    kind: None,
+                    action: None,
+                    state: CommentState::Draft,
+                    author: Identity::agent(),
+                    channel: Channel::Onboarding,
+                },
+            )
+        })
     }
 
     #[tool(
@@ -689,6 +732,10 @@ impl GanderMcp {
                 Self::provenance_snapshot(&context, &state.sessions[idx]),
                 anchor.clone(),
             );
+            let initial_state = params
+                .state
+                .map(Into::into)
+                .unwrap_or(this.initial_comment_state);
             review::add_comment(
                 &mut state.sessions[idx],
                 &mut state.comments,
@@ -702,10 +749,13 @@ impl GanderMcp {
                     body: params.body,
                     kind: params.kind,
                     action: params.action,
-                    state: params
-                        .state
-                        .map(Into::into)
-                        .unwrap_or(this.initial_comment_state),
+                    state: initial_state,
+                    author: Identity::agent(),
+                    channel: if initial_state == CommentState::Todo {
+                        Channel::Delegation
+                    } else {
+                        Channel::Note
+                    },
                 },
             )
         })
@@ -718,6 +768,7 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentsReadyParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
         let all_drafts = params.all_drafts.unwrap_or(false);
         let ids = params.ids.unwrap_or_default();
         if all_drafts != ids.is_empty() {
@@ -727,7 +778,7 @@ impl GanderMcp {
             ));
         }
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
+            let idx = this.ensure_session_index_for_context(state, &context);
             if all_drafts {
                 review::ready_all_drafts(&mut state.sessions[idx], &mut state.comments)
             } else {
@@ -743,26 +794,17 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentResolveParams>,
     ) -> Result<CallToolResult, McpError> {
-        let context = params
-            .reply
-            .as_ref()
-            .map(|_| self.selected_review_context())
-            .transpose()?;
+        let context = self.selected_review_context()?;
         self.with_state_mut(|state, this| {
-            let idx = match &context {
-                Some(context) => this.ensure_session_index_for_context(state, context),
-                None => this.ensure_session_index(state),
-            };
+            let idx = this.ensure_session_index_for_context(state, &context);
             if let Some(reply) = params.reply {
-                let snapshot = Self::provenance_snapshot(
-                    context.as_ref().expect("reply context captured"),
-                    &state.sessions[idx],
-                );
+                let snapshot = Self::provenance_snapshot(&context, &state.sessions[idx]);
                 review::reply_and_maybe_resolve_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
                     &params.id,
                     reply,
+                    Identity::agent(),
                     true,
                     snapshot,
                 )
@@ -788,6 +830,7 @@ impl GanderMcp {
                 &mut state.comments,
                 &params.id,
                 params.body,
+                Identity::agent(),
                 params.resolve.unwrap_or(false),
                 snapshot,
             )
@@ -801,8 +844,9 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<CommentSetStateParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
+            let idx = this.ensure_session_index_for_context(state, &context);
             review::set_comment_state(
                 &mut state.sessions[idx],
                 &mut state.comments,
@@ -1479,7 +1523,13 @@ mod tests {
 
         let overlay =
             crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.drafts.len(), 1);
+        assert!(!overlay.has_legacy_drafts());
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert!(state.comments.iter().any(|comment| {
+            comment.id == draft["id"].as_str().unwrap()
+                && comment.author.kind == crate::state::AuthorKind::Agent
+                && comment.channel == Channel::Onboarding
+        }));
         assert_eq!(overlay.chunks[0].title, "core change");
         assert_eq!(overlay.chunks[0].change_id, None);
         assert_eq!(
@@ -1488,6 +1538,78 @@ mod tests {
         );
         assert_eq!(overlay.briefs.len(), 1);
         assert_eq!(overlay.briefs[0].change_id, "abc");
+    }
+
+    #[test]
+    fn comment_mutations_are_immediately_visible_through_mcp_comment_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let draft = result_json(
+            &server
+                .draft_comment(Parameters(DraftCommentParams {
+                    path: "src/app.rs".into(),
+                    line: Some(1),
+                    body: "durable draft".into(),
+                }))
+                .unwrap(),
+        );
+        let id = draft["id"].as_str().unwrap().to_owned();
+
+        let comments = result_json(&server.comments().unwrap());
+        assert_eq!(comments[0]["id"], id);
+        assert_eq!(comments[0]["state"], "draft");
+        assert_eq!(comments[0]["channel"], "onboarding");
+        assert_eq!(comments[0]["author"]["kind"], "agent");
+
+        server
+            .comments_ready(Parameters(CommentsReadyParams {
+                ids: Some(vec![id.clone()]),
+                all_drafts: None,
+            }))
+            .unwrap();
+        let comments = result_json(&server.comments().unwrap());
+        assert_eq!(comments[0]["state"], "todo");
+        assert_eq!(comments[0]["channel"], "delegation");
+
+        server
+            .comment_reply(Parameters(CommentReplyParams {
+                id: id.clone(),
+                body: "agent response".into(),
+                resolve: None,
+            }))
+            .unwrap();
+        let comments = result_json(&server.comments().unwrap());
+        assert_eq!(comments[0]["replies"][0]["body"], "agent response");
+        assert_eq!(comments[0]["replies"][0]["author"]["kind"], "agent");
+
+        server
+            .comment_resolve(Parameters(CommentResolveParams { id, reply: None }))
+            .unwrap();
+        let comments = result_json(&server.comments().unwrap());
+        assert_eq!(comments[0]["state"], "resolved");
+    }
+
+    #[test]
+    fn mcp_comment_read_defaults_legacy_annotation_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        std::fs::write(
+            &server.state_path,
+            r#"{"comments":[{"id":"legacy","body":"legacy","state":"todo","created_at":"2026-01-01T00:00:00Z","replies":[{"id":"reply","body":"done","created_at":"2026-01-01T00:01:00Z"}]}]}"#,
+        )
+        .unwrap();
+
+        let comments = result_json(&server.comments().unwrap());
+
+        assert_eq!(
+            comments[0]["author"],
+            json!({ "kind": "human", "name": "local" })
+        );
+        assert_eq!(comments[0]["channel"], "delegation");
+        assert_eq!(
+            comments[0]["replies"][0]["author"],
+            json!({ "kind": "human", "name": "local" })
+        );
     }
 
     #[test]

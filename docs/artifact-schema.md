@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `8`.
+Current schema version: `9`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -30,7 +30,7 @@ config.
 
 ```json
 {
-  "version": 8,
+  "version": 9,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -94,6 +94,8 @@ config.
       },
       "body": "Comment body",
       "state": "todo",
+      "author": { "kind": "human", "name": "Reviewer" },
+      "channel": "delegation",
       "observation": {
         "snapshot": {
           "captured_at": "2026-06-30T00:00:00Z",
@@ -146,6 +148,7 @@ config.
         {
           "id": "reply-uuid",
           "body": "Acknowledged; resolving after the fix.",
+          "author": { "kind": "agent", "name": "agent" },
           "created_at": "2026-06-30T00:05:00Z",
           "result": {
             "parent_comment_id": "stable-ish-id",
@@ -268,6 +271,17 @@ Notes:
   `resolved` is retained history. Missing values deserialize as `draft` for
   artifacts written before version 4 and for persisted state written before
   `CommentState` existed.
+- `comments[].author` is an identity with lowercase `kind` (`human` or
+  `agent`) and a non-empty `name`; `comments[].channel` is `onboarding`,
+  `delegation`, `collaboration`, or `note`. Replies carry their own `author`
+  and remain in the parent comment's channel. Todo comments must use the
+  delegation channel.
+- During the one-release state/artifact compatibility window, a missing author
+  becomes the deterministic local human identity `{ "kind": "human",
+  "name": "local" }`. A missing channel derives from state (`todo` becomes
+  `delegation`; draft/resolved become `note`), and legacy replies receive the
+  same local identity. New agent-authored drafts use the temporary deterministic
+  agent name `agent` until identity configuration lands.
 - Full exports include all comment states. Prompt handoff and delegation select
   only open durable action items plus unlinked `todo` comments by default; draft
   comments are rejected by explicit delegate selectors unless first readied.
@@ -304,6 +318,8 @@ Notes:
 
 ## Version history
 
+- `9`: comments carry durable author identity and annotation channel; replies
+  carry author identity. Legacy fields are serde-defaulted from state.
 - `8`: optional immutable comment observations and reply results add portable
   A→B patch provenance while preserving legacy comments/replies.
 - `7`: `tasks` is renamed to `action_items`, comment backrefs are
@@ -320,9 +336,9 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
-Review-state schema `3` introduces the optional persisted observation/result
-fields. Delegation schema `4` carries the same comment evidence and reply
-results. Delegation's existing top-level `fingerprints.diff` retains its v3
+Review-state schema `4` adds durable comment author/channel and reply author
+fields. Delegation schema `5` carries author/channel on comment evidence and
+reply authors. Delegation's existing top-level `fingerprints.diff` retains its v3
 path-plus-exact-file-fingerprint algorithm; provenance uses the separate
 versioned `observation.snapshot.scope.aggregate`. Both remain backward-readable
 through serde defaults.
@@ -330,6 +346,5 @@ through serde defaults.
 ## Planned schema additions
 
 - per-file ignored/collapsed metadata
-- reviewer identity/profile metadata
 - review disposition/intent (`comment`, `approve`, `needs-work`, etc.) as
   local state, not a direct forge-posting integration

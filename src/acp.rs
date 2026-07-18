@@ -3,8 +3,8 @@
 //! `gander acp` exposes the current review session over a line-delimited
 //! JSON-RPC 2.0 protocol on stdio (the transport used by the Agent Client
 //! Protocol). Agents can read the diff, comments, and viewed state, and can
-//! write review suggestions (ordering, flagged sections, chunks, draft
-//! comments) into the shared agent overlay that the TUI surfaces live.
+//! write non-comment review suggestions into the shared agent overlay and
+//! agent-authored draft comments into durable review state.
 //!
 //! Two hosting modes share the same [`AcpHandler`] dispatch:
 //! - standalone: [`AcpServer`] owns a session snapshot and serves stdio
@@ -26,10 +26,10 @@ use serde_json::{Value, json};
 
 use crate::{
     agent::{
-        AgentDraft, AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief,
-        ChangeDiffContext, ChunkImportance, ChunkPart, ChunkValidationContext, DraftState,
-        FlagPriority, ReviewChunk, brief_without_spotlight_warnings, invalid_chunk_parts_message,
-        remove_review_chunks, replace_review_chunks, update_review_chunks,
+        AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief, ChangeDiffContext,
+        ChunkImportance, ChunkPart, ChunkValidationContext, FlagPriority, ReviewChunk,
+        brief_without_spotlight_warnings, invalid_chunk_parts_message, remove_review_chunks,
+        replace_review_chunks, update_review_chunks,
     },
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
@@ -72,6 +72,22 @@ pub struct AcpHandler {
 pub struct AcpServer {
     session: ReviewSession,
     handler: AcpHandler,
+    state_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewMutation {
+    DraftComment {
+        path: String,
+        line: Option<usize>,
+        body: String,
+    },
+}
+
+#[derive(Debug)]
+struct ParsedReviewMutation {
+    id: Option<Value>,
+    mutation: ReviewMutation,
 }
 
 impl AcpServer {
@@ -79,6 +95,7 @@ impl AcpServer {
         Ok(Self {
             session,
             handler: AcpHandler::new(overlay_path)?,
+            state_path: None,
         })
     }
 
@@ -89,6 +106,11 @@ impl AcpServer {
         self
     }
 
+    pub fn with_state_path(mut self, state_path: PathBuf) -> Self {
+        self.state_path = Some(state_path);
+        self
+    }
+
     /// Serve requests until EOF. One JSON-RPC message per line.
     pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> Result<()> {
         for line in input.lines() {
@@ -96,7 +118,15 @@ impl AcpServer {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Some(response) = self.handler.handle_line(&self.session, &line) {
+            let response = match parse_review_mutation(&line) {
+                Some(Ok(request)) => {
+                    let result = self.apply_review_mutation(request.mutation);
+                    review_mutation_response(request.id, result)
+                }
+                Some(Err((id, message))) => id.map(|id| error_response(id, -32602, &message)),
+                None => self.handler.handle_line(&mut self.session, &line),
+            };
+            if let Some(response) = response {
                 serde_json::to_writer(&mut output, &response)?;
                 output.write_all(b"\n")?;
                 output.flush()?;
@@ -105,10 +135,79 @@ impl AcpServer {
         Ok(())
     }
 
+    fn apply_review_mutation(&mut self, mutation: ReviewMutation) -> Result<Value, String> {
+        let state_path = self
+            .state_path
+            .as_deref()
+            .ok_or_else(|| "durable review state path unavailable".to_owned())?;
+        let mut latest = crate::state::ReviewState::load_or_default(state_path)
+            .map_err(|error| error.to_string())?;
+        let value = apply_review_mutation_to_state(&self.session, &mut latest, mutation)?;
+        latest.save(state_path).map_err(|error| error.to_string())?;
+        self.session.apply_review_state(latest);
+        Ok(value)
+    }
+
     #[cfg(test)]
     fn handle_line(&mut self, line: &str) -> Option<Value> {
-        self.handler.handle_line(&self.session, line)
+        match parse_review_mutation(line) {
+            Some(Ok(request)) => {
+                let mut state = self.session.to_state();
+                let result =
+                    apply_review_mutation_to_state(&self.session, &mut state, request.mutation);
+                if result.is_ok() {
+                    self.session.apply_review_state(state);
+                }
+                review_mutation_response(request.id, result)
+            }
+            Some(Err((id, message))) => id.map(|id| error_response(id, -32602, &message)),
+            None => self.handler.handle_line(&mut self.session, line),
+        }
     }
+}
+
+fn apply_review_mutation_to_state(
+    session: &ReviewSession,
+    state: &mut crate::state::ReviewState,
+    mutation: ReviewMutation,
+) -> Result<Value, String> {
+    match mutation {
+        ReviewMutation::DraftComment { path, line, body } => session
+            .add_agent_draft_to_state(state, path, line, body)
+            .map(|comment| json!({ "id": comment.id }))
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn parse_review_mutation(
+    line: &str,
+) -> Option<Result<ParsedReviewMutation, (Option<Value>, String)>> {
+    let request: Value = serde_json::from_str(line).ok()?;
+    if request.get("method").and_then(Value::as_str) != Some("review/draft_comment") {
+        return None;
+    }
+    let id = request.get("id").cloned();
+    let params = request.get("params").cloned().unwrap_or(Value::Null);
+    let parsed = (|| {
+        let path = require_str(&params, "path")?;
+        let body = require_str(&params, "body")?;
+        let line = params
+            .get("line")
+            .and_then(Value::as_u64)
+            .map(|line| line as usize);
+        Ok(ParsedReviewMutation {
+            id: id.clone(),
+            mutation: ReviewMutation::DraftComment { path, line, body },
+        })
+    })();
+    Some(parsed.map_err(|message| (id, message)))
+}
+
+fn review_mutation_response(id: Option<Value>, result: Result<Value, String>) -> Option<Value> {
+    id.map(|id| match result {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(message) => error_response(id, -32000, &message),
+    })
 }
 
 impl AcpHandler {
@@ -146,7 +245,7 @@ impl AcpHandler {
 
     /// Handle one raw JSON-RPC message; `None` means no response is due
     /// (notification).
-    pub fn handle_line(&mut self, session: &ReviewSession, line: &str) -> Option<Value> {
+    pub fn handle_line(&mut self, session: &mut ReviewSession, line: &str) -> Option<Value> {
         let request: Value = match serde_json::from_str(line) {
             Ok(request) => request,
             Err(error) => {
@@ -175,7 +274,7 @@ impl AcpHandler {
 
     fn dispatch(
         &mut self,
-        session: &ReviewSession,
+        session: &mut ReviewSession,
         method: &str,
         params: &Value,
     ) -> Result<Value, String> {
@@ -248,28 +347,7 @@ impl AcpHandler {
                     "raw": file.diff.raw,
                 }))
             }
-            "review/comments" => Ok(json!(
-                session
-                    .comments
-                    .iter()
-                    .map(|comment| json!({
-                        "id": comment.id,
-                        "session_id": comment.session_id,
-                        "path": comment.path,
-                        "line": comment.line,
-                        "end_line": comment.end_line,
-                        "anchor": comment.anchor,
-                        "observation": comment.observation,
-                        "body": comment.body,
-                        "kind": comment.kind,
-                        "action": comment.action,
-                        "state": comment.state.label(),
-                        "replies": comment.replies,
-                        "created_at": comment.created_at,
-                        "updated_at": comment.updated_at,
-                    }))
-                    .collect::<Vec<_>>()
-            )),
+            "review/comments" => Ok(comments_json(session.comments.iter())),
             // Internal compact handoff used by MCP durable comment mutations.
             // It guarantees capture comes from the same selected live/snapshot
             // session as MCP reads, without another jj query.
@@ -500,24 +578,6 @@ impl AcpHandler {
                 self.save_overlay()?;
                 Ok(json!({ "briefs": self.overlay.briefs.len(), "warnings": warnings }))
             }
-            "review/draft_comment" => {
-                let path = require_str(params, "path")?;
-                let body = require_str(params, "body")?;
-                let draft = AgentDraft {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    path,
-                    line: params
-                        .get("line")
-                        .and_then(Value::as_u64)
-                        .map(|line| line as usize),
-                    body,
-                    state: DraftState::Pending,
-                    accepted_comment_id: None,
-                };
-                self.overlay.drafts.push(draft.clone());
-                self.save_overlay()?;
-                Ok(json!({ "id": draft.id }))
-            }
             other => Err(format!("unknown method: {other}")),
         }
     }
@@ -529,19 +589,6 @@ impl AcpHandler {
     }
 
     fn save_overlay(&mut self) -> Result<(), String> {
-        // Merge dispositions the TUI may have written since our last write:
-        // draft states/accepted ids flow TUI -> agent, everything else
-        // agent -> TUI.
-        if let Ok(on_disk) = AgentOverlay::load_or_default(&self.overlay_path) {
-            for draft in &mut self.overlay.drafts {
-                if let Some(disk_draft) = on_disk.drafts.iter().find(|disk| disk.id == draft.id)
-                    && draft.state == DraftState::Pending
-                {
-                    draft.state = disk_draft.state;
-                    draft.accepted_comment_id = disk_draft.accepted_comment_id.clone();
-                }
-            }
-        }
         self.overlay
             .save(&self.overlay_path)
             .map_err(|error| error.to_string())
@@ -591,6 +638,34 @@ impl AcpHandler {
             change_diffs,
         })
     }
+}
+
+pub(crate) fn comments_json<'a>(
+    comments: impl IntoIterator<Item = &'a crate::state::Comment>,
+) -> Value {
+    json!(
+        comments
+            .into_iter()
+            .map(|comment| json!({
+                "id": comment.id,
+                "session_id": comment.session_id,
+                "path": comment.path,
+                "line": comment.line,
+                "end_line": comment.end_line,
+                "anchor": comment.anchor,
+                "observation": comment.observation,
+                "body": comment.body,
+                "kind": comment.kind,
+                "action": comment.action,
+                "state": comment.state.label(),
+                "author": comment.author,
+                "channel": comment.channel,
+                "replies": comment.replies,
+                "created_at": comment.created_at,
+                "updated_at": comment.updated_at,
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
@@ -746,7 +821,9 @@ pub mod socket {
 
     use serde_json::{Value, json};
 
-    use super::{AcpHandler, error_response, is_present_method};
+    use super::{
+        AcpHandler, ReviewMutation, error_response, is_present_method, parse_review_mutation,
+    };
     use crate::{app::ReviewSession, jj::JjBackend};
 
     /// One JSON-RPC line from a connected agent, plus where to send the
@@ -787,6 +864,24 @@ pub mod socket {
                 Err((code, message)) => error_response(self.id, code, &message),
             };
             let _ = self.reply.send(Some(response.to_string()));
+        }
+    }
+
+    pub struct ReviewMutationRequest {
+        pub id: Option<Value>,
+        pub mutation: ReviewMutation,
+        reply: mpsc::Sender<Option<String>>,
+    }
+
+    impl ReviewMutationRequest {
+        pub fn respond(self, result: Result<Value, (i64, String)>) {
+            let response = self.id.map(|id| match result {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                Err((code, message)) => error_response(id, code, &message),
+            });
+            let _ = self
+                .reply
+                .send(response.map(|response| response.to_string()));
         }
     }
 
@@ -865,13 +960,23 @@ pub mod socket {
         /// changed (i.e. an agent wrote suggestions); latency is bounded by
         /// the event-loop tick.
         #[cfg(test)]
-        pub fn process_pending(&mut self, session: &mut ReviewSession) -> bool {
-            let (overlay_changed, commands) = self.drain_ui_commands(session);
+        pub fn process_pending(&mut self, session: &mut ReviewSession, state_path: &Path) -> bool {
+            let (overlay_changed, commands, mutations) = self.drain_ui_commands(session);
             for command in commands {
                 command.respond(Err((
                     -32000,
                     "present command was not applied by the TUI".to_owned(),
                 )));
+            }
+            for request in mutations {
+                let result = crate::tui::persist_acp_review_mutation(
+                    request.mutation.clone(),
+                    session,
+                    state_path,
+                    &crate::state::ReviewStateTombstones::default(),
+                )
+                .map_err(|error| (-32000, error.to_string()));
+                request.respond(result);
             }
             overlay_changed
         }
@@ -879,13 +984,31 @@ pub mod socket {
         pub fn drain_ui_commands(
             &mut self,
             session: &mut ReviewSession,
-        ) -> (bool, Vec<PresentRequest>) {
+        ) -> (bool, Vec<PresentRequest>, Vec<ReviewMutationRequest>) {
             let mut overlay_changed = false;
             let mut commands = Vec::new();
+            let mut mutations = Vec::new();
             while let Ok(request) = self.receiver.try_recv() {
                 if let Some(command) = parse_present_request(&request.line, request.reply.clone()) {
                     commands.push(command);
                     continue;
+                }
+                match parse_review_mutation(&request.line) {
+                    Some(Ok(parsed)) => {
+                        mutations.push(ReviewMutationRequest {
+                            id: parsed.id,
+                            mutation: parsed.mutation,
+                            reply: request.reply,
+                        });
+                        continue;
+                    }
+                    Some(Err((id, message))) => {
+                        let response =
+                            id.map(|id| error_response(id, -32602, &message).to_string());
+                        let _ = request.reply.send(response);
+                        continue;
+                    }
+                    None => {}
                 }
                 // Pick up dispositions the TUI wrote since the last request
                 // so reads (review/overlay) are never stale.
@@ -901,7 +1024,7 @@ pub mod socket {
                     .reply
                     .send(response.map(|response| response.to_string()));
             }
-            (overlay_changed, commands)
+            (overlay_changed, commands, mutations)
         }
     }
 
@@ -1213,6 +1336,15 @@ diff --git a/README.md b/README.md
     #[test]
     fn read_methods_expose_files_diff_and_comments() {
         let (mut server, _dir) = server();
+        server.session.comments[0]
+            .replies
+            .push(crate::state::CommentReply {
+                id: "reply".into(),
+                body: "agent reply".into(),
+                author: crate::state::Identity::agent(),
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: None,
+            });
 
         let files = call(&mut server, "review/files", Value::Null);
         let paths: Vec<&str> = files
@@ -1238,6 +1370,50 @@ diff --git a/README.md b/README.md
         assert_eq!(comments[0]["state"], "draft");
         assert!(comments[0]["session_id"].as_str().is_some());
         assert_eq!(comments[0]["path"], "src/app.rs");
+        assert_eq!(
+            comments[0]["author"],
+            json!({ "kind": "human", "name": "local" })
+        );
+        assert_eq!(comments[0]["channel"], "note");
+        assert_eq!(
+            comments[0]["replies"][0]["author"],
+            json!({ "kind": "agent", "name": "agent" })
+        );
+        assert_eq!(
+            comments[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "action",
+                "anchor",
+                "author",
+                "body",
+                "channel",
+                "created_at",
+                "end_line",
+                "id",
+                "kind",
+                "line",
+                "observation",
+                "path",
+                "replies",
+                "session_id",
+                "state",
+                "updated_at",
+            ])
+        );
+        assert_eq!(
+            comments[0]["replies"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["author", "body", "created_at", "id"])
+        );
 
         let context = call(&mut server, "review/provenance_context", Value::Null);
         assert_eq!(context["base"], "trunk()");
@@ -1248,6 +1424,111 @@ diff --git a/README.md b/README.md
                 .as_str()
                 .unwrap()
                 .contains("+new")
+        );
+    }
+
+    #[test]
+    fn standalone_read_does_not_clobber_newer_external_review_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let snapshot = session(dir.path());
+        let mut external = snapshot.to_state();
+        external.files.get_mut("src/app.rs").unwrap().viewed = true;
+        external.comments[0]
+            .replies
+            .push(crate::state::CommentReply {
+                id: "external-reply".into(),
+                body: "new reply".into(),
+                author: crate::state::Identity::agent(),
+                created_at: chrono::Utc::now(),
+                result: None,
+            });
+        external.comments.push(crate::state::Comment {
+            id: "external-comment".into(),
+            session_id: external.comments[0].session_id.clone(),
+            body: "new external comment".into(),
+            ..Default::default()
+        });
+        external.save(&state_path).unwrap();
+        let before = std::fs::read(&state_path).unwrap();
+        let mut server = AcpServer::new(snapshot, dir.path().join("agent.json"))
+            .unwrap()
+            .with_state_path(state_path.clone());
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "review/comments"
+        })
+        .to_string();
+
+        server
+            .serve(std::io::Cursor::new(format!("{request}\n")), Vec::new())
+            .unwrap();
+
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+        let loaded = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(loaded.files["src/app.rs"].viewed);
+        assert!(
+            loaded
+                .comments
+                .iter()
+                .any(|comment| comment.id == "external-comment")
+        );
+        assert!(
+            loaded.comments[0]
+                .replies
+                .iter()
+                .any(|reply| reply.id == "external-reply")
+        );
+    }
+
+    #[test]
+    fn standalone_draft_applies_to_latest_state_and_refreshes_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let snapshot = session(dir.path());
+        let mut external = snapshot.to_state();
+        external.files.get_mut("src/app.rs").unwrap().viewed = true;
+        external.comments.push(crate::state::Comment {
+            id: "external-comment".into(),
+            session_id: external.comments[0].session_id.clone(),
+            body: "keep me".into(),
+            ..Default::default()
+        });
+        external.save(&state_path).unwrap();
+        let mut server = AcpServer::new(snapshot, dir.path().join("agent.json"))
+            .unwrap()
+            .with_state_path(state_path.clone());
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "review/draft_comment",
+            "params": { "path": "src/app.rs", "line": 1, "body": "agent draft" }
+        })
+        .to_string();
+        let mut output = Vec::new();
+
+        server
+            .serve(std::io::Cursor::new(format!("{request}\n")), &mut output)
+            .unwrap();
+
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        let draft_id = response["result"]["id"].as_str().unwrap();
+        let loaded = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(loaded.files["src/app.rs"].viewed);
+        assert!(
+            loaded
+                .comments
+                .iter()
+                .any(|comment| comment.id == "external-comment")
+        );
+        assert!(loaded.comments.iter().any(|comment| comment.id == draft_id));
+        assert!(
+            server
+                .session
+                .comments
+                .iter()
+                .any(|comment| comment.id == draft_id)
         );
     }
 
@@ -1298,9 +1579,16 @@ diff --git a/README.md b/README.md
         assert_eq!(overlay.flags[0].priority, FlagPriority::Critical);
         assert_eq!(overlay.chunks.len(), 1);
         assert_eq!(overlay.chunks[0].title, "core change");
-        assert_eq!(overlay.drafts.len(), 1);
-        assert_eq!(overlay.drafts[0].id, draft["id"].as_str().unwrap());
-        assert_eq!(overlay.drafts[0].state, DraftState::Pending);
+        assert!(!overlay.has_legacy_drafts());
+        let durable = server
+            .session
+            .comments
+            .iter()
+            .find(|comment| comment.id == draft["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(durable.state, crate::state::CommentState::Draft);
+        assert_eq!(durable.channel, crate::state::Channel::Onboarding);
+        assert_eq!(durable.author.kind, crate::state::AuthorKind::Agent);
     }
 
     #[test]
@@ -1624,38 +1912,22 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn server_merges_tui_dispositions_instead_of_clobbering() {
+    fn server_appends_durable_agent_drafts_without_overlay_bucket() {
         let (mut server, dir) = server();
-        let draft = call(
+        call(
             &mut server,
             "review/draft_comment",
             json!({ "path": "README.md", "body": "first" }),
         );
-        let draft_id = draft["id"].as_str().unwrap().to_owned();
-
-        // Simulate the TUI accepting the draft on disk.
-        let overlay_path = dir.path().join("agent.json");
-        let mut on_disk = AgentOverlay::load_or_default(&overlay_path).unwrap();
-        on_disk.drafts[0].state = DraftState::Accepted;
-        on_disk.drafts[0].accepted_comment_id = Some("comment-1".to_owned());
-        on_disk.save(&overlay_path).unwrap();
-
-        // A subsequent agent write must not clobber the disposition.
         call(
             &mut server,
             "review/draft_comment",
             json!({ "path": "README.md", "body": "second" }),
         );
 
-        let merged = AgentOverlay::load_or_default(&overlay_path).unwrap();
-        let first = merged
-            .drafts
-            .iter()
-            .find(|draft| draft.id == draft_id)
-            .unwrap();
-        assert_eq!(first.state, DraftState::Accepted);
-        assert_eq!(first.accepted_comment_id.as_deref(), Some("comment-1"));
-        assert_eq!(merged.drafts.len(), 2);
+        assert_eq!(server.session.pending_agent_drafts().len(), 2);
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert!(!overlay.has_legacy_drafts());
     }
 
     #[test]
@@ -1706,6 +1978,7 @@ diff --git a/README.md b/README.md
     mod socket_tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixStream;
+        use std::path::Path;
 
         use super::*;
         use crate::acp::socket::AcpBridge;
@@ -1715,10 +1988,11 @@ diff --git a/README.md b/README.md
         fn pump_until<T>(
             bridge: &mut AcpBridge,
             session: &mut ReviewSession,
+            state_path: &Path,
             mut ready: impl FnMut() -> Option<T>,
         ) -> T {
             for _ in 0..200 {
-                bridge.process_pending(session);
+                bridge.process_pending(session, state_path);
                 if let Some(value) = ready() {
                     return value;
                 }
@@ -1730,6 +2004,7 @@ diff --git a/README.md b/README.md
         fn call_over_socket(
             bridge: &mut AcpBridge,
             session: &mut ReviewSession,
+            state_path: &Path,
             client: &mut BufReader<UnixStream>,
             request: &Value,
         ) -> Value {
@@ -1750,7 +2025,9 @@ diff --git a/README.md b/README.md
                     *response_in_thread.lock().unwrap() = Some(line);
                 }
             });
-            let line = pump_until(bridge, session, || response.lock().unwrap().take());
+            let line = pump_until(bridge, session, state_path, || {
+                response.lock().unwrap().take()
+            });
             reader_thread.join().unwrap();
             serde_json::from_str(&line).unwrap()
         }
@@ -1761,6 +2038,7 @@ diff --git a/README.md b/README.md
             let mut session = session(dir.path());
             let socket_path = dir.path().join("acp.sock");
             let overlay_path = dir.path().join("agent.json");
+            let state_path = dir.path().join("state.json");
             let mut bridge =
                 AcpBridge::bind(socket_path.clone(), overlay_path.clone(), None).unwrap();
             assert!(socket::is_live(&socket_path));
@@ -1770,6 +2048,7 @@ diff --git a/README.md b/README.md
             let response = call_over_socket(
                 &mut bridge,
                 &mut session,
+                &state_path,
                 &mut client,
                 &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
             );
@@ -1780,6 +2059,7 @@ diff --git a/README.md b/README.md
             let response = call_over_socket(
                 &mut bridge,
                 &mut session,
+                &state_path,
                 &mut client,
                 &json!({ "jsonrpc": "2.0", "id": 2, "method": "review/files" }),
             );
@@ -1789,6 +2069,7 @@ diff --git a/README.md b/README.md
             let response = call_over_socket(
                 &mut bridge,
                 &mut session,
+                &state_path,
                 &mut client,
                 &json!({
                     "jsonrpc": "2.0", "id": 3,
@@ -1797,14 +2078,52 @@ diff --git a/README.md b/README.md
                 }),
             );
             let draft_id = response["result"]["id"].as_str().unwrap();
-            assert!(
-                session
-                    .agent_drafts
-                    .iter()
-                    .any(|draft| draft.id == draft_id)
-            );
+            assert!(session.comments.iter().any(|draft| draft.id == draft_id
+                && draft.author.kind == crate::state::AuthorKind::Agent));
+            let persisted = ReviewState::load_or_default(&state_path).unwrap();
+            assert!(persisted.comments.iter().any(|draft| draft.id == draft_id));
             let overlay = AgentOverlay::load_or_default(&overlay_path).unwrap();
-            assert_eq!(overlay.drafts.len(), 1);
+            assert!(!overlay.has_legacy_drafts());
+        }
+
+        #[test]
+        fn socket_draft_reports_persistence_failure_without_keeping_volatile_comment() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut session = session(dir.path());
+            let initial_comment_ids = session
+                .comments
+                .iter()
+                .map(|comment| comment.id.clone())
+                .collect::<Vec<_>>();
+            let socket_path = dir.path().join("acp.sock");
+            let overlay_path = dir.path().join("agent.json");
+            let state_path = dir.path().join("state.json");
+            std::fs::create_dir(state_path.with_extension("json.tmp")).unwrap();
+            let mut bridge = AcpBridge::bind(socket_path.clone(), overlay_path, None).unwrap();
+            let mut client = BufReader::new(UnixStream::connect(&socket_path).unwrap());
+
+            let response = call_over_socket(
+                &mut bridge,
+                &mut session,
+                &state_path,
+                &mut client,
+                &json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "review/draft_comment",
+                    "params": { "path": "README.md", "body": "volatile" },
+                }),
+            );
+
+            assert_eq!(response["error"]["code"], -32000);
+            assert_eq!(
+                session
+                    .comments
+                    .iter()
+                    .map(|comment| comment.id.clone())
+                    .collect::<Vec<_>>(),
+                initial_comment_ids
+            );
+            assert!(!state_path.exists());
         }
 
         #[test]

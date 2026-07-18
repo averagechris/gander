@@ -1,11 +1,11 @@
 //! Shared state for agent collaboration: the "agent overlay".
 //!
 //! Agents connected over ACP (see [`crate::acp`]) write suggested review
-//! ordering, flagged sections, review chunks, and draft comments into a
+//! ordering, flagged sections, and review chunks into a
 //! plain JSON overlay file (`agent.json` in the per-workspace state dir,
 //! see [`crate::paths`]). The TUI loads and polls this file, surfaces the
-//! suggestions, and writes back draft dispositions so the collaboration is
-//! two-way while both processes stay independent.
+//! suggestions while both processes stay independent. Pre-M17 overlay drafts
+//! are retained only as a one-release, read-only migration input.
 
 use std::{fs, path::Path};
 
@@ -14,10 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::{DiffLineKind, FileDiff};
 
-pub const AGENT_OVERLAY_VERSION: u32 = 1;
+pub const AGENT_OVERLAY_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct AgentOverlay {
     pub version: u32,
     /// Suggested review order: file paths, highest priority first. Files not
@@ -30,8 +29,11 @@ pub struct AgentOverlay {
     /// Per-change briefings for stacked reviews: the high-level narrative
     /// of each jj change, shown as a chapter intro in the zen walkthrough.
     pub briefs: Vec<ChangeBrief>,
-    /// Agent-drafted comments awaiting human review.
-    pub drafts: Vec<AgentDraft>,
+    /// One-release compatibility input. Never serialized: pending entries are
+    /// folded into durable comments and accepted/discarded history is consumed
+    /// without being recreated.
+    #[serde(skip)]
+    pub(crate) legacy_drafts: Vec<LegacyAgentDraft>,
 }
 
 /// The agent's high-level briefing for one jj change: what it accomplishes,
@@ -804,40 +806,66 @@ mod validation_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentDraft {
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LegacyAgentDraft {
     pub id: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
     pub body: String,
     #[serde(default)]
-    pub state: DraftState,
+    pub state: LegacyDraftState,
     /// Set when a human accepts the draft: the id of the created comment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_comment_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DraftState {
+pub(crate) enum LegacyDraftState {
     #[default]
     Pending,
     Accepted,
     Discarded,
 }
 
-impl DraftState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Accepted => "accepted",
-            Self::Discarded => "discarded",
-        }
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CompatibleAgentOverlay {
+    version: u32,
+    ordering: Vec<String>,
+    flags: Vec<AgentFlag>,
+    chunks: Vec<ReviewChunk>,
+    briefs: Vec<ChangeBrief>,
+    drafts: Vec<LegacyAgentDraft>,
+}
+
+impl<'de> Deserialize<'de> for AgentOverlay {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let compatible = CompatibleAgentOverlay::deserialize(deserializer)?;
+        Ok(Self {
+            version: compatible.version,
+            ordering: compatible.ordering,
+            flags: compatible.flags,
+            chunks: compatible.chunks,
+            briefs: compatible.briefs,
+            legacy_drafts: compatible.drafts,
+        })
     }
 }
 
 impl AgentOverlay {
+    pub(crate) fn has_legacy_drafts(&self) -> bool {
+        !self.legacy_drafts.is_empty()
+    }
+
+    pub(crate) fn clear_legacy_drafts(&mut self) {
+        self.legacy_drafts.clear();
+    }
+
     pub fn load_or_default(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {
@@ -859,7 +887,9 @@ impl AgentOverlay {
         // corrupt the overlay both processes share.
         let mut tmp = path.to_path_buf();
         tmp.set_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        let mut persisted = self.clone();
+        persisted.version = AGENT_OVERLAY_VERSION;
+        fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
     }
@@ -1044,14 +1074,7 @@ mod tests {
                     body: "client -> middleware(aud?) -> handler".to_owned(),
                 }],
             }],
-            drafts: vec![AgentDraft {
-                id: "draft-1".to_owned(),
-                path: "src/risky.rs".to_owned(),
-                line: Some(42),
-                body: "consider handling the None case".to_owned(),
-                state: DraftState::Pending,
-                accepted_comment_id: None,
-            }],
+            legacy_drafts: Vec::new(),
         };
 
         overlay.save(&path).unwrap();
@@ -1059,6 +1082,19 @@ mod tests {
 
         assert_eq!(loaded, overlay);
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn legacy_drafts_deserialize_but_are_not_serialized() {
+        let overlay: AgentOverlay = serde_json::from_str(
+            r#"{"version":1,"drafts":[{"id":"pending","path":"src/lib.rs","line":4,"body":"check","state":"pending"},{"id":"discarded","path":"src/lib.rs","body":"old","state":"discarded"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(overlay.legacy_drafts.len(), 2);
+        assert_eq!(overlay.legacy_drafts[0].state, LegacyDraftState::Pending);
+        let json = serde_json::to_string(&overlay).unwrap();
+        assert!(!json.contains("drafts"));
     }
 
     #[test]

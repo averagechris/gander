@@ -9,9 +9,9 @@ use std::path::Path;
 
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
-    ActionIntent, ActionItem, ActionItemStatus, ClosedDisposition, Comment, CommentKind,
-    CommentReply, CommentState, ExternalTicket, ReviewSession, ReviewSessionStatus, ReviewState,
-    ReviewTarget, Walkthrough, WalkthroughStep,
+    ActionIntent, ActionItem, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
+    CommentReply, CommentState, ExternalTicket, Identity, ReviewSession, ReviewSessionStatus,
+    ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +205,8 @@ pub struct NewComment {
     pub action: Option<ActionIntent>,
     /// New comments may start as private drafts or actionable todos.
     pub state: CommentState,
+    pub author: Identity,
+    pub channel: Channel,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -250,6 +252,8 @@ pub fn add_comment(
         kind: new.kind,
         action: new.action,
         state: new.state,
+        author: new.author,
+        channel: new.channel,
         replies: Vec::new(),
         created_at: now,
         updated_at: Some(now),
@@ -337,6 +341,7 @@ pub fn ready_comments(
     let now = chrono::Utc::now();
     for index in &draft_indices {
         comments[*index].state = CommentState::Todo;
+        comments[*index].channel = Channel::Delegation;
         comments[*index].updated_at = Some(now);
     }
     touch_at(session, now);
@@ -375,6 +380,10 @@ pub fn set_comment_state(
     ensure_comment_belongs_to_session(comment, session)?;
     let now = chrono::Utc::now();
     comment.state = new_state;
+    if new_state == CommentState::Todo {
+        comment.channel = Channel::Delegation;
+    }
+    comment.validate()?;
     comment.updated_at = Some(now);
     touch_at(session, now);
     Ok(comment.clone())
@@ -393,9 +402,10 @@ pub fn reply_to_comment(
     comments: &mut [Comment],
     id: &str,
     body: String,
+    author: Identity,
     snapshot: crate::provenance::SnapshotEvidence,
 ) -> Result<Comment> {
-    reply_and_maybe_resolve_comment(session, comments, id, body, false, snapshot)
+    reply_and_maybe_resolve_comment(session, comments, id, body, author, false, snapshot)
 }
 
 pub fn reply_and_maybe_resolve_comment(
@@ -403,6 +413,7 @@ pub fn reply_and_maybe_resolve_comment(
     comments: &mut [Comment],
     id: &str,
     body: String,
+    author: Identity,
     resolve: bool,
     snapshot: crate::provenance::SnapshotEvidence,
 ) -> Result<Comment> {
@@ -413,6 +424,7 @@ pub fn reply_and_maybe_resolve_comment(
         .find(|comment| comment.id == canonical_id)
         .expect("resolved comment id must exist");
     ensure_comment_belongs_to_session(comment, session)?;
+    author.validate()?;
     let now = chrono::Utc::now();
     let result = crate::provenance::CommentReplyResult::compare(
         comment.id.clone(),
@@ -423,6 +435,7 @@ pub fn reply_and_maybe_resolve_comment(
     comment.replies.push(CommentReply {
         id: uuid::Uuid::new_v4().to_string(),
         body,
+        author,
         created_at: now,
         result: Some(result),
     });
@@ -1379,6 +1392,7 @@ mod tests {
             &mut comments,
             "abc",
             "done".into(),
+            Identity::agent(),
             snapshot(),
         )
         .unwrap();
@@ -1398,6 +1412,7 @@ mod tests {
             &mut comments,
             "abc",
             "fixed".into(),
+            Identity::agent(),
             true,
             snapshot(),
         )
@@ -1405,7 +1420,15 @@ mod tests {
         assert_eq!(resolved.replies.len(), 2);
         assert_eq!(resolved.state, CommentState::Resolved);
         assert!(
-            reply_to_comment(&mut session, &mut comments, "abc", "  ".into(), snapshot()).is_err()
+            reply_to_comment(
+                &mut session,
+                &mut comments,
+                "abc",
+                "  ".into(),
+                Identity::agent(),
+                snapshot()
+            )
+            .is_err()
         );
     }
 
@@ -1416,6 +1439,11 @@ mod tests {
             path: Some("src/lib.rs".into()),
             body: format!("comment {id}"),
             state,
+            channel: if state == CommentState::Todo {
+                Channel::Delegation
+            } else {
+                Channel::Note
+            },
             ..Comment::default()
         }
     }
@@ -1442,6 +1470,8 @@ mod tests {
                 kind: Some(CommentKind::Issue),
                 action: Some(ActionIntent::Explain),
                 state: CommentState::Todo,
+                author: Identity::local_human(),
+                channel: Channel::Delegation,
             },
         )
         .unwrap();
@@ -1467,6 +1497,12 @@ mod tests {
                 kind: None,
                 action: None,
                 state,
+                author: Identity::local_human(),
+                channel: if state == CommentState::Todo {
+                    Channel::Delegation
+                } else {
+                    Channel::Note
+                },
             }
         }
 
@@ -1539,6 +1575,7 @@ mod tests {
             }
         );
         assert_eq!(comments[0].state, CommentState::Todo);
+        assert_eq!(comments[0].channel, Channel::Delegation);
         assert_eq!(comments[0].updated_at, session.updated_at);
         assert_eq!(comments[1].updated_at, todo_updated_at);
         let first_touch = session.updated_at;
@@ -1591,6 +1628,8 @@ mod tests {
         assert_eq!(result.already_ready, 0);
         assert_eq!(comments[0].state, CommentState::Todo);
         assert_eq!(comments[1].state, CommentState::Todo);
+        assert_eq!(comments[0].channel, Channel::Delegation);
+        assert_eq!(comments[1].channel, Channel::Delegation);
         assert_eq!(comments[2].state, CommentState::Draft);
         assert_eq!(comments[3].state, CommentState::Todo);
         assert_eq!(comments[0].updated_at, comments[1].updated_at);
@@ -1632,6 +1671,7 @@ mod tests {
                 &mut comments,
                 "foreign-",
                 "reply".into(),
+                Identity::agent(),
                 snapshot(),
             )
             .is_err()

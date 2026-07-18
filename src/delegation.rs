@@ -8,12 +8,13 @@ use crate::{
     diff::{DiffLineKind, DiffSet, FileDiff},
     ids::shortest_unique_prefix,
     state::{
-        ActionIntent, ActionItem, ActionItemStatus, Comment, CommentReply, CommentState,
-        ExternalTicket, ReviewSession, ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
+        ActionIntent, ActionItem, ActionItemStatus, Channel, Comment, CommentReply, CommentState,
+        ExternalTicket, Identity, ReviewSession, ReviewState, ReviewTarget, Walkthrough,
+        WalkthroughStep,
     },
 };
 
-pub const DELEGATION_SCHEMA_VERSION: u8 = 4;
+pub const DELEGATION_SCHEMA_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DelegationSpec {
@@ -119,10 +120,18 @@ pub struct CommentEvidence {
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub body: String,
+    #[serde(default)]
+    pub author: Identity,
+    #[serde(default = "delegation_channel")]
+    pub channel: Channel,
     pub action: Option<ActionIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<crate::provenance::CommentObservation>,
     pub replies: Vec<CommentReply>,
+}
+
+fn delegation_channel() -> Channel {
+    Channel::Delegation
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -421,6 +430,8 @@ fn comment_evidence(comment: &Comment) -> CommentEvidence {
         line: comment.line,
         end_line: comment.end_line,
         body: comment.body.clone(),
+        author: comment.author.clone(),
+        channel: comment.channel,
         action: comment.action,
         observation: comment.observation.clone(),
         replies: comment.replies.clone(),
@@ -950,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn delegation_four_carries_provenance_and_honest_missing_language() {
+    fn delegation_five_carries_provenance_and_honest_missing_language() {
         let (mut state, session, diff) = fixture();
         let snapshot = crate::provenance::SnapshotEvidence::capture(
             chrono::DateTime::UNIX_EPOCH,
@@ -981,6 +992,7 @@ mod tests {
         linked.replies.push(CommentReply {
             id: "reply".into(),
             body: "addressed".into(),
+            author: crate::state::Identity::agent(),
             created_at: chrono::DateTime::UNIX_EPOCH,
             result: Some(crate::provenance::CommentReplyResult::compare(
                 "linked",
@@ -992,6 +1004,7 @@ mod tests {
         linked.replies.push(CommentReply {
             id: "legacy-a".into(),
             body: "legacy observation".into(),
+            author: crate::state::Identity::local_human(),
             created_at: chrono::DateTime::UNIX_EPOCH,
             result: Some(crate::provenance::CommentReplyResult::compare(
                 "linked",
@@ -1008,7 +1021,7 @@ mod tests {
 
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
-        assert_eq!(packet.schema_version, 4);
+        assert_eq!(packet.schema_version, DELEGATION_SCHEMA_VERSION);
         let json = serde_json::to_value(&packet).unwrap();
         assert!(json.to_string().contains("portable_patch_changed"));
         let markdown = render_delegation_markdown(&packet);
@@ -1058,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_uses_action_item_vocabulary_and_close_contract() {
+    fn schema_five_uses_action_item_vocabulary_and_close_contract() {
         let (state, session, diff) = fixture();
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
@@ -1076,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_preserves_top_level_diff_fingerprint_algorithm() {
+    fn schema_five_preserves_top_level_diff_fingerprint_algorithm() {
         let (state, session, diff) = fixture();
         let packet =
             build_delegation_packet(&state, &session, &diff, &DelegationSpec::default()).unwrap();
@@ -1092,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn delegation_three_reply_without_provenance_deserializes() {
+    fn legacy_delegation_without_annotation_or_provenance_fields_deserializes() {
         let (mut state, session, diff) = fixture();
         state
             .comments
@@ -1103,6 +1116,7 @@ mod tests {
             .push(CommentReply {
                 id: "legacy-reply".into(),
                 body: "legacy".into(),
+                author: crate::state::Identity::local_human(),
                 created_at: chrono::DateTime::UNIX_EPOCH,
                 result: None,
             });
@@ -1112,9 +1126,14 @@ mod tests {
         value["schema_version"] = serde_json::json!(3);
         for item in value["action_items"].as_array_mut().unwrap() {
             for evidence in item["evidence_comments"].as_array_mut().unwrap() {
-                evidence.as_object_mut().unwrap().remove("observation");
+                let evidence = evidence.as_object_mut().unwrap();
+                evidence.remove("observation");
+                evidence.remove("author");
+                evidence.remove("channel");
                 for reply in evidence["replies"].as_array_mut().unwrap() {
-                    reply.as_object_mut().unwrap().remove("result");
+                    let reply = reply.as_object_mut().unwrap();
+                    reply.remove("result");
+                    reply.remove("author");
                 }
             }
         }
@@ -1130,6 +1149,9 @@ mod tests {
             .unwrap();
         assert!(evidence.observation.is_none());
         assert!(evidence.replies[0].result.is_none());
+        assert_eq!(evidence.author, Identity::local_human());
+        assert_eq!(evidence.channel, Channel::Delegation);
+        assert_eq!(evidence.replies[0].author, Identity::local_human());
     }
 
     #[test]

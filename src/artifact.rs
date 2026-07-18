@@ -34,7 +34,7 @@ pub struct ArtifactBuildOptions {
 }
 
 const EXCERPT_CONTEXT_LINES: usize = 3;
-pub const ARTIFACT_SCHEMA_VERSION: u8 = 8;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 9;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -1419,6 +1419,7 @@ mod tests {
                 replies: vec![CommentReply {
                     id: "reply".into(),
                     body: "extra evidence".into(),
+                    author: crate::state::Identity::agent(),
                     created_at: chrono::DateTime::UNIX_EPOCH,
                     result: None,
                 }],
@@ -1461,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn full_artifact_schema_eight_exposes_durable_action_item_fields_and_links() {
+    fn full_artifact_schema_nine_exposes_durable_action_item_fields_and_links() {
         let mut session = fixture();
         let closed = ActionItem {
             id: "action-closed".into(),
@@ -1644,10 +1645,10 @@ mod tests {
     }
 
     #[test]
-    fn import_preserves_backward_artifact_deserialization() {
+    fn artifact_v8_import_defaults_legacy_authors_and_state_derived_channel() {
         let artifact: OwnedReviewArtifact = serde_json::from_str(
             r#"{
-  "version": 7,
+  "version": 8,
   "base": "trunk()",
   "revision": "@",
   "files": [{ "path": "src/lib.rs", "viewed": true, "fingerprint": "abc" }],
@@ -1677,12 +1678,84 @@ mod tests {
 
         let summary = import_json_artifact_into_state(&mut state, &artifact);
 
-        assert_eq!(artifact.version, 7);
+        assert_eq!(artifact.version, 8);
         assert_eq!(summary.viewed_files_imported, 1);
         assert_eq!(summary.comments_imported, 1);
         assert_eq!(state.comments[0].session_id, None);
+        assert_eq!(
+            state.comments[0].author,
+            crate::state::Identity::local_human()
+        );
+        assert_eq!(state.comments[0].channel, crate::state::Channel::Delegation);
+        assert_eq!(
+            state.comments[0].replies[0].author,
+            crate::state::Identity::local_human()
+        );
         assert!(state.comments[0].observation.is_none());
         assert!(state.comments[0].replies[0].result.is_none());
+    }
+
+    #[test]
+    fn artifact_v9_import_export_preserves_foreign_authors_and_channel() {
+        let artifact: OwnedReviewArtifact = serde_json::from_str(
+            r#"{
+  "version": 9,
+  "base": "trunk()",
+  "revision": "@",
+  "comments": [{
+    "id": "foreign",
+    "body": "team feedback",
+    "state": "draft",
+    "author": { "kind": "human", "name": "Alice" },
+    "channel": "collaboration",
+    "created_at": "2026-06-30T00:00:00Z",
+    "replies": [{
+      "id": "foreign-reply",
+      "body": "acknowledged",
+      "author": { "kind": "human", "name": "Bob" },
+      "created_at": "2026-06-30T00:01:00Z"
+    }]
+  }]
+}"#,
+        )
+        .unwrap();
+        let mut state = ReviewState::default();
+
+        let summary = import_json_artifact_into_state(&mut state, &artifact);
+
+        assert_eq!(summary.comments_imported, 1);
+        assert_eq!(state.comments[0].author.name, "Alice");
+        assert_eq!(
+            state.comments[0].channel,
+            crate::state::Channel::Collaboration
+        );
+        assert_eq!(state.comments[0].replies[0].author.name, "Bob");
+
+        let session = ReviewSession::new(
+            ".".into(),
+            crate::jj::ReviewTarget::trunk_to_current(),
+            crate::diff::DiffSet::parse("").unwrap(),
+            state,
+        );
+        let exported: serde_json::Value =
+            serde_json::from_str(&render_artifact(&session, ArtifactFormat::Json).unwrap())
+                .unwrap();
+        let comment = exported["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|comment| comment["id"] == "foreign")
+            .unwrap();
+        assert_eq!(exported["version"], 9);
+        assert_eq!(
+            comment["author"],
+            serde_json::json!({ "kind": "human", "name": "Alice" })
+        );
+        assert_eq!(comment["channel"], "collaboration");
+        assert_eq!(
+            comment["replies"][0]["author"],
+            serde_json::json!({ "kind": "human", "name": "Bob" })
+        );
     }
 
     #[test]
@@ -1731,6 +1804,7 @@ mod tests {
         let reply = CommentReply {
             id: "reply".into(),
             body: "done".into(),
+            author: crate::state::Identity::local_human(),
             created_at: chrono::DateTime::UNIX_EPOCH,
             result: None,
         };
@@ -1789,6 +1863,7 @@ mod tests {
                 replies: vec![CommentReply {
                     id: "reply".into(),
                     body: body.into(),
+                    author: crate::state::Identity::agent(),
                     created_at: chrono::DateTime::UNIX_EPOCH,
                     result: Some(crate::provenance::CommentReplyResult::compare(
                         "comment", None, None, snapshot,

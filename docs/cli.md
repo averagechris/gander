@@ -128,6 +128,8 @@ Example:
   "kind": "issue",
   "action": "fix",
   "state": "todo",
+  "author": { "kind": "human", "name": "local" },
+  "channel": "delegation",
   "created_at": "2026-07-04T22:19:06.819614Z"
 }
 ```
@@ -303,9 +305,10 @@ final “At a glance” slide; otherwise the tour falls back to changed files.
 gander drafts list|add [--file <spec>]|remove --id <id>
 ```
 
-Drafts remain a supported overlay-backed CLI surface. Specs are JSON files or
-stdin, and a live TUI on the same workspace picks up overlay writes within a
-poll. Public `chunks` and `briefs` commands have been removed; use
+Drafts remain a supported CLI surface, now backed by durable agent-authored
+comments (`state=draft`, `channel=onboarding`) rather than an overlay bucket.
+Specs are JSON files or stdin, and a live TUI on the same workspace picks up
+review-state writes within a poll. Public `chunks` and `briefs` commands have been removed; use
 `walkthrough` for durable tour curation. ACP/MCP agents may still provide live
 overlay chunks and change briefs, which Gander adapts into walkthrough/zen views.
 

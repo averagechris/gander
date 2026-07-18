@@ -27,7 +27,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentDraft, AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, DraftState, ReviewChunk},
+    agent::{AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, LegacyDraftState, ReviewChunk},
     anchor::{
         CommentAnchor, DiffSide, RangeLineAnchor, comment_anchor_for_file_lines,
         comment_anchor_for_sided_lines, fingerprint_range, line_anchor_for_side_line,
@@ -38,9 +38,10 @@ use crate::{
     jj::ReviewTarget,
     review,
     state::{
-        Comment, CommentState, FileState, REVIEW_STATE_SCHEMA_VERSION, ReviewSessionStatus,
-        ReviewState, ReviewStateMeta, ReviewTarget as StateReviewTarget, StepArtifact,
-        StepArtifactKind, StepImportance, StepKind, Walkthrough, WalkthroughStep,
+        AuthorKind, Channel, Comment, CommentState, FileState, Identity,
+        REVIEW_STATE_SCHEMA_VERSION, ReviewSessionStatus, ReviewState, ReviewStateMeta,
+        ReviewTarget as StateReviewTarget, StepArtifact, StepArtifactKind, StepImportance,
+        StepKind, Walkthrough, WalkthroughStep,
     },
     syntax::SyntaxConfig,
 };
@@ -171,8 +172,6 @@ pub struct ReviewSession {
     /// Zen fallback uses these so per-change chapter facts come from that
     /// change's own parent diff instead of the whole reviewed range.
     pub change_diffs: Vec<(String, DiffSet)>,
-    /// Agent-drafted comments with their dispositions.
-    pub agent_drafts: Vec<AgentDraft>,
     selected_comment_id: Option<String>,
     /// Per-gap context expansion state, keyed by `(path, gap id)`.
     /// Session-only; joins the rows-cache key via [`Self::expansion_epoch`]
@@ -852,7 +851,6 @@ impl ReviewSession {
             review_chunks: Vec::new(),
             change_briefs: Vec::new(),
             change_diffs: Vec::new(),
-            agent_drafts: Vec::new(),
             selected_comment_id: None,
             context_expansion: BTreeMap::new(),
             file_contents: BTreeMap::new(),
@@ -1507,8 +1505,65 @@ impl ReviewSession {
         self.agent_flags = overlay.flags.clone();
         self.review_chunks = overlay.chunks.clone();
         self.change_briefs = overlay.briefs.clone();
-        self.agent_drafts = overlay.drafts.clone();
         self.apply_overlay_as_walkthrough(overlay);
+    }
+
+    /// Fold one-release legacy overlay drafts into durable comments. Pending
+    /// drafts keep their ids so a failed overlay cleanup can be retried
+    /// without duplication; accepted/discarded entries are intentionally not
+    /// recreated.
+    pub(crate) fn fold_legacy_agent_drafts(&mut self, overlay: &AgentOverlay) -> usize {
+        let pending = overlay
+            .legacy_drafts
+            .iter()
+            .filter(|draft| draft.state == LegacyDraftState::Pending)
+            .filter(|draft| !self.comments.iter().any(|comment| comment.id == draft.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return 0;
+        }
+        let session_index = self.ensure_active_review_session_index();
+        let session_id = self.sessions[session_index].id.clone();
+        let now = chrono::Utc::now();
+        let mut folded = 0;
+        for draft in pending {
+            let anchor = self
+                .files
+                .iter()
+                .find(|file| file.path == draft.path)
+                .and_then(|file| comment_anchor_for_file_lines(file, draft.line, draft.line));
+            let observation = anchor.clone().map(|anchor| {
+                crate::provenance::CommentObservation::new(
+                    self.provenance_snapshot(session_index),
+                    Some(anchor),
+                )
+            });
+            let comment = Comment {
+                id: draft.id,
+                session_id: Some(session_id.clone()),
+                path: Some(draft.path),
+                line: draft.line,
+                end_line: None,
+                anchor,
+                observation,
+                body: draft.body,
+                kind: None,
+                action: None,
+                state: CommentState::Draft,
+                author: Identity::agent(),
+                channel: Channel::Onboarding,
+                replies: Vec::new(),
+                created_at: now,
+                updated_at: Some(now),
+            };
+            self.comments.push(comment);
+            folded += 1;
+        }
+        if folded > 0 {
+            self.sessions[session_index].updated_at = Some(now);
+        }
+        folded
     }
 
     fn apply_overlay_as_walkthrough(&mut self, overlay: &AgentOverlay) {
@@ -1554,67 +1609,70 @@ impl ReviewSession {
         session.walkthroughs[0].steps.append(&mut steps);
     }
 
-    /// Agent drafts still awaiting a human decision.
-    pub fn pending_agent_drafts(&self) -> Vec<AgentDraft> {
-        self.agent_drafts
+    /// Durable agent-authored comments still awaiting human triage.
+    pub fn pending_agent_drafts(&self) -> Vec<Comment> {
+        let Some(active_session_id) = review::active_session_for_loaded_review(
+            &self.sessions,
+            &self.repo,
+            &self.target.base,
+            &self.target.rev,
+        )
+        .map(|session| session.id.as_str()) else {
+            return Vec::new();
+        };
+        self.comments
             .iter()
-            .filter(|draft| draft.state == DraftState::Pending)
+            .filter(|comment| {
+                comment.author.kind == AuthorKind::Agent
+                    && comment.state == CommentState::Draft
+                    && comment.belongs_to_session(active_session_id)
+            })
             .cloned()
             .collect()
     }
 
-    /// Accept an agent draft as a real comment (optionally with an edited
-    /// body). Anchors to the drafted line when it exists in the current
-    /// diff, otherwise to the file. Returns the new comment id, or `None`
-    /// when the file is not part of the current diff or the body is empty.
-    pub fn accept_agent_draft(&mut self, draft: &AgentDraft, body: String) -> Option<String> {
+    /// Accept a durable agent draft, preserving its id and anchor. Until WP-B
+    /// context inference lands, acceptance conservatively makes it an
+    /// actionable delegation todo.
+    pub fn accept_agent_draft(&mut self, draft: &Comment, body: String) -> Option<String> {
         if body.trim().is_empty() {
             return None;
         }
-        let file_index = self.files.iter().position(|file| file.path == draft.path)?;
+        let path = draft.path.as_deref()?;
+        let file_index = self.files.iter().position(|file| file.path == path)?;
         self.reveal_filtered_file(file_index);
         self.select_file_revealed(file_index);
-        let anchor = draft
-            .line
-            .and_then(|line| {
-                self.diff_rows_for_selected_file()
-                    .iter()
-                    .find(|row| row.new_lineno == Some(line) && row.anchor.is_some())
-                    .and_then(|row| row.anchor.clone())
-            })
-            .unwrap_or_else(|| {
-                let file = &self.files[file_index];
-                CommentAnchor::File {
-                    path: file.path.clone(),
-                    old_path: file.old_path.clone(),
-                    diff_fingerprint: file.fingerprint.clone(),
-                }
-            });
-        self.add_comment_with_anchor(body, anchor);
-        let comment_id = self.comments.last()?.id.clone();
-        self.set_agent_draft_state(&draft.id, DraftState::Accepted, Some(comment_id.clone()));
-        Some(comment_id)
+        let index = self.ensure_active_review_session_index();
+        review::edit_comment(
+            &mut self.sessions[index],
+            &mut self.comments,
+            &draft.id,
+            review::CommentEdits {
+                body: Some(body),
+                ..Default::default()
+            },
+        )
+        .ok()?;
+        let accepted = review::set_comment_state(
+            &mut self.sessions[index],
+            &mut self.comments,
+            &draft.id,
+            CommentState::Todo,
+        )
+        .ok()?;
+        Some(accepted.id)
     }
 
-    /// Discard an agent draft without creating a comment.
-    pub fn discard_agent_draft(&mut self, draft_id: &str) {
-        self.set_agent_draft_state(draft_id, DraftState::Discarded, None);
-    }
-
-    fn set_agent_draft_state(
-        &mut self,
-        draft_id: &str,
-        state: DraftState,
-        accepted_comment_id: Option<String>,
-    ) {
-        if let Some(draft) = self
-            .agent_drafts
-            .iter_mut()
-            .find(|draft| draft.id == draft_id)
+    /// Discard an agent draft by deleting the durable draft comment.
+    pub fn discard_agent_draft(&mut self, draft_id: &str) -> bool {
+        if !self
+            .pending_agent_drafts()
+            .iter()
+            .any(|draft| draft.id == draft_id)
         {
-            draft.state = state;
-            draft.accepted_comment_id = accepted_comment_id;
+            return false;
         }
+        self.delete_comment(draft_id)
     }
 
     /// Jump to a chunk part: select its file and move the diff cursor to
@@ -2782,8 +2840,87 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: self.comment_initial_state,
+                author: Identity::local_human(),
+                channel: if self.comment_initial_state == CommentState::Todo {
+                    Channel::Delegation
+                } else {
+                    Channel::Note
+                },
             },
         );
+    }
+
+    /// Add an agent-authored durable draft for TUI triage. This is the shared
+    /// live ACP path; the overlay is reserved for non-comment suggestions.
+    pub fn add_agent_draft(
+        &mut self,
+        path: String,
+        line: Option<usize>,
+        body: String,
+    ) -> Option<Comment> {
+        let mut state = self.to_state();
+        let comment = self
+            .add_agent_draft_to_state(&mut state, path, line, body)
+            .ok()?;
+        self.apply_review_state(state);
+        Some(comment)
+    }
+
+    /// Apply an agent draft to an arbitrary latest-state snapshot using the
+    /// same durable comment service as CLI/MCP/TUI. The loaded diff supplies
+    /// the anchor and immutable observation; `state` remains the persistence
+    /// authority.
+    pub fn add_agent_draft_to_state(
+        &self,
+        state: &mut ReviewState,
+        path: String,
+        line: Option<usize>,
+        body: String,
+    ) -> color_eyre::eyre::Result<Comment> {
+        let target = review::SessionTargetSpec {
+            repo: Some(review::canonical_repo_identity(&self.repo)),
+            base: Some(self.target.base.clone()),
+            revision: Some(self.target.rev.clone()),
+            revset: Some(self.target.to_string()),
+        };
+        let session_id = review::ensure_session(state, &target, None).id.clone();
+        let session_index = state
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .expect("ensured session must exist");
+        let anchor = self
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .and_then(|file| comment_anchor_for_file_lines(file, line, line));
+        let observation = crate::provenance::CommentObservation::new(
+            crate::provenance::SnapshotEvidence::capture(
+                chrono::Utc::now(),
+                session_id.clone(),
+                state.sessions[session_index].target.clone(),
+                self.files.iter().map(|file| &file.diff),
+            ),
+            anchor.clone(),
+        );
+        review::add_comment(
+            &mut state.sessions[session_index],
+            &mut state.comments,
+            review::NewComment {
+                session_id,
+                path: Some(path),
+                line,
+                end_line: None,
+                anchor,
+                observation: Some(observation),
+                body,
+                kind: None,
+                action: None,
+                state: CommentState::Draft,
+                author: Identity::agent(),
+                channel: Channel::Onboarding,
+            },
+        )
     }
 
     pub fn add_general_comment(&mut self, body: String) {
@@ -2805,6 +2942,12 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: self.comment_initial_state,
+                author: Identity::local_human(),
+                channel: if self.comment_initial_state == CommentState::Todo {
+                    Channel::Delegation
+                } else {
+                    Channel::Note
+                },
             },
         );
     }
@@ -5801,5 +5944,62 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(state.meta.revision.as_deref(), Some("@"));
         assert!(state.meta.repo.is_some());
         assert!(state.meta.saved_at.is_some());
+    }
+
+    #[test]
+    fn folds_only_pending_legacy_overlay_drafts_as_durable_onboarding_comments() {
+        let mut session = session();
+        let overlay = AgentOverlay {
+            legacy_drafts: vec![
+                crate::agent::LegacyAgentDraft {
+                    id: "pending".into(),
+                    path: session.files[0].path.clone(),
+                    line: None,
+                    body: "agent note".into(),
+                    state: LegacyDraftState::Pending,
+                    accepted_comment_id: None,
+                },
+                crate::agent::LegacyAgentDraft {
+                    id: "accepted".into(),
+                    path: session.files[0].path.clone(),
+                    line: None,
+                    body: "already accepted".into(),
+                    state: LegacyDraftState::Accepted,
+                    accepted_comment_id: Some("durable-comment".into()),
+                },
+                crate::agent::LegacyAgentDraft {
+                    id: "discarded".into(),
+                    path: session.files[0].path.clone(),
+                    line: None,
+                    body: "do not recreate".into(),
+                    state: LegacyDraftState::Discarded,
+                    accepted_comment_id: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(session.fold_legacy_agent_drafts(&overlay), 1);
+        assert_eq!(session.fold_legacy_agent_drafts(&overlay), 0);
+        let comment = session
+            .comments
+            .iter()
+            .find(|comment| comment.id == "pending")
+            .unwrap();
+        assert_eq!(comment.author, Identity::agent());
+        assert_eq!(comment.channel, Channel::Onboarding);
+        assert_eq!(comment.state, CommentState::Draft);
+        assert!(
+            !session
+                .comments
+                .iter()
+                .any(|comment| comment.id == "accepted")
+        );
+        assert!(
+            !session
+                .comments
+                .iter()
+                .any(|comment| comment.id == "discarded")
+        );
     }
 }

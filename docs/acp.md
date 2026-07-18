@@ -10,9 +10,10 @@
 (the transport style used by the Agent Client Protocol). Normal automation
 should prefer the CLI or optional MCP adapter; ACP remains available for the
 TUI live bridge and compatibility. Agents can read the diff, comments, and
-viewed state, and write review suggestions into the shared **agent overlay**
-(`agent.json` in the per-workspace state directory; run `gander paths` to see
-where), which the running TUI polls and surfaces live.
+viewed state. Non-comment suggestions (ordering, flags, chunks, and briefs) go
+to the shared **agent overlay** (`agent.json` in the per-workspace state
+directory; run `gander paths` to see where), while agent draft comments are
+durable review-state comments. The running TUI surfaces both live.
 
 ```sh
 gander --base 'trunk()' --rev '@' acp
@@ -85,17 +86,19 @@ prompt and run a subprocess works.
 | `review/summary` | – | repo, base, revision, summary line |
 | `review/files` | – | array of `{path, old_path, status, additions, deletions, viewed, generated, fingerprint}` |
 | `review/file_diff` | `{path}` | `{path, fingerprint, raw}` (raw git-style diff) |
-| `review/comments` | – | array of comments with `id`, optional `session_id`, optional target fields/anchor, optional immutable `observation`, `body`, `kind`, `action`, `state`, replies (including optional result snapshots), `created_at`, and `updated_at`; legacy comments may omit snapshots, and general comments have no path/line/excerpt |
+| `review/comments` | – | array of comments with `id`, optional `session_id`, optional target fields/anchor, optional immutable `observation`, `body`, `kind`, `action`, `state`, `author`, `channel`, replies (each with an author and optional result snapshot), `created_at`, and `updated_at`; legacy comments may omit snapshots, and general comments have no path/line/excerpt |
 | `review/provenance_context` | – | internal MCP bridge context containing the selected live/snapshot session's repo, base, revision, and already-loaded parsed file diffs; used for comment capture without another jj query |
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
 | `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
 | `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what compatibility chunk parts anchored to this change must reference |
-| `review/overlay` | – | the full agent overlay (ordering, flags, chunks, change briefs, drafts with dispositions) |
+| `review/overlay` | – | the current overlay object (`version`, `ordering`, `flags`, `chunks`, and `briefs`). Durable comments are returned only by `review/comments`; the one-release legacy `drafts` input is consumed during startup and is never returned |
 
 ## Write methods
 
-All write methods persist the overlay atomically; the TUI picks changes up
-within one poll tick.
+Overlay suggestion methods persist the overlay atomically. Draft comments write
+durable review state. Live and standalone ACP acknowledge a draft only after its
+merge-aware atomic state save succeeds; read/error requests never rewrite review
+state. The TUI picks external durable changes up within one poll tick.
 
 | Method | Params | Effect |
 | --- | --- | --- |
@@ -112,9 +115,9 @@ is saved/private/withheld, `todo` is ready/actionable and asks an agent to
 address it regardless of kind/action, and `resolved` is retained history. Prompt
 handoff selects open durable action items plus unlinked todo comments; linked
 todo evidence is folded into its parent action item, and full export includes all
-states. The older overlay `review/draft_comment` method always creates a
-triage draft; use CLI/MCP `comment_add` with an explicit state for durable
-ready comments or general comments.
+states. `review/draft_comment` creates a durable agent-authored onboarding
+comment in draft state for triage; use CLI/MCP `comment_add` with an explicit
+state for ready comments or general comments.
 
 `artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
 one of `example` (default), `output`, `diagram`, or `note`: exhibits that
@@ -142,18 +145,20 @@ The public spec-file authoring path is available for drafts. Use `gander drafts 
 `review/draft_comment` shape (`{ "path": "...", "line": 12, "body": "..." }`;
 `line` is a 1-indexed diff line in the current session diff, new side preferred
 with old-side fallback for removed-only lines)
-or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append pending drafts and
+or `{ "drafts": [ ... ] }` for bulk adds. Draft adds append durable drafts and
 print the generated ids; remove is strict and rejects unknown ids without
-mutating the overlay. For all three groups, `--file -` or an omitted `--file`
-reads stdin and writes the same overlay file that the TUI watches.
+mutating review state. For all three groups, `--file -` or an omitted `--file`
+reads stdin and writes the same review-state file that the TUI watches.
 
-## Two-way draft flow
+## Durable draft flow
 
-Draft comments start `pending`. The human accepts, edits, or discards them in
-the TUI; gander writes the disposition (`accepted`/`discarded`, plus
-`accepted_comment_id`) back into the overlay. Agents observe outcomes via
-`review/overlay`. Server writes merge with on-disk dispositions rather than
-clobbering them.
+Agent draft comments start as `state=draft`, `author.kind=agent`, and
+`channel=onboarding`. The human accepts (optionally editing) or discards them in
+the TUI. Acceptance preserves the comment id and promotes it to an actionable
+delegation todo; discard deletes the durable draft. Agents observe current
+outcomes through `review/comments`. For one release, pending legacy overlay
+drafts fold into this model on startup; accepted and discarded overlay history
+is consumed without recreating comments.
 
 ## Example session
 

@@ -5,16 +5,82 @@ use std::{
 };
 
 use color_eyre::eyre::{Result, eyre};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 
 use crate::{
     anchor::CommentAnchor,
     provenance::{CommentObservation, CommentReplyResult},
 };
 
-/// Current on-disk review-state schema. Version 3 adds optional immutable
-/// comment observations and reply results while preserving legacy comments.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 3;
+/// Current on-disk review-state schema. Version 4 adds durable annotation
+/// authors and channels while preserving legacy comments and replies.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 4;
+
+/// Deterministic identity used only when reading pre-v4 local review state.
+/// Configured identities are stamped by adapters when creating new comments;
+/// raw state deserialization deliberately has no config dependency.
+pub const LEGACY_LOCAL_HUMAN_NAME: &str = "local";
+
+/// Conservative identity for agent-authored annotations until agent identity
+/// configuration lands in a later M17 package.
+pub const DEFAULT_AGENT_NAME: &str = "agent";
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorKind {
+    #[default]
+    Human,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct Identity {
+    pub kind: AuthorKind,
+    pub name: String,
+}
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self::local_human()
+    }
+}
+
+impl Identity {
+    pub fn local_human() -> Self {
+        Self {
+            kind: AuthorKind::Human,
+            name: LEGACY_LOCAL_HUMAN_NAME.to_owned(),
+        }
+    }
+
+    pub fn agent() -> Self {
+        Self {
+            kind: AuthorKind::Agent,
+            name: DEFAULT_AGENT_NAME.to_owned(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(eyre!("identity name must not be empty"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Onboarding,
+    Delegation,
+    Collaboration,
+    #[default]
+    Note,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -64,7 +130,7 @@ impl FileState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Comment {
     pub id: String,
     /// Durable review session that owns this comment.
@@ -91,6 +157,8 @@ pub struct Comment {
     pub action: Option<ActionIntent>,
     #[serde(default)]
     pub state: CommentState,
+    pub author: Identity,
+    pub channel: Channel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<CommentReply>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -112,6 +180,8 @@ impl Default for Comment {
             kind: None,
             action: None,
             state: CommentState::default(),
+            author: Identity::default(),
+            channel: Channel::default(),
             replies: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: None,
@@ -153,6 +223,13 @@ impl Comment {
     /// Validate relationships between the denormalized location fields and
     /// an optional durable diff anchor.
     pub fn validate(&self) -> Result<()> {
+        self.author.validate()?;
+        for reply in &self.replies {
+            reply.validate()?;
+        }
+        if self.state == CommentState::Todo && self.channel != Channel::Delegation {
+            return Err(eyre!("todo comment channel must be delegation"));
+        }
         if self.session_id.as_deref() == Some("") {
             return Err(eyre!("comment session id must not be empty"));
         }
@@ -219,11 +296,94 @@ impl Comment {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct CompatibleComment {
+    id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    #[serde(default)]
+    anchor: Option<CommentAnchor>,
+    #[serde(default)]
+    observation: Option<CommentObservation>,
+    body: String,
+    #[serde(default)]
+    kind: Option<CommentKind>,
+    #[serde(default)]
+    action: Option<ActionIntent>,
+    #[serde(default)]
+    state: CommentState,
+    #[serde(default)]
+    author: Option<Identity>,
+    #[serde(default)]
+    channel: Option<Channel>,
+    #[serde(default)]
+    replies: Vec<CommentReply>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl<'de> Deserialize<'de> for Comment {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let compatible = CompatibleComment::deserialize(deserializer)?;
+        let channel = compatible.channel.unwrap_or(match compatible.state {
+            CommentState::Todo => Channel::Delegation,
+            CommentState::Draft | CommentState::Resolved => Channel::Note,
+        });
+        let comment = Self {
+            id: compatible.id,
+            session_id: compatible.session_id,
+            path: compatible.path,
+            line: compatible.line,
+            end_line: compatible.end_line,
+            anchor: compatible.anchor,
+            observation: compatible.observation,
+            body: compatible.body,
+            kind: compatible.kind,
+            action: compatible.action,
+            state: compatible.state,
+            author: compatible.author.unwrap_or_default(),
+            channel,
+            replies: compatible.replies,
+            created_at: compatible.created_at,
+            updated_at: compatible.updated_at,
+        };
+        comment
+            .validate_annotation_fields()
+            .map_err(D::Error::custom)?;
+        Ok(comment)
+    }
+}
+
+impl Comment {
+    fn validate_annotation_fields(&self) -> Result<()> {
+        self.author.validate()?;
+        for reply in &self.replies {
+            reply.validate()?;
+        }
+        if self.state == CommentState::Todo && self.channel != Channel::Delegation {
+            return Err(eyre!("todo comment channel must be delegation"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CommentReply {
     pub id: String,
     pub body: String,
+    #[serde(default)]
+    pub author: Identity,
     pub created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<CommentReplyResult>,
@@ -234,9 +394,16 @@ impl Default for CommentReply {
         Self {
             id: String::new(),
             body: String::new(),
+            author: Identity::default(),
             created_at: chrono::Utc::now(),
             result: None,
         }
+    }
+}
+
+impl CommentReply {
+    pub fn validate(&self) -> Result<()> {
+        self.author.validate()
     }
 }
 
@@ -598,9 +765,30 @@ impl ReviewState {
         let mut persisted = self.clone();
         persisted.meta.version = REVIEW_STATE_SCHEMA_VERSION;
         persisted.normalize_action_items();
+        for comment in &persisted.comments {
+            comment.validate_annotation_fields()?;
+        }
         fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
         fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Merge the latest on-disk state into a local session snapshot and save
+    /// the result atomically. This is the shared persistence boundary for TUI
+    /// and live-adapter mutations: local view state remains authoritative,
+    /// externally-added durable objects are retained, and tombstones prevent
+    /// deleted objects from being resurrected.
+    pub fn merge_latest_and_save(
+        mut self,
+        path: &Path,
+        tombstones: &ReviewStateTombstones,
+    ) -> Result<Self> {
+        if path.exists() {
+            let external = Self::load_or_default(path)?;
+            self.merge_external(external, tombstones);
+        }
+        self.save(path)?;
+        Ok(self)
     }
 }
 
@@ -1169,6 +1357,7 @@ mod tests {
         local.comments[0].replies.push(CommentReply {
             id: "local-reply".into(),
             body: "local".into(),
+            author: Identity::local_human(),
             created_at: chrono::Utc::now(),
             result: None,
         });
@@ -1180,6 +1369,7 @@ mod tests {
         external.comments[0].replies.push(CommentReply {
             id: "external-reply".into(),
             body: "external".into(),
+            author: Identity::agent(),
             created_at: chrono::Utc::now(),
             result: None,
         });
@@ -1199,6 +1389,15 @@ mod tests {
                 .iter()
                 .any(|reply| reply.id == "external-reply")
         );
+        assert_eq!(
+            local.comments[0]
+                .replies
+                .iter()
+                .find(|reply| reply.id == "external-reply")
+                .unwrap()
+                .author,
+            Identity::agent()
+        );
     }
 
     fn reply_result(session_id: &str) -> crate::provenance::CommentReplyResult {
@@ -1216,6 +1415,7 @@ mod tests {
         let reply = CommentReply {
             id: "reply".into(),
             body: "done".into(),
+            author: Identity::local_human(),
             created_at: chrono::DateTime::UNIX_EPOCH,
             result: None,
         };
@@ -1683,5 +1883,85 @@ mod tests {
             anchored_line_mismatch.validate().unwrap_err().to_string(),
             "comment line coordinates do not match line anchor"
         );
+    }
+
+    #[test]
+    fn legacy_comment_channels_derive_from_state_and_authors_default_locally() {
+        let comments: Vec<Comment> = serde_json::from_str(
+            r#"[
+              {"id":"todo","body":"fix","state":"todo","created_at":"2026-01-01T00:00:00Z"},
+              {"id":"draft","body":"note","state":"draft","created_at":"2026-01-01T00:00:00Z"},
+              {"id":"resolved","body":"done","state":"resolved","created_at":"2026-01-01T00:00:00Z","replies":[{"id":"reply","body":"ok","created_at":"2026-01-01T00:01:00Z"}]}
+            ]"#,
+        )
+        .unwrap();
+
+        assert_eq!(comments[0].channel, Channel::Delegation);
+        assert_eq!(comments[1].channel, Channel::Note);
+        assert_eq!(comments[2].channel, Channel::Note);
+        assert_eq!(comments[0].author, Identity::local_human());
+        assert_eq!(comments[2].replies[0].author, Identity::local_human());
+    }
+
+    #[test]
+    fn annotation_identity_channel_and_reply_author_round_trip_with_stable_names() {
+        let comment = Comment {
+            id: "annotation".into(),
+            body: "look here".into(),
+            author: Identity::agent(),
+            channel: Channel::Onboarding,
+            replies: vec![CommentReply {
+                id: "reply".into(),
+                body: "thanks".into(),
+                author: Identity {
+                    kind: AuthorKind::Human,
+                    name: "Reviewer".into(),
+                },
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                result: None,
+            }],
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&comment).unwrap();
+        assert!(json.contains(r#""kind":"agent""#));
+        assert!(json.contains(r#""channel":"onboarding""#));
+        let loaded: Comment = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, comment);
+    }
+
+    #[test]
+    fn annotation_validation_rejects_empty_names_and_non_delegation_todos() {
+        let empty_name = Comment {
+            author: Identity {
+                kind: AuthorKind::Human,
+                name: "  ".into(),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            empty_name.validate().unwrap_err().to_string(),
+            "identity name must not be empty"
+        );
+
+        let invalid_todo = Comment {
+            state: CommentState::Todo,
+            channel: Channel::Note,
+            ..Default::default()
+        };
+        assert_eq!(
+            invalid_todo.validate().unwrap_err().to_string(),
+            "todo comment channel must be delegation"
+        );
+        let json = serde_json::to_string(&invalid_todo).unwrap();
+        assert!(serde_json::from_str::<Comment>(&json).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = ReviewState {
+            comments: vec![invalid_todo],
+            ..Default::default()
+        };
+        assert!(state.save(&dir.path().join("state.json")).is_err());
     }
 }

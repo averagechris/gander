@@ -4271,9 +4271,10 @@ fn draw_draft_list_popup(
                     } else {
                         Style::default().fg(Color::Gray)
                     };
+                    let path = draft.path.as_deref().unwrap_or("<general>");
                     let location = match draft.line {
-                        Some(line) => format!("{}:{line}", draft.path),
-                        None => draft.path.clone(),
+                        Some(line) => format!("{path}:{line}"),
+                        None => path.to_owned(),
                     };
                     let summary = draft
                         .body
@@ -6676,27 +6677,34 @@ diff --git a/Cargo.toml b/Cargo.toml
 +new
 "#,
         );
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            drafts: vec![
-                crate::agent::AgentDraft {
-                    id: "draft-1".to_owned(),
-                    path: "a.txt".to_owned(),
-                    line: Some(1),
-                    body: "consider a clearer name".to_owned(),
-                    state: crate::agent::DraftState::Pending,
-                    accepted_comment_id: None,
-                },
-                crate::agent::AgentDraft {
-                    id: "draft-2".to_owned(),
-                    path: "a.txt".to_owned(),
-                    line: None,
-                    body: "file-level: needs tests".to_owned(),
-                    state: crate::agent::DraftState::Pending,
-                    accepted_comment_id: None,
-                },
-            ],
-            ..Default::default()
-        });
+        let session_id = session
+            .add_agent_draft("a.txt".into(), Some(1), "seed".into())
+            .unwrap()
+            .session_id;
+        session.comments = vec![
+            crate::state::Comment {
+                id: "draft-1".to_owned(),
+                session_id: session_id.clone(),
+                path: Some("a.txt".to_owned()),
+                line: Some(1),
+                body: "consider a clearer name".to_owned(),
+                state: crate::state::CommentState::Draft,
+                author: crate::state::Identity::agent(),
+                channel: crate::state::Channel::Onboarding,
+                ..Default::default()
+            },
+            crate::state::Comment {
+                id: "draft-2".to_owned(),
+                session_id,
+                path: Some("a.txt".to_owned()),
+                line: None,
+                body: "file-level: needs tests".to_owned(),
+                state: crate::state::CommentState::Draft,
+                author: crate::state::Identity::agent(),
+                channel: crate::state::Channel::Onboarding,
+                ..Default::default()
+            },
+        ];
         let mode = Mode::DraftList(DraftListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));

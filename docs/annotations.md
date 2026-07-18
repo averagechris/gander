@@ -118,4 +118,9 @@ The primitives a future GitHub/GitLab/SourceHut plugin needs, built now:
 Serde-defaulted, one release of leniency, consistent with prior state
 migrations: comments without a channel deserialize as `delegation` when
 `state = todo`, else `note`; missing authors default to a local human
-identity. Pending overlay drafts fold into comments on first load.
+identity. Raw state deserialization uses the deterministic legacy identity
+`human:local` because configuration is intentionally unavailable there; new
+agent drafts use `agent:agent` until identity configuration lands. Pending
+overlay drafts fold into onboarding-channel durable draft comments on first
+load. Accepted and discarded overlay history is consumed without recreating
+comments.

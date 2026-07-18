@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added durable annotation authors and onboarding/delegation/collaboration/note
+  channels to comments, plus reply authors and a one-release migration that
+  derives legacy channels and identities and folds pending agent-overlay drafts
+  into durable onboarding comments without recreating accepted or discarded
+  history.
 
 ## v0.7.2 - 2026-07-12
 

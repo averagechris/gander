@@ -769,7 +769,7 @@ fn run_loop(
         // drawing so their effects render this frame.
         #[cfg(unix)]
         if let Some(bridge) = acp_bridge.as_deref_mut() {
-            let (overlay_changed, commands) = bridge.drain_ui_commands(session);
+            let (overlay_changed, commands, mutations) = bridge.drain_ui_commands(session);
             for command in commands {
                 let result = apply_present_command(
                     command.command.clone(),
@@ -781,6 +781,16 @@ fn run_loop(
                     agent_overlay_path,
                 );
                 command.respond(result);
+            }
+            for request in mutations {
+                let result = apply_acp_review_mutation(
+                    request.mutation.clone(),
+                    session,
+                    state_path,
+                    tui_state,
+                )
+                .map_err(|error| (-32000, error.to_string()));
+                request.respond(result);
             }
             if overlay_changed {
                 // The bridge already applied overlay changes; skip the redundant
@@ -1974,40 +1984,96 @@ fn state_fingerprint(session: &ReviewSession) -> String {
 }
 
 fn autosave_state(session: &mut ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
+    if let Err(error) = persist_review_state(session, state_path, tui_state) {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Error,
+            message: format!("failed to autosave review state: {error}"),
+        });
+    }
+}
+
+fn persist_review_state(
+    session: &mut ReviewSession,
+    state_path: &Path,
+    tui_state: &mut TuiState,
+) -> Result<()> {
     let fingerprint = state_fingerprint(session);
     let disk_mtime = state_file_mtime(state_path);
     if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str())
         && disk_mtime == tui_state.state_mtime
     {
-        return;
+        return Ok(());
     }
-    let mut state = session.to_state();
-    if disk_mtime != tui_state.state_mtime
-        && let Ok(on_disk) = crate::state::ReviewState::load_or_default(state_path)
+    let transition = tui_state
+        .diff_viewport
+        .transition_snapshot(session, current_diff_inner(session, tui_state));
+    let state = session
+        .to_state()
+        .merge_latest_and_save(state_path, &tui_state.state_tombstones)?;
+    session.apply_review_state(state);
+    tui_state.diff_viewport.finish_transition(
+        transition,
+        session,
+        current_diff_inner(session, tui_state),
+    );
+    tui_state.state_mtime = state_file_mtime(state_path);
+    tui_state.last_autosave = Some(state_fingerprint(session));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn apply_acp_review_mutation(
+    mutation: crate::acp::ReviewMutation,
+    session: &mut ReviewSession,
+    state_path: Option<&Path>,
+    tui_state: &mut TuiState,
+) -> Result<serde_json::Value> {
+    let Some(state_path) = state_path else {
+        return Err(color_eyre::eyre::eyre!(
+            "durable review state path unavailable"
+        ));
+    };
+    let transition = tui_state
+        .diff_viewport
+        .transition_snapshot(session, current_diff_inner(session, tui_state));
+    let result =
+        persist_acp_review_mutation(mutation, session, state_path, &tui_state.state_tombstones)?;
+    tui_state.diff_viewport.finish_transition(
+        transition,
+        session,
+        current_diff_inner(session, tui_state),
+    );
+    tui_state.state_mtime = state_file_mtime(state_path);
+    tui_state.last_autosave = Some(state_fingerprint(session));
+    Ok(result)
+}
+
+#[cfg(unix)]
+pub(crate) fn persist_acp_review_mutation(
+    mutation: crate::acp::ReviewMutation,
+    session: &mut ReviewSession,
+    state_path: &Path,
+    tombstones: &crate::state::ReviewStateTombstones,
+) -> Result<serde_json::Value> {
+    let before = session.to_state();
+    let result = match mutation {
+        crate::acp::ReviewMutation::DraftComment { path, line, body } => session
+            .add_agent_draft(path, line, body)
+            .map(|comment| serde_json::json!({ "id": comment.id }))
+            .ok_or_else(|| color_eyre::eyre::eyre!("draft body must contain non-whitespace text")),
+    }?;
+    let merged = match session
+        .to_state()
+        .merge_latest_and_save(state_path, tombstones)
     {
-        let transition = tui_state
-            .diff_viewport
-            .transition_snapshot(session, current_diff_inner(session, tui_state));
-        state.merge_external(on_disk, &tui_state.state_tombstones);
-        session.apply_review_state(state.clone());
-        tui_state.diff_viewport.finish_transition(
-            transition,
-            session,
-            current_diff_inner(session, tui_state),
-        );
-    }
-    match state.save(state_path) {
-        Ok(()) => {
-            tui_state.state_mtime = state_file_mtime(state_path);
-            tui_state.last_autosave = Some(state_fingerprint(session));
-        }
+        Ok(merged) => merged,
         Err(error) => {
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Error,
-                message: format!("failed to autosave review state: {error}"),
-            });
+            session.apply_review_state(before);
+            return Err(error);
         }
-    }
+    };
+    session.apply_review_state(merged);
+    Ok(result)
 }
 
 fn handle_key_event(
@@ -3863,7 +3929,7 @@ fn handle_draft_list_key(
         Some(Action::DraftDiscard) => {
             let draft = list.selected_draft().cloned()?;
             session.discard_agent_draft(&draft.id);
-            persist_draft_disposition(session, tui_state, &draft.id);
+            tui_state.state_tombstones.comments.insert(draft.id.clone());
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "discarded agent draft".to_owned(),
@@ -3885,8 +3951,7 @@ fn handle_draft_list_key(
     }
 }
 
-/// Accept a pending agent draft (optionally with an edited body), persisting
-/// the disposition to the overlay. Returns true on success.
+/// Accept a pending durable agent draft, optionally with an edited body.
 fn accept_agent_draft(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
@@ -3894,10 +3959,9 @@ fn accept_agent_draft(
     body_override: Option<String>,
 ) -> bool {
     let Some(draft) = session
-        .agent_drafts
-        .iter()
+        .pending_agent_drafts()
+        .into_iter()
         .find(|draft| draft.id == draft_id)
-        .cloned()
     else {
         return false;
     };
@@ -3907,7 +3971,6 @@ fn accept_agent_draft(
         .transition_snapshot(session, current_diff_inner(session, tui_state));
     match session.accept_agent_draft(&draft, body) {
         Some(_comment_id) => {
-            persist_draft_disposition(session, tui_state, draft_id);
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
@@ -3922,47 +3985,12 @@ fn accept_agent_draft(
         None => {
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
-                message: format!("cannot accept draft: {} is not in this diff", draft.path),
+                message: format!(
+                    "cannot accept draft: {} is not in this diff",
+                    draft.path.as_deref().unwrap_or("<general>")
+                ),
             });
             false
-        }
-    }
-}
-
-/// Write a draft's disposition back into the shared overlay so agents can
-/// observe the outcome. Refreshes the poll mtime so our own write does not
-/// trigger a spurious reload notice.
-fn persist_draft_disposition(session: &ReviewSession, tui_state: &mut TuiState, draft_id: &str) {
-    let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
-        return;
-    };
-    let Some(session_draft) = session
-        .agent_drafts
-        .iter()
-        .find(|draft| draft.id == draft_id)
-    else {
-        return;
-    };
-    let result =
-        crate::agent::AgentOverlay::load_or_default(&overlay_path).and_then(|mut overlay| {
-            if let Some(draft) = overlay.drafts.iter_mut().find(|draft| draft.id == draft_id) {
-                draft.state = session_draft.state;
-                draft.accepted_comment_id = session_draft.accepted_comment_id.clone();
-            }
-            overlay.save(&overlay_path)?;
-            Ok(())
-        });
-    match result {
-        Ok(()) => {
-            tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
-                .and_then(|metadata| metadata.modified())
-                .ok();
-        }
-        Err(error) => {
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Error,
-                message: format!("failed to record draft disposition: {error}"),
-            });
         }
     }
 }
@@ -6745,24 +6773,24 @@ diff --git a/b.rs b/b.rs
 "#,
         );
         let overlay_path = dir.join("agent.json");
-        let overlay = crate::agent::AgentOverlay {
-            drafts: vec![crate::agent::AgentDraft {
-                id: "draft-1".to_owned(),
-                path: "a.txt".to_owned(),
-                line: Some(1),
-                body: "agent thinks this is wrong".to_owned(),
-                state: crate::agent::DraftState::Pending,
-                accepted_comment_id: None,
-            }],
-            ..Default::default()
-        };
-        overlay.save(&overlay_path).unwrap();
-        session.apply_agent_overlay(&overlay);
+        let draft = session
+            .add_agent_draft(
+                "a.txt".to_owned(),
+                Some(1),
+                "agent thinks this is wrong".to_owned(),
+            )
+            .unwrap();
+        session
+            .comments
+            .iter_mut()
+            .find(|comment| comment.id == draft.id)
+            .unwrap()
+            .id = "draft-1".to_owned();
         (session, overlay_path)
     }
 
     #[test]
-    fn accepting_a_draft_creates_comment_and_persists_disposition() {
+    fn accepting_a_draft_promotes_the_durable_comment() {
         let dir = tempfile::tempdir().unwrap();
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
         let mut tui_state = TuiState {
@@ -6785,13 +6813,12 @@ diff --git a/b.rs b/b.rs
         assert_eq!(session.comments.len(), 1);
         assert_eq!(session.comments[0].body, "agent thinks this is wrong");
         assert_eq!(session.comments[0].line, Some(1));
-
-        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
-        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Accepted);
+        assert_eq!(session.comments[0].state, crate::state::CommentState::Todo);
         assert_eq!(
-            on_disk.drafts[0].accepted_comment_id.as_deref(),
-            Some(session.comments[0].id.as_str())
+            session.comments[0].channel,
+            crate::state::Channel::Delegation
         );
+        assert_eq!(session.comments[0].id, "draft-1");
     }
 
     #[test]
@@ -6807,14 +6834,15 @@ diff --git a/b.rs b/b.rs
             .unwrap();
         session.diff_scroll = row as u16;
         session.diff_cursor = row;
-        session.agent_drafts.push(crate::agent::AgentDraft {
-            id: "draft-detached".into(),
-            path: "a.txt".into(),
-            line: Some(1),
-            body: "draft comment".into(),
-            state: crate::agent::DraftState::Pending,
-            accepted_comment_id: None,
-        });
+        let draft = session
+            .add_agent_draft("a.txt".into(), Some(1), "draft comment".into())
+            .unwrap();
+        session
+            .comments
+            .iter_mut()
+            .find(|comment| comment.id == draft.id)
+            .unwrap()
+            .id = "draft-detached".into();
         let mut tui_state = TuiState {
             terminal_size: ratatui::prelude::Size::new(30, 5),
             ..TuiState::default()
@@ -7169,7 +7197,7 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn discarding_a_draft_persists_without_creating_comment() {
+    fn discarding_a_draft_deletes_the_durable_comment_and_tombstones_it() {
         let dir = tempfile::tempdir().unwrap();
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
         let mut tui_state = TuiState {
@@ -7189,9 +7217,7 @@ diff --git a/b.rs b/b.rs
 
         assert!(matches!(next, Some(Mode::Normal)));
         assert!(session.comments.is_empty());
-        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
-        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Discarded);
-        assert_eq!(on_disk.drafts[0].accepted_comment_id, None);
+        assert!(tui_state.state_tombstones.comments.contains("draft-1"));
     }
 
     #[test]
@@ -7229,15 +7255,14 @@ diff --git a/b.rs b/b.rs
 
         assert_eq!(session.comments.len(), 1);
         assert_eq!(session.comments[0].body, "human-edited note");
-        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
-        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Accepted);
+        assert_eq!(session.comments[0].state, crate::state::CommentState::Todo);
     }
 
     #[test]
     fn accepting_draft_for_missing_file_reports_error() {
         let dir = tempfile::tempdir().unwrap();
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
-        session.agent_drafts[0].path = "gone.rs".to_owned();
+        session.comments[0].path = Some("gone.rs".to_owned());
         let mut tui_state = TuiState {
             agent_overlay_path: Some(overlay_path.clone()),
             ..TuiState::default()
@@ -7250,12 +7275,11 @@ diff --git a/b.rs b/b.rs
             None
         ));
 
-        assert!(session.comments.is_empty());
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.comments[0].state, crate::state::CommentState::Draft);
         let notice = tui_state.notice.unwrap();
         assert_eq!(notice.level, UiNoticeLevel::Error);
         assert!(notice.message.contains("gone.rs"));
-        let on_disk = crate::agent::AgentOverlay::load_or_default(&overlay_path).unwrap();
-        assert_eq!(on_disk.drafts[0].state, crate::agent::DraftState::Pending);
     }
 
     fn zen_session() -> ReviewSession {

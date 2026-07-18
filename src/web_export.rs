@@ -556,6 +556,7 @@ mod tests {
         state.comments[0].replies.push(crate::state::CommentReply {
             id: "reply".into(),
             body: "done".into(),
+            author: crate::state::Identity::agent(),
             created_at: chrono::DateTime::UNIX_EPOCH,
             result: Some(crate::provenance::CommentReplyResult::compare(
                 "c1",
@@ -589,6 +590,7 @@ mod tests {
             crate::state::CommentReply {
                 id: "rename".into(),
                 body: "renamed".into(),
+                author: crate::state::Identity::agent(),
                 created_at: chrono::DateTime::UNIX_EPOCH,
                 result: Some(crate::provenance::CommentReplyResult {
                     parent_comment_id: "c1".into(),
@@ -604,6 +606,7 @@ mod tests {
             crate::state::CommentReply {
                 id: "missing-a".into(),
                 body: "gone".into(),
+                author: crate::state::Identity::agent(),
                 created_at: chrono::DateTime::UNIX_EPOCH,
                 result: Some(crate::provenance::CommentReplyResult {
                     parent_comment_id: "c1".into(),
@@ -618,6 +621,7 @@ mod tests {
             crate::state::CommentReply {
                 id: "missing-b".into(),
                 body: "legacy reply".into(),
+                author: crate::state::Identity::local_human(),
                 created_at: chrono::DateTime::UNIX_EPOCH,
                 result: None,
             },
