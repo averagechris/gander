@@ -73,6 +73,9 @@ local commands/protocols those harnesses can consume.
 7. **Private thinking precedes publishing.** Comments, action items, and walkthroughs
    are local/private until an external tool exports or posts them. Gander should
    make review intent explicit but not surprise users by publishing anything.
+   Annotation channels make this boundary structural: only collaboration-channel
+   annotations are eligible for team-facing export (see
+   [docs/annotations.md](annotations.md)).
 
 ## Review session model
 
@@ -80,13 +83,22 @@ The next-generation review session should include:
 
 - subject: jj revset/change stack/base+tip already visible in the workspace;
 - files, hunks, stable anchors, fingerprints, viewed state, and symbols;
-- comments with kind, status, action intent, author, timestamps, and target;
-- todo comments as the primary implicit feedback: every todo comment is an
-  actionable request, while ordinary draft/resolved comments are not action items;
+- comments with author identity, channel, kind, status, action intent,
+  timestamps, and target;
+- annotation channels separating the three review conversations — onboarding
+  (agent → reviewer), delegation (reviewer → agent), collaboration
+  (human ↔ human), and private notes — with context-inferred defaults and a
+  structural publication boundary; see [docs/annotations.md](annotations.md);
+- delegation todo comments as the primary agent feedback: every delegation
+  todo is an actionable request, while ordinary draft/resolved comments are
+  not action items;
 - optional durable action items for higher-level coordination, grouping many
   linked comments, and recording opaque external ticket references;
-- walkthroughs: ordered steps pointing at files/hunks/ranges/symbols with
-  explanations and rationale;
+- an attention map assigning salience (spotlight/supporting/skim) to regions
+  so reviewers spend attention where the mental-model delta is and dismiss
+  the rest with confidence; see [docs/attention.md](attention.md);
+- walkthroughs: an ordered path over spotlight regions with explanations and
+  rationale, presented in the normal diff view rather than a separate mode;
 - exports in JSON, Markdown, and static HTML.
 
 This model is the shared substrate for self-review, reviewing agent-generated
@@ -127,7 +139,8 @@ gander walkthrough export
 - Make the TUI read and write the same session objects as the CLI.
 - Add first-class affordances for key hunks, walkthrough editing, action-tagged
   todo comments, and open action-item work.
-- Keep focused/zen review modes as presentations of walkthrough/session state.
+- Present focused/zen review as views over walkthrough/session state; the
+  end state is the attention map (M18).
 
 ### M14: MCP parity adapter
 
@@ -146,6 +159,44 @@ gander walkthrough export
 
 - Add an interactive local browser UI only after the session model stabilizes.
 - Use the same core services and respect the no-code-mutation boundary.
+
+Milestones 17–19 predate M16 in build order; the numbers record when they
+were planned, not sequence.
+
+### M17: Annotation channels
+
+Design: [docs/annotations.md](annotations.md).
+
+- Add author identity and channel (onboarding/delegation/collaboration/note)
+  to comments and replies.
+- Infer the channel from context with a quiet, always-visible indicator and
+  one-key override in the editor.
+- Fold agent drafts into the comment model; make the publication boundary
+  structural (`--profile team` exports collaboration threads only).
+- Ship the forge-readiness primitives (anchor round-tripping, identity
+  config, disposition, import) with no forge integration.
+
+### M18: Attention map and the review stream
+
+Design: [docs/attention.md](attention.md).
+
+- Make salience (spotlight/supporting/skim) a durable session property fed by
+  agent curation, heuristics, and human overrides.
+- Render one diff view by salience: skim folds with one-key acknowledge,
+  inline narration cards on spotlights, chapters as stream headers.
+- Recast walkthroughs as an ordering over spotlight regions; focus becomes a
+  view preset, coverage replaces files-viewed as progress.
+- Delete the zen phase machinery and the ephemeral overlay-chunk model.
+
+### M19: Presentation polish
+
+- Derived theme system: all chrome routed through one contrast-guarded theme
+  computed from a small base palette; auto light/dark detection; transparent
+  terminals.
+- Keybinding presets (`gander` classic, `hunk`-style) on top of the existing
+  remapping system.
+- Responsive layout (breakpoint-driven pane behavior) and menu-driven
+  discoverability rendered from the live keymap.
 
 ## Canonical workflows
 

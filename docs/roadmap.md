@@ -278,7 +278,9 @@ walkthrough/session state.
 - [x] add first-class key hunk and walkthrough editing affordances
 - [x] support action-tagged comments/action items (`fix`, `explain`, `test`,
   `follow-up`) for agent handoff
-- [ ] keep zen/focused review modes as views over walkthrough/session state
+- [ ] keep zen/focused review modes as views over walkthrough/session state —
+  direction refined into the attention map (milestone 18,
+  docs/attention.md)
 
 ## Milestone 14: MCP parity adapter
 
@@ -313,6 +315,78 @@ Status: future.
 - [ ] expose the same capabilities as the TUI/CLI where appropriate
 - [ ] preserve the no-code-mutation and forge-agnostic boundaries
 
+## Milestone 17: annotation channels
+
+Every annotation knows who wrote it and who it is for. Design:
+[docs/annotations.md](annotations.md). Subsumes backlog item 2
+(reviewer/author metadata).
+
+Status: designed.
+
+- [ ] add `author` (Identity: human/agent + name) and `channel`
+  (onboarding/delegation/collaboration/note) to comments and replies, with
+  serde-defaulted migration (todo → delegation, else note)
+- [ ] infer channel from context (thread > onboarding card > agent attached >
+  foreign change author > note); `[comments] default-channel` pins it
+- [ ] channel indicator in the comment editor: channel-colored border + one
+  compact chip; one key cycles channel live while composing
+- [ ] one channel color language across editor, cards, gutter, and comment
+  list (onboarding=accent, delegation=warning, collaboration=info, note=muted)
+- [ ] fold agent drafts into the comment model (author=agent, state=draft);
+  retire the overlay draft bucket; channel resolved at accept time
+- [ ] `[identity]` config for the human; agent identities from agent config
+- [ ] `--channel` filters on comment CLI/MCP surfaces
+- [ ] `--profile team` export: collaboration threads only, forge-mappable
+  anchors + fingerprints, optional session disposition
+  (comment/approve/request-changes)
+- [ ] import preserves foreign authorship so two humans can review over an
+  artifact file today
+
+## Milestone 18: attention map and the review stream
+
+Spend attention where the mental-model delta is; dismiss the rest with
+confidence — in one diff view, not a separate mode. Design:
+[docs/attention.md](attention.md). Supersedes backlog item 5 and the
+remaining M13 zen item.
+
+Status: designed.
+
+- [ ] durable per-region salience (spotlight/supporting/skim) on the session;
+  sources: human override > agent curation > generated/lockfile heuristics
+- [ ] skim regions render as one-line folds, expandable in place; one key
+  acknowledges a fold and marks contained files viewed
+- [ ] spotlight regions render with inline narration cards (onboarding
+  annotations: title/why/rationale, artifacts expandable)
+- [ ] inline annotation cards as the single render primitive for comments,
+  drafts, and walkthrough steps, channel-colored (see milestone 17)
+- [ ] chapters become change-scoped stream headers (description, bookmarks,
+  stats)
+- [ ] walkthrough = ordering over spotlight regions; next/prev drive the
+  normal view; coverage (spotlights visited + skims acknowledged) replaces
+  files-viewed as footer progress
+- [ ] focus is a one-key view preset (max fold, file pane hidden, cards
+  pinned) — no modal phases, full review vocabulary throughout
+- [ ] glance board becomes a summary popup over the attention map
+- [ ] delete `ZenPhase` machinery and the overlay-chunk model + `set_chunks`
+  compatibility path; regions re-anchor/stale via fingerprints instead of
+  tearing down on retarget
+
+## Milestone 19: presentation polish
+
+Status: planned. Independent of milestones 17–18; can land in parallel.
+
+- [ ] derived theme system: an `AppTheme` with all chrome slots computed from
+  a small base palette (bg/fg/accent/diff hues) via contrast-guarded
+  blending; route all hardcoded render colors through it
+- [ ] auto light/dark via OSC 11 background query; transparent-background
+  mode; keep the xterm-256 downgrade path
+- [ ] keybinding presets (`preset = "gander" | "hunk"`) layered under the
+  existing per-key overrides; adopt non-conflicting conventions as defaults
+  (`[`/`]` hunks, `,`/`.` files)
+- [ ] responsive layout: breakpoint-driven file-pane auto-hide and
+  percentage/adjustable split
+- [ ] optional menu bar rendered from the live keymap for discoverability
+
 ## Follow-up backlog (next session pick-up)
 
 Open items from the 2026-07 review-sessions push, consolidated so a future
@@ -324,9 +398,8 @@ session can start here without re-deriving them:
    id-prefix semantics), fix inconsistencies once, then declare the contract
    stable and note versioning rules in docs/cli.md.
 2. **Reviewer/author metadata** (M11). Comments/sessions/action items have no author
-   field yet. Add optional `author` (human name/handle or agent identifier)
-   with serde defaults, thread it through `review.rs`, the CLI (`--author` or
-   config default), MCP params, and exports.
+   field yet. Subsumed by milestone 17 (annotation channels,
+   docs/annotations.md): author identity + channel land together.
 3. **MCP/CLI mutations vs live TUI autosave** (M14 unchecked box). Parity
    tools and mutation CLI commands write the state file directly; an open TUI
    holds state in memory and can autosave over those writes. Options: route
@@ -341,10 +414,10 @@ session can start here without re-deriving them:
    snapshot operation can revert those edits on disk. A future non-mutating
    working-copy fingerprint (or filesystem watcher that only snapshots after a
    visible prompt) would be needed to remove the footgun entirely.
-5. **Zen/focused modes over durable walkthroughs** (M13). Zen currently tours
-   agent-overlay chunks; teach it to also tour persisted
-   `state.sessions[].walkthroughs` so authored walkthroughs (`Y`/`W`) get the
-   same guided presentation.
+5. **Zen/focused modes over durable walkthroughs** (M13). Superseded by
+   milestone 18 (attention map, docs/attention.md): zen collapses into
+   salience-driven rendering of the one diff view instead of touring either
+   chunk source.
 6. **TUI comment creation through the service layer** (M13). TUI comment adds
    still go through `app::ReviewSession::add_comment`; unify with
    `review::add_comment` so kind/action can be set at creation time in the
