@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{DiffRow, DiffRowKind, Focus, ReviewSession, SplitRow, split_rows},
-    config::DiffViewModeConfig,
+    config::{DiffViewModeConfig, UiConfig},
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     jj::JjChangeSummary,
@@ -49,6 +49,7 @@ use super::zen::ZenPhase;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct UiLayout {
+    pub(super) menu: Rect,
     pub(super) files: Rect,
     pub(super) diff: Rect,
     pub(super) footer: Rect,
@@ -90,7 +91,8 @@ pub(super) fn draw(
     let theme = &tui_state.theme;
     let full_area = frame.area();
     frame.buffer_mut().set_style(full_area, theme.base_style());
-    let layout = ui_layout(frame.area(), session.file_pane_visible);
+    let effective_file_pane = tui_state.effective_file_pane(session, full_area.width);
+    let layout = tui_state.review_layout(session, full_area);
 
     // The zen focus card and glance board are full-screen takeovers: the
     // point is a single object of attention, not panes. The reading phase
@@ -146,10 +148,17 @@ pub(super) fn draw(
             );
         }
         _ => {
-            if session.file_pane_visible {
+            if layout.files.width > 0 {
                 draw_files(frame, layout.files, session, theme);
             }
-            draw_diff(frame, layout.diff, session, tui_state);
+            draw_menu_bar(frame, layout.menu, keymap, theme);
+            draw_diff(
+                frame,
+                layout.diff,
+                session,
+                tui_state,
+                effective_file_pane.visible,
+            );
             draw_footer(
                 frame,
                 layout.footer,
@@ -195,9 +204,15 @@ pub(super) fn draw(
         Mode::CommentList(list) => {
             draw_comment_list_popup(frame, frame.area(), session, list, keymap, theme)
         }
-        Mode::ViewOptions(state) => {
-            draw_view_options_popup(frame, frame.area(), session, state, keymap, theme)
-        }
+        Mode::ViewOptions(state) => draw_view_options_popup(
+            frame,
+            frame.area(),
+            session,
+            state,
+            keymap,
+            theme,
+            effective_file_pane.visible,
+        ),
         Mode::CommentInput { editor, target } => {
             draw_comment_popup(frame, frame.area(), session, editor, target, keymap, theme)
         }
@@ -206,21 +221,46 @@ pub(super) fn draw(
     }
 }
 
-pub(super) fn ui_layout(area: Rect, files_visible: bool) -> UiLayout {
+pub(super) fn ui_layout(
+    area: Rect,
+    files_visible: bool,
+    config: &UiConfig,
+    split_percent: u16,
+) -> UiLayout {
+    let menu_height = if config.menu_bar && area.height >= 18 && area.width >= 80 {
+        1
+    } else {
+        0
+    };
     let main = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(2)])
+        .constraints([
+            Constraint::Length(menu_height),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
         .split(area);
-    let files_width = if files_visible { 44 } else { 0 };
+    let files_width = if files_visible {
+        let requested = (area.width as u32 * split_percent.clamp(10, 60) as u32 / 100) as u16;
+        let max_files = area.width.saturating_sub(40);
+        requested.clamp(20, max_files.max(20))
+    } else {
+        0
+    };
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(files_width), Constraint::Min(40)])
-        .split(main[0]);
+        // `files_width` already reserves 40 columns for the diff whenever the
+        // terminal is wide enough. If an explicit override forces the pane on
+        // below that width, preserve its 20-column minimum and let the diff use
+        // the remainder instead of allowing ratatui to squeeze files away.
+        .constraints([Constraint::Length(files_width), Constraint::Min(0)])
+        .split(main[1]);
 
     UiLayout {
+        menu: main[0],
         files: body[0],
         diff: body[1],
-        footer: main[1],
+        footer: main[2],
     }
 }
 
@@ -231,6 +271,36 @@ fn body_area(area: Rect) -> Rect {
         height: area.height.saturating_sub(2),
         ..area
     }
+}
+
+fn draw_menu_bar(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, theme: &AppTheme) {
+    if area.height == 0 || area.width < 80 {
+        return;
+    }
+    let items = [
+        ("help", Action::Help),
+        ("hunk", Action::NextChangedHunk),
+        ("file", Action::NextFile),
+        ("comment", Action::Comment),
+        ("view", Action::ViewOptions),
+        ("pane", Action::ToggleFilePane),
+        ("quit", Action::Quit),
+    ];
+    let mut text = String::from(" ");
+    let mut rendered_any = false;
+    for (label, action) in items {
+        let Some(hint) = keymap.bound_hint(action) else {
+            continue;
+        };
+        if rendered_any {
+            text.push_str("  ");
+        }
+        text.push_str(hint);
+        text.push(' ');
+        text.push_str(label);
+        rendered_any = true;
+    }
+    frame.render_widget(Paragraph::new(text).style(theme.base_style()), area);
 }
 
 pub(super) fn inner_bordered(area: Rect) -> Rect {
@@ -389,6 +459,7 @@ fn draw_diff(
     area: Rect,
     session: &ReviewSession,
     tui_state: &TuiState,
+    file_pane_visible: bool,
 ) {
     let theme = &tui_state.theme;
     if session.selected_visible_file().is_none() {
@@ -417,7 +488,7 @@ fn draw_diff(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(diff_pane_title(session)),
+                    .title(diff_pane_title(session, file_pane_visible)),
             )
             .wrap(Wrap { trim: false }),
             area,
@@ -445,7 +516,7 @@ fn draw_diff(
         &tui_state.theme,
     );
 
-    let mut title = diff_pane_title(session);
+    let mut title = diff_pane_title(session, file_pane_visible);
     if split_requested && !split_active {
         // Two unreadable half-panes help nobody: fall back to unified on
         // narrow terminals and say so in the title.
@@ -1710,8 +1781,8 @@ fn diff_line_cell_spans_with_width(
 
 /// Diff pane title: just "diff" normally; with the file pane hidden it
 /// carries the selected file path and viewed mark so context is never lost.
-fn diff_pane_title(session: &ReviewSession) -> String {
-    if session.file_pane_visible {
+fn diff_pane_title(session: &ReviewSession, file_pane_visible: bool) -> String {
+    if file_pane_visible {
         return "diff".to_owned();
     }
     match session.selected_visible_file() {
@@ -2524,6 +2595,10 @@ fn draw_help_popup(
         section("first review loop"),
         entry(&[Action::FileSearch], "open a file or fuzzy jump"),
         entry(&[Action::NextUnviewed], "next unviewed file"),
+        entry(
+            &[Action::NextFile, Action::PreviousFile],
+            "next/previous file from either pane",
+        ),
         entry(&[Action::MarkViewed], "mark viewed and advance"),
         entry(&[Action::Comment], "comment on what needs work"),
         entry(&[Action::Zen], "zen briefing for a focused pass"),
@@ -2536,6 +2611,10 @@ fn draw_help_popup(
             "horizontal scroll when wrap is off",
         ),
         entry(&[Action::ViewOptions], "soft wrap, layout, and visual cues"),
+        entry(
+            &[Action::WidenFilePane, Action::NarrowFilePane],
+            "widen/narrow file pane split",
+        ),
         section("general"),
         entry(
             &[Action::ToggleFocus],
@@ -2915,6 +2994,7 @@ fn draw_view_options_popup(
     state: &ViewOptionsState,
     keymap: &KeyMap,
     theme: &AppTheme,
+    file_pane_visible: bool,
 ) {
     let popup = centered_rect(56, 70, area);
     clear_popup(frame, popup, theme);
@@ -2927,7 +3007,7 @@ fn draw_view_options_popup(
     for (index, option) in ViewOption::ALL.into_iter().enumerate() {
         let selected = index == state.selected;
         let marker = if selected { "›" } else { " " };
-        let checkbox = if option.enabled(session) {
+        let checkbox = if option.enabled(session, file_pane_visible) {
             "[x]"
         } else {
             "[ ]"
@@ -5458,6 +5538,73 @@ mod tests {
         render_tui_text_with_zen(session, mode, None, width, height)
     }
 
+    #[test]
+    fn authoritative_file_pane_state_hides_and_splits_layout() {
+        let config = UiConfig {
+            file_pane_auto_hide_width: 80,
+            file_pane_split_percent: 40,
+            menu_bar: false,
+        };
+        let session = snapshot_session("");
+        let mut tui_state = TuiState {
+            layout_config: config,
+            file_pane: super::super::FilePaneState {
+                split_percent: 40,
+                ..Default::default()
+            },
+            ..TuiState::default()
+        };
+        let narrow = tui_state.review_layout(&session, Rect::new(0, 0, 70, 20));
+        assert_eq!(narrow.files.width, 0);
+        assert_eq!(narrow.diff.width, 70);
+
+        let wide = tui_state.review_layout(&session, Rect::new(0, 0, 140, 20));
+        assert_eq!(wide.files.width, 56);
+        assert_eq!(wide.diff.width, 84);
+
+        tui_state.file_pane.split_percent = 20;
+        let adjusted = tui_state.review_layout(&session, Rect::new(0, 0, 140, 20));
+        assert_eq!(adjusted.files.width, 28);
+        assert_eq!(adjusted.diff.width, 112);
+
+        tui_state.file_pane.explicit_override = Some(true);
+        let forced = tui_state.review_layout(&session, Rect::new(0, 0, 70, 20));
+        assert!(forced.files.width > 0);
+    }
+
+    #[test]
+    fn menu_bar_reserves_height_only_when_enabled_and_roomy() {
+        let mut config = UiConfig {
+            menu_bar: true,
+            ..UiConfig::default()
+        };
+        assert_eq!(
+            ui_layout(Rect::new(0, 0, 100, 20), true, &config, 30)
+                .menu
+                .height,
+            1
+        );
+        assert_eq!(
+            ui_layout(Rect::new(0, 0, 79, 20), true, &config, 30)
+                .menu
+                .height,
+            0
+        );
+        assert_eq!(
+            ui_layout(Rect::new(0, 0, 100, 17), true, &config, 30)
+                .menu
+                .height,
+            0
+        );
+        config.menu_bar = false;
+        assert_eq!(
+            ui_layout(Rect::new(0, 0, 100, 20), true, &config, 30)
+                .menu
+                .height,
+            0
+        );
+    }
+
     fn render_tui_buffer_and_cursor(
         session: &ReviewSession,
         mode: &Mode,
@@ -5500,16 +5647,27 @@ mod tests {
         width: u16,
         height: u16,
     ) -> String {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        render_tui_text_with_state_and_keymap(session, mode, tui_state, &keymap, width, height)
+    }
+
+    fn render_tui_text_with_state_and_keymap(
+        session: &ReviewSession,
+        mode: &Mode,
+        tui_state: &TuiState,
+        keymap: &KeyMap,
+        width: u16,
+        height: u16,
+    ) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         terminal
             .draw(|frame| {
                 draw(
                     frame,
                     session,
                     mode,
-                    &keymap,
+                    keymap,
                     tui_state,
                     tui_state.notice.as_ref(),
                     None,
@@ -5517,6 +5675,198 @@ mod tests {
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
+    }
+
+    fn menu_snapshot_state() -> TuiState {
+        TuiState {
+            layout_config: UiConfig {
+                menu_bar: true,
+                ..UiConfig::default()
+            },
+            ..TuiState::default()
+        }
+    }
+
+    #[test]
+    fn tui_snapshot_menu_with_gander_preset() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::Normal,
+            &menu_snapshot_state(),
+            &keymap,
+            110,
+            20,
+        );
+        assert!(rendered.contains("? help  ] hunk  . file"), "{rendered}");
+        insta::assert_snapshot!("tui_snapshot_menu_gander_preset", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_with_hunk_preset() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let config = KeybindingsConfig::preset(crate::config::KeybindingPresetConfig::Hunk);
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::Normal,
+            &menu_snapshot_state(),
+            &keymap,
+            110,
+            20,
+        );
+        assert!(rendered.contains("alt-j hunk  alt-l file"), "{rendered}");
+        insta::assert_snapshot!("tui_snapshot_menu_hunk_preset", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_with_custom_override() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let config = KeybindingsConfig {
+            help: vec!["alt-1".into()],
+            next_changed_hunk: vec!["alt-2".into()],
+            next_file: vec!["alt-3".into()],
+            comment: vec!["alt-4".into()],
+            view_options: vec!["alt-5".into()],
+            toggle_file_pane: vec!["alt-6".into()],
+            quit: vec!["alt-7".into()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::Normal,
+            &menu_snapshot_state(),
+            &keymap,
+            110,
+            20,
+        );
+        assert!(
+            rendered.contains("alt-1 help  alt-2 hunk  alt-3 file"),
+            "{rendered}"
+        );
+        insta::assert_snapshot!("tui_snapshot_menu_custom_override", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_omits_unbound_item() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let config = KeybindingsConfig {
+            next_changed_hunk: Vec::new(),
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::Normal,
+            &menu_snapshot_state(),
+            &keymap,
+            110,
+            20,
+        );
+        assert!(!rendered.lines().next().unwrap_or_default().contains("hunk"));
+        insta::assert_snapshot!("tui_snapshot_menu_unbound_item_omitted", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_with_popup_and_footer() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let config = KeybindingsConfig {
+            popup_move_down: vec!["alt-j".into()],
+            popup_move_up: vec!["alt-k".into()],
+            comment_list_new_general: vec!["alt-g".into()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::CommentList(CommentListState::default()),
+            &menu_snapshot_state(),
+            &keymap,
+            120,
+            22,
+        );
+        assert!(rendered.contains("alt-j/alt-k move"), "{rendered}");
+        assert!(rendered.contains("alt-g general"), "{rendered}");
+        insta::assert_snapshot!("tui_snapshot_menu_with_popup_and_footer", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_file_pane_effective_layouts() {
+        let session = snapshot_session(
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let wide = TuiState::default();
+        insta::assert_snapshot!(
+            "tui_snapshot_file_pane_wide_visible",
+            render_tui_text_with_state(&session, &Mode::Normal, &wide, 100, 16)
+        );
+
+        let narrow = TuiState::default();
+        let mut narrow_session = session.clone();
+        narrow.correct_file_pane_focus(&mut narrow_session, 44);
+        let narrow_rendered =
+            render_tui_text_with_state(&narrow_session, &Mode::Normal, &narrow, 44, 16);
+        assert!(
+            narrow_rendered.contains("diff · src/a.rs"),
+            "{narrow_rendered}"
+        );
+        insta::assert_snapshot!("tui_snapshot_file_pane_narrow_auto_hidden", narrow_rendered);
+
+        let forced = TuiState {
+            file_pane: super::super::FilePaneState {
+                explicit_override: Some(true),
+                ..Default::default()
+            },
+            ..TuiState::default()
+        };
+        insta::assert_snapshot!(
+            "tui_snapshot_file_pane_narrow_forced_visible",
+            render_tui_text_with_state(&session, &Mode::Normal, &forced, 44, 16)
+        );
+
+        let adjusted = TuiState {
+            file_pane: super::super::FilePaneState {
+                split_percent: 45,
+                ..Default::default()
+            },
+            ..TuiState::default()
+        };
+        insta::assert_snapshot!(
+            "tui_snapshot_file_pane_adjusted_split",
+            render_tui_text_with_state(&session, &Mode::Normal, &adjusted, 100, 16)
+        );
+    }
+
+    #[test]
+    fn view_options_file_pane_checkbox_uses_effective_visibility() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mode = Mode::ViewOptions(ViewOptionsState { selected: 4 });
+        let narrow = render_tui_text_with_state(&session, &mode, &TuiState::default(), 44, 32);
+        assert!(narrow.contains("[ ] file pane"), "{narrow}");
+
+        let forced = TuiState {
+            file_pane: super::super::FilePaneState {
+                explicit_override: Some(true),
+                ..Default::default()
+            },
+            ..TuiState::default()
+        };
+        let forced = render_tui_text_with_state(&session, &mode, &forced, 44, 32);
+        assert!(forced.contains("[x] file pane"), "{forced}");
     }
 
     fn render_tui_text_with_zen(
@@ -5716,6 +6066,8 @@ diff --git a/README.md b/README.md
         assert!(rendered.contains("horizontal scroll when"));
         assert!(rendered.contains("wrap is off"));
         assert!(rendered.contains("shift-left/shift-right"));
+        assert!(rendered.contains("next/previous file from either pane"));
+        assert!(rendered.contains("widen/narrow file pane"));
         assert!(!rendered.contains("?  toggle diff soft wrap"));
         assert!(rendered.contains("j/k or page keys scroll"));
 
@@ -7181,7 +7533,8 @@ diff --git a/Cargo.toml b/Cargo.toml
  }
 "#,
         );
-        session.toggle_file_pane();
+        session.toggle_focus();
+        session.file_pane_visible = false;
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 80, 12));
     }
@@ -7201,7 +7554,8 @@ diff --git a/Cargo.toml b/Cargo.toml
 "#,
         );
         session.toggle_diff_view();
-        session.toggle_file_pane();
+        session.toggle_focus();
+        session.file_pane_visible = false;
 
         insta::assert_snapshot!(render_tui_style_runs(&session, &Mode::Normal, 130, 12));
     }
@@ -8063,7 +8417,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             render_tui_text(&session, &Mode::Normal, 76, 14)
         );
         session.toggle_diff_view();
-        session.toggle_file_pane();
+        session.file_pane_visible = false;
         insta::assert_snapshot!(
             "tui_snapshot_wrapped_split_diff",
             render_tui_text(&session, &Mode::Normal, 130, 14)

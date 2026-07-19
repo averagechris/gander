@@ -62,7 +62,7 @@ use crate::{
         render_handoff_markdown,
     },
     clipboard::{ClipboardMethod, copy_to_clipboard},
-    config::{AgentConfig, KeybindingsConfig, ThemeConfig, ThemeModeConfig},
+    config::{AgentConfig, KeybindingsConfig, ThemeConfig, ThemeModeConfig, UiConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
@@ -181,7 +181,7 @@ enum CommentInputTarget {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct TuiState {
     diff_viewport: viewport::DiffViewportController,
     help_scroll: usize,
@@ -231,6 +231,135 @@ struct TuiState {
     /// auto-background query outcome; inactive for parsed replies and when no
     /// query was sent.
     osc_guard: OscTailGuard,
+    layout_config: UiConfig,
+    file_pane: FilePaneState,
+}
+
+impl Default for TuiState {
+    fn default() -> Self {
+        let layout_config = UiConfig::default();
+        Self {
+            diff_viewport: viewport::DiffViewportController::default(),
+            help_scroll: 0,
+            terminal_size: ratatui::prelude::Size::default(),
+            launch_target: None,
+            diff_drag: None,
+            notice: None,
+            last_autosave: None,
+            overlay_mtime: None,
+            state_mtime: None,
+            state_tombstones: ReviewStateTombstones::default(),
+            invalid_chunk_parts: Vec::new(),
+            agent_overlay_path: None,
+            agent_log_path: None,
+            agent_config: AgentConfig::default(),
+            agent_process: None,
+            instance_registration: None,
+            zen: None,
+            last_repo_poll: None,
+            repo_fingerprint: None,
+            current_identity_chip: None,
+            activity: VecDeque::new(),
+            fingerprint_failures: 0,
+            theme: AppTheme::default(),
+            osc_guard: OscTailGuard::default(),
+            file_pane: FilePaneState {
+                explicit_override: None,
+                presentation_scope: None,
+                split_percent: layout_config.file_pane_split_percent,
+            },
+            layout_config,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilePaneState {
+    explicit_override: Option<bool>,
+    presentation_scope: Option<PresentationFilePaneScope>,
+    split_percent: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PresentationFilePaneScope {
+    prior_explicit_override: Option<bool>,
+}
+
+impl Default for FilePaneState {
+    fn default() -> Self {
+        Self {
+            explicit_override: None,
+            presentation_scope: None,
+            split_percent: UiConfig::default().file_pane_split_percent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectiveFilePane {
+    visible: bool,
+    split_percent: u16,
+}
+
+impl TuiState {
+    /// Resolve the one effective file-pane state used by every geometry,
+    /// rendering, focus, and input path. A scoped zen/presenter hide wins over
+    /// the explicit user override; outside presentation, the explicit override
+    /// wins and the persisted preference is otherwise subject to the
+    /// configured responsive breakpoint at the actual terminal width.
+    fn effective_file_pane(
+        &self,
+        session: &ReviewSession,
+        terminal_width: u16,
+    ) -> EffectiveFilePane {
+        let responsive_preference = session.file_pane_visible
+            && terminal_width >= self.layout_config.file_pane_auto_hide_width;
+        EffectiveFilePane {
+            visible: if self.file_pane.presentation_scope.is_some() {
+                false
+            } else {
+                self.file_pane
+                    .explicit_override
+                    .unwrap_or(responsive_preference)
+            },
+            split_percent: self.file_pane.split_percent.clamp(10, 60),
+        }
+    }
+
+    fn review_layout(&self, session: &ReviewSession, area: Rect) -> render::UiLayout {
+        let pane = self.effective_file_pane(session, area.width);
+        ui_layout(area, pane.visible, &self.layout_config, pane.split_percent)
+    }
+
+    fn correct_file_pane_focus(&self, session: &mut ReviewSession, terminal_width: u16) {
+        if !self.effective_file_pane(session, terminal_width).visible
+            && session.focus == Focus::Files
+        {
+            session.focus = Focus::Diff;
+        }
+    }
+
+    fn toggle_file_pane(&mut self, session: &mut ReviewSession, terminal_width: u16) {
+        let next = !self.effective_file_pane(session, terminal_width).visible;
+        self.file_pane.explicit_override = Some(next);
+        session.file_pane_visible = next;
+        self.correct_file_pane_focus(session, terminal_width);
+    }
+
+    fn enter_presentation_file_pane_scope(&mut self, session: &mut ReviewSession) {
+        debug_assert!(self.file_pane.presentation_scope.is_none());
+        self.file_pane.presentation_scope = Some(PresentationFilePaneScope {
+            prior_explicit_override: self.file_pane.explicit_override,
+        });
+        self.correct_file_pane_focus(session, self.terminal_size.width);
+    }
+
+    fn restore_presentation_file_pane_scope(&mut self, session: &mut ReviewSession) {
+        if let Some(scope) = self.file_pane.presentation_scope.take() {
+            self.file_pane.explicit_override = scope.prior_explicit_override;
+        }
+        self.correct_file_pane_focus(session, self.terminal_size.width);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +420,7 @@ pub fn run(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
     theme_config: &ThemeConfig,
+    ui_config: &UiConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
@@ -428,12 +558,20 @@ pub fn run(
         terminal_size: initial_terminal_size,
         theme: app_theme,
         osc_guard,
+        layout_config: ui_config.clone(),
+        file_pane: FilePaneState {
+            split_percent: ui_config.file_pane_split_percent.clamp(10, 60),
+            ..FilePaneState::default()
+        },
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
             message,
         }),
         ..TuiState::default()
     };
+    // Correct focus before the first draw. The initial size is already stored,
+    // so waiting for a Resize event would leave an auto-hidden pane focused.
+    tui_state.correct_file_pane_focus(session, initial_terminal_size.width);
     #[cfg(unix)]
     {
         tui_state.instance_registration = instance_registration;
@@ -688,6 +826,14 @@ fn tour_breadcrumb(stop: &zen::ZenStop) -> String {
     }
 }
 
+/// End the zen/presenter layer and restore both session-owned view state and
+/// the exact explicit file-pane override captured when presentation began.
+/// Every successful teardown funnels through this helper.
+fn finish_zen_presentation(session: &mut ReviewSession, tui_state: &mut TuiState, zen: &ZenState) {
+    zen::end(session, zen);
+    tui_state.restore_presentation_file_pane_scope(session);
+}
+
 fn seed_zen_tour(
     session: &mut ReviewSession,
     review_loader: &ReviewLoader<'_>,
@@ -744,6 +890,7 @@ fn seed_zen_tour(
                     return;
                 }
             }
+            tui_state.enter_presentation_file_pane_scope(session);
             session.file_pane_visible = false;
             if let Some(stop) = zen.current().cloned()
                 && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
@@ -751,6 +898,7 @@ fn seed_zen_tour(
                 *session = prior_session;
                 tui_state.diff_viewport.restore_transaction(prior_viewport);
                 tui_state.zen = None;
+                tui_state.restore_presentation_file_pane_scope(session);
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Error,
                     message: "zen could not start — initial stop is unavailable".into(),
@@ -868,7 +1016,7 @@ fn run_loop(
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
             let zen = tui_state.zen.take().expect("checked above");
-            zen::end(session, &zen);
+            finish_zen_presentation(session, tui_state, &zen);
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
@@ -960,6 +1108,9 @@ fn run_loop(
             }
         }
         if quit {
+            if let Some(zen) = tui_state.zen.take() {
+                finish_zen_presentation(session, tui_state, &zen);
+            }
             if let Some(state_path) = state_path {
                 autosave_state(session, state_path, tui_state);
             }
@@ -1020,6 +1171,7 @@ fn observe_terminal_size(
             .diff_viewport
             .transition_snapshot(session, current_diff_inner(session, tui_state));
         tui_state.terminal_size = observed;
+        tui_state.correct_file_pane_focus(session, observed.width);
         resize_comment_editor(mode, observed);
         tui_state.diff_viewport.finish_transition(
             transition,
@@ -1027,6 +1179,9 @@ fn observe_terminal_size(
             current_diff_inner(session, tui_state),
         );
     } else {
+        // Session preference can change independently of terminal dimensions
+        // (zen, retarget, or focus commands), so enforce this before every draw.
+        tui_state.correct_file_pane_focus(session, observed.width);
         resize_comment_editor(mode, observed);
     }
 }
@@ -1481,7 +1636,7 @@ fn apply_present_command(
                 let transition = tui_state
                     .diff_viewport
                     .transition_snapshot(session, current_diff_inner(session, tui_state));
-                zen::end(session, &zen);
+                finish_zen_presentation(session, tui_state, &zen);
                 tui_state.diff_viewport.finish_transition(
                     transition,
                     session,
@@ -1684,12 +1839,14 @@ fn start_present_tour(
             "nothing to review — no changed files in this target".to_owned(),
         ));
     };
-    let prior_pane = session.file_pane_visible;
+    let prior_session = session.clone();
+    tui_state.enter_presentation_file_pane_scope(session);
     session.file_pane_visible = false;
     if let Some(stop) = zen.current().cloned()
         && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
     {
-        session.file_pane_visible = prior_pane;
+        *session = prior_session;
+        tui_state.restore_presentation_file_pane_scope(session);
         return Err((-32002, "initial zen stop is unavailable".into()));
     }
     tui_state.zen = Some(zen);
@@ -1716,7 +1873,7 @@ fn reload_present_tour(
             .diff_viewport
             .transition_snapshot(session, current_diff_inner(session, tui_state));
         let zen = tui_state.zen.take().expect("checked above");
-        zen::end(session, &zen);
+        finish_zen_presentation(session, tui_state, &zen);
         tui_state.diff_viewport.finish_transition(
             transition,
             session,
@@ -1804,7 +1961,7 @@ fn refresh_current_target(
             let transition = tui_state
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
-            zen::end(session, &zen);
+            finish_zen_presentation(session, tui_state, &zen);
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
@@ -2206,7 +2363,7 @@ fn handle_key_event(
                         let transition = tui_state
                             .diff_viewport
                             .transition_snapshot(session, current_diff_inner(session, tui_state));
-                        zen::end(session, &zen);
+                        finish_zen_presentation(session, tui_state, &zen);
                         tui_state.diff_viewport.finish_transition(
                             transition,
                             session,
@@ -2381,6 +2538,8 @@ fn handle_normal_action(
         Action::ToggleFocus
             | Action::NextUnviewed
             | Action::PreviousUnviewed
+            | Action::NextFile
+            | Action::PreviousFile
             | Action::MarkViewed
             | Action::ToggleViewed
             | Action::MarkAllViewed
@@ -2435,7 +2594,10 @@ fn handle_normal_action(
                 }
             }
         },
-        Action::ToggleFocus => session.toggle_focus(),
+        Action::ToggleFocus => {
+            session.toggle_focus();
+            tui_state.correct_file_pane_focus(session, tui_state.terminal_size.width);
+        }
         Action::DiffTop => {
             tui_state
                 .diff_viewport
@@ -2562,6 +2724,8 @@ fn handle_normal_action(
         }
         Action::NextUnviewed => session.move_to_unviewed(1),
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
+        Action::NextFile => session.move_file_selection(1),
+        Action::PreviousFile => session.move_file_selection(-1),
         Action::FileSearch => {
             *mode = Mode::FileSearch(FileSearchState::new(session));
         }
@@ -2713,10 +2877,34 @@ fn handle_normal_action(
             session.toggle_diff_wrap();
         }
         Action::ToggleFilePane => {
-            session.toggle_file_pane();
+            tui_state.toggle_file_pane(session, tui_state.terminal_size.width);
         }
         Action::ToggleDiffView => {
             session.toggle_diff_view();
+        }
+        Action::WidenFilePane => {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
+            tui_state.file_pane.split_percent =
+                tui_state.file_pane.split_percent.saturating_add(5).min(60);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
+        }
+        Action::NarrowFilePane => {
+            let transition = tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state));
+            tui_state.file_pane.split_percent =
+                tui_state.file_pane.split_percent.saturating_sub(5).max(10);
+            tui_state.diff_viewport.finish_transition(
+                transition,
+                session,
+                current_diff_inner(session, tui_state),
+            );
         }
         Action::ToggleLargeDiff => {
             session.toggle_large_diff_render();
@@ -2875,11 +3063,9 @@ fn handle_normal_action(
 fn current_diff_inner(session: &ReviewSession, tui_state: &TuiState) -> Rect {
     let size = tui_state.terminal_size;
     inner_bordered(
-        ui_layout(
-            Rect::new(0, 0, size.width, size.height),
-            session.file_pane_visible,
-        )
-        .diff,
+        tui_state
+            .review_layout(session, Rect::new(0, 0, size.width, size.height))
+            .diff,
     )
 }
 
@@ -2900,7 +3086,7 @@ enum NavigationViewportPlacement {
 fn apply_navigation_viewport_placement(
     session: &mut ReviewSession,
     placement: NavigationViewportPlacement,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) {
     let inner = current_diff_inner(session, tui_state);
     match placement {
@@ -3465,7 +3651,7 @@ fn handle_view_options_key(
     state: &mut ViewOptionsState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) -> bool {
     // The popup's own binding closes it, so `V` toggles the popup.
     if keymap.normal_action_for(&key, true) == Some(Action::ViewOptions) {
@@ -3485,7 +3671,11 @@ fn handle_view_options_key(
             let transition = tui_state
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
-            option.toggle(session);
+            if option == ViewOption::FilePane {
+                tui_state.toggle_file_pane(session, tui_state.terminal_size.width);
+            } else {
+                option.toggle(session);
+            }
             tui_state.diff_viewport.finish_transition_top_only(
                 transition,
                 session,
@@ -3510,7 +3700,7 @@ fn handle_flag_list_key(
     list: &mut FlagListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) -> bool {
     if let Some(action) = keymap.popup_action_for(KeyContext::FlagList, &key) {
         match action {
@@ -3616,7 +3806,7 @@ fn zen_goto_stop(
 fn apply_zen_viewport_placement(
     session: &mut ReviewSession,
     placement: zen::ZenViewportPlacement,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) {
     match placement {
         zen::ZenViewportPlacement::Top => tui_state
@@ -4078,7 +4268,7 @@ fn handle_file_search_key(
     search: &mut FileSearchState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) -> bool {
     if let Some(action) = keymap.filter_action_for(KeyContext::FileSearch, &key) {
         match action {
@@ -4272,7 +4462,7 @@ fn handle_open_work_key(
     list: &mut OpenWorkListState,
     session: &mut ReviewSession,
     keymap: &KeyMap,
-    tui_state: &TuiState,
+    tui_state: &mut TuiState,
 ) -> bool {
     if let Some(action) = keymap.popup_action_for(KeyContext::OpenWork, &key) {
         match action {
@@ -4713,9 +4903,9 @@ fn handle_mouse_event(
         return;
     }
 
-    let layout = ui_layout(
+    let layout = tui_state.review_layout(
+        session,
         Rect::new(0, 0, terminal_size.width, terminal_size.height),
-        session.file_pane_visible,
     );
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -4743,13 +4933,13 @@ fn handle_zen_mouse_event(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
 ) -> bool {
+    let layout = tui_state.review_layout(
+        session,
+        Rect::new(0, 0, terminal_size.width, terminal_size.height),
+    );
     let Some(zen) = tui_state.zen.as_mut() else {
         return false;
     };
-    let layout = ui_layout(
-        Rect::new(0, 0, terminal_size.width, terminal_size.height),
-        session.file_pane_visible,
-    );
     let body = Rect {
         height: terminal_size.height.saturating_sub(2),
         ..Rect::new(0, 0, terminal_size.width, terminal_size.height)
@@ -6070,21 +6260,21 @@ mod tests {
         );
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut search = FileSearchState::new(&session);
-        let tui_state = TuiState::default();
+        let mut tui_state = TuiState::default();
 
         assert!(!handle_file_search_key(
             KeyEvent::from(KeyCode::Char('j')),
             &mut search,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert!(!handle_file_search_key(
             KeyEvent::from(KeyCode::Char('k')),
             &mut search,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert_eq!(search.query, "jk");
 
@@ -6095,7 +6285,7 @@ mod tests {
             &mut search,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert_eq!(search.query, "");
     }
@@ -6965,7 +7155,7 @@ diff --git a/b.rs b/b.rs
             .position(|row| row.text == long)
             .unwrap();
         session.diff_scroll = row as u16;
-        let tui_state = TuiState {
+        let mut tui_state = TuiState {
             terminal_size: ratatui::prelude::Size::new(30, 5),
             ..TuiState::default()
         };
@@ -6982,7 +7172,7 @@ diff --git a/b.rs b/b.rs
             &mut list,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert_eq!(tui_state.diff_viewport.visual_state(&session), before);
     }
@@ -7208,7 +7398,7 @@ diff --git a/b.rs b/b.rs
             .unwrap();
         session.diff_cursor = row;
         session.diff_scroll = row as u16;
-        let tui_state = TuiState {
+        let mut tui_state = TuiState {
             terminal_size: ratatui::prelude::Size::new(30, 5),
             ..TuiState::default()
         };
@@ -7224,7 +7414,7 @@ diff --git a/b.rs b/b.rs
             &mut list,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert_eq!(session.diff_scroll, 0);
         assert_eq!(tui_state.diff_viewport.visual_state(&session), (0, 7));
@@ -8098,7 +8288,12 @@ diff --git a/b.rs b/b.rs
     fn target_and_view_modals_block_click_wheel_and_drag_from_review() {
         let diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n-old\n-old2\n-old3\n-old4\n+new\n+new2\n+new3\n+new4\n";
         let size = ratatui::prelude::Size::new(80, 12);
-        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), true);
+        let layout = ui_layout(
+            Rect::new(0, 0, size.width, size.height),
+            true,
+            &UiConfig::default(),
+            30,
+        );
         let files = inner_bordered(layout.files);
         let diff_area = inner_bordered(layout.diff);
 
@@ -8163,7 +8358,12 @@ diff --git a/b.rs b/b.rs
             .unwrap();
         session.diff_scroll = owner as u16;
         let size = ratatui::prelude::Size::new(60, 8);
-        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), false);
+        let layout = ui_layout(
+            Rect::new(0, 0, size.width, size.height),
+            false,
+            &UiConfig::default(),
+            30,
+        );
         let inner = inner_bordered(layout.diff);
         let mut tui_state = TuiState::default();
 
@@ -8209,7 +8409,12 @@ diff --git a/b.rs b/b.rs
         let right = rows.iter().position(|row| row.text == added).unwrap();
         session.diff_scroll = left as u16;
         let size = ratatui::prelude::Size::new(130, 6);
-        let layout = ui_layout(Rect::new(0, 0, size.width, size.height), false);
+        let layout = ui_layout(
+            Rect::new(0, 0, size.width, size.height),
+            false,
+            &UiConfig::default(),
+            30,
+        );
         let inner = inner_bordered(layout.diff);
         let mut tui_state = TuiState::default();
 
@@ -8244,7 +8449,7 @@ diff --git a/b.rs b/b.rs
             .position(|row| row.text == long)
             .unwrap();
         session.diff_scroll = owner as u16;
-        let layout = ui_layout(Rect::new(0, 0, 60, 7), false);
+        let layout = ui_layout(Rect::new(0, 0, 60, 7), false, &UiConfig::default(), 30);
         let inner = inner_bordered(layout.diff);
         let mut tui_state = TuiState::default();
 
@@ -8281,7 +8486,7 @@ diff --git a/b.rs b/b.rs
             .iter()
             .position(|row| matches!(row.kind, crate::app::DiffRowKind::HunkHeader))
             .unwrap();
-        let layout = ui_layout(Rect::new(0, 0, 80, 12), false);
+        let layout = ui_layout(Rect::new(0, 0, 80, 12), false, &UiConfig::default(), 30);
         let inner = inner_bordered(layout.diff);
         let mut tui_state = TuiState::default();
 
@@ -8310,7 +8515,7 @@ diff --git a/b.rs b/b.rs
         let rows = session.diff_rows_for_selected_file();
         let left = rows.iter().position(|row| row.text == removed).unwrap();
         session.diff_scroll = left as u16;
-        let layout = ui_layout(Rect::new(0, 0, 130, 8), false);
+        let layout = ui_layout(Rect::new(0, 0, 130, 8), false, &UiConfig::default(), 30);
         let inner = inner_bordered(layout.diff);
         let mut tui_state = TuiState::default();
 
@@ -8961,6 +9166,174 @@ diff --git a/c.rs b/c.rs
         ));
     }
 
+    fn split_reflow_session() -> ReviewSession {
+        let mut body = String::from(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,30 +1,30 @@\n",
+        );
+        for line in 1..=30 {
+            body.push_str(&format!(" line {line} {}\n", "wide ".repeat(12)));
+        }
+        snapshot_session(&body)
+    }
+
+    #[test]
+    fn widen_file_pane_reflows_and_keeps_followed_cursor_visible() {
+        let mut session = split_reflow_session();
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .rposition(|row| row.anchor.is_some())
+            .unwrap();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 10),
+            ..TuiState::default()
+        };
+        let old_inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .logical_selection(&mut session, old_inner);
+        assert!(diff_cursor_is_visible(&session, old_inner, &tui_state));
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::WidenFilePane,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(tui_state.file_pane.split_percent, 35);
+        let widened_inner = current_diff_inner(&session, &tui_state);
+        assert!(widened_inner.width < old_inner.width);
+        assert!(diff_cursor_is_visible(&session, widened_inner, &tui_state));
+    }
+
+    #[test]
+    fn narrow_file_pane_reflows_without_reattaching_detached_scroll() {
+        let mut session = split_reflow_session();
+        session.focus = Focus::Diff;
+        session.diff_cursor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .rposition(|row| row.anchor.is_some())
+            .unwrap();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 10),
+            ..TuiState::default()
+        };
+        let old_inner = current_diff_inner(&session, &tui_state);
+        tui_state
+            .diff_viewport
+            .logical_selection(&mut session, old_inner);
+        tui_state
+            .diff_viewport
+            .visual_scroll(&mut session, old_inner, isize::MIN);
+        let detached_top = session.diff_top_identity();
+        assert!(!diff_cursor_is_visible(&session, old_inner, &tui_state));
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::NarrowFilePane,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert_eq!(tui_state.file_pane.split_percent, 25);
+        let narrowed_inner = current_diff_inner(&session, &tui_state);
+        assert!(narrowed_inner.width > old_inner.width);
+        assert_eq!(session.diff_top_identity(), detached_top);
+        assert!(!diff_cursor_is_visible(
+            &session,
+            narrowed_inner,
+            &tui_state
+        ));
+    }
+
+    #[test]
+    fn effective_file_pane_resolves_preference_breakpoint_and_override() {
+        let mut session = snapshot_session("");
+        let mut tui_state = TuiState::default();
+        assert!(session.file_pane_visible);
+        assert!(!tui_state.effective_file_pane(&session, 49).visible);
+        assert!(tui_state.effective_file_pane(&session, 50).visible);
+
+        session.file_pane_visible = false;
+        assert!(!tui_state.effective_file_pane(&session, 100).visible);
+        tui_state.file_pane.explicit_override = Some(true);
+        assert!(tui_state.effective_file_pane(&session, 20).visible);
+        tui_state.file_pane.explicit_override = Some(false);
+        session.file_pane_visible = true;
+        assert!(!tui_state.effective_file_pane(&session, 100).visible);
+    }
+
+    #[test]
+    fn tui_state_default_uses_production_thirty_percent_file_split() {
+        let session = snapshot_session("");
+        let tui_state = TuiState::default();
+        assert_eq!(tui_state.file_pane.split_percent, 30);
+        let layout = tui_state.review_layout(&session, Rect::new(0, 0, 100, 20));
+        assert_eq!(layout.files.width, 30);
+        assert_eq!(layout.diff.width, 70);
+    }
+
+    #[test]
+    fn equal_startup_size_corrects_auto_hidden_files_focus() {
+        let mut session = snapshot_session("");
+        assert_eq!(session.focus, Focus::Files);
+        let size = ratatui::prelude::Size::new(40, 12);
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            ..TuiState::default()
+        };
+
+        observe_terminal_size(size, &mut session, &mut mode, &mut tui_state);
+
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(!tui_state.effective_file_pane(&session, size.width).visible);
+    }
+
+    #[test]
+    fn forced_visible_narrow_pane_persists_across_resize() {
+        let mut session = snapshot_session("");
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(40, 12),
+            ..TuiState::default()
+        };
+        tui_state.toggle_file_pane(&mut session, 40);
+        session.focus = Focus::Files;
+
+        observe_terminal_size(
+            ratatui::prelude::Size::new(35, 12),
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert!(tui_state.effective_file_pane(&session, 35).visible);
+        assert_eq!(session.focus, Focus::Files);
+    }
+
     #[test]
     fn large_diff_toggle_finishes_with_cursor_visible_in_short_pane() {
         let mut session = snapshot_session(
@@ -9051,7 +9424,7 @@ diff --git a/c.rs b/c.rs
         let mut session = snapshot_session(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        let tui_state = TuiState {
+        let mut tui_state = TuiState {
             terminal_size: ratatui::prelude::Size::new(80, 12),
             ..TuiState::default()
         };
@@ -9065,7 +9438,7 @@ diff --git a/c.rs b/c.rs
             &mut options,
             &mut session,
             &keymap,
-            &tui_state,
+            &mut tui_state,
         ));
         assert_eq!(tui_state.diff_viewport.cache_builds(), builds);
     }
@@ -9285,6 +9658,158 @@ diff --git a/c.rs b/c.rs
     }
 
     #[test]
+    fn zen_scope_hides_forced_pane_geometry_and_hit_testing_then_restores_override() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let size = ratatui::prelude::Size::new(100, 20);
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+
+        seed_zen_tour(&mut session, &loader, &mut tui_state);
+
+        assert!(tui_state.zen.is_some());
+        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(
+            tui_state.file_pane.presentation_scope,
+            Some(PresentationFilePaneScope {
+                prior_explicit_override: Some(true),
+            })
+        );
+        for phase in [
+            zen::ZenPhase::Focus,
+            zen::ZenPhase::Reading,
+            zen::ZenPhase::Glance,
+            zen::ZenPhase::Artifact {
+                index: 0,
+                scroll: 0,
+            },
+        ] {
+            tui_state.zen.as_mut().unwrap().phase = phase;
+            assert!(!tui_state.effective_file_pane(&session, size.width).visible);
+            assert_eq!(
+                tui_state
+                    .review_layout(&session, Rect::new(0, 0, size.width, size.height))
+                    .files
+                    .width,
+                0
+            );
+        }
+
+        // Reading uses the normal pane hit-testing path. A click where the
+        // forced-visible files pane would have been must still target the
+        // full-width diff while the presentation scope is active.
+        tui_state.zen.as_mut().unwrap().phase = zen::ZenPhase::Reading;
+        session.focus = Focus::Files;
+        let mut mode = Mode::Normal;
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(session.focus, Focus::Diff);
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Esc),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+
+        assert!(tui_state.zen.is_none());
+        assert!(tui_state.file_pane.presentation_scope.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert!(tui_state.effective_file_pane(&session, size.width).visible);
+        assert_eq!(
+            tui_state
+                .review_layout(&session, Rect::new(0, 0, size.width, size.height))
+                .files
+                .width,
+            30
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn present_end_restores_forced_pane_override() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
+
+        apply_present_command(
+            crate::acp::socket::PresentCommand::End,
+            &loader,
+            &mut session,
+            &Mode::Normal,
+            &mut tui_state,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(tui_state.zen.is_none());
+        assert!(tui_state.file_pane.presentation_scope.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert!(tui_state.effective_file_pane(&session, 100).visible);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn present_reload_failure_restores_forced_pane_override() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
+        assert!(!tui_state.effective_file_pane(&session, 100).visible);
+
+        session.replace_diff(
+            session.target.clone(),
+            DiffSet::parse("").expect("empty diff parses"),
+        );
+        let error = reload_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
+
+        assert!(error.1.contains("no slides"));
+        assert!(tui_state.zen.is_none());
+        assert!(tui_state.file_pane.presentation_scope.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert!(tui_state.effective_file_pane(&session, 100).visible);
+    }
+
+    #[test]
     fn unavailable_initial_zen_stop_restores_startup_state() {
         let mut session = zen_session();
         for chunk in &mut session.review_chunks {
@@ -9304,7 +9829,13 @@ diff --git a/c.rs b/c.rs
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
             jj: &backend,
         };
-        let mut tui_state = TuiState::default();
+        let mut tui_state = TuiState {
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
         let before = (
             session.selected,
             session.diff_scroll,
@@ -9313,6 +9844,8 @@ diff --git a/c.rs b/c.rs
         );
         seed_zen_tour(&mut session, &loader, &mut tui_state);
         assert!(tui_state.zen.is_none());
+        assert!(tui_state.file_pane.presentation_scope.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
         assert_eq!(
             (
                 session.selected,

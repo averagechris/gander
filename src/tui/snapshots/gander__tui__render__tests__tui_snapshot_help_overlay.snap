@@ -2,35 +2,35 @@
 source: src/tui/render.rs
 expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 ---
-┌files─────────────────────────────────────┐┌diff────────────────────────────────────────────────────────────┐
-│• ▾ src 0/1                               ││src/app.rs  +1 -1                                               │
-│  • mod     app.rs                        ││@@ -1,2 +1,2 @@                                                 │
+┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
+│• ▾ src 0/1                    ││src/app.rs  +1 -1                                                          │
+│  • mod     app.rs             ││@@ -1,2 +1,2 @@                                                            │
 │     ┌help─────────────────────────────────────────────────────────────────────────────────────────────┐    │
 │     │first review loop                                zen keys                                        │    │
 │     │           /  open a file or fuzzy jump                   n/p  next/back stop                    │    │
 │     │           n  next unviewed file                          tab  toggle focus card / reading view  │    │
-│     │       enter  mark viewed and advance                       g  open glance board                 │    │
-│     │           c  comment on what needs work                    e  open/close artifacts              │    │
-│     │           T  zen briefing for a focused pass               d  toggle chapter details / expand   │    │
-│     │      ctrl-y  copy handoff when done             brief                                           │    │
-│     │diff & view                                                 .  refocus current stop              │    │
-│     │         j/k  move diff cursor                              a  acknowledge glance items          │    │
-│     │         d/u  vertical scroll                             esc  leave zen; close modal zen        │    │
-│     │  shift-left/shift-right  horizontal scroll when comments                                        │    │
-│     │wrap is off                                                 c  comment at cursor                 │    │
-│     │           V  soft wrap, layout, and visual cues            r  start/finish range comment        │    │
-│     │general                                                     s  cycle comment state               │    │
-│     │         tab  switch focus between files and diff           e  edit comment                      │    │
-│     │           w  hide/show file pane                           x  delete comment                    │    │
-│     │           ?  this help                                     C  comment center                    │    │
-│     │      ctrl-a  activity feed (live refresh while           C/n  create general comment (sequence) │    │
-│     │open)                                                       R  ready all draft comments          │    │
-│     │      ctrl-g  dismiss range/notice                          X  action items & todo feedback      │    │
-│     │           q  quit (writes artifact)                        W  walkthrough panel                 │    │
-│     │files                                                       Y  mark for walkthrough              │    │
-│     │         j/k  move in tree                                m/M  next/previous comment             │    │
-│     │       space  fold/unfold directory              targets & jj                                    │    │
+│     │         ./,  next/previous file from either pane           g  open glance board                 │    │
+│     │       enter  mark viewed and advance                       e  open/close artifacts              │    │
+│     │           c  comment on what needs work                    d  toggle chapter details / expand   │    │
+│     │           T  zen briefing for a focused pass    brief                                           │    │
+│     │      ctrl-y  copy handoff when done                        .  refocus current stop              │    │
+│     │diff & view                                                 a  acknowledge glance items          │    │
+│     │         j/k  move diff cursor                            esc  leave zen; close modal zen        │    │
+│     │         d/u  vertical scroll                    comments                                        │    │
+│     │  shift-left/shift-right  horizontal scroll when            c  comment at cursor                 │    │
+│     │wrap is off                                                 r  start/finish range comment        │    │
+│     │           V  soft wrap, layout, and visual cues            s  cycle comment state               │    │
+│     │  alt-right/alt-left  widen/narrow file pane                e  edit comment                      │    │
+│     │split                                                       x  delete comment                    │    │
+│     │general                                                     C  comment center                    │    │
+│     │         tab  switch focus between files and diff         C/n  create general comment (sequence) │    │
+│     │           w  hide/show file pane                           R  ready all draft comments          │    │
+│     │           ?  this help                                     X  action items & todo feedback      │    │
+│     │      ctrl-a  activity feed (live refresh while             W  walkthrough panel                 │    │
+│     │open)                                                       Y  mark for walkthrough              │    │
+│     │      ctrl-g  dismiss range/notice                        m/M  next/previous comment             │    │
+│     │           q  quit (writes artifact)             targets & jj                                    │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
-└──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+└───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
 help · j/k or page keys scroll · esc/q/? close

@@ -26,6 +26,10 @@
   `[syntax.theme]` values remain literal user styles; unset `[diff.theme]`
   entries now derive from the theme. Known detection edge cases and their
   bounded impact are documented in docs/theme.md.
+- Added M19 TUI presentation polish: keybinding presets with gander/hunk
+  navigation conventions, explicit next/previous file actions, configurable
+  responsive file-pane auto-hide and split sizing with runtime split controls,
+  and an optional live-keymap menu bar.
 
 ## v0.7.2 - 2026-07-12
 

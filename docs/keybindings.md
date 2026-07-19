@@ -13,6 +13,18 @@ Configuration layering is unchanged: XDG user config, repository
 list. `tour` remains an alias for `zen`, and `task-list` remains an alias for
 `open-work`.
 
+Preset layering happens inside `[keybindings]`: the last configured
+`preset = "gander"` (the default) or `preset = "hunk"` selects the complete
+base action map. Gander then applies every explicit per-action array from all
+config layers in normal source order, including overrides from a layer before
+the layer that selected the final preset; each explicit array replaces that
+action's whole list. Immutable safety fallbacks are appended after the
+effective map and still participate in collision validation.
+
+The `hunk` preset keeps the Gander punctuation bindings and adds an Alt
+navigation cluster: Alt-J / Alt-K move to the next / previous changed hunk,
+while Alt-L / Alt-H move to the next / previous file.
+
 ## Key syntax and safety bindings
 
 Keys are single characters or `esc`, `enter`, `tab`, `backspace`, `space`,
@@ -94,8 +106,9 @@ remains effective.
 | `next-comment` / `previous-comment` | `m` / `M` | normal |
 | `file-search` | `/` | normal |
 | `symbol-outline` | `o` | normal diff |
-| `next-symbol` / `previous-symbol` | `]` / `[` | normal diff |
-| `next-changed-hunk` / `previous-changed-hunk` | `}` / `{` | normal diff |
+| `next-symbol` / `previous-symbol` | `}` / `{` | normal diff |
+| `next-changed-hunk` / `previous-changed-hunk` | `]` / `[` (`hunk`: Alt-J, `]` / Alt-K, `[`) | normal diff |
+| `next-file` / `previous-file` | `.` / `,` (`hunk`: Alt-L, `.` / Alt-H, `,`) | normal |
 
 ### Review, diff, and agent actions
 
@@ -112,6 +125,7 @@ remains effective.
 | `view-options` | `V` | normal |
 | `toggle-word-highlight` / `toggle-line-background` / `toggle-gutter-bar` / `toggle-diff-wrap` | unbound | normal diff |
 | `toggle-file-pane` / `toggle-diff-view` | `w` / `\|` | normal / normal diff |
+| `widen-file-pane` / `narrow-file-pane` | Alt-Right / Alt-Left | normal diff |
 | `toggle-large-diff` | `L` | normal diff |
 | `toggle-agent-order` / `flag-list` | `A` / `F` | normal |
 | `open-work` / `activity` | `X` / Ctrl-A | normal |

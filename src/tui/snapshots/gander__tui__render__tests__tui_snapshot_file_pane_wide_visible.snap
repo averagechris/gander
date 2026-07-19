@@ -1,18 +1,20 @@
 ---
 source: src/tui/render.rs
-expression: "render_tui_text(&session, &Mode::Normal, 100, 14)"
+expression: "render_tui_text_with_state(&session, &Mode::Normal, &wide, 100, 16)"
 ---
 ┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
-│No changed files            ││No changed files                                                    │
+│• ▾ src 0/1                 ││src/a.rs  +1 -1                                                     │
+│  • mod     a.rs            ││@@ -1 +1 @@                                                         │
+│                            ││    1 - old                                                         │
+│                            ││    1 + new                                                         │
 │                            ││                                                                    │
-│Try t for trunk, p for      ││Current target: trunk()..@                                          │
-│parent, b for target        ││                                                                    │
-│chooser, or adjust          ││Use t for launch target, p for @-..@, b for chooser, or pass        │
-│--base/--rev/--ignore.      ││--base/--rev.                                                       │
-│                            ││If files disappeared unexpectedly, check --ignore filters.          │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
-0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
 trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed

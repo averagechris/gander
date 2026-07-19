@@ -2,14 +2,14 @@
 source: src/tui/render.rs
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
-┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
-│No changed files                          ││No changed files                                      │
-│                                          ││                                                      │
-│Try t for trunk, p for parent, b for      ││Current target: trunk()..@                            │
-│target ┌target────────────────────────────────────────────────────────────────────────────┐       │
-│--base/│Choose base for def456..@ (tab toggles base/tip)                                  │oser,  │
-│       │filter: type to fuzzy match                                                       │       │
-│       │   change id      bookmarks                 description                           │re     │
+┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
+│No changed files            ││No changed files                                                    │
+│                            ││                                                                    │
+│Try t for trunk, p for      ││Current target: trunk()..@                                          │
+│parent,┌target────────────────────────────────────────────────────────────────────────────┐       │
+│chooser│Choose base for def456..@ (tab toggles base/tip)                                  │       │
+│--base/│filter: type to fuzzy match                                                       │       │
+│       │   change id      bookmarks                 description                           │       │
 │       │  T@ abc123       main                      feat: first change                    │       │
 │       │›B   def456       feature*                  fix: selected change                  │       │
 │       │                                                                                  │       │
@@ -22,7 +22,7 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │       │                                                                                  │       │
 │       │                                                                                  │       │
 │       └──────────────────────────────────────────────────────────────────────────────────┘       │
-│                                          ││                                                      │
-└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
 0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
 choose base/tip · refresh paused · type filter · tab side · down/up move · enter load · esc cancel

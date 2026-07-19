@@ -1,0 +1,26 @@
+---
+source: src/tui/render.rs
+expression: rendered
+---
+ ? help  ] hunk  . file  c comment  V view  w pane  q quit
+┌files─────────────────────────────┐┌diff──────────────────────────────────────────────────────────────────────────────┐
+│• mod     a.rs                    ││a.rs  +1 -1                                                                       │
+│                                  ││@@ -1 +1 @@                                                                       │
+│           ┌comments──────────────────────────────────────────────────────────────────────────────────────┐           │
+│           │  no comments                                                                                 │           │
+│           │                                                                                              │           │
+│           │alt-j/alt-k move · alt-g general · enter jump · e edit · s state · R ready drafts · a action ·│           │
+│           │K kind · x delete · esc close                                                                 │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           └──────────────────────────────────────────────────────────────────────────────────────────────┘           │
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+comments · alt-j/alt-k move · alt-g general · enter jump · e edit · s state · R ready drafts · a action · K kind · x del

@@ -1,0 +1,20 @@
+---
+source: src/tui/render.rs
+expression: narrow_rendered
+---
+┌diff · src/a.rs───────────────────────────┐
+│src/a.rs  +1 -1                           │
+│@@ -1 +1 @@                               │
+│    1 - old                               │
+│    1 + new                               │
+│                                          │
+│                                          │
+│                                          │
+│                                          │
+│                                          │
+│                                          │
+│                                          │
+│                                          │
+└──────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/
+trunk()..@ · focus diff (wrap) · j/k line ·

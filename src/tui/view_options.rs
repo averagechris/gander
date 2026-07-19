@@ -36,26 +36,29 @@ impl ViewOption {
         }
     }
 
-    pub(super) fn enabled(self, session: &ReviewSession) -> bool {
+    pub(super) fn enabled(self, session: &ReviewSession, file_pane_visible: bool) -> bool {
         match self {
             Self::WordHighlight => session.diff_cues.word_highlight,
             Self::LineBackground => session.diff_cues.line_background,
             Self::GutterBar => session.diff_cues.gutter_bar,
             Self::SoftWrap => session.diff_cues.soft_wrap,
-            Self::FilePane => session.file_pane_visible,
+            Self::FilePane => file_pane_visible,
             Self::SideBySide => {
                 session.diff_cues.view == crate::config::DiffViewModeConfig::SideBySide
             }
         }
     }
 
+    /// Toggle session-owned diff cues. File-pane visibility is intentionally
+    /// excluded: the TUI's effective pane state must combine preference,
+    /// override, breakpoint, and terminal width.
     pub(super) fn toggle(self, session: &mut ReviewSession) {
         match self {
             Self::WordHighlight => session.toggle_word_highlight(),
             Self::LineBackground => session.toggle_line_background(),
             Self::GutterBar => session.toggle_gutter_bar(),
             Self::SoftWrap => session.toggle_diff_wrap(),
-            Self::FilePane => session.toggle_file_pane(),
+            Self::FilePane => unreachable!("file pane toggles through TuiState"),
             Self::SideBySide => session.toggle_diff_view(),
         }
     }
@@ -96,10 +99,10 @@ mod tests {
     #[test]
     fn toggling_options_flips_session_cues() {
         let mut session = snapshot_session("");
-        assert!(ViewOption::WordHighlight.enabled(&session));
-        assert!(ViewOption::LineBackground.enabled(&session));
-        assert!(!ViewOption::GutterBar.enabled(&session));
-        assert!(ViewOption::SoftWrap.enabled(&session));
+        assert!(ViewOption::WordHighlight.enabled(&session, true));
+        assert!(ViewOption::LineBackground.enabled(&session, true));
+        assert!(!ViewOption::GutterBar.enabled(&session, true));
+        assert!(ViewOption::SoftWrap.enabled(&session, true));
 
         ViewOption::WordHighlight.toggle(&mut session);
         ViewOption::GutterBar.toggle(&mut session);

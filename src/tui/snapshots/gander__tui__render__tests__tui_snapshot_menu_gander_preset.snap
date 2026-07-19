@@ -1,0 +1,24 @@
+---
+source: src/tui/render.rs
+expression: rendered
+---
+ ? help  ] hunk  . file  c comment  V view  w pane  q quit
+┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
+│• mod     a.rs                 ││a.rs  +1 -1                                                                │
+│                               ││@@ -1 +1 @@                                                                │
+│                               ││    1 - old                                                                │
+│                               ││    1 + new                                                                │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+│                               ││                                                                           │
+└───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed · tab dif

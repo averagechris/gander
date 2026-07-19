@@ -1177,6 +1177,7 @@ fn run() -> color_eyre::Result<()> {
                 &mut session,
                 &config.keybindings,
                 &config.theme,
+                &config.ui,
                 ignore_globs,
                 generated_matcher,
                 &jj,

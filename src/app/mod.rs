@@ -1260,6 +1260,63 @@ impl ReviewSession {
         }
     }
 
+    /// Move among displayed file rows only, skipping directory rows. The
+    /// current file anchors navigation even when focus is in the diff pane.
+    pub fn move_file_selection(&mut self, delta: isize) {
+        let tree = self.file_tree();
+        let file_rows: Vec<_> = tree
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| match row.kind {
+                FlatTreeRowKind::File { file_index } => Some((row_index, file_index)),
+                FlatTreeRowKind::Directory { .. } => None,
+            })
+            .collect();
+        if file_rows.is_empty() {
+            return;
+        }
+        let selected_tree_path = self
+            .selected_file()
+            .map(|file| self.tree_path_for_file(file));
+        let anchor_row = tree.selected_row_for_file(self.selected).or_else(|| {
+            selected_tree_path
+                .as_deref()
+                .and_then(|path| visible_ancestor_row(&tree, path))
+        });
+        let next = if let Some(current) = file_rows
+            .iter()
+            .position(|&(_, index)| index == self.selected)
+        {
+            (current as isize + delta).clamp(0, file_rows.len() as isize - 1) as usize
+        } else if delta > 0 {
+            let Some(anchor_row) = anchor_row else {
+                return;
+            };
+            let Some(next) = file_rows
+                .iter()
+                .position(|&(row_index, _)| row_index > anchor_row)
+            else {
+                return;
+            };
+            next
+        } else if delta < 0 {
+            let Some(anchor_row) = anchor_row else {
+                return;
+            };
+            let Some(next) = file_rows
+                .iter()
+                .rposition(|&(row_index, _)| row_index < anchor_row)
+            else {
+                return;
+            };
+            next
+        } else {
+            return;
+        };
+        self.select_file_index(file_rows[next].1);
+    }
+
     pub fn toggle_generated_visibility(&mut self) {
         self.hide_generated = !self.hide_generated;
         self.ensure_selected_file_visible();
@@ -1309,18 +1366,6 @@ impl ReviewSession {
             DiffViewModeConfig::Unified => DiffViewModeConfig::SideBySide,
             DiffViewModeConfig::SideBySide => DiffViewModeConfig::Unified,
         };
-    }
-
-    /// Toggle the files pane. Hiding it moves focus to the diff so the
-    /// keyboard keeps working on what is visible; focusing the files pane
-    /// while hidden re-shows it (never trap the user).
-    pub fn toggle_file_pane(&mut self) {
-        self.file_pane_visible = !self.file_pane_visible;
-        if !self.file_pane_visible && self.focus == Focus::Files {
-            self.focus = Focus::Diff;
-            self.clear_selected_freshness_marks();
-            self.ensure_diff_cursor_commentable();
-        }
     }
 
     pub fn move_to_unviewed(&mut self, delta: isize) {
@@ -3196,21 +3241,10 @@ mod tests {
     };
 
     #[test]
-    fn hiding_the_file_pane_moves_focus_to_the_diff() {
-        let mut session = session();
-        assert!(session.file_pane_visible);
-        assert_eq!(session.focus, Focus::Files);
-
-        session.toggle_file_pane();
-
-        assert!(!session.file_pane_visible);
-        assert_eq!(session.focus, Focus::Diff);
-    }
-
-    #[test]
     fn focusing_the_files_pane_reshows_it() {
         let mut session = session();
-        session.toggle_file_pane();
+        session.toggle_focus();
+        session.file_pane_visible = false;
         assert!(!session.file_pane_visible);
 
         // Never trap: tab back to the files pane brings it back.
@@ -3252,16 +3286,6 @@ mod tests {
         assert_eq!(draft.author.kind, AuthorKind::Agent);
     }
 
-    #[test]
-    fn showing_the_file_pane_again_keeps_diff_focus() {
-        let mut session = session();
-        session.toggle_file_pane();
-        session.toggle_file_pane();
-
-        assert!(session.file_pane_visible);
-        assert_eq!(session.focus, Focus::Diff);
-    }
-
     fn session() -> ReviewSession {
         let diff = DiffSet::parse(
             r#"diff --git a/src/tui.rs b/src/tui.rs
@@ -3285,6 +3309,101 @@ diff --git a/README.md b/README.md
             diff,
             ReviewState::default(),
         )
+    }
+
+    #[test]
+    fn collapsed_file_navigation_scans_tree_order_from_ancestor_with_unviewed_filter() {
+        let diff = DiffSet::parse(
+            // Parse order is z, mid, a; visible tree order is a, mid, z.
+            r#"diff --git a/z/after.rs b/z/after.rs
+--- a/z/after.rs
++++ b/z/after.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/mid/hidden.rs b/mid/hidden.rs
+--- a/mid/hidden.rs
++++ b/mid/hidden.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/a/before.rs b/a/before.rs
+--- a/a/before.rs
++++ b/a/before.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.files[2].viewed = true;
+        session.viewed_filter = ViewedFilter::Unviewed;
+        session.collapsed_dirs.insert("mid".to_owned());
+        session.select_file_index(1);
+        session.focus = Focus::Files;
+
+        // There is no unviewed file before the collapsed mid row. Do not jump
+        // across the ancestor to z/after.rs merely because it was parsed first.
+        session.move_file_selection(-1);
+        assert_eq!(session.selected_file().unwrap().path, "mid/hidden.rs");
+        assert_eq!(session.focus, Focus::Files);
+
+        session.move_file_selection(1);
+        assert_eq!(session.selected_file().unwrap().path, "z/after.rs");
+    }
+
+    #[test]
+    fn collapsed_file_navigation_scans_tree_order_from_ancestor_with_viewed_filter() {
+        let diff = DiffSet::parse(
+            // Parse order is z, mid, a; visible tree order is a, mid, z.
+            r#"diff --git a/z/after.rs b/z/after.rs
+--- a/z/after.rs
++++ b/z/after.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/mid/hidden.rs b/mid/hidden.rs
+--- a/mid/hidden.rs
++++ b/mid/hidden.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/a/before.rs b/a/before.rs
+--- a/a/before.rs
++++ b/a/before.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+        );
+        session.files[1].viewed = true;
+        session.files[2].viewed = true;
+        session.viewed_filter = ViewedFilter::Viewed;
+        session.collapsed_dirs.insert("mid".to_owned());
+        session.select_file_index(1);
+        session.focus = Focus::Diff;
+
+        // There is no viewed file after the collapsed mid row. Do not jump
+        // across the ancestor to a/before.rs merely because it was parsed last.
+        session.move_file_selection(1);
+        assert_eq!(session.selected_file().unwrap().path, "mid/hidden.rs");
+        assert_eq!(session.focus, Focus::Diff);
+
+        session.move_file_selection(-1);
+        assert_eq!(session.selected_file().unwrap().path, "a/before.rs");
     }
 
     #[test]
@@ -3407,7 +3526,8 @@ diff --git a/README.md b/README.md
     #[test]
     fn replace_diff_preserving_view_keeps_the_reviewers_place() {
         let mut session = session();
-        session.toggle_file_pane(); // hidden pane, focus moves to the diff
+        session.toggle_focus();
+        session.file_pane_visible = false;
         session.hide_generated = true;
         session.viewed_filter = ViewedFilter::Unviewed;
         // Select the second file and mark the first viewed.

@@ -27,6 +27,29 @@ pub struct Config {
     pub diff: DiffConfig,
     pub comments: CommentsConfig,
     pub theme: ThemeConfig,
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct UiConfig {
+    /// Hide the files pane automatically below this terminal width unless the
+    /// user explicitly toggles it visible for the session.
+    pub file_pane_auto_hide_width: u16,
+    /// Percentage of terminal width used by the files pane on wide terminals.
+    pub file_pane_split_percent: u16,
+    /// Show a compact top menu built from the effective keymap. Default off.
+    pub menu_bar: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            file_pane_auto_hide_width: 50,
+            file_pane_split_percent: 30,
+            menu_bar: false,
+        }
+    }
 }
 
 /// Derived TUI theme (docs/roadmap.md M19). All chrome colors derive from a
@@ -267,6 +290,7 @@ pub struct ArtifactConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct KeybindingsConfig {
+    pub preset: KeybindingPresetConfig,
     pub quit: Vec<String>,
     pub help: Vec<String>,
     pub summon_agent: Vec<String>,
@@ -318,6 +342,8 @@ pub struct KeybindingsConfig {
     pub previous_symbol: Vec<String>,
     pub next_changed_hunk: Vec<String>,
     pub previous_changed_hunk: Vec<String>,
+    pub next_file: Vec<String>,
+    pub previous_file: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub scroll_diff_left: Vec<String>,
@@ -341,6 +367,8 @@ pub struct KeybindingsConfig {
     pub toggle_diff_wrap: Vec<String>,
     pub toggle_file_pane: Vec<String>,
     pub toggle_diff_view: Vec<String>,
+    pub widen_file_pane: Vec<String>,
+    pub narrow_file_pane: Vec<String>,
     pub range_comment: Vec<String>,
     pub mark_walkthrough: Vec<String>,
     pub cancel_range_comment: Vec<String>,
@@ -373,6 +401,14 @@ pub struct KeybindingsConfig {
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
     pub delete_char: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeybindingPresetConfig {
+    #[default]
+    Gander,
+    Hunk,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -416,6 +452,15 @@ struct ConfigPatch {
     diff: DiffConfigPatch,
     comments: CommentsConfigPatch,
     theme: ThemeConfigPatch,
+    ui: UiConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+struct UiConfigPatch {
+    file_pane_auto_hide_width: Option<u16>,
+    file_pane_split_percent: Option<u16>,
+    menu_bar: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -509,6 +554,7 @@ struct ArtifactConfigPatch {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct KeybindingsConfigPatch {
+    preset: Option<KeybindingPresetConfig>,
     quit: Option<Vec<String>>,
     help: Option<Vec<String>>,
     summon_agent: Option<Vec<String>>,
@@ -555,6 +601,8 @@ struct KeybindingsConfigPatch {
     previous_symbol: Option<Vec<String>>,
     next_changed_hunk: Option<Vec<String>>,
     previous_changed_hunk: Option<Vec<String>>,
+    next_file: Option<Vec<String>>,
+    previous_file: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     scroll_diff_left: Option<Vec<String>>,
@@ -578,6 +626,8 @@ struct KeybindingsConfigPatch {
     toggle_diff_wrap: Option<Vec<String>>,
     toggle_file_pane: Option<Vec<String>>,
     toggle_diff_view: Option<Vec<String>>,
+    widen_file_pane: Option<Vec<String>>,
+    narrow_file_pane: Option<Vec<String>>,
     range_comment: Option<Vec<String>>,
     mark_walkthrough: Option<Vec<String>>,
     cancel_range_comment: Option<Vec<String>>,
@@ -640,7 +690,14 @@ impl Default for JjConfig {
 
 impl Default for KeybindingsConfig {
     fn default() -> Self {
-        Self {
+        Self::preset(KeybindingPresetConfig::Gander)
+    }
+}
+
+impl KeybindingsConfig {
+    pub(crate) fn preset(preset: KeybindingPresetConfig) -> Self {
+        let mut config = Self {
+            preset,
             // Esc intentionally does not quit: it dismisses the current layer
             // (range selection, notices, popups) so it stays safe to mash.
             quit: keys(["q"]),
@@ -682,10 +739,12 @@ impl Default for KeybindingsConfig {
             previous_comment: keys(["M"]),
             file_search: keys(["/"]),
             symbol_outline: keys(["o"]),
-            next_symbol: keys(["]"]),
-            previous_symbol: keys(["["]),
-            next_changed_hunk: keys(["}"]),
-            previous_changed_hunk: keys(["{"]),
+            next_symbol: keys(["}"]),
+            previous_symbol: keys(["{"]),
+            next_changed_hunk: keys(["]"]),
+            previous_changed_hunk: keys(["["]),
+            next_file: keys(["."]),
+            previous_file: keys([","]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             scroll_diff_left: keys(["shift-left"]),
@@ -711,6 +770,8 @@ impl Default for KeybindingsConfig {
             toggle_diff_wrap: keys([]),
             toggle_file_pane: keys(["w"]),
             toggle_diff_view: keys(["|"]),
+            widen_file_pane: keys(["alt-right"]),
+            narrow_file_pane: keys(["alt-left"]),
             range_comment: keys(["r"]),
             mark_walkthrough: keys(["Y"]),
             cancel_range_comment: keys(["ctrl-g", "esc"]),
@@ -743,7 +804,14 @@ impl Default for KeybindingsConfig {
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
             delete_char: keys(["backspace"]),
+        };
+        if preset == KeybindingPresetConfig::Hunk {
+            config.next_changed_hunk = keys(["alt-j", "]"]);
+            config.previous_changed_hunk = keys(["alt-k", "["]);
+            config.next_file = keys(["alt-l", "."]);
+            config.previous_file = keys(["alt-h", ","]);
         }
+        config
     }
 }
 
@@ -782,6 +850,7 @@ impl Config {
 
     fn load_layers(sources: &[ConfigSource]) -> Result<Self> {
         let mut config = Self::default();
+        let mut keybinding_patches = Vec::new();
         for source in sources {
             if !source.path.exists() {
                 if source.required {
@@ -794,9 +863,21 @@ impl Config {
 
             let contents = fs::read_to_string(&source.path)
                 .with_context(|| format!("failed to read config {}", source.path.display()))?;
-            let patch: ConfigPatch = toml::from_str(&contents)
+            let mut patch: ConfigPatch = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse config {}", source.path.display()))?;
+            keybinding_patches.push(patch.keybindings.clone());
+            patch.keybindings = KeybindingsConfigPatch::default();
             config.apply_patch(patch);
+        }
+
+        let final_preset = keybinding_patches
+            .iter()
+            .filter_map(|patch| patch.preset)
+            .next_back()
+            .unwrap_or_default();
+        config.keybindings = KeybindingsConfig::preset(final_preset);
+        for patch in keybinding_patches {
+            config.keybindings.apply_action_patch(patch);
         }
 
         Ok(config)
@@ -871,6 +952,16 @@ impl Config {
             self.identity.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
         }
 
+        if let Some(width) = patch.ui.file_pane_auto_hide_width {
+            self.ui.file_pane_auto_hide_width = width;
+        }
+        if let Some(percent) = patch.ui.file_pane_split_percent {
+            self.ui.file_pane_split_percent = percent.clamp(10, 60);
+        }
+        if let Some(menu_bar) = patch.ui.menu_bar {
+            self.ui.menu_bar = menu_bar;
+        }
+
         if let Some(word_highlight) = patch.diff.word_highlight {
             self.diff.word_highlight = word_highlight;
         }
@@ -931,6 +1022,13 @@ impl From<GeneratedConfig> for GeneratedPolicy {
 
 impl KeybindingsConfig {
     fn apply_patch(&mut self, patch: KeybindingsConfigPatch) {
+        if let Some(preset) = patch.preset {
+            *self = Self::preset(preset);
+        }
+        self.apply_action_patch(patch);
+    }
+
+    fn apply_action_patch(&mut self, patch: KeybindingsConfigPatch) {
         apply_optional(&mut self.quit, patch.quit);
         apply_optional(&mut self.help, patch.help);
         apply_optional(&mut self.summon_agent, patch.summon_agent);
@@ -974,6 +1072,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.previous_symbol, patch.previous_symbol);
         apply_optional(&mut self.next_changed_hunk, patch.next_changed_hunk);
         apply_optional(&mut self.previous_changed_hunk, patch.previous_changed_hunk);
+        apply_optional(&mut self.next_file, patch.next_file);
+        apply_optional(&mut self.previous_file, patch.previous_file);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.scroll_diff_left, patch.scroll_diff_left);
@@ -1000,6 +1100,8 @@ impl KeybindingsConfig {
         apply_optional(&mut self.toggle_diff_wrap, patch.toggle_diff_wrap);
         apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
         apply_optional(&mut self.toggle_diff_view, patch.toggle_diff_view);
+        apply_optional(&mut self.widen_file_pane, patch.widen_file_pane);
+        apply_optional(&mut self.narrow_file_pane, patch.narrow_file_pane);
         apply_optional(&mut self.range_comment, patch.range_comment);
         apply_optional(&mut self.mark_walkthrough, patch.mark_walkthrough);
         apply_optional(&mut self.cancel_range_comment, patch.cancel_range_comment);
@@ -1444,6 +1546,46 @@ move-down = ["n", "down"]
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
         assert_eq!(config.comments.initial_state, InitialCommentState::Todo);
+    }
+
+    #[test]
+    fn keybinding_preset_resolves_after_layers_without_erasing_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let early = dir.path().join("early.toml");
+        let late = dir.path().join("late.toml");
+        fs::write(
+            &early,
+            r#"
+[keybindings]
+next-file = ["ctrl-n"]
+previous-file = ["ctrl-p"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &late,
+            r#"
+[keybindings]
+preset = "hunk"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[
+            ConfigSource {
+                path: early,
+                required: false,
+            },
+            ConfigSource {
+                path: late,
+                required: false,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(config.keybindings.next_changed_hunk, ["alt-j", "]"]);
+        assert_eq!(config.keybindings.next_file, ["ctrl-n"]);
+        assert_eq!(config.keybindings.previous_file, ["ctrl-p"]);
     }
 
     #[test]

@@ -373,22 +373,21 @@ Status: designed.
 
 ## Milestone 19: presentation polish
 
-Status: in progress — the derived theme and OSC 11 auto-detection landed
-(guarantees and consciously accepted edge-case deltas are documented in
-[docs/theme.md](theme.md)); the remaining items are open. Independent of
-milestones 17–18; can land in parallel.
+Status: complete — derived theme/OSC detection, keybinding presets,
+responsive layout, and live-keymap menu chrome have landed. Independent of
+milestones 17–18.
 
 - [x] derived theme system: an `AppTheme` with all chrome slots computed from
   a small base palette (bg/fg/accent/diff hues) via contrast-guarded
   blending; route all hardcoded render colors through it
 - [x] auto light/dark via OSC 11 background query; transparent-background
   mode; keep the xterm-256 downgrade path
-- [ ] keybinding presets (`preset = "gander" | "hunk"`) layered under the
+- [x] keybinding presets (`preset = "gander" | "hunk"`) layered under the
   existing per-key overrides; adopt non-conflicting conventions as defaults
   (`[`/`]` hunks, `,`/`.` files)
-- [ ] responsive layout: breakpoint-driven file-pane auto-hide and
+- [x] responsive layout: breakpoint-driven file-pane auto-hide and
   percentage/adjustable split
-- [ ] optional menu bar rendered from the live keymap for discoverability
+- [x] optional menu bar rendered from the live keymap for discoverability
 
 ## Follow-up backlog (next session pick-up)
 

@@ -2,13 +2,13 @@
 source: src/tui/render.rs
 expression: "render_tui_text(&session, &mode, 100, 24)"
 ---
-┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
-│• ▾ src 0/1                               ││src/app.rs  +1 -1                                     │
-│  • mod     app.rs                        ││@@ -1 +1 @@                                           │
-│                                          ││2   1 - old                                           │
-│                                          ││      ↳ test-evi [todo] [test] [issue] Branch is untes│
+┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
+│• ▾ src 0/1                 ││src/app.rs  +1 -1                                                   │
+│  • mod     app.rs          ││@@ -1 +1 @@                                                         │
+│                            ││2   1 - old                                                         │
+│                            ││      ↳ test-evi [todo] [test] [issue] Branch is untested           │
 │        ╭ Action items & feedback ───────────────────────────────────────────────────────╮        │
-│        │› [item] [test] src/app.rs:1 Cover fallback with a regression test              │llback  │
+│        │› [item] [test] src/app.rs:1 Cover fallback with a regression test              │        │
 │        │└ [evidence] src/app.rs:1 [todo] [test] [issue] Branch is untested              │        │
 │        │[feedback] src/app.rs:1 [todo] Please document the fallback                     │        │
 │        │                                                                                │        │
@@ -21,8 +21,8 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │        │                                                                                │        │
 │        │                                                                                │        │
 │        ╰────────────────────────────────────────────────────────────────────────────────╯        │
-│                                          ││                                                      │
-│                                          ││                                                      │
-└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 3 comments · following @
 action items & feedback · j/k move · enter jump · esc close

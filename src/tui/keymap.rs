@@ -85,6 +85,8 @@ pub(super) enum Action {
     PreviousSymbol,
     NextChangedHunk,
     PreviousChangedHunk,
+    NextFile,
+    PreviousFile,
     ScrollDown,
     ScrollUp,
     ScrollDiffLeft,
@@ -108,6 +110,8 @@ pub(super) enum Action {
     ToggleDiffWrap,
     ToggleFilePane,
     ToggleDiffView,
+    WidenFilePane,
+    NarrowFilePane,
     RangeComment,
     MarkWalkthrough,
     CancelRangeComment,
@@ -270,6 +274,8 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             Action::PreviousChangedHunk,
             &config.previous_changed_hunk,
         )?;
+        add_bindings(&mut bindings, Action::NextFile, &config.next_file)?;
+        add_bindings(&mut bindings, Action::PreviousFile, &config.previous_file)?;
         add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
         add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;
         add_bindings(
@@ -353,6 +359,16 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleDiffView,
             &config.toggle_diff_view,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::WidenFilePane,
+            &config.widen_file_pane,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::NarrowFilePane,
+            &config.narrow_file_pane,
         )?;
         add_bindings(&mut bindings, Action::RangeComment, &config.range_comment)?;
         add_bindings(
@@ -500,11 +516,14 @@ impl KeyMap {
     }
 
     pub(super) fn hint(&self, action: Action) -> &str {
+        self.bound_hint(action).unwrap_or("?")
+    }
+
+    pub(super) fn bound_hint(&self, action: Action) -> Option<&str> {
         self.bindings
             .iter()
             .find(|binding| binding.action == action)
             .map(|binding| binding.key.label.as_str())
-            .unwrap_or("?")
     }
 
     /// Resolve both effective layers used by zen focus/reading dispatch.
@@ -593,8 +612,8 @@ impl Action {
             | CompareParent | TargetChooser | RevsetInput | StackNext | StackPrevious
             | OperationPicker | JjHelpers | ToggleAgentOrder | FlagList | OpenWork | Activity
             | WalkthroughList | Zen | DraftList | NextUnviewed | PreviousUnviewed | NextComment
-            | PreviousComment | FileSearch | ToggleFilePane | ViewOptions | Comment
-            | CommentList | CancelRangeComment => NORMAL,
+            | PreviousComment | NextFile | PreviousFile | FileSearch | ToggleFilePane
+            | ViewOptions | Comment | CommentList | CancelRangeComment => NORMAL,
             Help => &[
                 KeyContext::NormalFiles,
                 KeyContext::NormalDiff,
@@ -605,7 +624,7 @@ impl Action {
             | ScrollDiffRight | ToggleContextFold | ExpandContext | ExpandContextAll
             | CollapseContext | ToggleWordHighlight | ToggleLineBackground | ToggleGutterBar
             | ToggleDiffWrap | ToggleDiffView | ToggleLargeDiff | RangeComment
-            | MarkWalkthrough => DIFF,
+            | MarkWalkthrough | WidenFilePane | NarrowFilePane => DIFF,
             MarkViewed | ToggleViewed | MarkAllViewed | ToggleGenerated | CycleViewedFilter => {
                 NORMAL
             }
@@ -801,6 +820,7 @@ fn intentional_zen_override(left: Action, right: Action, key: &KeyPress) -> bool
             | (Action::ZenGlance, Action::DiffTop, "g")
             | (Action::ZenArtifact, Action::EditComment, "e")
             | (Action::ZenToggleDetails, Action::ScrollDown, "d")
+            | (Action::ZenRefocus, Action::NextFile, ".")
             | (Action::ZenClose, Action::CancelRangeComment, "esc")
     )
 }
@@ -1111,12 +1131,51 @@ mod tests {
     fn default_changed_hunk_keybindings_map_to_actions() {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         assert_eq!(
-            keymap.action_for(&KeyEvent::from(KeyCode::Char('}'))),
+            keymap.action_for(&KeyEvent::from(KeyCode::Char(']'))),
             Some(Action::NextChangedHunk)
         );
         assert_eq!(
-            keymap.action_for(&KeyEvent::from(KeyCode::Char('{'))),
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('['))),
             Some(Action::PreviousChangedHunk)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('.'))),
+            Some(Action::NextFile)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char(','))),
+            Some(Action::PreviousFile)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('}'))),
+            Some(Action::NextSymbol)
+        );
+    }
+
+    #[test]
+    fn hunk_preset_is_collision_free_and_keeps_safety_movement() {
+        let config = KeybindingsConfig {
+            preset: crate::config::KeybindingPresetConfig::Hunk,
+            ..KeybindingsConfig::preset(crate::config::KeybindingPresetConfig::Hunk)
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        assert_eq!(
+            keymap.action_for_context(
+                KeyContext::NormalDiff,
+                &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)
+            ),
+            Some(Action::NextChangedHunk)
+        );
+        assert_eq!(
+            keymap.action_for_context(KeyContext::NormalFiles, &KeyEvent::from(KeyCode::Char('j'))),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            keymap.action_for_context(
+                KeyContext::NormalDiff,
+                &KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT)
+            ),
+            Some(Action::NextFile)
         );
     }
 

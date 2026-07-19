@@ -32,7 +32,7 @@ This repo is intentionally early, but the first vertical slice is in place:
 - labels generated/noisy files in the TUI, summaries, and artifacts, and
   auto-detects generated files by header markers like `@generated`/`DO NOT EDIT`
 - fuzzy file search (`/`) and viewed/unviewed file filters (`f`)
-- changed-symbol outline (`o`) with `]`/`[` jumps between changed functions
+- changed-symbol outline (`o`) with `}`/`{` jumps between changed functions
 - symbol-aware folding of long unchanged context runs (`z`)
 - records lightweight file-level and line-level comments from the TUI
 - tracks comment states (draft saved/private/withheld, todo ready/actionable,
@@ -202,6 +202,15 @@ mode = "auto" # auto | dark | light
 # the palette background.
 transparent = true
 
+[ui]
+# Auto-hide the file pane below this terminal width unless explicitly toggled.
+file-pane-auto-hide-width = 50
+# Wide-terminal file-pane split percentage; runtime Alt-Left/Alt-Right adjust
+# this only for the current TUI session. Values are clamped to 10..60.
+file-pane-split-percent = 30
+# Optional one-line discoverability menu rendered from the live keymap.
+menu-bar = false
+
 [artifact]
 format = "markdown"
 profile = "human" # human | agent | team (team JSON is canonical; Markdown/HTML are human summaries)
@@ -248,6 +257,7 @@ comment = "dark-gray"
 type = "yellow"
 
 [keybindings]
+preset = "gander" # or "hunk"; explicit per-action arrays override the chosen base
 move-down = ["j", "down"]
 move-up = ["k", "up"]
 toggle-focus = ["tab"]
@@ -292,10 +302,16 @@ scroll-diff-left = ["shift-left"]
 scroll-diff-right = ["shift-right"]
 toggle-file-pane = ["w"]
 toggle-diff-view = ["|"]
+widen-file-pane = ["alt-right"]
+narrow-file-pane = ["alt-left"]
 file-search = ["/"]
 symbol-outline = ["o"]
-next-symbol = ["]"]
-previous-symbol = ["["]
+next-symbol = ["}"]
+previous-symbol = ["{"]
+next-changed-hunk = ["]"]
+previous-changed-hunk = ["["]
+next-file = ["."]
+previous-file = [","]
 comment = ["c"] # opens an empty comment editor
 mark-walkthrough = ["Y"]
 edit-comment = ["e"]
@@ -531,11 +547,14 @@ keymap; the footer only shows the everyday hints.
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `V` | View Options popup for word highlights, line backgrounds, gutter bar, soft wrap, file pane, and side-by-side view |
 | `w` / `\|` | hide/show the file pane / toggle unified vs side-by-side diff view |
+| Alt-Right / Alt-Left | widen / narrow the file-pane split by five percentage points |
 | `h` | hide/show generated/noisy files in the TUI |
 | `z` | fold/unfold long unchanged context runs in the diff |
 | `+` / `=` / `-` | expand the nearest hidden-context gap by `context-step` / fully / re-collapse it |
 | `o` | changed-symbol outline popup for the selected file |
-| `]` / `[` | jump to next / previous changed symbol in the diff |
+| `]` / `[` | jump to next / previous changed hunk in the diff (`hunk` preset also adds Alt-J / Alt-K) |
+| `.` / `,` | jump to next / previous file (`hunk` preset also adds Alt-L / Alt-H) |
+| `}` / `{` | jump to next / previous changed symbol in the diff |
 | `r` in diff focus | start/cancel a range selection for a multi-line comment |
 | Ctrl-G / Esc | cancel active range selection and dismiss notices |
 | Enter | mark selected file viewed and advance to the next unviewed file |

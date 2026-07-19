@@ -2,27 +2,27 @@
 source: src/tui/render.rs
 expression: "render_tui_text(&session, &Mode::Normal, 100, 24)"
 ---
-┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
-│• ▾ src 0/1                               ││src/app.rs  +2 -2                                     │
-│  • mod     app.rs                        ││      ⋯ 3 lines hidden  (+ expand 10, = expand all)   │
-│                                          ││@@ -4,3 +4,3 @@                                       │
-│                                          ││    4   line 4                                        │
-│                                          ││    5 - old five                                      │
-│                                          ││    5 + line 5                                        │
-│                                          ││    6   line 6                                        │
-│                                          ││      ⋯ 3 lines hidden  (+ expand 10, = expand all)   │
-│                                          ││   10   line 10                                       │
-│                                          ││   11   line 11                                       │
-│                                          ││@@ -12,3 +12,3 @@                                     │
-│                                          ││   12   line 12                                       │
-│                                          ││   13 - old thirteen                                  │
-│                                          ││   13 + line 13                                       │
-│                                          ││   14   line 14                                       │
-│                                          ││      ⋯ 6 lines hidden  (+ expand 10, = expand all)   │
-│                                          ││                                                      │
-│                                          ││                                                      │
-│                                          ││                                                      │
-│                                          ││                                                      │
-└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
+│• ▾ src 0/1                 ││src/app.rs  +2 -2                                                   │
+│  • mod     app.rs          ││      ⋯ 3 lines hidden  (+ expand 10, = expand all)                 │
+│                            ││@@ -4,3 +4,3 @@                                                     │
+│                            ││    4   line 4                                                      │
+│                            ││    5 - old five                                                    │
+│                            ││    5 + line 5                                                      │
+│                            ││    6   line 6                                                      │
+│                            ││      ⋯ 3 lines hidden  (+ expand 10, = expand all)                 │
+│                            ││   10   line 10                                                     │
+│                            ││   11   line 11                                                     │
+│                            ││@@ -12,3 +12,3 @@                                                   │
+│                            ││   12   line 12                                                     │
+│                            ││   13 - old thirteen                                                │
+│                            ││   13 + line 13                                                     │
+│                            ││   14   line 14                                                     │
+│                            ││      ⋯ 6 lines hidden  (+ expand 10, = expand all)                 │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +2/-2, 0 comments · following @
 trunk()..@ · focus diff (wrap) · j/k line · d/u scroll · V view/wrap · r range · Y walkthrough · c c

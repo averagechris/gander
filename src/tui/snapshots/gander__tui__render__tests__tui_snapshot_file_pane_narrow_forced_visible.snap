@@ -1,0 +1,20 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_state(&session, &Mode::Normal, &forced, 44, 16)"
+---
+┌files─────────────┐┌diff──────────────────┐
+│• ▾ src 0/1       ││src/a.rs  +1 -1       │
+│  • mod     a.rs  ││@@ -1 +1 @@           │
+│                  ││    1 - old           │
+│                  ││    1 + new           │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+│                  ││                      │
+└──────────────────┘└──────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/
+trunk()..@ · focus files · j/k move · space

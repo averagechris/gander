@@ -2,19 +2,19 @@
 source: src/tui/render.rs
 expression: "render_tui_text(&session, &Mode::Normal, 100, 16)"
 ---
-┌files─────────────────────────────────────┐┌diff──────────────────────────────────────────────────┐
-│• mod     big.txt                         ││    5 - removed line 5                                │
-│                                          ││    5 + line 5                                        │
-│                                          ││    6   line 6                                        │
-│                                          ││    7   line 7                                        │
-│                                          ││    8   line 8                                        │
-│                                          ││    9   line 9                                        │
-│                                          ││   10   line 10                                       │
-│                                          ││   11   line 11                                       │
-│                                          ││   12   line 12                                       │
-│                                          ││   13   line 13                                       │
-│                                          ││   14   line 14                                       │
-│                                          ││   15   line 15                                       │
-└──────────────────────────────────────────┘└──────────────────────────────────────────────────────┘
+┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
+│• mod     big.txt           ││    5 - removed line 5                                              │
+│                            ││    5 + line 5                                                      │
+│                            ││    6   line 6                                                      │
+│                            ││    7   line 7                                                      │
+│                            ││    8   line 8                                                      │
+│                            ││    9   line 9                                                      │
+│                            ││   10   line 10                                                     │
+│                            ││   11   line 11                                                     │
+│                            ││   12   line 12                                                     │
+│                            ││   13   line 13                                                     │
+│                            ││   14   line 14                                                     │
+│                            ││   15   line 15                                                     │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
 trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed
