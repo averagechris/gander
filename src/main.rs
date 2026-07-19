@@ -54,10 +54,13 @@ use crate::{
     review::SessionTargetSpec,
     state::{
         ActionIntent, ActionItemStatus, Channel, ClosedDisposition, CommentKind, CommentState,
-        Identity, ReviewState, ReviewTarget as StateReviewTarget, StepArtifact, StepImportance,
-        StepKind, WalkthroughStep,
+        ReviewState, ReviewTarget as StateReviewTarget, StepArtifact, StepImportance, StepKind,
+        WalkthroughStep,
     },
 };
+
+#[cfg(test)]
+use crate::state::Identity;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 enum ListFormat {
@@ -439,6 +442,9 @@ enum HunksCommand {
 enum CommentsCommand {
     /// List comments as JSON or compact text.
     List {
+        /// Filter by annotation channel.
+        #[arg(long, value_enum)]
+        channel: Option<ChannelArg>,
         /// Output format for the comment list.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
@@ -583,6 +589,28 @@ enum ReviewsCommand {
     Show {
         /// Review session id or unique id prefix.
         id: String,
+    },
+    /// Set, clear, or show the active session-level team disposition.
+    Disposition {
+        #[command(subcommand)]
+        command: DispositionCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DispositionCommand {
+    Show {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    Set {
+        disposition: DispositionArg,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    Clear {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
 }
 
@@ -942,6 +970,43 @@ enum HunkShowFormat {
 enum OutputProfile {
     Human,
     Agent,
+    Team,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ChannelArg {
+    Onboarding,
+    Delegation,
+    Collaboration,
+    Note,
+}
+
+impl From<ChannelArg> for Channel {
+    fn from(value: ChannelArg) -> Self {
+        match value {
+            ChannelArg::Onboarding => Channel::Onboarding,
+            ChannelArg::Delegation => Channel::Delegation,
+            ChannelArg::Collaboration => Channel::Collaboration,
+            ChannelArg::Note => Channel::Note,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DispositionArg {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl From<DispositionArg> for state::ReviewDisposition {
+    fn from(value: DispositionArg) -> Self {
+        match value {
+            DispositionArg::Comment => Self::Comment,
+            DispositionArg::Approve => Self::Approve,
+            DispositionArg::RequestChanges => Self::RequestChanges,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1131,7 +1196,11 @@ fn run() -> color_eyre::Result<()> {
             state.save(&state_path)?;
             if let Some(request) = artifact_request {
                 if request.format == OutputFormat::Html {
-                    let html = web_export::render_html(&session, &state);
+                    let html = web_export::render_html_with_profile(
+                        &session,
+                        &state,
+                        ArtifactProfile::from(request.profile),
+                    );
                     match request.destination {
                         TuiArtifactDestination::File(path) => std::fs::write(&path, html)
                             .with_context(|| {
@@ -1185,18 +1254,17 @@ fn run() -> color_eyre::Result<()> {
             output,
             profile,
         } => {
-            if matches!(format, Some(OutputFormat::Html)) && profile.is_some() {
-                return Err(user_error(
-                    "export --profile is not supported with html output",
-                ));
-            }
             let (format, destination, profile) =
                 resolve_export_options(&repo, &config, format, output, profile);
             let spec = session_target_spec(&repo, &session.target);
             warn_session_target_mismatch(&state, &spec);
             note_if_no_session_for_artifact(&state, &spec);
             if format == OutputFormat::Html {
-                let html = web_export::render_html(&session, &state);
+                let html = web_export::render_html_with_profile(
+                    &session,
+                    &state,
+                    ArtifactProfile::from(profile),
+                );
                 match destination {
                     TuiArtifactDestination::File(path) => std::fs::write(&path, html)
                         .with_context(|| format!("failed to write artifact {}", path.display()))?,
@@ -1314,14 +1382,19 @@ fn run() -> color_eyre::Result<()> {
                 .with_context(|| format!("failed to read artifact {}", input.display()))?;
             let artifact: OwnedReviewArtifact = serde_json::from_str(&contents)
                 .with_context(|| format!("failed to parse JSON artifact {}", input.display()))?;
-            if artifact.base != session.target.base || artifact.revision != session.target.rev {
-                eprintln!(
-                    "warning: importing artifact for {}..{} into current target {}",
-                    artifact.base, artifact.revision, session.target
-                );
-            }
-            state = session.clone().into_state();
-            let summary = import_json_artifact_into_state(&mut state, &artifact);
+            ensure_import_target_matches(&artifact, &session.target)?;
+            let mut imported_state = session.clone().into_state();
+            let spec = session_target_spec(&repo, &session.target);
+            let active_session_id = review::ensure_session(&mut imported_state, &spec, None)
+                .id
+                .clone();
+            let summary = import_json_artifact_into_state(
+                &mut imported_state,
+                &artifact,
+                Some(&active_session_id),
+            )
+            .map_err(into_user_error)?;
+            state = imported_state;
             state.save(&state_path)?;
             println!(
                 "Imported {} comments, skipped {} duplicates, restored {} viewed files",
@@ -1406,10 +1479,17 @@ fn run() -> color_eyre::Result<()> {
                 mcp_ingredients.expect("captured above for the mcp command");
             let session_repo = repo.clone();
             let initial_comment_state = config.comments.initial_state.into();
+            let agent_identity = config.agent_identity();
+            let factory_config = config.clone();
             crate::mcp::run(
                 move || {
-                    let mut session =
-                        ReviewSession::new_with_config(session_repo, target, diff, state, &config);
+                    let mut session = ReviewSession::new_with_config(
+                        session_repo,
+                        target,
+                        diff,
+                        state,
+                        &factory_config,
+                    );
                     session.annotate_generated_where(|file| {
                         generated_matcher.is_match(&file.path)
                             || crate::generated::diff_content_looks_generated(&file.diff)
@@ -1425,6 +1505,7 @@ fn run() -> color_eyre::Result<()> {
                     target: session.target.clone(),
                     diff_files: session.files.iter().map(|file| file.path.clone()).collect(),
                     initial_comment_state,
+                    agent_identity,
                 },
             )?;
         }
@@ -1446,7 +1527,7 @@ fn run() -> color_eyre::Result<()> {
         }
         Command::Drafts { command } => {
             warn_if_live_session_target_differs(&workspace_paths, &session);
-            handle_drafts_command(command, &session, &repo, &mut state, &state_path)?
+            handle_drafts_command(command, &session, &repo, &mut state, &state_path, &config)?
         }
         Command::Files { command } => match command {
             FilesCommand::List { format } => match format {
@@ -1480,18 +1561,20 @@ fn run() -> color_eyre::Result<()> {
             },
         },
         Command::Comments { command } => match command {
-            CommentsCommand::List { format } => {
+            CommentsCommand::List { channel, format } => {
                 let spec = session_target_spec(&repo, &session.target);
                 warn_session_target_mismatch(&state, &spec);
                 let active_session_id = review::find_session_for_target(&state, &spec)
                     .map(|review_session| review_session.id.as_str());
                 let mut listed_session = session.clone();
-                listed_session
-                    .comments
-                    .retain(|comment| match active_session_id {
-                        Some(id) => comment.is_in_session(id),
-                        None => comment.session_id.is_none(),
-                    });
+                listed_session.comments = review::list_comments_for_session(
+                    &state.comments,
+                    active_session_id,
+                    channel.map(Into::into),
+                )
+                .into_iter()
+                .cloned()
+                .collect();
                 match format {
                     ListFormat::Json => print_json(&session_comments_json(&listed_session))?,
                     ListFormat::Text => print!("{}", session_comments_text(&listed_session)),
@@ -1553,7 +1636,7 @@ fn run() -> color_eyre::Result<()> {
                         kind: kind.map(Into::into),
                         action: action.and_then(action_intent_arg_to_option),
                         state: initial_state,
-                        author: Identity::local_human(),
+                        author: config.human_identity(),
                         channel: if initial_state == CommentState::Todo {
                             Channel::Delegation
                         } else {
@@ -1608,7 +1691,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         reply,
-                        Identity::local_human(),
+                        config.human_identity(),
                         true,
                         snapshot,
                     )
@@ -1639,7 +1722,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         body,
-                        Identity::local_human(),
+                        config.human_identity(),
                         true,
                         snapshot,
                     )
@@ -1649,7 +1732,7 @@ fn run() -> color_eyre::Result<()> {
                         &mut state.comments,
                         &id,
                         body,
-                        Identity::local_human(),
+                        config.human_identity(),
                         snapshot,
                     )
                 }
@@ -1804,6 +1887,47 @@ fn run() -> color_eyre::Result<()> {
             },
             ReviewsCommand::Show { id } => {
                 print_json(review::find_session(&state, &id).map_err(into_user_error)?)?
+            }
+            ReviewsCommand::Disposition { command } => {
+                let spec = session_target_spec(&repo, &session.target);
+                note_if_creating_mismatched_session(&state, &spec);
+                let sid = review::ensure_session(&mut state, &spec, None).id.clone();
+                let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
+                let (updated, format) = match command {
+                    DispositionCommand::Show { format } => (state.sessions[idx].clone(), format),
+                    DispositionCommand::Set {
+                        disposition,
+                        format,
+                    } => {
+                        let updated = review::set_session_disposition(
+                            &mut state.sessions[idx],
+                            Some(disposition.into()),
+                        );
+                        state.save(&state_path)?;
+                        (updated, format)
+                    }
+                    DispositionCommand::Clear { format } => {
+                        let updated =
+                            review::set_session_disposition(&mut state.sessions[idx], None);
+                        state.save(&state_path)?;
+                        (updated, format)
+                    }
+                };
+                match format {
+                    ListFormat::Json => print_json(
+                        &serde_json::json!({ "session_id": updated.id, "disposition": updated.disposition }),
+                    )?,
+                    ListFormat::Text => println!(
+                        "disposition: {}",
+                        updated
+                            .disposition
+                            .map(|d| serde_json::to_string(&d)
+                                .unwrap()
+                                .trim_matches('"')
+                                .to_owned())
+                            .unwrap_or_else(|| "none".to_owned())
+                    ),
+                }
             }
         },
         Command::ActionItems { command } => match command {
@@ -2195,6 +2319,19 @@ fn run() -> color_eyre::Result<()> {
     Ok(())
 }
 
+fn ensure_import_target_matches(
+    artifact: &OwnedReviewArtifact,
+    target: &ReviewTarget,
+) -> color_eyre::Result<()> {
+    if artifact.base != target.base || artifact.revision != target.rev {
+        return Err(user_error(format!(
+            "cannot import artifact for {}..{} into current target {}; import requires an exact target match",
+            artifact.base, artifact.revision, target
+        )));
+    }
+    Ok(())
+}
+
 fn take_skills_command(command: &mut Option<Command>) -> Option<SkillsCommand> {
     if !matches!(command.as_ref(), Some(Command::Skills { .. })) {
         return None;
@@ -2480,6 +2617,7 @@ fn handle_drafts_command(
     repo: &std::path::Path,
     state: &mut ReviewState,
     state_path: &std::path::Path,
+    config: &Config,
 ) -> color_eyre::Result<()> {
     let target = session_target_spec(repo, &session.target);
     let active_session_id =
@@ -2545,7 +2683,7 @@ fn handle_drafts_command(
                         kind: None,
                         action: None,
                         state: CommentState::Draft,
-                        author: Identity::agent(),
+                        author: config.agent_identity(),
                         channel: Channel::Onboarding,
                     },
                 )
@@ -3491,11 +3629,6 @@ fn resolve_tui_artifact_options(
         .map(TuiArtifactOnQuitConfig::from)
         .unwrap_or(config.artifact.on_tui_quit);
     let format = cli_format.unwrap_or_else(|| config.artifact.format.into());
-    if matches!(format, OutputFormat::Html) && cli_profile.is_some() {
-        return Err(user_error(
-            "tui --artifact-profile is not supported with html artifacts",
-        ));
-    }
     let profile = cli_profile.unwrap_or_else(|| config.artifact.profile.into());
     Ok(match mode {
         TuiArtifactOnQuitConfig::Never => None,
@@ -3537,6 +3670,7 @@ impl From<ArtifactProfileConfig> for OutputProfile {
         match value {
             ArtifactProfileConfig::Human => Self::Human,
             ArtifactProfileConfig::Agent => Self::Agent,
+            ArtifactProfileConfig::Team => Self::Team,
         }
     }
 }
@@ -3546,6 +3680,7 @@ impl From<OutputProfile> for ArtifactProfile {
         match value {
             OutputProfile::Human => Self::Human,
             OutputProfile::Agent => Self::Agent,
+            OutputProfile::Team => Self::Team,
         }
     }
 }
@@ -3640,6 +3775,7 @@ mod tests {
             &session.repo,
             &mut state,
             &state_path,
+            &Config::default(),
         )
         .unwrap();
         assert_eq!(state.comments.len(), 1);
@@ -3656,6 +3792,7 @@ mod tests {
             &session.repo,
             &mut state,
             &state_path,
+            &Config::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("unknown draft id(s): missing"));
@@ -3666,6 +3803,7 @@ mod tests {
             &session.repo,
             &mut state,
             &state_path,
+            &Config::default(),
         )
         .unwrap();
         assert!(state.comments.is_empty());
@@ -4640,6 +4778,18 @@ mod tests {
     }
 
     #[test]
+    fn import_target_mismatch_is_rejected() {
+        let artifact = OwnedReviewArtifact {
+            base: "main".into(),
+            revision: "other".into(),
+            ..Default::default()
+        };
+        let target = ReviewTarget::new("main", "@");
+        let error = ensure_import_target_matches(&artifact, &target).unwrap_err();
+        assert!(error.to_string().contains("exact target match"));
+    }
+
+    #[test]
     fn cli_comment_anchor_exports_agent_excerpt() {
         let mut session = sample_session();
         let file = session
@@ -4887,5 +5037,51 @@ mod tests {
         let session = sample_session();
 
         assert_eq!(session_comments_json(&session)["comments"][0]["id"], "c1");
+    }
+
+    #[test]
+    fn cli_accepts_channel_filters_and_disposition_commands() {
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "list",
+                "--channel",
+                "delegation",
+                "--format",
+                "json"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Comments {
+                command: CommentsCommand::List {
+                    channel: Some(ChannelArg::Delegation),
+                    format: ListFormat::Json
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gander", "reviews", "disposition", "set", "request-changes"])
+                .unwrap()
+                .command,
+            Some(Command::Reviews {
+                command: ReviewsCommand::Disposition {
+                    command: DispositionCommand::Set {
+                        disposition: DispositionArg::RequestChanges,
+                        ..
+                    }
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["gander", "reviews", "disposition", "clear"])
+                .unwrap()
+                .command,
+            Some(Command::Reviews {
+                command: ReviewsCommand::Disposition {
+                    command: DispositionCommand::Clear { .. }
+                }
+            })
+        ));
     }
 }

@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fs, io::Write, path::Path};
 
 use chrono::Utc;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -10,8 +10,9 @@ use crate::{
     diff::{DiffLineKind, Hunk},
     ids::shortest_unique_prefix,
     state::{
-        ActionIntent, ActionItemStatus, ClosedDisposition, Comment, CommentKind, CommentState,
-        ExternalTicket, ReviewState, ReviewTarget, StepArtifact, StepImportance, StepKind,
+        ActionIntent, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
+        CommentState, ExternalTicket, ReviewState, ReviewTarget, StepArtifact, StepImportance,
+        StepKind,
     },
 };
 
@@ -26,6 +27,7 @@ pub enum ArtifactProfile {
     #[default]
     Human,
     Agent,
+    Team,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -33,8 +35,13 @@ pub struct ArtifactBuildOptions {
     pub only_open: bool,
 }
 
+pub struct TeamProjection<'a> {
+    pub comments: Vec<CommentArtifact<'a>>,
+    pub summary: String,
+}
+
 const EXCERPT_CONTEXT_LINES: usize = 3;
-pub const ARTIFACT_SCHEMA_VERSION: u8 = 9;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 10;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -59,6 +66,8 @@ pub struct SessionArtifact<'a> {
     pub id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<crate::state::ReviewDisposition>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,7 +94,7 @@ pub struct HunkArtifact<'a> {
     pub lines: Vec<ExcerptLine<'a>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExcerptLine<'a> {
     pub kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,7 +104,7 @@ pub struct ExcerptLine<'a> {
     pub text: &'a str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommentArtifact<'a> {
     #[serde(flatten)]
     pub comment: &'a Comment,
@@ -171,6 +180,15 @@ pub struct OwnedReviewArtifact {
     pub revision: String,
     pub files: Vec<OwnedFileArtifact>,
     pub comments: Vec<Comment>,
+    pub session: Option<OwnedSessionArtifact>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct OwnedSessionArtifact {
+    pub id: String,
+    pub title: Option<String>,
+    pub disposition: Option<crate::state::ReviewDisposition>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -196,6 +214,7 @@ impl Default for OwnedReviewArtifact {
             revision: String::new(),
             files: Vec::new(),
             comments: Vec::new(),
+            session: None,
         }
     }
 }
@@ -217,6 +236,7 @@ impl<'a> ReviewArtifact<'a> {
         options: ArtifactBuildOptions,
     ) -> Self {
         let agent = profile == ArtifactProfile::Agent;
+        let team = profile == ArtifactProfile::Team;
         let durable = active_durable_session(session);
         // Keep all outbound open-work adapters aligned with the shared review
         // query even though this complete artifact also carries closed history.
@@ -226,17 +246,56 @@ impl<'a> ReviewArtifact<'a> {
             .flat_map(|work| work.action_items.iter().map(|entry| entry.item.id.as_str()))
             .collect::<BTreeSet<_>>();
 
+        let team_projection = team.then(|| build_team_projection(session, durable, agent));
+        let comments = if let Some(projection) = &team_projection {
+            projection.comments.clone()
+        } else {
+            session
+                .comments
+                .iter()
+                .filter(|comment| {
+                    comment_belongs_to_session(comment, durable.map(|active| active.id.as_str()))
+                })
+                .filter(|comment| !options.only_open || comment.state == CommentState::Todo)
+                .filter(|comment| {
+                    !team
+                        || (comment.channel == Channel::Collaboration
+                            && matches!(comment.state, CommentState::Todo | CommentState::Resolved))
+                })
+                .map(|comment| CommentArtifact {
+                    comment,
+                    linked_action_item_ids: if team {
+                        Vec::new()
+                    } else {
+                        linked_action_item_ids(session, &comment.id)
+                    },
+                    excerpt: (agent || team)
+                        .then(|| comment_excerpt(session, comment))
+                        .flatten(),
+                })
+                .collect::<Vec<_>>()
+        };
+
         Self {
             version: ARTIFACT_SCHEMA_VERSION,
             generated_at: Utc::now(),
             repo: &session.repo,
             base: &session.target.base,
             revision: &session.target.rev,
-            profile: agent.then_some("agent"),
-            summary: session.summary_line(),
+            profile: match profile {
+                ArtifactProfile::Human => None,
+                ArtifactProfile::Agent => Some("agent"),
+                ArtifactProfile::Team => Some("team"),
+            },
+            summary: if team {
+                team_projection.as_ref().unwrap().summary.clone()
+            } else {
+                session.summary_line()
+            },
             session: durable.map(|active| SessionArtifact {
                 id: &active.id,
                 title: active.title.as_deref(),
+                disposition: active.disposition,
             }),
             files: session
                 .files
@@ -250,65 +309,91 @@ impl<'a> ReviewArtifact<'a> {
                     additions: file.additions,
                     deletions: file.deletions,
                     fingerprint: &file.fingerprint,
-                    hunks: agent.then(|| file.diff.hunks.iter().map(hunk_artifact).collect()),
+                    hunks: (agent || team)
+                        .then(|| file.diff.hunks.iter().map(hunk_artifact).collect()),
                 })
                 .collect(),
-            comments: session
-                .comments
-                .iter()
-                .filter(|comment| {
-                    comment_belongs_to_session(comment, durable.map(|active| active.id.as_str()))
-                })
-                .filter(|comment| !options.only_open || comment.state == CommentState::Todo)
-                .map(|comment| CommentArtifact {
-                    comment,
-                    linked_action_item_ids: linked_action_item_ids(session, &comment.id),
-                    excerpt: agent.then(|| comment_excerpt(session, comment)).flatten(),
-                })
-                .collect(),
-            action_items: durable
-                .into_iter()
-                .flat_map(|active| active.action_items.iter())
-                .filter(|item| !options.only_open || open_ids.contains(item.id.as_str()))
-                .map(|item| ActionItemArtifact {
-                    id: &item.id,
-                    title: &item.title,
-                    body: item.body.as_deref(),
-                    status: item.status,
-                    action: item.action,
-                    comment_ids: item.comment_ids.iter().map(String::as_str).collect(),
-                    external_tickets: &item.external_tickets,
-                    disposition: item.disposition,
-                    outcome: item.outcome.as_deref(),
-                    closed_at: item.closed_at,
-                    target: item.target.as_ref().map(target_artifact),
-                })
-                .collect(),
-            walkthroughs: durable
-                .into_iter()
-                .flat_map(|active| active.walkthroughs.iter())
-                .map(|walkthrough| WalkthroughArtifact {
-                    id: &walkthrough.id,
-                    title: walkthrough.title.as_deref(),
-                    steps: walkthrough
-                        .steps
-                        .iter()
-                        .map(|step| WalkthroughStepArtifact {
-                            id: &step.id,
-                            kind: step.kind,
-                            importance: step.importance,
-                            change_id: step.change_id.as_deref(),
-                            title: step.title.as_deref(),
-                            why: step.why.as_deref(),
-                            body: step.body.as_deref(),
-                            target: target_artifact(&step.target),
-                            artifacts: step.artifacts.iter().collect(),
-                        })
-                        .collect(),
-                })
-                .collect(),
+            comments,
+            action_items: if team {
+                Vec::new()
+            } else {
+                durable
+                    .into_iter()
+                    .flat_map(|active| active.action_items.iter())
+                    .filter(|item| !options.only_open || open_ids.contains(item.id.as_str()))
+                    .map(|item| ActionItemArtifact {
+                        id: &item.id,
+                        title: &item.title,
+                        body: item.body.as_deref(),
+                        status: item.status,
+                        action: item.action,
+                        comment_ids: item.comment_ids.iter().map(String::as_str).collect(),
+                        external_tickets: &item.external_tickets,
+                        disposition: item.disposition,
+                        outcome: item.outcome.as_deref(),
+                        closed_at: item.closed_at,
+                        target: item.target.as_ref().map(target_artifact),
+                    })
+                    .collect()
+            },
+            walkthroughs: if team {
+                Vec::new()
+            } else {
+                durable
+                    .into_iter()
+                    .flat_map(|active| active.walkthroughs.iter())
+                    .map(|walkthrough| WalkthroughArtifact {
+                        id: &walkthrough.id,
+                        title: walkthrough.title.as_deref(),
+                        steps: walkthrough
+                            .steps
+                            .iter()
+                            .map(|step| WalkthroughStepArtifact {
+                                id: &step.id,
+                                kind: step.kind,
+                                importance: step.importance,
+                                change_id: step.change_id.as_deref(),
+                                title: step.title.as_deref(),
+                                why: step.why.as_deref(),
+                                body: step.body.as_deref(),
+                                target: target_artifact(&step.target),
+                                artifacts: step.artifacts.iter().collect(),
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            },
         }
     }
+}
+
+pub fn build_team_projection<'a>(
+    session: &'a ReviewSession,
+    durable: Option<&'a crate::state::ReviewSession>,
+    _agent: bool,
+) -> TeamProjection<'a> {
+    let comments = session
+        .comments
+        .iter()
+        .filter(|comment| {
+            comment_belongs_to_session(comment, durable.map(|active| active.id.as_str()))
+        })
+        .filter(|comment| team_comment_is_public(comment))
+        .map(|comment| CommentArtifact {
+            comment,
+            linked_action_item_ids: Vec::new(),
+            excerpt: comment_excerpt(session, comment),
+        })
+        .collect::<Vec<_>>();
+    TeamProjection {
+        summary: team_summary_line(session, comments.len()),
+        comments,
+    }
+}
+
+pub fn team_comment_is_public(comment: &Comment) -> bool {
+    comment.channel == Channel::Collaboration
+        && matches!(comment.state, CommentState::Todo | CommentState::Resolved)
 }
 
 pub fn render_handoff_json(
@@ -505,6 +590,27 @@ fn hunk_artifact(hunk: &Hunk) -> HunkArtifact<'_> {
     }
 }
 
+fn team_summary_line(session: &ReviewSession, comment_count: usize) -> String {
+    let viewed = session
+        .files
+        .iter()
+        .filter(|file| file.viewed || file.caught_up)
+        .count();
+    let generated = session.files.iter().filter(|file| file.generated).count();
+    let additions: usize = session.files.iter().map(|file| file.additions).sum();
+    let deletions: usize = session.files.iter().map(|file| file.deletions).sum();
+    let noun = if comment_count == 1 {
+        "comment"
+    } else {
+        "comments"
+    };
+    format!(
+        "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {comment_count} {noun}",
+        session.files.len(),
+        session.files.len()
+    )
+}
+
 fn excerpt_line(line: &crate::diff::DiffLine) -> ExcerptLine<'_> {
     ExcerptLine {
         kind: match line.kind {
@@ -580,7 +686,19 @@ pub fn write_artifact(
 pub fn import_json_artifact_into_state(
     state: &mut ReviewState,
     artifact: &OwnedReviewArtifact,
-) -> ImportSummary {
+    active_session_id: Option<&str>,
+) -> Result<ImportSummary> {
+    let mut imported = state.clone();
+    let summary = apply_json_artifact_import(&mut imported, artifact, active_session_id)?;
+    *state = imported;
+    Ok(summary)
+}
+
+fn apply_json_artifact_import(
+    state: &mut ReviewState,
+    artifact: &OwnedReviewArtifact,
+    active_session_id: Option<&str>,
+) -> Result<ImportSummary> {
     let mut summary = ImportSummary::default();
     for file in &artifact.files {
         let Some(existing) = state.files.get_mut(&file.path) else {
@@ -595,18 +713,28 @@ pub fn import_json_artifact_into_state(
         }
     }
     for comment in &artifact.comments {
+        let mut comment = comment.clone();
+        if let Some(active_session_id) = active_session_id {
+            comment.session_id = Some(active_session_id.to_owned());
+        }
         if let Some(existing) = state
             .comments
             .iter_mut()
             .find(|existing| existing.id == comment.id)
         {
+            if existing.session_id != comment.session_id {
+                return Err(eyre!(
+                    "imported comment `{}` collides with a different local session",
+                    comment.id
+                ));
+            }
             let before = existing.clone();
-            crate::state::merge_comment_observation(existing, comment);
-            crate::state::merge_comment_replies(existing, comment);
+            crate::state::merge_comment_observation(existing, &comment);
+            crate::state::merge_comment_replies(existing, &comment);
             if comment.updated_at > existing.updated_at {
                 let replies = existing.replies.clone();
                 let observation = existing.observation.clone();
-                *existing = comment.clone();
+                *existing = comment;
                 existing.replies = replies;
                 existing.observation = observation;
             }
@@ -616,11 +744,20 @@ pub fn import_json_artifact_into_state(
                 summary.comments_imported += 1;
             }
         } else {
-            state.comments.push(comment.clone());
+            state.comments.push(comment);
             summary.comments_imported += 1;
         }
     }
-    summary
+    if let (Some(session), Some(active_session_id)) = (&artifact.session, active_session_id)
+        && session.disposition.is_some()
+        && let Some(existing) = state
+            .sessions
+            .iter_mut()
+            .find(|item| item.id == active_session_id)
+    {
+        existing.disposition = session.disposition;
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -670,9 +807,26 @@ pub fn write_artifact_to(
 fn to_markdown(artifact: &ReviewArtifact<'_>) -> String {
     if artifact.profile == Some("agent") {
         to_agent_markdown(artifact)
+    } else if artifact.profile == Some("team") {
+        to_team_markdown(artifact)
     } else {
         to_human_markdown(artifact)
     }
+}
+
+fn to_team_markdown(artifact: &ReviewArtifact<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("# Team review summary\n\n");
+    write_header(artifact, &mut out);
+    out.push_str("## Published collaboration comments\n\n");
+    if artifact.comments.is_empty() {
+        out.push_str("No published collaboration comments.\n");
+    } else {
+        for comment in &artifact.comments {
+            write_comment_human_summary(&mut out, comment.comment);
+        }
+    }
+    out
 }
 
 fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
@@ -702,6 +856,16 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
         for comment in &artifact.comments {
             write_comment_heading(&mut out, comment.comment);
             write_comment_provenance(&mut out, comment.comment, "");
+            out.push_str(&format!(
+                "Author: `{}:{}`  \nChannel: `{}`  \n",
+                serde_json::to_string(&comment.comment.author.kind)
+                    .unwrap()
+                    .trim_matches('"'),
+                comment.comment.author.name,
+                serde_json::to_string(&comment.comment.channel)
+                    .unwrap()
+                    .trim_matches('"')
+            ));
             out.push_str(&format!("Status: {}\n\n", comment.comment.state.label()));
             out.push_str(comment.comment.body.trim());
             out.push_str("\n\n");
@@ -713,6 +877,58 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
     out.push_str("\n## Walkthrough\n\n");
     write_walkthroughs(&mut out, artifact);
     out
+}
+
+fn write_comment_human_summary(out: &mut String, comment: &Comment) {
+    out.push_str("### ");
+    write_comment_location_inline(out, comment);
+    if let Some(anchor) = &comment.anchor {
+        out.push_str(&format!(" ({})", concise_anchor_label(anchor)));
+    }
+    out.push_str("\n\n");
+    out.push_str(&format!(
+        "Author: `{}:{}`  \nChannel: `{}`  \nStatus: `{}`\n\n",
+        serde_json::to_string(&comment.author.kind)
+            .unwrap()
+            .trim_matches('"'),
+        comment.author.name,
+        serde_json::to_string(&comment.channel)
+            .unwrap()
+            .trim_matches('"'),
+        comment.state.label()
+    ));
+    out.push_str(comment.body.trim());
+    out.push_str("\n\n");
+    write_comment_replies(out, comment);
+}
+
+fn concise_anchor_label(anchor: &CommentAnchor) -> String {
+    match anchor {
+        CommentAnchor::File { old_path, .. } => old_path
+            .as_deref()
+            .map(|old| format!("file, renamed from `{old}`"))
+            .unwrap_or_else(|| "file".to_owned()),
+        CommentAnchor::Line {
+            side,
+            old_line,
+            new_line,
+            ..
+        } => {
+            format!(
+                "{} side, old {:?}, new {:?}",
+                side.label(),
+                old_line,
+                new_line
+            )
+        }
+        CommentAnchor::Range {
+            start_line,
+            end_line,
+            ..
+        } => {
+            format!("range {start_line}-{end_line}")
+        }
+    }
 }
 
 fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
@@ -768,6 +984,18 @@ fn write_header(artifact: &ReviewArtifact<'_>, out: &mut String) {
         && let Some(title) = session.title
     {
         out.push_str(&format!("- Session: {}\n", title));
+    }
+    if let Some(disposition) = artifact
+        .session
+        .as_ref()
+        .and_then(|session| session.disposition)
+    {
+        out.push_str(&format!(
+            "- Disposition: `{}`\n",
+            serde_json::to_string(&disposition)
+                .unwrap()
+                .trim_matches('"')
+        ));
     }
     out.push_str(&format!(
         "- Open work: {} item(s) ({} durable action item(s), {} standalone todo comment(s))\n\n",
@@ -1276,8 +1504,12 @@ fn write_comment_replies_indented(out: &mut String, comment: &Comment, indent: &
     out.push_str(&format!("{indent}Replies:\n"));
     for reply in &comment.replies {
         out.push_str(&format!(
-            "{indent}- `{}` at `{}`: {}\n",
+            "{indent}- `{}` by `{}:{}` at `{}`: {}\n",
             reply.id,
+            serde_json::to_string(&reply.author.kind)
+                .unwrap()
+                .trim_matches('"'),
+            reply.author.name,
             reply.created_at,
             reply.body.trim()
         ));
@@ -1461,8 +1693,156 @@ mod tests {
         )
     }
 
+    fn compatibility_shape_without_additive_annotations(
+        session: &ReviewSession,
+        profile: ArtifactProfile,
+    ) -> serde_json::Value {
+        let mut value: serde_json::Value = serde_json::from_str(
+            &render_artifact_with_profile(session, ArtifactFormat::Json, profile).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            value["comments"][0]["author"],
+            serde_json::json!({ "kind": "human", "name": "local" })
+        );
+        assert_eq!(value["comments"][0]["channel"], "note");
+        assert_eq!(
+            value["comments"][0]["replies"][0]["author"],
+            serde_json::json!({ "kind": "agent", "name": "agent" })
+        );
+        value["generated_at"] = "[generated_at]".into();
+        if let Some(session) = value
+            .get_mut("session")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            session.remove("disposition");
+        }
+        for comment in value["comments"].as_array_mut().unwrap() {
+            let comment = comment.as_object_mut().unwrap();
+            comment.remove("author");
+            comment.remove("channel");
+            comment.insert("created_at".into(), "[created_at]".into());
+            if let Some(replies) = comment
+                .get_mut("replies")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for reply in replies {
+                    let reply = reply.as_object_mut().unwrap();
+                    reply.remove("author");
+                    reply.insert("created_at".into(), "[created_at]".into());
+                }
+            }
+        }
+        value
+    }
+
     #[test]
-    fn full_artifact_schema_nine_exposes_durable_action_item_fields_and_links() {
+    fn human_artifact_profile_golden_preserves_legacy_shape_and_order_except_additive_annotations()
+    {
+        let value =
+            compatibility_shape_without_additive_annotations(&fixture(), ArtifactProfile::Human);
+
+        assert_eq!(
+            value["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|comment| comment["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["linked", "draft-linked", "standalone"]
+        );
+        assert!(value["files"][0].get("hunks").is_none());
+        insta::assert_json_snapshot!(value);
+    }
+
+    #[test]
+    fn agent_artifact_profile_golden_preserves_legacy_shape_and_order_except_additive_annotations()
+    {
+        let value =
+            compatibility_shape_without_additive_annotations(&fixture(), ArtifactProfile::Agent);
+
+        assert_eq!(
+            value["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|comment| comment["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["linked", "draft-linked", "standalone"]
+        );
+        assert!(value["files"][0]["hunks"].is_array());
+        insta::assert_json_snapshot!(value);
+    }
+
+    #[test]
+    fn team_profile_only_exports_collaboration_todo_resolved_without_private_leaks() {
+        let mut session = fixture();
+        session.sessions[0].disposition = Some(crate::state::ReviewDisposition::RequestChanges);
+        for comment in &mut session.comments {
+            match comment.id.as_str() {
+                "linked" => {
+                    comment.channel = Channel::Collaboration;
+                    comment.anchor = crate::anchor::comment_anchor_for_file_diff(
+                        &session.files[0].diff,
+                        Some(1),
+                        Some(1),
+                    );
+                    comment.author = crate::state::Identity {
+                        kind: crate::state::AuthorKind::Human,
+                        name: "Teammate".into(),
+                    };
+                }
+                "draft-linked" => {
+                    comment.channel = Channel::Collaboration;
+                    comment.body = "private collaboration draft".into();
+                }
+                "standalone" => comment.channel = Channel::Delegation,
+                _ => {}
+            }
+        }
+
+        let json_text =
+            render_artifact_with_profile(&session, ArtifactFormat::Json, ArtifactProfile::Team)
+                .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+        assert_eq!(value["version"], ARTIFACT_SCHEMA_VERSION);
+        assert_eq!(value["profile"], "team");
+        assert!(value["summary"].as_str().unwrap().contains("1 comment"));
+        assert_eq!(value["session"]["disposition"], "request-changes");
+        assert_eq!(value["comments"].as_array().unwrap().len(), 1);
+        let exported = &value["comments"][0];
+        assert_eq!(exported["id"], "linked");
+        assert_eq!(exported["author"]["name"], "Teammate");
+        assert_eq!(exported["replies"][0]["author"]["kind"], "agent");
+        assert_eq!(exported["channel"], "collaboration");
+        assert!(exported["excerpt"].is_array());
+        assert!(value["files"][0]["hunks"].is_array());
+        assert!(
+            exported["linked_action_item_ids"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(value["action_items"].as_array().unwrap().is_empty());
+        assert!(value["walkthroughs"].as_array().unwrap().is_empty());
+        assert!(!json_text.contains("private collaboration draft"));
+        assert!(!json_text.contains("standalone todo"));
+        assert!(!json_text.contains("Fix parser behavior"));
+
+        let markdown =
+            render_artifact_with_profile(&session, ArtifactFormat::Markdown, ArtifactProfile::Team)
+                .unwrap();
+        assert!(markdown.contains("linked evidence body"));
+        assert!(markdown.contains("new side"));
+        assert!(!markdown.contains("line_fingerprint"));
+        assert!(!markdown.contains("diff_fingerprint"));
+        assert!(!markdown.contains("hunk_index"));
+        assert!(!markdown.contains("private collaboration draft"));
+        assert!(!markdown.contains("Fix parser behavior"));
+    }
+
+    #[test]
+    fn full_artifact_schema_ten_exposes_durable_action_item_fields_and_links() {
         let mut session = fixture();
         let closed = ActionItem {
             id: "action-closed".into(),
@@ -1676,7 +2056,7 @@ mod tests {
             },
         );
 
-        let summary = import_json_artifact_into_state(&mut state, &artifact);
+        let summary = import_json_artifact_into_state(&mut state, &artifact, None).unwrap();
 
         assert_eq!(artifact.version, 8);
         assert_eq!(summary.viewed_files_imported, 1);
@@ -1721,7 +2101,7 @@ mod tests {
         .unwrap();
         let mut state = ReviewState::default();
 
-        let summary = import_json_artifact_into_state(&mut state, &artifact);
+        let summary = import_json_artifact_into_state(&mut state, &artifact, None).unwrap();
 
         assert_eq!(summary.comments_imported, 1);
         assert_eq!(state.comments[0].author.name, "Alice");
@@ -1746,7 +2126,7 @@ mod tests {
             .iter()
             .find(|comment| comment["id"] == "foreign")
             .unwrap();
-        assert_eq!(exported["version"], 9);
+        assert_eq!(exported["version"], ARTIFACT_SCHEMA_VERSION);
         assert_eq!(
             comment["author"],
             serde_json::json!({ "kind": "human", "name": "Alice" })
@@ -1755,6 +2135,144 @@ mod tests {
         assert_eq!(
             comment["replies"][0]["author"],
             serde_json::json!({ "kind": "human", "name": "Bob" })
+        );
+    }
+
+    #[test]
+    fn import_remaps_foreign_session_to_active_and_preserves_authors_disposition_absent() {
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "local-session".into(),
+            disposition: Some(crate::state::ReviewDisposition::Approve),
+            ..Default::default()
+        });
+        let foreign_author = crate::state::Identity {
+            kind: crate::state::AuthorKind::Human,
+            name: "Foreign Reviewer".into(),
+        };
+        let reply_author = crate::state::Identity {
+            kind: crate::state::AuthorKind::Agent,
+            name: "Foreign Bot".into(),
+        };
+        let artifact = OwnedReviewArtifact {
+            base: "main".into(),
+            revision: "@".into(),
+            session: Some(OwnedSessionArtifact {
+                id: "foreign-session".into(),
+                title: Some("Foreign title".into()),
+                disposition: None,
+            }),
+            comments: vec![Comment {
+                id: "foreign-comment".into(),
+                session_id: Some("foreign-session".into()),
+                body: "team feedback".into(),
+                author: foreign_author.clone(),
+                channel: Channel::Collaboration,
+                state: CommentState::Todo,
+                replies: vec![CommentReply {
+                    id: "reply".into(),
+                    body: "ack".into(),
+                    author: reply_author.clone(),
+                    created_at: chrono::DateTime::UNIX_EPOCH,
+                    result: None,
+                }],
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let summary =
+            import_json_artifact_into_state(&mut state, &artifact, Some("local-session")).unwrap();
+        assert_eq!(summary.comments_imported, 1);
+        assert_eq!(
+            state.comments[0].session_id.as_deref(),
+            Some("local-session")
+        );
+        assert_eq!(state.comments[0].author, foreign_author);
+        assert_eq!(state.comments[0].replies[0].author, reply_author);
+        assert_eq!(state.comments[0].channel, Channel::Collaboration);
+        assert_eq!(
+            state.sessions[0].disposition,
+            Some(crate::state::ReviewDisposition::Approve)
+        );
+
+        let with_disposition = OwnedReviewArtifact {
+            session: Some(OwnedSessionArtifact {
+                id: "foreign-session".into(),
+                disposition: Some(crate::state::ReviewDisposition::RequestChanges),
+                ..Default::default()
+            }),
+            ..OwnedReviewArtifact::default()
+        };
+        import_json_artifact_into_state(&mut state, &with_disposition, Some("local-session"))
+            .unwrap();
+        assert_eq!(
+            state.sessions[0].disposition,
+            Some(crate::state::ReviewDisposition::RequestChanges)
+        );
+    }
+
+    #[test]
+    fn import_wrong_session_id_collision_after_safe_file_and_comment_is_fully_atomic() {
+        let mut state = ReviewState::default();
+        state.files.insert(
+            "safe.rs".into(),
+            FileState {
+                fingerprint: "matching".into(),
+                viewed: false,
+                ..Default::default()
+            },
+        );
+        state.comments.push(Comment {
+            id: "same-id".into(),
+            session_id: Some("other-session".into()),
+            body: "keep me".into(),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            ..Default::default()
+        });
+        let before = state.clone();
+        let before_bytes = serde_json::to_vec(&state).unwrap();
+        let artifact = OwnedReviewArtifact {
+            files: vec![OwnedFileArtifact {
+                path: "safe.rs".into(),
+                viewed: true,
+                fingerprint: "matching".into(),
+            }],
+            comments: vec![
+                Comment {
+                    id: "safe-earlier-comment".into(),
+                    session_id: Some("foreign".into()),
+                    body: "must not be partially imported".into(),
+                    created_at: chrono::DateTime::UNIX_EPOCH,
+                    ..Default::default()
+                },
+                Comment {
+                    id: "same-id".into(),
+                    session_id: Some("foreign".into()),
+                    body: "incoming collision".into(),
+                    created_at: chrono::DateTime::UNIX_EPOCH,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let error = import_json_artifact_into_state(&mut state, &artifact, Some("active-session"))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collides with a different local session")
+        );
+        assert_eq!(state, before);
+        assert_eq!(serde_json::to_vec(&state).unwrap(), before_bytes);
+        assert!(!state.files["safe.rs"].viewed);
+        assert!(
+            state
+                .comments
+                .iter()
+                .all(|comment| comment.id != "safe-earlier-comment")
         );
     }
 
@@ -1842,7 +2360,7 @@ mod tests {
             ..Default::default()
         };
 
-        let summary = import_json_artifact_into_state(&mut state, &artifact);
+        let summary = import_json_artifact_into_state(&mut state, &artifact, None).unwrap();
 
         assert_eq!(summary.comments_imported, 1);
         assert!(state.comments[0].replies[0].result.is_some());
@@ -1890,7 +2408,9 @@ mod tests {
                 comments: vec![right],
                 ..Default::default()
             },
-        );
+            None,
+        )
+        .unwrap();
         import_json_artifact_into_state(
             &mut right_state,
             &OwnedReviewArtifact {
@@ -1898,7 +2418,9 @@ mod tests {
                 comments: vec![left],
                 ..Default::default()
             },
-        );
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             left_state.comments[0].replies,

@@ -30,7 +30,7 @@ use crate::{
     jj::{JjBackend, ReviewTarget as JjReviewTarget},
     registry, review,
     state::{
-        ActionIntent, Channel, CommentKind, CommentState, Identity, ReviewState,
+        ActionIntent, Channel, CommentKind, CommentState, Identity, ReviewDisposition, ReviewState,
         ReviewTarget as StateReviewTarget, WalkthroughStep,
     },
 };
@@ -47,6 +47,7 @@ pub struct GanderMcp {
     target: review::SessionTargetSpec,
     diff_files: Vec<String>,
     initial_comment_state: CommentState,
+    agent_identity: Identity,
     snapshot: mpsc::Sender<SnapshotRequest>,
     tool_router: ToolRouter<Self>,
 }
@@ -59,6 +60,7 @@ pub struct GanderMcpParams {
     pub target: JjReviewTarget,
     pub diff_files: Vec<String>,
     pub initial_comment_state: CommentState,
+    pub agent_identity: Identity,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,6 +242,12 @@ pub struct CommentAddParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CommentsParams {
+    /// Optional annotation channel filter: onboarding, delegation, collaboration, or note.
+    pub channel: Option<Channel>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CommentsReadyParams {
     /// Full ids or unambiguous prefixes. Mutually exclusive with all_drafts.
     pub ids: Option<Vec<String>>,
@@ -270,6 +278,11 @@ pub struct CommentResolveParams {
     pub id: String,
     /// Optional reply body to append before resolving.
     pub reply: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReviewDispositionParams {
+    pub disposition: Option<ReviewDisposition>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -407,6 +420,7 @@ impl GanderMcp {
             target: target_spec,
             diff_files: params.diff_files,
             initial_comment_state: params.initial_comment_state,
+            agent_identity: params.agent_identity,
             snapshot: sender,
             tool_router: Self::tool_router(),
         })
@@ -433,7 +447,10 @@ impl GanderMcp {
     }
 
     #[tool(description = "Human review comments recorded in this session")]
-    fn comments(&self) -> Result<CallToolResult, McpError> {
+    fn comments(
+        &self,
+        Parameters(params): Parameters<CommentsParams>,
+    ) -> Result<CallToolResult, McpError> {
         let context = self.selected_review_context()?;
         let state = self.load_state()?;
         let target = review::SessionTargetSpec {
@@ -444,13 +461,9 @@ impl GanderMcp {
         };
         let active_session_id =
             review::find_session_for_target(&state, &target).map(|session| session.id.as_str());
-        let comments = state
-            .comments
-            .iter()
-            .filter(|comment| match active_session_id {
-                Some(id) => comment.belongs_to_session(id),
-                None => comment.session_id.is_none(),
-            });
+        let channel = params.channel;
+        let comments =
+            review::list_comments_for_session(&state.comments, active_session_id, channel);
         json_result(crate::acp::comments_json(comments))
     }
 
@@ -644,7 +657,7 @@ impl GanderMcp {
                     kind: None,
                     action: None,
                     state: CommentState::Draft,
-                    author: Identity::agent(),
+                    author: this.agent_identity.clone(),
                     channel: Channel::Onboarding,
                 },
             )
@@ -690,6 +703,40 @@ impl GanderMcp {
     ) -> Result<CallToolResult, McpError> {
         self.with_state_mut(|state, this| {
             Ok(review::ensure_session(state, &this.target, params.title.as_deref()).clone())
+        })
+    }
+
+    #[tool(
+        description = "Show the active session-level team disposition. Equivalent to `gander reviews disposition show`."
+    )]
+    fn review_disposition(&self) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let state = self.load_state()?;
+        let target = review::SessionTargetSpec {
+            repo: Some(context.repo.display().to_string()),
+            base: Some(context.base),
+            revision: Some(context.revision),
+            revset: None,
+        };
+        let disposition =
+            review::find_session_for_target(&state, &target).and_then(|s| s.disposition);
+        json_result(json!({ "disposition": disposition }))
+    }
+
+    #[tool(
+        description = "Set or clear the active session-level team disposition. Equivalent to `gander reviews disposition set|clear`."
+    )]
+    fn review_disposition_set(
+        &self,
+        Parameters(params): Parameters<ReviewDispositionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            Ok(review::set_session_disposition(
+                &mut state.sessions[idx],
+                params.disposition,
+            ))
         })
     }
 
@@ -750,7 +797,7 @@ impl GanderMcp {
                     kind: params.kind,
                     action: params.action,
                     state: initial_state,
-                    author: Identity::agent(),
+                    author: this.agent_identity.clone(),
                     channel: if initial_state == CommentState::Todo {
                         Channel::Delegation
                     } else {
@@ -804,7 +851,7 @@ impl GanderMcp {
                     &mut state.comments,
                     &params.id,
                     reply,
-                    Identity::agent(),
+                    this.agent_identity.clone(),
                     true,
                     snapshot,
                 )
@@ -830,7 +877,7 @@ impl GanderMcp {
                 &mut state.comments,
                 &params.id,
                 params.body,
-                Identity::agent(),
+                this.agent_identity.clone(),
                 params.resolve.unwrap_or(false),
                 snapshot,
             )
@@ -1439,6 +1486,7 @@ mod tests {
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
+                agent_identity: Identity::agent(),
             },
         )
         .unwrap()
@@ -1450,6 +1498,27 @@ mod tests {
             panic!("expected text content");
         };
         serde_json::from_str(&text.text).unwrap()
+    }
+
+    fn expected_comment_json(id: &str, state: &str, channel: &str, author_name: &str) -> Value {
+        json!({
+            "id": id,
+            "session_id": "active",
+            "path": null,
+            "line": null,
+            "end_line": null,
+            "anchor": null,
+            "observation": null,
+            "body": format!("{id} body"),
+            "kind": null,
+            "action": null,
+            "state": state,
+            "author": { "kind": "human", "name": author_name },
+            "channel": channel,
+            "replies": [],
+            "created_at": "2026-07-19T12:00:00Z",
+            "updated_at": null
+        })
     }
 
     #[test]
@@ -1555,7 +1624,11 @@ mod tests {
         );
         let id = draft["id"].as_str().unwrap().to_owned();
 
-        let comments = result_json(&server.comments().unwrap());
+        let comments = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
         assert_eq!(comments[0]["id"], id);
         assert_eq!(comments[0]["state"], "draft");
         assert_eq!(comments[0]["channel"], "onboarding");
@@ -1567,9 +1640,29 @@ mod tests {
                 all_drafts: None,
             }))
             .unwrap();
-        let comments = result_json(&server.comments().unwrap());
+        let comments = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
         assert_eq!(comments[0]["state"], "todo");
         assert_eq!(comments[0]["channel"], "delegation");
+        let delegation = result_json(
+            &server
+                .comments(Parameters(CommentsParams {
+                    channel: Some(Channel::Delegation),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(delegation[0]["id"], id);
+        let onboarding = result_json(
+            &server
+                .comments(Parameters(CommentsParams {
+                    channel: Some(Channel::Onboarding),
+                }))
+                .unwrap(),
+        );
+        assert!(onboarding.as_array().unwrap().is_empty());
 
         server
             .comment_reply(Parameters(CommentReplyParams {
@@ -1578,15 +1671,114 @@ mod tests {
                 resolve: None,
             }))
             .unwrap();
-        let comments = result_json(&server.comments().unwrap());
+        let comments = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
         assert_eq!(comments[0]["replies"][0]["body"], "agent response");
         assert_eq!(comments[0]["replies"][0]["author"]["kind"], "agent");
 
         server
             .comment_resolve(Parameters(CommentResolveParams { id, reply: None }))
             .unwrap();
-        let comments = result_json(&server.comments().unwrap());
+        let comments = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
         assert_eq!(comments[0]["state"], "resolved");
+    }
+
+    #[test]
+    fn mcp_comments_filter_multiple_channels_and_preserve_exact_unfiltered_shape_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let created_at = "2026-07-19T12:00:00Z".parse().unwrap();
+        let mut state = ReviewState::default();
+        state.sessions.push(crate::state::ReviewSession {
+            id: "active".into(),
+            target: StateReviewTarget {
+                repo: Some(dir.path().canonicalize().unwrap().display().to_string()),
+                base: Some("trunk()".into()),
+                revision: Some("@".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        state.comments.extend([
+            crate::state::Comment {
+                id: "onboarding".into(),
+                session_id: Some("active".into()),
+                body: "onboarding body".into(),
+                state: CommentState::Draft,
+                author: Identity {
+                    kind: crate::state::AuthorKind::Human,
+                    name: "First".into(),
+                },
+                channel: Channel::Onboarding,
+                created_at,
+                ..Default::default()
+            },
+            crate::state::Comment {
+                id: "delegation".into(),
+                session_id: Some("active".into()),
+                body: "delegation body".into(),
+                state: CommentState::Todo,
+                author: Identity {
+                    kind: crate::state::AuthorKind::Human,
+                    name: "Second".into(),
+                },
+                channel: Channel::Delegation,
+                created_at,
+                ..Default::default()
+            },
+            crate::state::Comment {
+                id: "collaboration".into(),
+                session_id: Some("active".into()),
+                body: "collaboration body".into(),
+                state: CommentState::Resolved,
+                author: Identity {
+                    kind: crate::state::AuthorKind::Human,
+                    name: "Third".into(),
+                },
+                channel: Channel::Collaboration,
+                created_at,
+                ..Default::default()
+            },
+        ]);
+        state.save(&server.state_path).unwrap();
+
+        let unfiltered = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
+        assert_eq!(
+            unfiltered,
+            json!([
+                expected_comment_json("onboarding", "draft", "onboarding", "First"),
+                expected_comment_json("delegation", "todo", "delegation", "Second"),
+                expected_comment_json("collaboration", "resolved", "collaboration", "Third")
+            ])
+        );
+
+        let filtered = result_json(
+            &server
+                .comments(Parameters(CommentsParams {
+                    channel: Some(Channel::Collaboration),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(
+            filtered,
+            json!([expected_comment_json(
+                "collaboration",
+                "resolved",
+                "collaboration",
+                "Third"
+            )])
+        );
     }
 
     #[test]
@@ -1599,7 +1791,11 @@ mod tests {
         )
         .unwrap();
 
-        let comments = result_json(&server.comments().unwrap());
+        let comments = result_json(
+            &server
+                .comments(Parameters(CommentsParams { channel: None }))
+                .unwrap(),
+        );
 
         assert_eq!(
             comments[0]["author"],
@@ -1654,6 +1850,52 @@ mod tests {
     }
 
     #[test]
+    fn mcp_disposition_set_show_clear_persists_every_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let created = result_json(
+            &server
+                .reviews_create(Parameters(ReviewsCreateParams { title: None }))
+                .unwrap(),
+        );
+        let updated = result_json(
+            &server
+                .review_disposition_set(Parameters(ReviewDispositionParams {
+                    disposition: Some(ReviewDisposition::RequestChanges),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(updated["disposition"], "request-changes");
+        assert_eq!(
+            ReviewState::load_or_default(&server.state_path)
+                .unwrap()
+                .sessions[0]
+                .disposition,
+            Some(ReviewDisposition::RequestChanges)
+        );
+        let shown = result_json(&server.review_disposition().unwrap());
+        assert_eq!(shown, json!({ "disposition": "request-changes" }));
+        let cleared = result_json(
+            &server
+                .review_disposition_set(Parameters(ReviewDispositionParams { disposition: None }))
+                .unwrap(),
+        );
+        assert_eq!(cleared["id"], created["id"]);
+        assert!(cleared["disposition"].is_null());
+        assert_eq!(
+            ReviewState::load_or_default(&server.state_path)
+                .unwrap()
+                .sessions[0]
+                .disposition,
+            None
+        );
+        assert_eq!(
+            result_json(&server.review_disposition().unwrap()),
+            json!({ "disposition": null })
+        );
+    }
+
+    #[test]
     fn comment_add_persists_to_state_file() {
         let dir = tempfile::tempdir().unwrap();
         let server = server(dir.path());
@@ -1693,6 +1935,68 @@ mod tests {
     }
 
     #[test]
+    fn mcp_comment_and_reply_use_configured_agent_identity_and_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let server = GanderMcp::new(
+            move || session(&root),
+            None,
+            GanderMcpParams {
+                overlay_path: dir.path().join("agent.json"),
+                state_path: dir.path().join("state.json"),
+                registry_dir: dir.path().join("registry"),
+                workspace_root: dir.path().to_path_buf(),
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".into()],
+                initial_comment_state: CommentState::Todo,
+                agent_identity: Identity {
+                    kind: crate::state::AuthorKind::Agent,
+                    name: "MCP Bot".into(),
+                },
+            },
+        )
+        .unwrap();
+        let comment = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: Some("src/app.rs".into()),
+                    general: None,
+                    line: Some(1),
+                    end_line: None,
+                    body: "configured".into(),
+                    kind: None,
+                    action: None,
+                    state: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(
+            comment["author"],
+            json!({ "kind": "agent", "name": "MCP Bot" })
+        );
+        let replied = result_json(
+            &server
+                .comment_reply(Parameters(CommentReplyParams {
+                    id: comment["id"].as_str().unwrap().into(),
+                    body: "configured reply".into(),
+                    resolve: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(
+            replied["replies"][0]["author"],
+            json!({ "kind": "agent", "name": "MCP Bot" })
+        );
+        let persisted = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(persisted.comments[0].author.name, "MCP Bot");
+        assert_eq!(persisted.comments[0].replies[0].author.name, "MCP Bot");
+        assert_eq!(
+            persisted.comments[0].replies[0].author.kind,
+            crate::state::AuthorKind::Agent
+        );
+    }
+
+    #[test]
     fn comment_add_freezes_range_anchor_from_selected_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -1717,6 +2021,7 @@ mod tests {
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
+                agent_identity: Identity::agent(),
             },
         )
         .unwrap();
@@ -1981,6 +2286,7 @@ mod tests {
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
+                agent_identity: Identity::agent(),
             },
         )
         .unwrap();
@@ -2064,6 +2370,7 @@ mod tests {
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
                 initial_comment_state: CommentState::Todo,
+                agent_identity: Identity::agent(),
             },
         )
         .unwrap();

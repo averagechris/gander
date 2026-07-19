@@ -1,0 +1,113 @@
+---
+source: src/artifact.rs
+expression: value
+---
+{
+  "action_items": [
+    {
+      "action": "fix",
+      "body": "Cover every edge case.",
+      "comment_ids": [
+        "linked",
+        "draft-linked"
+      ],
+      "external_tickets": [
+        {
+          "created_at": "1970-01-01T00:00:00Z",
+          "reference": "GAN-7",
+          "tracker": "linear",
+          "updated_at": "1970-01-01T00:00:00Z",
+          "url": "https://example.test/GAN-7"
+        }
+      ],
+      "id": "action-open",
+      "status": "open",
+      "target": {
+        "file": "a.txt",
+        "line": 1
+      },
+      "title": "Fix parser behavior"
+    }
+  ],
+  "base": "main",
+  "comments": [
+    {
+      "action": "fix",
+      "body": "linked evidence body",
+      "created_at": "[created_at]",
+      "id": "linked",
+      "kind": "issue",
+      "line": 1,
+      "linked_action_item_ids": [
+        "action-open"
+      ],
+      "path": "a.txt",
+      "replies": [
+        {
+          "body": "extra evidence",
+          "created_at": "[created_at]",
+          "id": "reply"
+        }
+      ],
+      "session_id": "active",
+      "state": "todo"
+    },
+    {
+      "body": "withheld draft",
+      "created_at": "[created_at]",
+      "id": "draft-linked",
+      "linked_action_item_ids": [
+        "action-open"
+      ],
+      "path": "a.txt",
+      "session_id": "active",
+      "state": "draft"
+    },
+    {
+      "body": "standalone todo",
+      "created_at": "[created_at]",
+      "id": "standalone",
+      "linked_action_item_ids": [],
+      "session_id": "active",
+      "state": "todo"
+    }
+  ],
+  "files": [
+    {
+      "additions": 1,
+      "deletions": 1,
+      "fingerprint": "c2f5877a97f782ebaa2f4011438788c626a8fab658ecdcd8a62e37f4cd710271",
+      "generated": false,
+      "old_path": null,
+      "path": "a.txt",
+      "status": "mod",
+      "viewed": false
+    }
+  ],
+  "generated_at": "[generated_at]",
+  "repo": "/repo",
+  "revision": "@",
+  "session": {
+    "id": "active",
+    "title": "Current review"
+  },
+  "summary": "1 files (0/1 viewed, 0 generated/noisy), +1/-1, 4 comments",
+  "version": 10,
+  "walkthroughs": [
+    {
+      "id": "walk",
+      "steps": [
+        {
+          "id": "step",
+          "importance": "spotlight",
+          "kind": "step",
+          "target": {
+            "file": "a.txt",
+            "line": 1
+          },
+          "title": "Read parser"
+        }
+      ]
+    }
+  ]
+}

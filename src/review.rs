@@ -10,8 +10,8 @@ use std::path::Path;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, ActionItem, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
-    CommentReply, CommentState, ExternalTicket, Identity, ReviewSession, ReviewSessionStatus,
-    ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
+    CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition, ReviewSession,
+    ReviewSessionStatus, ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,30 @@ pub struct SessionTargetSpec {
     pub base: Option<String>,
     pub revision: Option<String>,
     pub revset: Option<String>,
+}
+
+pub fn list_comments_for_session<'a>(
+    comments: &'a [Comment],
+    active_session_id: Option<&str>,
+    channel: Option<Channel>,
+) -> Vec<&'a Comment> {
+    comments
+        .iter()
+        .filter(|comment| match active_session_id {
+            Some(id) => comment.belongs_to_session(id),
+            None => comment.session_id.is_none(),
+        })
+        .filter(|comment| channel.is_none_or(|channel| comment.channel == channel))
+        .collect()
+}
+
+pub fn set_session_disposition(
+    session: &mut ReviewSession,
+    disposition: Option<ReviewDisposition>,
+) -> ReviewSession {
+    session.disposition = disposition;
+    session.updated_at = Some(chrono::Utc::now());
+    session.clone()
 }
 
 pub fn validate_body(body: &str, label: &str) -> Result<()> {
@@ -341,7 +365,9 @@ pub fn ready_comments(
     let now = chrono::Utc::now();
     for index in &draft_indices {
         comments[*index].state = CommentState::Todo;
-        comments[*index].channel = Channel::Delegation;
+        if comments[*index].channel != Channel::Collaboration {
+            comments[*index].channel = Channel::Delegation;
+        }
         comments[*index].updated_at = Some(now);
     }
     touch_at(session, now);
@@ -380,7 +406,7 @@ pub fn set_comment_state(
     ensure_comment_belongs_to_session(comment, session)?;
     let now = chrono::Utc::now();
     comment.state = new_state;
-    if new_state == CommentState::Todo {
+    if new_state == CommentState::Todo && comment.channel != Channel::Collaboration {
         comment.channel = Channel::Delegation;
     }
     comment.validate()?;
@@ -1639,6 +1665,61 @@ mod tests {
         let repeated = ready_all_drafts(&mut session, &mut comments).unwrap();
         assert_eq!(repeated, ReadyCommentsResult::default());
         assert_eq!(session.updated_at, first_touch);
+    }
+
+    #[test]
+    fn ready_preserves_collaboration_drafts_but_agent_directed_becomes_delegation() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let mut collaboration = scoped_comment("collab", Some("session-a"), CommentState::Draft);
+        collaboration.channel = Channel::Collaboration;
+        let mut onboarding = scoped_comment("onboard", Some("session-a"), CommentState::Draft);
+        onboarding.channel = Channel::Onboarding;
+        let mut note = scoped_comment("note", Some("session-a"), CommentState::Draft);
+        note.channel = Channel::Note;
+        let mut comments = vec![collaboration, onboarding, note];
+
+        let result = ready_all_drafts(&mut session, &mut comments).unwrap();
+        assert_eq!(result.readied, 3);
+        assert_eq!(comments[0].state, CommentState::Todo);
+        assert_eq!(comments[0].channel, Channel::Collaboration);
+        assert_eq!(comments[1].state, CommentState::Todo);
+        assert_eq!(comments[1].channel, Channel::Delegation);
+        assert_eq!(comments[2].state, CommentState::Todo);
+        assert_eq!(comments[2].channel, Channel::Delegation);
+    }
+
+    #[test]
+    fn list_comments_filters_each_channel_and_none_preserves_all() {
+        let mut comments = vec![
+            scoped_comment("onboard", Some("session-a"), CommentState::Draft),
+            scoped_comment("delegate", Some("session-a"), CommentState::Todo),
+            scoped_comment("collab", Some("session-a"), CommentState::Draft),
+            scoped_comment("note", Some("session-a"), CommentState::Draft),
+            scoped_comment("foreign", Some("session-b"), CommentState::Draft),
+        ];
+        comments[0].channel = Channel::Onboarding;
+        comments[1].channel = Channel::Delegation;
+        comments[2].channel = Channel::Collaboration;
+        comments[3].channel = Channel::Note;
+        comments[4].channel = Channel::Note;
+
+        assert_eq!(
+            list_comments_for_session(&comments, Some("session-a"), None).len(),
+            4
+        );
+        for (channel, id) in [
+            (Channel::Onboarding, "onboard"),
+            (Channel::Delegation, "delegate"),
+            (Channel::Collaboration, "collab"),
+            (Channel::Note, "note"),
+        ] {
+            let filtered = list_comments_for_session(&comments, Some("session-a"), Some(channel));
+            assert_eq!(filtered.len(), 1);
+            assert_eq!(filtered[0].id, id);
+        }
     }
 
     #[test]

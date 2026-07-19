@@ -12,17 +12,17 @@ use crate::{
     provenance::{CommentObservation, CommentReplyResult},
 };
 
-/// Current on-disk review-state schema. Version 4 adds durable annotation
-/// authors and channels while preserving legacy comments and replies.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 4;
+/// Current on-disk review-state schema. Version 5 adds session disposition and
+/// permits collaboration todo comments for team-facing review feedback.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 5;
 
 /// Deterministic identity used only when reading pre-v4 local review state.
 /// Configured identities are stamped by adapters when creating new comments;
 /// raw state deserialization deliberately has no config dependency.
 pub const LEGACY_LOCAL_HUMAN_NAME: &str = "local";
 
-/// Conservative identity for agent-authored annotations until agent identity
-/// configuration lands in a later M17 package.
+/// Conservative identity for agent-authored annotations when no `[agent].name`
+/// is configured, and for raw migration defaults.
 pub const DEFAULT_AGENT_NAME: &str = "agent";
 
 #[derive(
@@ -216,10 +216,6 @@ impl Comment {
             .is_none_or(|owner| owner == session_id)
     }
 
-    pub fn is_in_session(&self, session_id: &str) -> bool {
-        self.belongs_to_session(session_id)
-    }
-
     /// Validate relationships between the denormalized location fields and
     /// an optional durable diff anchor.
     pub fn validate(&self) -> Result<()> {
@@ -227,8 +223,12 @@ impl Comment {
         for reply in &self.replies {
             reply.validate()?;
         }
-        if self.state == CommentState::Todo && self.channel != Channel::Delegation {
-            return Err(eyre!("todo comment channel must be delegation"));
+        if self.state == CommentState::Todo
+            && !matches!(self.channel, Channel::Delegation | Channel::Collaboration)
+        {
+            return Err(eyre!(
+                "todo comment channel must be delegation or collaboration"
+            ));
         }
         if self.session_id.as_deref() == Some("") {
             return Err(eyre!("comment session id must not be empty"));
@@ -370,8 +370,12 @@ impl Comment {
         for reply in &self.replies {
             reply.validate()?;
         }
-        if self.state == CommentState::Todo && self.channel != Channel::Delegation {
-            return Err(eyre!("todo comment channel must be delegation"));
+        if self.state == CommentState::Todo
+            && !matches!(self.channel, Channel::Delegation | Channel::Collaboration)
+        {
+            return Err(eyre!(
+                "todo comment channel must be delegation or collaboration"
+            ));
         }
         Ok(())
     }
@@ -414,10 +418,20 @@ pub struct ReviewSession {
     pub title: Option<String>,
     pub target: ReviewTarget,
     pub status: ReviewSessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ReviewDisposition>,
     pub walkthroughs: Vec<Walkthrough>,
     pub action_items: Vec<ActionItem>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewDisposition {
+    Comment,
+    Approve,
+    RequestChanges,
 }
 
 /// Stable target for a review session or nested review object.
@@ -646,6 +660,7 @@ struct CompatibleReviewSession {
     title: Option<String>,
     target: ReviewTarget,
     status: ReviewSessionStatus,
+    disposition: Option<ReviewDisposition>,
     walkthroughs: Vec<Walkthrough>,
     action_items: Vec<ActionItem>,
     tasks: Vec<ActionItem>,
@@ -673,6 +688,7 @@ impl<'de> Deserialize<'de> for ReviewSession {
             title: compatible.title,
             target: compatible.target,
             status: compatible.status,
+            disposition: compatible.disposition,
             walkthroughs: compatible.walkthroughs,
             action_items,
             created_at: compatible.created_at,
@@ -1952,7 +1968,7 @@ mod tests {
         };
         assert_eq!(
             invalid_todo.validate().unwrap_err().to_string(),
-            "todo comment channel must be delegation"
+            "todo comment channel must be delegation or collaboration"
         );
         let json = serde_json::to_string(&invalid_todo).unwrap();
         assert!(serde_json::from_str::<Comment>(&json).is_err());

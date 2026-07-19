@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     generated::{GeneratedPolicy, GeneratedPreset},
-    state::CommentState,
+    state::{AuthorKind, CommentState, Identity},
     syntax::SyntaxConfig,
 };
 
@@ -23,6 +23,7 @@ pub struct Config {
     pub syntax: SyntaxConfig,
     pub limits: LimitsConfig,
     pub agent: AgentConfig,
+    pub identity: IdentityConfig,
     pub diff: DiffConfig,
     pub comments: CommentsConfig,
     pub theme: ThemeConfig,
@@ -162,6 +163,8 @@ pub struct DiffThemeConfig {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct AgentConfig {
+    /// Name stamped on agent-authored annotations.
+    pub name: Option<String>,
     /// Shell command that runs the agent. The review prompt is appended as
     /// a final shell-quoted argument, or substituted for a `{prompt}`
     /// placeholder when present.
@@ -171,6 +174,36 @@ pub struct AgentConfig {
     /// Custom prompt template; `{repo}`, `{base}`, and `{rev}` are
     /// substituted. Defaults to a built-in prompt describing the ACP methods.
     pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct IdentityConfig {
+    /// Name stamped on local human-authored annotations.
+    pub name: Option<String>,
+}
+
+impl Config {
+    pub fn human_identity(&self) -> Identity {
+        configured_identity(AuthorKind::Human, self.identity.name.as_deref())
+            .unwrap_or_else(Identity::local_human)
+    }
+
+    pub fn agent_identity(&self) -> Identity {
+        configured_identity(AuthorKind::Agent, self.agent.name.as_deref())
+            .unwrap_or_else(Identity::agent)
+    }
+}
+
+fn configured_identity(kind: AuthorKind, name: Option<&str>) -> Option<Identity> {
+    let name = name?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(Identity {
+        kind,
+        name: name.to_owned(),
+    })
 }
 
 /// Size thresholds that keep huge inputs from overwhelming the TUI.
@@ -357,6 +390,7 @@ pub enum ArtifactProfileConfig {
     #[default]
     Human,
     Agent,
+    Team,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -378,6 +412,7 @@ struct ConfigPatch {
     syntax: Option<SyntaxConfig>,
     limits: LimitsConfigPatch,
     agent: AgentConfigPatch,
+    identity: IdentityConfigPatch,
     diff: DiffConfigPatch,
     comments: CommentsConfigPatch,
     theme: ThemeConfigPatch,
@@ -422,9 +457,16 @@ struct DiffThemeConfigPatch {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 struct AgentConfigPatch {
+    name: Option<String>,
     command: Option<String>,
     autostart: Option<bool>,
     prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+struct IdentityConfigPatch {
+    name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -811,6 +853,9 @@ impl Config {
         if let Some(command) = patch.agent.command {
             self.agent.command = Some(command);
         }
+        if let Some(name) = patch.agent.name {
+            self.agent.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+        }
         if let Some(autostart) = patch.agent.autostart {
             self.agent.autostart = autostart;
         }
@@ -820,6 +865,10 @@ impl Config {
 
         if let Some(initial_state) = patch.comments.initial_state {
             self.comments.initial_state = initial_state;
+        }
+
+        if let Some(name) = patch.identity.name {
+            self.identity.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
         }
 
         if let Some(word_highlight) = patch.diff.word_highlight {

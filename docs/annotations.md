@@ -43,7 +43,7 @@ Kind, state, action intent, anchors, and replies are unchanged and orthogonal.
 | ------------- | --------------------------------- | -------------------------------- | --------------------------------------------- |
 | Onboarding    | the reviewer, in the TUI          | active → acknowledged / stale    | dissolves once understood; feeds attention map |
 | Delegation    | agent harness via CLI/MCP         | draft → todo → resolved (+reply) | `gander comments list --channel delegation`    |
-| Collaboration | teammate / future forge plugin    | draft → published → resolved     | `gander export --profile team`                 |
+| Collaboration | teammate / future forge plugin    | draft → todo → resolved          | `gander export --profile team`                 |
 | Note          | the reviewer only                 | freeform                         | never leaves the machine                       |
 
 Threads may cross channels by linkage, not by mixing: replying to an
@@ -102,9 +102,11 @@ The primitives a future GitHub/GitLab/SourceHut plugin needs, built now:
    old/new line, hunk header, and fingerprints — a superset of forge review
    APIs. The artifact schema documents the mapping guarantee and includes
    fingerprints so a plugin can detect drift before posting.
-2. **`--profile team` export**: session metadata, target change ids,
-   collaboration threads with authors and anchors, and an optional
-   session-level disposition (`comment | approve | request-changes`).
+2. **`--profile team` export**: JSON is the canonical forge-mappable contract:
+   session metadata, target change ids, collaboration threads with authors and
+   structured anchors/fingerprints, and an optional session-level disposition
+   (`comment | approve | request-changes`). Team Markdown/HTML are filtered
+   human summaries over the same public projection.
 3. **Identity config**: `[identity] name` for humans; agent identities from
    the agent config. Authorship is stamped now so exports are attributable
    later.
@@ -120,7 +122,7 @@ migrations: comments without a channel deserialize as `delegation` when
 `state = todo`, else `note`; missing authors default to a local human
 identity. Raw state deserialization uses the deterministic legacy identity
 `human:local` because configuration is intentionally unavailable there; new
-agent drafts use `agent:agent` until identity configuration lands. Pending
+agent-authored annotations use `[agent].name`, falling back to `agent`. Pending
 overlay drafts fold into onboarding-channel durable draft comments on first
 load. Accepted and discarded overlay history is consumed without recreating
 comments.

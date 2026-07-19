@@ -39,11 +39,11 @@ gander handoff --copy
 gander hunks show <hunk-id>
 ```
 
-Review state schema 3 records optional comment `session_id`, `path`, immutable
-observations, and reply results, plus normalized `action_items` when legacy
-`tasks` state is read.
-Artifact schema 8 and delegation schema 4 expose action-item shape plus
-portable comment-observation and reply-result evidence. A snapshot label or an
+Review state schema 5 records optional comment `session_id`, `path`, immutable
+observations, reply results, annotation authors/channels, and session
+disposition, plus normalized `action_items` when legacy `tasks` state is read.
+Artifact schema 10 and delegation schema 5 expose action-item shape, team-profile
+collaboration exports, plus portable comment-observation and reply-result evidence. A snapshot label or an
 unchanged portable patch is context, not proof that the requested outcome was
 implemented or tested; report actual verification separately.
 State/artifact readers still accept older anchored comments unchanged. A legacy
@@ -76,14 +76,14 @@ Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`
 stacked PRs), `change_diff` (one change against its parent),
 `set_ordering`, `flag_section`, `set_chunks` (deprecated compatibility input;
 prefer `walkthrough_*` for new curation, with optional stack `change_id`),
-`draft_comment`,
+`draft_comment`, `review_disposition`, `review_disposition_set`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
 `comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, walkthrough/zen
 mode via `T`/`Z`, comments via `C`, and open work via `X`). MCP must preserve CLI
 semantics: new comments honor the configured initial state unless an explicit
-state is supplied; draft comments are durable/private/withheld, todo comments
-are ready/actionable regardless of kind/action, resolved comments are history,
+state is supplied; draft comments are durable/private/withheld, delegation todos
+are agent-directed work, collaboration todos are open team feedback, resolved comments are history,
 and general comments have no file location or excerpt. Todo comments are the
 primary implicit feedback; ordinary comments are not action items. Durable action
 items are optional higher-level coordination objects and linked todo evidence is
@@ -109,6 +109,9 @@ scriptable surface.
 | `reviews_list` | `gander reviews list` |
 | `reviews_show` | `gander reviews show <id>` |
 | `reviews_create` | `gander reviews create [--title <title>]` |
+| `review_disposition` | `gander reviews disposition show` |
+| `review_disposition_set` | `gander reviews disposition set <state>` / `gander reviews disposition clear` |
+| `comments` with `channel` | `gander comments list --channel onboarding|delegation|collaboration|note` |
 | `comment_add` | `gander comments add (--path <path> [--line <n>] [--end-line <n>] \| --general) --body <text> [--kind ...] [--action ...] [--state ...]` |
 | `comment_reply` | `gander comments reply <id> --body <text> [--resolve]` |
 | `comment_resolve` | `gander comments resolve <id> [--reply <text>]` |

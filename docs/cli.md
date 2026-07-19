@@ -31,6 +31,9 @@ short human echo.
 gander reviews create [--title <title>]
 gander reviews list [--format json|text]
 gander reviews show <id>
+gander reviews disposition show [--format json|text]
+gander reviews disposition set comment|approve|request-changes [--format json|text]
+gander reviews disposition clear [--format json|text]
 ```
 
 `create` opens a durable review session for the current target. Example output:
@@ -49,7 +52,9 @@ gander reviews show <id>
 ```
 
 `list` returns `{ "sessions": [...] }` with `action_item_count` and
-`walkthrough_count`; `show` returns the full session object.
+`walkthrough_count`; `show` returns the full session object. The optional
+session disposition is durable local review state used by team exports; it does
+not post to any forge.
 
 ## Files and hunks
 
@@ -66,7 +71,7 @@ hunk ids suitable for `hunks show` and accepts the file as a positional or
 ## Comments
 
 ```sh
-gander comments list [--format json|text]
+gander comments list [--channel onboarding|delegation|collaboration|note] [--format json|text]
 gander comments add (--path <path> [--line <n>] [--end-line <n>] | --general) --body <text> \
   [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] \
   [--state draft|todo] [--format json|text]
@@ -97,10 +102,9 @@ Comment state semantics are deliberately workflow-oriented:
 
 - `draft`: saved, private, and withheld from implementation handoff. Drafts are
   durable reviewer notes until explicitly readied, resolved, or deleted.
-- `todo`: ready/actionable. Every todo comment asks an agent to address it,
-  regardless of `kind` (`question`, `praise`, `note`, or `issue`) or `action`
-  (`none`, `explain`, `fix`, `test`, or `follow-up`). A todo praise may ask the
-  agent to preserve a good behavior; a todo question asks for an answer/change.
+- `todo`: ready/actionable. Delegation-channel todos ask an agent to address
+  them regardless of `kind` or `action`; collaboration-channel todos are open
+  team feedback eligible for `--profile team` export.
 - `resolved`: retained history. Resolved comments are not selected for prompt
   handoff or delegation by default, but remain in full exports and threads.
 
@@ -134,7 +138,10 @@ Example:
 }
 ```
 
-`comments list` returns `{ "comments": [...] }`. `comments ready <id>...` marks
+`comments list` returns `{ "comments": [...] }`. Pass `--channel delegation`
+(or `onboarding`, `collaboration`, `note`) to filter through the shared review
+query; omitting it preserves the full active-session list. JSON and text output
+retain each comment's `author` and `channel`. `comments ready <id>...` marks
 the selected active-session drafts `todo`; `comments ready --all-drafts` marks
 all active-session drafts `todo`. The operation is atomic: if any supplied id is
 unknown, ambiguous, not in the active session, or already resolved, no comments
@@ -328,7 +335,7 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 
 ```sh
 gander handoff [--mode prompt|delegate] [--format markdown|json] [--output <path>] [--copy]
-gander export [json|markdown|html] [--profile human|agent] [--output <path>]
+gander export [json|markdown|html] [--profile human|agent|team] [--output <path>]
 gander import <json-artifact>
 gander mark-viewed
 gander mark-generated-viewed
@@ -355,9 +362,12 @@ when you need the full session artifact for archive/reference or broad
 automation: full exports include all comments (`draft`, `todo`, and
 `resolved`), all action items, walkthroughs, replies, and excerpts when available (its
 H1 is `# Review session export (agent profile)`; the two artifacts
-cross-reference each other). Import currently restores only matching
-viewed state and duplicate-safe comments; exported action items and walkthroughs are
-not restored by `gander import`.
+cross-reference each other). `export --profile team` includes only collaboration
+`todo`/`resolved` comments and session disposition for team review handoff.
+Import requires the artifact's base/revision to exactly match the currently
+loaded target; on match it remaps imported comments into the active local session
+while preserving foreign authors, channels, replies, and identities. Exported
+action items and walkthroughs are not restored by `gander import`.
 
 Humans read the durable review session directly in the TUI (and future web UI).
 Prompt handoff and delegate mode are outbound adapters for transferring work to
@@ -385,7 +395,12 @@ hunks, reply history, and concrete `comments resolve --reply` / `action-items cl
 --disposition completed --outcome` return commands. `--verify` is inert requested text; Gander never
 executes it.
 
-`export html` writes a self-contained static review page and rejects an explicitly supplied `--profile`; JSON and Markdown are the complete session artifact formats. `--profile agent` adds all raw hunks and comment excerpts for tools, including resolved comments as reference.
+`export html` writes a self-contained static review page. JSON is the canonical
+machine-readable artifact format; `--profile agent` adds all raw hunks and
+comment excerpts for tools, and `--profile team --format json` is the canonical
+forge-mappable team contract. Team Markdown/HTML are filtered human summaries
+over the same public collaboration projection, not machine-readable forge
+mapping formats.
 
 ## Bundled agent skills
 

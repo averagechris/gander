@@ -334,9 +334,9 @@ Status: implementation in progress (domain foundation and draft folding landed).
   list (onboarding=accent, delegation=warning, collaboration=info, note=muted)
 - [x] fold agent drafts into the comment model (author=agent, state=draft);
   retire the overlay draft bucket; channel resolved at accept time
-- [ ] `[identity]` config for the human; agent identities from agent config
-- [ ] `--channel` filters on comment CLI/MCP surfaces
-- [ ] `--profile team` export: collaboration threads only, forge-mappable
+- [x] `[identity]` config for the human; agent identities from agent config
+- [x] `--channel` filters on comment CLI/MCP surfaces
+- [x] `--profile team` export: collaboration threads only, JSON forge-mappable
   anchors + fingerprints, optional session disposition
   (comment/approve/request-changes)
 - [x] import preserves foreign authorship so two humans can review over an

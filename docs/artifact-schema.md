@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `9`.
+Current schema version: `10`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -10,7 +10,7 @@ publish elsewhere.
 
 ## Profiles
 
-Artifacts render in one of two profiles:
+Artifacts render in three profiles:
 
 - `human` (default): the compact shape below, without raw diff content.
 - `agent`: adds raw excerpts so tools can reason about the change without
@@ -21,16 +21,22 @@ Artifacts render in one of two profiles:
   - `comments[].excerpt`: raw diff lines around each comment anchor
     (3 context lines on each side; file-level comments excerpt the top of
     the first hunk)
+- `team`: JSON is the canonical forge-mappable team contract. Team JSON carries
+  session disposition, collaboration `todo`/`resolved` comments only, comment
+  and reply authorship, structured anchors/fingerprints, excerpts, and full
+  hunks. Team Markdown and HTML are filtered human summaries: they preserve the
+  publication boundary, authorship, channel, disposition, and concise location /
+  side context, but are not machine-readable forge mapping contracts.
 
-Select the profile with `gander export --profile agent`,
-`gander tui --artifact-profile agent`, or `[artifact] profile = "agent"` in
-config.
+Select the profile with `gander export --profile agent|team`,
+`gander tui --artifact-profile agent|team`, or `[artifact] profile = "agent"`
+or `"team"` in config.
 
 ## JSON shape
 
 ```json
 {
-  "version": 9,
+  "version": 10,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -39,7 +45,8 @@ config.
   "summary": "3 files (1/3 viewed), +10/-2, 1 comments",
   "session": {
     "id": "review-session-id",
-    "title": "Review handoff"
+    "title": "Review handoff",
+    "disposition": "request-changes"
   },
   "files": [
     {
@@ -234,7 +241,9 @@ config.
 Notes:
 
 - `profile`, `files[].hunks`, and `comments[].excerpt` are omitted entirely
-  in the `human` profile.
+  in the `human` profile. The `team` profile sets `"profile": "team"`, includes
+  hunks/excerpts for forge mapping, omits action items and walkthroughs, and
+  filters comments to collaboration `todo`/`resolved` only.
 - `session` is present when the exported change matches an open durable review
   session; it includes the session `id` and optional `title`.
 - `comments[].session_id` identifies the durable session that owns a newly
@@ -253,10 +262,12 @@ Notes:
   `disposition`, `outcome`, and `closed_at`; closed items emit those fields when
   recorded. Gander records ticket references only; it does not fetch from or
   post to forges or ticket systems.
-- Export is broader than import: `gander import` currently restores only
-  duplicate-safe comments and viewed files whose diff fingerprints still match
-  the current target. It does not restore `action_items` or `walkthroughs` from the
-  artifact yet.
+- Export is broader than import: `gander import` requires an exact base/revision
+  target match, restores duplicate-safe comments into the active local session
+  while preserving foreign authors/channels/replies, restores viewed files whose
+  diff fingerprints still match, and applies an incoming session disposition only
+  when one is present. It does not restore `action_items` or `walkthroughs` from
+  the artifact yet.
 - Line anchors are 1-indexed diff lines. New-side/post-image anchors are
   preferred; old-side coordinates are used only as a fallback for removed-only
   lines that have no new-side line.
@@ -267,21 +278,23 @@ Notes:
   their string `path` and deserialize unchanged.
 - `comments[].state` is one of `draft`, `todo`, `resolved`. `draft` means saved,
   private, and withheld from prompt/delegate handoff; `todo` means ready and
-  actionable (every todo asks an agent to address it regardless of kind/action);
-  `resolved` is retained history. Missing values deserialize as `draft` for
+  actionable (delegation todos ask an agent to address them; collaboration todos
+  are open team feedback); `resolved` is retained history. Missing values deserialize as `draft` for
   artifacts written before version 4 and for persisted state written before
   `CommentState` existed.
 - `comments[].author` is an identity with lowercase `kind` (`human` or
   `agent`) and a non-empty `name`; `comments[].channel` is `onboarding`,
   `delegation`, `collaboration`, or `note`. Replies carry their own `author`
-  and remain in the parent comment's channel. Todo comments must use the
-  delegation channel.
+  and remain in the parent comment's channel. Todo comments may use
+  `delegation` for agent-directed work or `collaboration` for open team
+  feedback; collaboration drafts remain private and are excluded from team
+  exports.
 - During the one-release state/artifact compatibility window, a missing author
   becomes the deterministic local human identity `{ "kind": "human",
   "name": "local" }`. A missing channel derives from state (`todo` becomes
   `delegation`; draft/resolved become `note`), and legacy replies receive the
   same local identity. New agent-authored drafts use the temporary deterministic
-  agent name `agent` until identity configuration lands.
+  configured agent name, falling back to `agent` when absent.
 - Full exports include all comment states. Prompt handoff and delegation select
   only open durable action items plus unlinked `todo` comments by default; draft
   comments are rejected by explicit delegate selectors unless first readied.
@@ -318,8 +331,11 @@ Notes:
 
 ## Version history
 
-- `9`: comments carry durable author identity and annotation channel; replies
-  carry author identity. Legacy fields are serde-defaulted from state.
+- `10`: team JSON exports collaboration `todo`/`resolved` threads only,
+  including disposition, author attribution, full hunk/excerpt data, and
+  forge-mappable anchor/fingerprint metadata. Team Markdown/HTML are filtered
+  human summaries over the same public projection.
+- `9`: durable annotation authors/channels and reply authors.
 - `8`: optional immutable comment observations and reply results add portable
   A→B patch provenance while preserving legacy comments/replies.
 - `7`: `tasks` is renamed to `action_items`, comment backrefs are
@@ -336,8 +352,9 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
-Review-state schema `4` adds durable comment author/channel and reply author
-fields. Delegation schema `5` carries author/channel on comment evidence and
+Review-state schema `5` adds session disposition and permits collaboration todo
+comments for team feedback. Review-state schema `4` adds durable comment
+author/channel and reply author fields. Delegation schema `5` carries author/channel on comment evidence and
 reply authors. Delegation's existing top-level `fingerprints.diff` retains its v3
 path-plus-exact-file-fingerprint algorithm; provenance uses the separate
 versioned `observation.snapshot.scope.aggregate`. Both remain backward-readable
@@ -346,5 +363,3 @@ through serde defaults.
 ## Planned schema additions
 
 - per-file ignored/collapsed metadata
-- review disposition/intent (`comment`, `approve`, `needs-work`, etc.) as
-  local state, not a direct forge-posting integration

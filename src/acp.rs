@@ -1546,8 +1546,12 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn write_methods_persist_overlay_to_disk() {
+    fn configured_agent_identity_stamps_executed_acp_draft_while_writes_persist() {
         let (mut server, dir) = server();
+        server.session.agent_identity = crate::state::Identity {
+            kind: crate::state::AuthorKind::Agent,
+            name: "ACP Bot".into(),
+        };
 
         call(
             &mut server,
@@ -1589,6 +1593,7 @@ diff --git a/README.md b/README.md
         assert_eq!(durable.state, crate::state::CommentState::Draft);
         assert_eq!(durable.channel, crate::state::Channel::Onboarding);
         assert_eq!(durable.author.kind, crate::state::AuthorKind::Agent);
+        assert_eq!(durable.author.name, "ACP Bot");
     }
 
     #[test]

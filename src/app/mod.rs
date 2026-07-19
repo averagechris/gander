@@ -124,6 +124,8 @@ pub struct ReviewSession {
     pub sessions: Vec<crate::state::ReviewSession>,
     /// Configured lifecycle state for newly accepted durable comments.
     pub comment_initial_state: CommentState,
+    pub human_identity: Identity,
+    pub agent_identity: Identity,
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
@@ -557,6 +559,8 @@ struct ReviewSessionOptions {
     limits: LimitsConfig,
     diff_cues: DiffConfig,
     comment_initial_state: CommentState,
+    human_identity: Identity,
+    agent_identity: Identity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,6 +758,8 @@ impl ReviewSession {
                 limits: config.limits.clone(),
                 diff_cues: config.diff.clone(),
                 comment_initial_state: config.comments.initial_state.into(),
+                human_identity: config.human_identity(),
+                agent_identity: config.agent_identity(),
             },
         )
     }
@@ -776,6 +782,8 @@ impl ReviewSession {
                 limits: LimitsConfig::default(),
                 diff_cues: DiffConfig::default(),
                 comment_initial_state: CommentState::Draft,
+                human_identity: Identity::local_human(),
+                agent_identity: Identity::agent(),
             },
         )
     }
@@ -792,6 +800,8 @@ impl ReviewSession {
             limits,
             diff_cues,
             comment_initial_state,
+            human_identity,
+            agent_identity,
         } = options;
         let mut state = state;
         state.normalize_legacy_file_state();
@@ -828,6 +838,8 @@ impl ReviewSession {
             comments,
             sessions,
             comment_initial_state,
+            human_identity,
+            agent_identity,
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
@@ -906,6 +918,8 @@ impl ReviewSession {
                 },
                 diff_cues: self.diff_cues.clone(),
                 comment_initial_state: self.comment_initial_state,
+                human_identity: self.human_identity.clone(),
+                agent_identity: self.agent_identity.clone(),
             },
         );
     }
@@ -1551,7 +1565,7 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: CommentState::Draft,
-                author: Identity::agent(),
+                author: self.agent_identity.clone(),
                 channel: Channel::Onboarding,
                 replies: Vec::new(),
                 created_at: now,
@@ -2840,7 +2854,7 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: self.comment_initial_state,
-                author: Identity::local_human(),
+                author: self.human_identity.clone(),
                 channel: if self.comment_initial_state == CommentState::Todo {
                     Channel::Delegation
                 } else {
@@ -2917,7 +2931,7 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: CommentState::Draft,
-                author: Identity::agent(),
+                author: self.agent_identity.clone(),
                 channel: Channel::Onboarding,
             },
         )
@@ -2942,7 +2956,7 @@ impl ReviewSession {
                 kind: None,
                 action: None,
                 state: self.comment_initial_state,
-                author: Identity::local_human(),
+                author: self.human_identity.clone(),
                 channel: if self.comment_initial_state == CommentState::Todo {
                     Channel::Delegation
                 } else {
@@ -3174,6 +3188,7 @@ fn visible_ancestor_row(tree: &FileTreeView, path: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::{
+        config::{AgentConfig, Config, IdentityConfig},
         diff::DiffSet,
         jj::ReviewTarget,
         state::ReviewState,
@@ -3203,6 +3218,38 @@ mod tests {
 
         assert_eq!(session.focus, Focus::Files);
         assert!(session.file_pane_visible);
+    }
+
+    #[test]
+    fn configured_identities_stamp_executed_tui_human_comment_and_agent_draft_paths() {
+        let config = Config {
+            identity: IdentityConfig {
+                name: Some("Human Reviewer".into()),
+            },
+            agent: AgentConfig {
+                name: Some("Review Bot".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let diff = DiffSet::parse("diff --git a/src/tui.rs b/src/tui.rs\n--- a/src/tui.rs\n+++ b/src/tui.rs\n@@ -1 +1 @@\n-old\n+new\n").unwrap();
+        let mut session = ReviewSession::new_with_config(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+            &config,
+        );
+
+        session.add_general_comment("human note".into());
+        let draft = session
+            .add_agent_draft("src/tui.rs".into(), Some(1), "agent note".into())
+            .unwrap();
+
+        assert_eq!(session.comments[0].author.name, "Human Reviewer");
+        assert_eq!(session.comments[0].author.kind, AuthorKind::Human);
+        assert_eq!(draft.author.name, "Review Bot");
+        assert_eq!(draft.author.kind, AuthorKind::Agent);
     }
 
     #[test]

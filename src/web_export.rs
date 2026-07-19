@@ -4,19 +4,47 @@ use chrono::Utc;
 
 use crate::{
     app::ReviewSession,
+    artifact::{ArtifactProfile, ReviewArtifact},
     diff::DiffLineKind,
-    state::{ActionItem, Comment, ReviewState, ReviewTarget},
+    state::{ActionItem, AuthorKind, Channel, Comment, ReviewState, ReviewTarget},
 };
 
+#[allow(dead_code)]
 pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
+    render_html_with_profile(session, state, ArtifactProfile::Human)
+}
+
+pub fn render_html_with_profile(
+    session: &ReviewSession,
+    state: &ReviewState,
+    profile: ArtifactProfile,
+) -> String {
     let generated_at = Utc::now().to_rfc3339();
+    let team = profile == ArtifactProfile::Team;
+    let projected_team_session = team.then(|| {
+        let mut projected = session.clone();
+        projected.comments = state.comments.clone();
+        projected.sessions = state.sessions.clone();
+        projected
+    });
+    let team_artifact = projected_team_session
+        .as_ref()
+        .map(|projected| ReviewArtifact::build(projected, ArtifactProfile::Team));
     let active_session = active_durable_session(session, state);
     let active_session_id = active_session.map(|durable| durable.id.as_str());
-    let linked_comment_ids = active_session
-        .into_iter()
-        .flat_map(|durable| durable.action_items.iter())
-        .flat_map(|item| item.comment_ids.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
+    let linked_comment_ids = if let Some(artifact) = &team_artifact {
+        artifact
+            .comments
+            .iter()
+            .map(|comment| comment.comment.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        active_session
+            .into_iter()
+            .flat_map(|durable| durable.action_items.iter())
+            .flat_map(|item| item.comment_ids.iter().map(String::as_str))
+            .collect::<BTreeSet<_>>()
+    };
     let mut out = String::from(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>gander review export</title>\n<style>",
     );
@@ -25,7 +53,11 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     out.push_str("<header class=\"hero\"><div><p class=\"eyebrow\">gander review export</p><h1>");
     esc_to(&mut out, &session.repo.display().to_string());
     out.push_str("</h1><p class=\"summary\">");
-    esc_to(&mut out, &session.summary_line());
+    if let Some(artifact) = &team_artifact {
+        esc_to(&mut out, &artifact.summary);
+    } else {
+        esc_to(&mut out, &session.summary_line());
+    }
     out.push_str("</p></div><div class=\"meta\"><div><span>Target</span><b>");
     esc_to(&mut out, &session.target.base);
     out.push_str(" → ");
@@ -58,15 +90,47 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
         out.push_str("</small></a>");
     }
     out.push_str("</nav><main>\n");
-    render_walkthroughs(&mut out, active_session);
-    render_action_items(&mut out, active_session, &state.comments);
-    let general_comments = state
-        .comments
-        .iter()
-        .filter(|comment| comment_belongs_to_session(comment, active_session_id))
-        .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
-        .filter(|comment| comment.path.is_none())
-        .collect::<Vec<_>>();
+    if team {
+        if let Some(disposition) = team_artifact
+            .as_ref()
+            .and_then(|a| a.session.as_ref())
+            .and_then(|s| s.disposition)
+        {
+            out.push_str("<section class=\"card\"><h2>Disposition</h2><p>");
+            esc_to(
+                &mut out,
+                serde_json::to_string(&disposition)
+                    .unwrap()
+                    .trim_matches('"'),
+            );
+            out.push_str("</p></section>");
+        }
+    } else {
+        render_walkthroughs(&mut out, active_session);
+        render_action_items(&mut out, active_session, &state.comments);
+    }
+    let team_comments = team_artifact.as_ref().map(|artifact| {
+        artifact
+            .comments
+            .iter()
+            .map(|comment| comment.comment)
+            .collect::<Vec<_>>()
+    });
+    let general_comments = if let Some(comments) = &team_comments {
+        comments
+            .iter()
+            .copied()
+            .filter(|comment| comment.path.is_none())
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .comments
+            .iter()
+            .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+            .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
+            .filter(|comment| comment.path.is_none())
+            .collect::<Vec<_>>()
+    };
     if !general_comments.is_empty() {
         out.push_str("<section class=\"card comments\"><h2>General comments</h2>");
         for comment in general_comments {
@@ -75,13 +139,21 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
         out.push_str("</section>");
     }
     for file in &session.files {
-        let comments: Vec<_> = state
-            .comments
-            .iter()
-            .filter(|comment| comment_belongs_to_session(comment, active_session_id))
-            .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
-            .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
-            .collect();
+        let comments: Vec<_> = if let Some(comments) = &team_comments {
+            comments
+                .iter()
+                .copied()
+                .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
+                .collect()
+        } else {
+            state
+                .comments
+                .iter()
+                .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+                .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
+                .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
+                .collect()
+        };
         out.push_str("<section class=\"card file\" id=\"");
         out.push_str(&file_anchor(&file.path));
         out.push_str("\"><details open><summary><h2>");
@@ -127,6 +199,22 @@ pub fn render_html(session: &ReviewSession, state: &ReviewState) -> String {
     }
     out.push_str("</main></div><script>document.querySelectorAll('[data-step-target]').forEach(a=>a.addEventListener('click',()=>{const e=document.querySelector(a.getAttribute('href')); if(e) e.querySelector('details')?.setAttribute('open','');}));</script>\n</body></html>\n");
     out
+}
+
+fn identity_kind(kind: AuthorKind) -> &'static str {
+    match kind {
+        AuthorKind::Human => "human",
+        AuthorKind::Agent => "agent",
+    }
+}
+
+fn channel_label(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Onboarding => "onboarding",
+        Channel::Delegation => "delegation",
+        Channel::Collaboration => "collaboration",
+        Channel::Note => "note",
+    }
 }
 
 fn active_durable_session<'a>(
@@ -284,6 +372,17 @@ fn render_comment(out: &mut String, comment: &Comment) {
     }
     out.push_str("<span class=\"pill\">id ");
     esc_to(out, &comment.id[..comment.id.len().min(8)]);
+    out.push_str("</span><span class=\"pill\">author ");
+    esc_to(
+        out,
+        &format!(
+            "{}:{}",
+            identity_kind(comment.author.kind),
+            comment.author.name
+        ),
+    );
+    out.push_str("</span><span class=\"pill\">channel ");
+    esc_to(out, channel_label(comment.channel));
     out.push_str("</span><span class=\"pill\">replies ");
     esc_to(out, &comment.replies.len().to_string());
     out.push_str("</span>");
@@ -301,8 +400,18 @@ fn render_comment(out: &mut String, comment: &Comment) {
         }
         None => out.push_str("snapshot unavailable (legacy; target label is not proof)"),
     }
+    if let Some(anchor) = &comment.anchor {
+        out.push_str("</p><p class=\"provenance\"><strong>Anchor:</strong> ");
+        esc_to(out, &anchor_summary(anchor));
+        out.push_str("</p><p>");
+    }
     for reply in &comment.replies {
-        out.push_str("</p><p class=\"reply\"><strong>Reply:</strong> ");
+        out.push_str("</p><p class=\"reply\"><strong>Reply by ");
+        esc_to(
+            out,
+            &format!("{}:{}", identity_kind(reply.author.kind), reply.author.name),
+        );
+        out.push_str(":</strong> ");
         esc_to(out, &reply.body);
         out.push_str(" <span class=\"provenance\">");
         match &reply.result {
@@ -348,6 +457,43 @@ fn render_comment(out: &mut String, comment: &Comment) {
         out.push_str("</span>");
     }
     out.push_str("</p></article>");
+}
+
+fn anchor_summary(anchor: &crate::anchor::CommentAnchor) -> String {
+    match anchor {
+        crate::anchor::CommentAnchor::File { path, old_path, .. } => {
+            format!(
+                "path={path} old_path={}",
+                old_path.as_deref().unwrap_or("null")
+            )
+        }
+        crate::anchor::CommentAnchor::Line {
+            path,
+            old_path,
+            side,
+            old_line,
+            new_line,
+            ..
+        } => format!(
+            "path={path} old_path={} side={} old_line={:?} new_line={:?}",
+            old_path.as_deref().unwrap_or("null"),
+            side.label(),
+            old_line,
+            new_line
+        ),
+        crate::anchor::CommentAnchor::Range {
+            path,
+            old_path,
+            start_line,
+            end_line,
+            ..
+        } => {
+            format!(
+                "path={path} old_path={} range={start_line}-{end_line}",
+                old_path.as_deref().unwrap_or("null")
+            )
+        }
+    }
 }
 
 fn short_fingerprint(value: &str) -> &str {
@@ -738,6 +884,53 @@ mod tests {
         assert!(html.contains("<h4>Evidence comments</h4>"));
         assert_eq!(html.matches("comment body").count(), 1);
         assert_eq!(html.matches("unlinked body").count(), 1);
+    }
+
+    #[test]
+    fn team_html_uses_team_projection_without_private_task_suppression() {
+        let (session, mut state) = fixture();
+        state.sessions[0].disposition = Some(crate::state::ReviewDisposition::RequestChanges);
+        state.comments[0].state = CommentState::Todo;
+        state.comments[0].channel = Channel::Collaboration;
+        state.comments[0].anchor =
+            crate::anchor::comment_anchor_for_file_diff(&session.files[0].diff, Some(1), Some(1));
+        state.comments[0].author = crate::state::Identity {
+            kind: crate::state::AuthorKind::Human,
+            name: "Teammate".into(),
+        };
+        state.comments[0].replies.push(crate::state::CommentReply {
+            id: "reply".into(),
+            body: "reply body".into(),
+            author: crate::state::Identity {
+                kind: crate::state::AuthorKind::Agent,
+                name: "Bot".into(),
+            },
+            created_at: Utc::now(),
+            result: None,
+        });
+        state.comments.push(Comment {
+            id: "private".into(),
+            path: Some("src/lib.rs".into()),
+            body: "private draft".into(),
+            state: CommentState::Draft,
+            channel: Channel::Collaboration,
+            created_at: Utc::now(),
+            ..Default::default()
+        });
+
+        let html = render_html_with_profile(&session, &state, ArtifactProfile::Team);
+        assert!(html.contains("comment body"));
+        assert!(html.contains("request-changes"));
+        assert!(html.contains("human:Teammate"));
+        assert!(html.contains("agent:Bot"));
+        assert!(html.contains("side=new"));
+        assert!(!html.contains("anchor-metadata"));
+        assert!(!html.contains("application/json"));
+        assert!(!html.contains("line_fingerprint"));
+        assert!(!html.contains("diff_fingerprint"));
+        assert!(!html.contains("hunk_index"));
+        assert!(!html.contains("private draft"));
+        assert!(!html.contains("Address comment"));
     }
 
     #[test]

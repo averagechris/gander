@@ -204,13 +204,16 @@ transparent = true
 
 [artifact]
 format = "markdown"
-profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JSON)
+profile = "human" # human | agent | team (team JSON is canonical; Markdown/HTML are human summaries)
 # output_dir = "artifacts" # unset (the default): artifacts go to stdout
 basename = "review"
 on_tui_quit = "stdout" # never | write | stdout
 
 [comments]
 initial-state = "todo" # todo (default) | draft; per-comment CLI --state overrides this
+
+[identity]
+name = "Reviewer" # optional local human name; blank falls back to human:local
 
 [syntax]
 enabled = true
@@ -323,6 +326,8 @@ submit-comment = ["ctrl-s"]
 quit = ["q"]
 
 [agent]
+# Optional annotation identity for agent-authored drafts/replies.
+name = "agent"
 # Optional: a shell command that summons a review agent (press @ in the TUI,
 # or set autostart). Agent-agnostic: any CLI that accepts a prompt works.
 command = "opencode run"

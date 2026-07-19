@@ -9,6 +9,11 @@
   derives legacy channels and identities and folds pending agent-overlay drafts
   into durable onboarding comments without recreating accepted or discarded
   history.
+- Added annotation automation surfaces: layered human/agent identity config,
+  comment channel filters for CLI/MCP, durable session disposition, and
+  team-profile exports that publish only collaboration todo/resolved threads;
+  team JSON is the canonical forge-mappable contract, while Markdown/HTML are
+  filtered human summaries.
 - Derived TUI theme (`[theme]` config): every chrome color now derives from a
   small light/dark base palette via WCAG-contrast-guarded blending (the
   per-combination contrast contract is documented in docs/theme.md), with
