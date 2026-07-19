@@ -18,11 +18,15 @@ mod flags;
 mod helpers;
 mod keymap;
 mod ops;
+mod osc_guard;
 mod outline;
+#[cfg(all(test, unix))]
+mod pty_tests;
 mod render;
 mod revset;
 mod search;
 mod text_layout;
+pub(crate) mod theme;
 mod view_options;
 mod viewport;
 mod walkthroughs;
@@ -58,7 +62,7 @@ use crate::{
         render_handoff_markdown,
     },
     clipboard::{ClipboardMethod, copy_to_clipboard},
-    config::{AgentConfig, KeybindingsConfig},
+    config::{AgentConfig, KeybindingsConfig, ThemeConfig, ThemeModeConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
@@ -76,6 +80,7 @@ use flags::FlagListState;
 use helpers::JjHelperState;
 use keymap::{Action, KeyContext, KeyMap};
 use ops::OperationPickerState;
+use osc_guard::OscTailGuard;
 use outline::SymbolOutlineState;
 #[cfg(test)]
 use render::diff_cursor_is_visible;
@@ -86,6 +91,7 @@ use render::{
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
+use theme::{AppTheme, BackgroundDetection};
 use view_options::{ViewOption, ViewOptionsState};
 use walkthroughs::WalkthroughListState;
 use zen::ZenState;
@@ -218,6 +224,13 @@ struct TuiState {
     /// [`FINGERPRINT_FAILURE_NOTICE_THRESHOLD`] so a broken watcher cannot
     /// freeze silently behind a "following @" indicator.
     fingerprint_failures: u32,
+    /// The derived chrome theme all rendering resolves through
+    /// (docs/roadmap.md M19). Defaults to dark/truecolor for tests.
+    theme: AppTheme,
+    /// Containment for stray OSC 11 replies after any non-`Detected`
+    /// auto-background query outcome; inactive for parsed replies and when no
+    /// query was sent.
+    osc_guard: OscTailGuard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +290,7 @@ pub struct TuiPaths {
 pub fn run(
     session: &mut ReviewSession,
     keybindings: &KeybindingsConfig,
+    theme_config: &ThemeConfig,
     ignore_globs: Vec<String>,
     generated_matcher: GeneratedMatcher,
     jj: &dyn JjBackend,
@@ -296,9 +310,43 @@ pub fn run(
         workspace_root,
     } = paths;
     let keymap = KeyMap::try_from(keybindings)?;
-    // Truecolor cue defaults quantize to indexed colors on terminals that
-    // do not advertise 24-bit support (docs/focused-diff-ux.md §1).
-    if !terminal_supports_truecolor() {
+    let truecolor = terminal_supports_truecolor();
+    // Resolve the derived theme up front. `mode = "auto"` queries the
+    // terminal background via OSC 11 exactly once, before Gander enables
+    // crossterm raw mode or starts the crossterm event reader. The query
+    // library temporarily uses and restores its own guarded raw mode
+    // (docs/roadmap.md M19). Explicit modes never query.
+    let detection = match theme_config.mode {
+        ThemeModeConfig::Auto => theme::detect_terminal_background(theme::OSC_QUERY_TIMEOUT),
+        ThemeModeConfig::Dark | ThemeModeConfig::Light => BackgroundDetection::Unsupported,
+    };
+    let detected_background = match detection {
+        BackgroundDetection::Detected(rgb) => Some(rgb),
+        BackgroundDetection::Unsupported | BackgroundDetection::Inconclusive => None,
+    };
+    let app_theme = AppTheme::resolve(
+        theme_config.mode,
+        theme_config.transparent,
+        truecolor,
+        detected_background,
+    );
+    // Only a parsed reply proves every solicited byte was consumed. An
+    // `Unsupported` verdict is *usually* fence-validated, but the query
+    // library can also report it without having confirmed the DA1 fence
+    // (for example a reply fragmented straight after its ESC), so anything
+    // other than `Detected` arms containment (docs/theme.md).
+    let osc_guard = if matches!(detection, BackgroundDetection::Detected(_)) {
+        OscTailGuard::inactive()
+    } else if matches!(theme_config.mode, ThemeModeConfig::Auto) {
+        OscTailGuard::armed(std::time::Instant::now())
+    } else {
+        // Explicit modes never queried: nothing to contain.
+        OscTailGuard::inactive()
+    };
+    // Explicitly configured truecolor cue specs quantize to indexed colors
+    // on terminals that do not advertise 24-bit support
+    // (docs/focused-diff-ux.md §1). Derived slots quantize inside AppTheme.
+    if !truecolor {
         downgrade_diff_theme(&mut session.diff_cues.theme);
     }
     let review_loader = ReviewLoader {
@@ -378,6 +426,8 @@ pub fn run(
         agent_log_path,
         agent_config,
         terminal_size: initial_terminal_size,
+        theme: app_theme,
+        osc_guard,
         notice: acp_notice.map(|message| UiNotice {
             level: UiNoticeLevel::Info,
             message,
@@ -842,50 +892,78 @@ fn run_loop(
             )
         })?;
 
-        if !event::poll(Duration::from_millis(150))? {
-            // Idle ticks are the natural moment to pick up agent overlay
-            // writes without competing with user input handling.
-            if let Some(overlay_path) = agent_overlay_path {
-                maybe_reload_agent_overlay(session, overlay_path, tui_state, review_loader, true);
-            }
-            if let Some(state_path) = state_path {
-                maybe_reload_review_state(session, state_path, tui_state, true);
-            }
-            notice_agent_exit(tui_state);
-            // Live refresh: pick up new/rewritten changes while nothing
-            // modal is open (a reload underneath a popup or comment editor
-            // could misanchor what the human is doing).
-            if mode_allows_live_refresh(mode) {
-                maybe_refresh_review(review_loader, session, tui_state);
-                if let Mode::OperationPicker(picker) = mode {
-                    refresh_operation_picker_preview(picker, session, review_loader);
+        let admitted = if event::poll(Duration::from_millis(150))? {
+            // Route every event through the OSC tail guard (a no-op unless
+            // the startup background query had a non-Detected outcome): stray
+            // OSC 11 reply fragments are contained, everything else dispatches
+            // in order, possibly together with previously held events.
+            tui_state
+                .osc_guard
+                .admit(event::read()?, std::time::Instant::now())
+                .events
+        } else {
+            // Idle tick: first release any user input the guard was holding
+            // so keystrokes are delayed by at most one poll interval.
+            let held = tui_state.osc_guard.flush_idle(std::time::Instant::now());
+            if held.is_empty() {
+                // Idle ticks are the natural moment to pick up agent overlay
+                // writes without competing with user input handling.
+                if let Some(overlay_path) = agent_overlay_path {
+                    maybe_reload_agent_overlay(
+                        session,
+                        overlay_path,
+                        tui_state,
+                        review_loader,
+                        true,
+                    );
                 }
-            }
-            continue;
-        }
-
-        match event::read()? {
-            Event::Key(key)
-                if handle_key_event(key, session, mode, keymap, review_loader, tui_state)? =>
-            {
                 if let Some(state_path) = state_path {
-                    autosave_state(session, state_path, tui_state);
+                    maybe_reload_review_state(session, state_path, tui_state, true);
                 }
-                break;
+                notice_agent_exit(tui_state);
+                // Live refresh: pick up new/rewritten changes while nothing
+                // modal is open (a reload underneath a popup or comment editor
+                // could misanchor what the human is doing).
+                if mode_allows_live_refresh(mode) {
+                    maybe_refresh_review(review_loader, session, tui_state);
+                    if let Mode::OperationPicker(picker) = mode {
+                        refresh_operation_picker_preview(picker, session, review_loader);
+                    }
+                }
+                continue;
             }
-            Event::Key(_) => {}
-            Event::Mouse(mouse) => {
-                handle_mouse_event(mouse, tui_state.terminal_size, session, mode, tui_state)
+            held
+        };
+
+        let mut quit = false;
+        for event in admitted {
+            match event {
+                Event::Key(key)
+                    if handle_key_event(key, session, mode, keymap, review_loader, tui_state)? =>
+                {
+                    quit = true;
+                    break;
+                }
+                Event::Key(_) => {}
+                Event::Mouse(mouse) => {
+                    handle_mouse_event(mouse, tui_state.terminal_size, session, mode, tui_state)
+                }
+                Event::Resize(width, height) => {
+                    let queued = ratatui::prelude::Size::new(width, height);
+                    let observed = terminal.size()?;
+                    // Crossterm may leave older Resize events queued. Trust the
+                    // backend's observed size and use the payload only when it
+                    // still describes that same current terminal.
+                    dispatch_resize_event(queued, observed, session, mode, tui_state);
+                }
+                _ => {}
             }
-            Event::Resize(width, height) => {
-                let queued = ratatui::prelude::Size::new(width, height);
-                let observed = terminal.size()?;
-                // Crossterm may leave older Resize events queued. Trust the
-                // backend's observed size and use the payload only when it
-                // still describes that same current terminal.
-                dispatch_resize_event(queued, observed, session, mode, tui_state);
+        }
+        if quit {
+            if let Some(state_path) = state_path {
+                autosave_state(session, state_path, tui_state);
             }
-            _ => {}
+            break;
         }
 
         // Heartbeat the instance registry (throttled) so `current_focus` /

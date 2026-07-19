@@ -49,7 +49,7 @@ word-highlight = true
 line-background = true
 gutter-bar = false
 
-[diff.theme]
+[diff.theme]                # optional; unset entries derive from [theme]
 added-line-bg = "#12261e"   # style specs reuse syntax_style_spec grammar
 removed-line-bg = "#301b1f"
 added-word = "bold on #1a4a29"
@@ -58,12 +58,15 @@ gutter-added = "#3fb950"
 gutter-removed = "#f85149"
 ```
 
-Defaults are GitHub-dark-inspired truecolor tints (the add/remove accents
-alpha-blended at ~15% for line backgrounds and ~40% for word emphasis).
-Terminals that do not advertise truecolor (`COLORTERM`) get the hex values
-quantized to the nearest xterm-256 indexed color at TUI startup, so the
-defaults stay usable in e.g. macOS Terminal.app. The existing style-spec
-parser (`render.rs::syntax_style_spec`) grows an `on <color>` background
+Since the derived theme landed (roadmap M19), the cue *defaults* come from
+the `[theme]` base palette: the add/remove hues alpha-blended over the
+active light/dark background (~15% for line backgrounds, ~40% for word
+emphasis) with WCAG-contrast guarding, quantized to xterm-256 on terminals
+that do not advertise truecolor (`COLORTERM`). Explicitly configured
+`[diff.theme]` entries remain literal user values: they render exactly as
+written (hex values still quantize to the nearest indexed color at TUI
+startup) and are never reinterpreted by the theme. The style-spec
+parser (`render.rs::syntax_style_spec`) has an `on <color>` background
 clause; syntax theme specs get it for free.
 
 ### Word-level diff algorithm

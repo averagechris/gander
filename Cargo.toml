@@ -32,6 +32,10 @@ similar = { version = "3.1.1", default-features = false, features = [
   "text",
   "unicode",
 ] }
+# OSC 10/11 terminal color queries with DA1 fencing, bounded timeouts, and
+# termios restoration on all paths; queried once before the crossterm event
+# loop starts (src/tui/theme.rs).
+terminal-colorsaurus = "1.0.3"
 tokio = { version = "1.52.3", features = [
   "rt-multi-thread",
   "macros",
@@ -64,6 +68,11 @@ wait-timeout = "0.2.1"
 insta = { version = "1.44.0", features = ["json"] }
 proptest = "1.11.0"
 tempfile = "3.23.0"
+
+[target.'cfg(unix)'.dev-dependencies]
+# PTY plumbing for the production-path OSC 11 detection tests
+# (src/tui/theme.rs pty_tests): openpty + TIOCSCTTY only.
+libc = "0.2"
 
 [profile.release]
 lto = "fat"

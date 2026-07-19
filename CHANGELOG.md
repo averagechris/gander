@@ -2,11 +2,25 @@
 
 ## Unreleased
 
+### Added
+
 - Added durable annotation authors and onboarding/delegation/collaboration/note
   channels to comments, plus reply authors and a one-release migration that
   derives legacy channels and identities and folds pending agent-overlay drafts
   into durable onboarding comments without recreating accepted or discarded
   history.
+- Derived TUI theme (`[theme]` config): every chrome color now derives from a
+  small light/dark base palette via WCAG-contrast-guarded blending (the
+  per-combination contrast contract is documented in docs/theme.md), with
+  automatic light/dark detection through a one-shot, DA1-fenced OSC 11
+  background query (`mode = "auto"`; explicit `dark`/`light` never query),
+  a transparent-background mode that keeps the terminal's own background
+  (the default), semantic annotation-channel colors reserved for milestone
+  17, and the truecolor-to-xterm-256 downgrade path preserved with
+  post-quantization contrast repair. Explicit `[diff.theme]` and
+  `[syntax.theme]` values remain literal user styles; unset `[diff.theme]`
+  entries now derive from the theme. Known detection edge cases and their
+  bounded impact are documented in docs/theme.md.
 
 ## v0.7.2 - 2026-07-12
 

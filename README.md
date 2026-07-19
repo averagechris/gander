@@ -181,6 +181,27 @@ view = "unified" # unified | side-by-side; side-by-side keeps removed/added rows
 soft-wrap = true # default; false enables horizontal scrolling for long diff lines
 context-step = 10
 
+# [diff.theme] entries are optional literal style specs (same grammar as
+# [syntax.theme]: named colors, 0-255 indexed values, #rrggbb, modifiers,
+# and `on <color>` for backgrounds). Unset entries derive from [theme].
+# [diff.theme]
+# added-line-bg = "#12261e"
+# removed-word = "bold on #6b2b2b"
+# gutter-added = "cyan"
+
+[theme]
+# Derived TUI theme: all chrome colors are computed from a light or dark
+# base palette with WCAG-contrast guarding, then quantized to xterm-256 on
+# terminals without truecolor (COLORTERM). `auto` detects light/dark from
+# the terminal background with a one-shot OSC 11 query at TUI startup
+# (bounded by a DA1 fence and a short timeout; dark is the fallback).
+# `dark`/`light` never query. Non-interactive commands never query.
+# Guarantees and documented edge cases: docs/theme.md.
+mode = "auto" # auto | dark | light
+# Keep the terminal's own background visible (default). Set false to paint
+# the palette background.
+transparent = true
+
 [artifact]
 format = "markdown"
 profile = "human" # human | agent (agent adds raw hunks + comment excerpts to JSON)

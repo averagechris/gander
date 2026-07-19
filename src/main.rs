@@ -1111,6 +1111,7 @@ fn run() -> color_eyre::Result<()> {
             tui::run(
                 &mut session,
                 &config.keybindings,
+                &config.theme,
                 ignore_globs,
                 generated_matcher,
                 &jj,

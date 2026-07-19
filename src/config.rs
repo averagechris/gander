@@ -25,6 +25,41 @@ pub struct Config {
     pub agent: AgentConfig,
     pub diff: DiffConfig,
     pub comments: CommentsConfig,
+    pub theme: ThemeConfig,
+}
+
+/// Derived TUI theme (docs/roadmap.md M19). All chrome colors derive from a
+/// light or dark base palette; `[diff.theme]`/`[syntax.theme]` entries stay
+/// literal user values on top of it.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ThemeConfig {
+    /// `auto` (default) detects light/dark from the terminal background via
+    /// a one-shot OSC 11 query at TUI startup; `dark`/`light` never query.
+    pub mode: ThemeModeConfig,
+    /// Leave the terminal's own background visible instead of painting the
+    /// palette background (default: true, Gander's historical look).
+    pub transparent: bool,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            mode: ThemeModeConfig::default(),
+            transparent: true,
+        }
+    }
+}
+
+/// Light/dark selection for the derived theme.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeModeConfig {
+    /// Detect from the terminal background (OSC 11); falls back to dark.
+    #[default]
+    Auto,
+    Dark,
+    Light,
 }
 
 /// Defaults for new durable comments. This deliberately cannot represent
@@ -99,39 +134,27 @@ impl Default for DiffConfig {
 /// Style specs for the diff cues. Specs use the same grammar as syntax
 /// theme entries (colors by name, `22`-style indexed values, `#rrggbb`,
 /// modifiers, and `on <color>` for backgrounds).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+///
+/// Every field defaults to `None`, meaning the value derives from the
+/// `[theme]` base palette (contrast-guarded for the active light/dark
+/// background). Explicitly configured specs are literal user values: they
+/// render exactly as written (quantized to xterm-256 on terminals without
+/// truecolor) and are never reinterpreted by the derived theme.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct DiffThemeConfig {
     /// Background color for added lines (color spec, background applied).
-    pub added_line_bg: String,
+    pub added_line_bg: Option<String>,
     /// Background color for removed lines.
-    pub removed_line_bg: String,
+    pub removed_line_bg: Option<String>,
     /// Style patched onto emphasized (changed) tokens on added lines.
-    pub added_word: String,
+    pub added_word: Option<String>,
     /// Style patched onto emphasized tokens on removed lines.
-    pub removed_word: String,
+    pub removed_word: Option<String>,
     /// Gutter bar style for added lines.
-    pub gutter_added: String,
+    pub gutter_added: Option<String>,
     /// Gutter bar style for removed lines.
-    pub gutter_removed: String,
-}
-
-impl Default for DiffThemeConfig {
-    fn default() -> Self {
-        Self {
-            // GitHub-dark-inspired truecolor tints: line backgrounds are the
-            // add/remove accents alpha-blended at ~15% over a dark base,
-            // word emphasis at ~40%. Terminals without truecolor support get
-            // these quantized to the nearest indexed color at TUI startup
-            // (see tui::render::downgrade_diff_theme).
-            added_line_bg: "#12261e".to_owned(),
-            removed_line_bg: "#301b1f".to_owned(),
-            added_word: "bold on #1a4a29".to_owned(),
-            removed_word: "bold on #6b2b2b".to_owned(),
-            gutter_added: "#3fb950".to_owned(),
-            gutter_removed: "#f85149".to_owned(),
-        }
-    }
+    pub gutter_removed: Option<String>,
 }
 
 /// How to summon a review agent from the TUI. Deliberately agent-agnostic:
@@ -357,6 +380,14 @@ struct ConfigPatch {
     agent: AgentConfigPatch,
     diff: DiffConfigPatch,
     comments: CommentsConfigPatch,
+    theme: ThemeConfigPatch,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+struct ThemeConfigPatch {
+    mode: Option<ThemeModeConfig>,
+    transparent: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -809,27 +840,34 @@ impl Config {
         if let Some(context_step) = patch.diff.context_step {
             self.diff.context_step = context_step;
         }
-        apply_optional(
+        apply_some(
             &mut self.diff.theme.added_line_bg,
             patch.diff.theme.added_line_bg,
         );
-        apply_optional(
+        apply_some(
             &mut self.diff.theme.removed_line_bg,
             patch.diff.theme.removed_line_bg,
         );
-        apply_optional(&mut self.diff.theme.added_word, patch.diff.theme.added_word);
-        apply_optional(
+        apply_some(&mut self.diff.theme.added_word, patch.diff.theme.added_word);
+        apply_some(
             &mut self.diff.theme.removed_word,
             patch.diff.theme.removed_word,
         );
-        apply_optional(
+        apply_some(
             &mut self.diff.theme.gutter_added,
             patch.diff.theme.gutter_added,
         );
-        apply_optional(
+        apply_some(
             &mut self.diff.theme.gutter_removed,
             patch.diff.theme.gutter_removed,
         );
+
+        if let Some(mode) = patch.theme.mode {
+            self.theme.mode = mode;
+        }
+        if let Some(transparent) = patch.theme.transparent {
+            self.theme.transparent = transparent;
+        }
     }
 }
 
@@ -960,6 +998,14 @@ impl KeybindingsConfig {
 fn apply_optional<T>(target: &mut T, value: Option<T>) {
     if let Some(value) = value {
         *target = value;
+    }
+}
+
+/// Layer an optional-by-default field: a later layer's explicit value wins;
+/// absence leaves earlier layers (or the derived default) untouched.
+fn apply_some<T>(target: &mut Option<T>, value: Option<T>) {
+    if let Some(value) = value {
+        *target = Some(value);
     }
 }
 
@@ -1180,8 +1226,10 @@ prompt = "review {repo} at {base}..{rev}"
         assert_eq!(defaults.view, DiffViewModeConfig::Unified);
         assert!(defaults.soft_wrap);
         assert_eq!(defaults.context_step, 10);
-        assert_eq!(defaults.theme.added_line_bg, "#12261e");
-        assert_eq!(defaults.theme.removed_word, "bold on #6b2b2b");
+        // Diff theme entries default to "derived from [theme]".
+        assert_eq!(defaults.theme, DiffThemeConfig::default());
+        assert_eq!(defaults.theme.added_line_bg, None);
+        assert_eq!(defaults.theme.removed_word, None);
         assert_eq!(Config::default().keybindings.expand_context, ["+"]);
         assert_eq!(Config::default().keybindings.expand_context_all, ["="]);
         assert_eq!(Config::default().keybindings.collapse_context, ["-"]);
@@ -1226,10 +1274,10 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.diff.view, DiffViewModeConfig::SideBySide);
         assert!(!config.diff.soft_wrap);
         assert_eq!(config.diff.context_step, 25);
-        assert_eq!(config.diff.theme.added_line_bg, "#103010");
-        assert_eq!(config.diff.theme.gutter_added, "cyan");
-        // Untouched theme entries keep their defaults.
-        assert_eq!(config.diff.theme.removed_line_bg, "#301b1f");
+        assert_eq!(config.diff.theme.added_line_bg.as_deref(), Some("#103010"));
+        assert_eq!(config.diff.theme.gutter_added.as_deref(), Some("cyan"));
+        // Untouched theme entries stay derived.
+        assert_eq!(config.diff.theme.removed_line_bg, None);
         assert_eq!(config.keybindings.view_options, ["ctrl-v"]);
         assert_eq!(config.keybindings.toggle_gutter_bar, ["B"]);
         assert_eq!(config.keybindings.toggle_diff_wrap, ["alt-w"]);
@@ -1347,6 +1395,80 @@ move-down = ["n", "down"]
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
         assert_eq!(config.comments.initial_state, InitialCommentState::Todo);
+    }
+
+    #[test]
+    fn theme_defaults_to_auto_transparent_and_parses_explicit_values() {
+        let defaults = Config::default().theme;
+        assert_eq!(defaults.mode, ThemeModeConfig::Auto);
+        assert!(defaults.transparent);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        fs::write(
+            &path,
+            r#"
+[theme]
+mode = "light"
+transparent = false
+"#,
+        )
+        .unwrap();
+        let config = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap();
+        assert_eq!(config.theme.mode, ThemeModeConfig::Light);
+        assert!(!config.theme.transparent);
+    }
+
+    #[test]
+    fn theme_rejects_unknown_fields_and_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-mode.toml");
+        fs::write(&path, "[theme]\nmode = \"solarized\"\n").unwrap();
+        assert!(
+            Config::load_layers(&[ConfigSource {
+                path,
+                required: true,
+            }])
+            .is_err()
+        );
+
+        let path = dir.path().join("bad-field.toml");
+        fs::write(&path, "[theme]\npalette = \"mono\"\n").unwrap();
+        assert!(
+            Config::load_layers(&[ConfigSource {
+                path,
+                required: true,
+            }])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn theme_layers_like_other_config_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.toml");
+        let overlay = dir.path().join("overlay.toml");
+        fs::write(&base, "[theme]\nmode = \"dark\"\ntransparent = false\n").unwrap();
+        fs::write(&overlay, "[theme]\nmode = \"auto\"\n").unwrap();
+
+        let config = Config::load_layers(&[
+            ConfigSource {
+                path: base,
+                required: true,
+            },
+            ConfigSource {
+                path: overlay,
+                required: true,
+            },
+        ])
+        .unwrap();
+        // Later layer overrides mode; untouched transparent persists.
+        assert_eq!(config.theme.mode, ThemeModeConfig::Auto);
+        assert!(!config.theme.transparent);
     }
 
     #[test]
