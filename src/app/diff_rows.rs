@@ -58,11 +58,15 @@ pub struct DiffRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffRowKind {
+    ChapterHeader,
     FileHeader,
     SyntaxSummary,
     HunkHeader,
     DiffLine(DiffLineKind),
     ContextFold,
+    /// Salience-driven cross-file fold. Expansion is tracked by stable fold id
+    /// in the review-stream projection, not in the underlying diff.
+    SkimFold,
     /// Hidden file lines between/around hunks that can expand via
     /// `+`/`=`/`-` (docs/focused-diff-ux.md §5). `hidden` is the count
     /// still collapsed.

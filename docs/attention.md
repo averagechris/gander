@@ -56,10 +56,11 @@ explicit. TUI on-quit exports reload the final target's unfiltered diff through
 jj's read-only `--ignore-working-copy` path, so a retarget or refresh cannot use
 startup fingerprints for attention staleness.
 
-Current automation (the first ordered M18 package) is available through
+Current automation is available through
 `gander attention list|set|clear|promote|demote|seed-heuristics|recompute-heuristics`
-and matching MCP tools. TUI folding/cards/focus and zen removal remain later
-packages.
+and matching MCP tools. TUI folds, narration cards, chapters, walkthrough
+navigation, and coverage are implemented; focus/glance presets and zen removal
+remain later packages.
 
 ## The review stream
 
@@ -67,13 +68,26 @@ One diff view. Salience changes rendering, never data:
 
 - **Skim** regions collapse to a one-line fold —
   `⌄ 4 files · generated churn · +812 −340` — expandable in place, and
-  acknowledgeable: one key marks every contained file viewed. This is
+  acknowledgeable: one key records fingerprint-guarded region progress. A file
+  is marked viewed only when the fold covers that file's entire current diff;
+  partial fold acknowledgement never marks the whole file viewed. This is
   "don't even scan it", with the peek always one keypress away.
 - **Supporting** regions render as a normal diff.
 - **Spotlight** regions render fully expanded with the agent's narration
   (an onboarding annotation card: title, why, rationale) inline beside the
   code. Step artifacts (examples, diagrams) render inside the card,
   expandable.
+
+Folding is formed from effective disjoint row spans, not raw file assignments:
+a narrower higher-precedence Supporting or Spotlight override always punches
+through a broad file-level Skim. A fold is whole-file only when it covers every
+current anchorable changed row after that partition.
+
+The cross-file index stays cheap: offscreen files contribute structural rows
+directly from the parsed diff, while full syntax, word-diff, context-fold, and
+gap rows are cached only when a file becomes current or enters a bounded stream
+window. The stream projection and file/local owner indexes share one signature
+cache that includes syntax configuration.
 
 Contiguous spotlight regions sharing a `change_id` open with a chapter
 header row (jj description, bookmarks, diff stats) — replacing the zen
@@ -105,10 +119,17 @@ chapter card.
 
 ## Interactions
 
-- **Viewed state**: acknowledging a fold marks contained files viewed via the
-  existing fingerprints; a stale fold (fingerprint drift) reverts to
-  unacknowledged, preserving the conservative-viewed guarantee.
+- **Viewed state**: acknowledging a whole-file fold marks that file viewed via
+  the existing fingerprint state. Partial folds record region progress only. A
+  stale fold or spotlight visit (fingerprint drift) reverts to unacknowledged /
+  unvisited without deleting history, preserving the conservative guarantee.
 - **Heuristics**: generated/lockfile detection seeds `Skim` automatically;
   `[ignore]`/`[generated]` config feeds the same map.
 - **Human override**: promote/demote the region under the cursor with one
-  key; human assignments outrank agent curation and persist in the session.
+  key (`Alt-Up` / `Alt-Down`); human assignments outrank agent curation and
+  persist in the session. `Alt-N` / `Alt-P` follow walkthrough-ordered
+  spotlights in the normal stream. `Space` peeks a selected skim fold and `a`
+  acknowledges it contextually. On an ordinary stream row, `a` is an explicit
+  no-op and never falls through to global mark-all. Stream range selections are
+  single-file and cancel when keyboard or mouse movement crosses a file
+  boundary.

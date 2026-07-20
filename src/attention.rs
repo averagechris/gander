@@ -11,12 +11,14 @@ use std::{cmp::Ordering, collections::BTreeSet};
 use color_eyre::eyre::{Result, eyre};
 use globset::{Glob, GlobSetBuilder};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::{
     anchor::{CommentAnchor, comment_anchor_for_file_diff},
     diff::FileDiff,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset, diff_content_looks_generated},
     state::{
+        AttentionProgress, AttentionProgressKind, AttentionProgressMember, AttentionProgressTarget,
         AttentionRegion, ReviewSession, ReviewTarget, Salience, SalienceSource, StepImportance,
         StepKind,
     },
@@ -54,6 +56,111 @@ pub struct HeuristicUpdate {
     pub updated: usize,
     pub removed: usize,
     pub preserved_stale: usize,
+}
+
+impl AttentionProgressTarget {
+    /// Build a canonical progress identity from current region targets. Anchor
+    /// evidence deliberately does not participate: it belongs in the separate
+    /// current fingerprint, so a changed diff keeps history but stops counting.
+    pub fn from_targets<'a>(targets: impl IntoIterator<Item = &'a ReviewTarget>) -> Self {
+        let mut members = targets
+            .into_iter()
+            .filter_map(|target| {
+                Some(AttentionProgressMember {
+                    file: target.file.clone()?,
+                    line: target.line,
+                    end_line: target.line.map(|line| target.end_line.unwrap_or(line)),
+                })
+            })
+            .collect::<Vec<_>>();
+        members.sort();
+        members.dedup();
+        Self { members }
+    }
+}
+
+/// Aggregate current diff fingerprints for a stable progress identity.
+/// Missing files make the target stale and therefore return `None`.
+pub fn progress_fingerprint(
+    target: &AttentionProgressTarget,
+    files: &[FileDiff],
+) -> Option<String> {
+    if target.members.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"gander-attention-progress-v1\0");
+    for member in &target.members {
+        let file = files.iter().find(|file| file.path == member.file)?;
+        hasher.update(member.file.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(member.line.unwrap_or(0).to_le_bytes());
+        hasher.update(member.end_line.unwrap_or(0).to_le_bytes());
+        hasher.update(file.fingerprint.as_bytes());
+        hasher.update(b"\0");
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+pub fn progress_fingerprint_refs(
+    target: &AttentionProgressTarget,
+    files: &[&FileDiff],
+) -> Option<String> {
+    if target.members.is_empty() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"gander-attention-progress-v1\0");
+    for member in &target.members {
+        let file = files
+            .iter()
+            .copied()
+            .find(|file| file.path == member.file)?;
+        hasher.update(member.file.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(member.line.unwrap_or(0).to_le_bytes());
+        hasher.update(member.end_line.unwrap_or(0).to_le_bytes());
+        hasher.update(file.fingerprint.as_bytes());
+        hasher.update(b"\0");
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+pub fn attention_progress_is_current_refs(
+    session: &ReviewSession,
+    target: &AttentionProgressTarget,
+    kind: AttentionProgressKind,
+    files: &[&FileDiff],
+) -> bool {
+    let Some(fingerprint) = progress_fingerprint_refs(target, files) else {
+        return false;
+    };
+    session.attention_progress.iter().any(|progress| {
+        progress.kind == kind && progress.target == *target && progress.fingerprint == fingerprint
+    })
+}
+
+pub fn record_attention_progress_refs(
+    session: &mut ReviewSession,
+    target: AttentionProgressTarget,
+    kind: AttentionProgressKind,
+    files: &[&FileDiff],
+) -> Result<bool> {
+    let fingerprint = progress_fingerprint_refs(&target, files)
+        .ok_or_else(|| eyre!("attention progress target is not current"))?;
+    if session.attention_progress.iter().any(|progress| {
+        progress.kind == kind && progress.target == target && progress.fingerprint == fingerprint
+    }) {
+        return Ok(false);
+    }
+    session.attention_progress.push(AttentionProgress {
+        target,
+        kind,
+        fingerprint,
+        recorded_at: chrono::Utc::now(),
+    });
+    session.updated_at = Some(chrono::Utc::now());
+    Ok(true)
 }
 
 fn region_key(target: &ReviewTarget) -> Option<RegionKey> {
@@ -160,7 +267,7 @@ pub fn target_for_diff(
     target_for_file_diff(file, path, line, end_line)
 }
 
-fn target_for_file_diff(
+pub(crate) fn target_for_file_diff(
     file: &FileDiff,
     path: &str,
     line: Option<usize>,
@@ -532,6 +639,19 @@ pub fn promote_human_attention(
     set_human_attention(session, target, salience, rationale)
 }
 
+pub fn promote_human_attention_refs(
+    session: &mut ReviewSession,
+    target: ReviewTarget,
+    rationale: Option<String>,
+    files: &[&FileDiff],
+) -> Result<AttentionRegion> {
+    let salience = resolve_effective_attention_refs(session, &target, files)
+        .salience
+        .promote();
+    let rationale = rationale.or_else(|| existing_human_rationale(session, &target));
+    set_human_attention(session, target, salience, rationale)
+}
+
 pub fn demote_human_attention(
     session: &mut ReviewSession,
     target: ReviewTarget,
@@ -539,6 +659,19 @@ pub fn demote_human_attention(
     files: &[FileDiff],
 ) -> Result<AttentionRegion> {
     let salience = resolve_effective_attention(session, &target, files)
+        .salience
+        .demote();
+    let rationale = rationale.or_else(|| existing_human_rationale(session, &target));
+    set_human_attention(session, target, salience, rationale)
+}
+
+pub fn demote_human_attention_refs(
+    session: &mut ReviewSession,
+    target: ReviewTarget,
+    rationale: Option<String>,
+    files: &[&FileDiff],
+) -> Result<AttentionRegion> {
+    let salience = resolve_effective_attention_refs(session, &target, files)
         .salience
         .demote();
     let rationale = rationale.or_else(|| existing_human_rationale(session, &target));
@@ -815,6 +948,43 @@ mod tests {
             rationale: None,
             source,
         }
+    }
+
+    #[test]
+    fn progress_is_append_only_but_fingerprint_drift_stops_counting() {
+        let files = files();
+        let target = target_for_diff(&files, "src/lib.rs", Some(2), None).unwrap();
+        let file_refs = files.iter().collect::<Vec<_>>();
+        let progress_target = AttentionProgressTarget::from_targets([&target]);
+        let mut session = ReviewSession::default();
+        assert!(
+            record_attention_progress_refs(
+                &mut session,
+                progress_target.clone(),
+                AttentionProgressKind::SpotlightVisited,
+                &file_refs,
+            )
+            .unwrap()
+        );
+        assert!(attention_progress_is_current_refs(
+            &session,
+            &progress_target,
+            AttentionProgressKind::SpotlightVisited,
+            &file_refs,
+        ));
+        let drifted = DiffSet::parse(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n old\n-new\n+different\n tail\n",
+        )
+        .unwrap()
+        .files;
+        let drifted_refs = drifted.iter().collect::<Vec<_>>();
+        assert!(!attention_progress_is_current_refs(
+            &session,
+            &progress_target,
+            AttentionProgressKind::SpotlightVisited,
+            &drifted_refs,
+        ));
+        assert_eq!(session.attention_progress.len(), 1, "history is retained");
     }
 
     #[test]

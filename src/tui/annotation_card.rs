@@ -12,10 +12,17 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 #[cfg(test)]
-static CARD_PROJECTIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CARD_PROJECTIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_projection() {
+    CARD_PROJECTIONS.with(|count| count.set(count.get() + 1));
+}
 
 use crate::{
     agent::{Artifact, ArtifactKind},
@@ -146,7 +153,7 @@ pub(super) struct AnnotationCardLayout {
 impl AnnotationCard {
     pub(super) fn from_comment(comment: &Comment) -> Self {
         #[cfg(test)]
-        CARD_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
+        record_projection();
         let (title, body) = split_headline(&comment.body, "(empty comment)");
         let mut badges = vec![CardBadge {
             label: comment.state.label().to_owned(),
@@ -209,7 +216,7 @@ impl AnnotationCard {
         load_artifact_bodies: bool,
     ) -> Self {
         #[cfg(test)]
-        CARD_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
+        record_projection();
         let title = step
             .title
             .as_deref()
@@ -499,12 +506,12 @@ impl AnnotationCard {
 
 #[cfg(test)]
 pub(super) fn reset_projection_count() {
-    CARD_PROJECTIONS.store(0, Ordering::Relaxed);
+    CARD_PROJECTIONS.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 pub(super) fn projection_count() -> usize {
-    CARD_PROJECTIONS.load(Ordering::Relaxed)
+    CARD_PROJECTIONS.with(Cell::get)
 }
 
 impl AnnotationCardLayout {

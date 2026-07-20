@@ -153,7 +153,7 @@ fn expected_listed_comment(id: &str, body: &str, state: &str, channel: &str) -> 
 }
 
 #[test]
-fn cli_walkthrough_stamps_configured_human_and_exports_schema_12_author() {
+fn cli_walkthrough_stamps_configured_human_and_exports_current_schema_author() {
     let fixture = CliFixture::new(Vec::new());
     let step = fixture.run_json(&[
         "walkthrough",
@@ -168,14 +168,14 @@ fn cli_walkthrough_stamps_configured_human_and_exports_schema_12_author() {
     assert_eq!(step["author"]["kind"], "human");
     assert_eq!(step["author"]["name"], "CLI Reviewer");
     let state = fixture.load_state();
-    assert_eq!(state["meta"]["version"], 7);
+    assert_eq!(state["meta"]["version"], 8);
     assert_eq!(
         state["sessions"][0]["walkthroughs"][0]["steps"][0]["author"]["name"],
         "CLI Reviewer"
     );
 
     let artifact = fixture.run_json(&["export", "json", "--profile", "human"]);
-    assert_eq!(artifact["version"], 12);
+    assert_eq!(artifact["version"], 13);
     assert_eq!(
         artifact["walkthroughs"][0]["steps"][0]["author"],
         json!({ "kind": "human", "name": "CLI Reviewer" })

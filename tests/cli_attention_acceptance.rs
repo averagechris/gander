@@ -172,7 +172,7 @@ fn cli_attention_lifecycle_has_stable_json_and_text() {
     assert_eq!(set["stale"], false);
     assert!(set["target"]["anchor"]["diff_fingerprint"].is_string());
     let migrated: Value = serde_json::from_slice(&fs::read(&fixture.state).unwrap()).unwrap();
-    assert_eq!(migrated["meta"]["version"], 7);
+    assert_eq!(migrated["meta"]["version"], 8);
 
     let demoted = fixture.json(&["attention", "demote", "--path", "src/lib.rs", "--line", "1"]);
     assert_eq!(demoted["salience"], "supporting");
@@ -307,8 +307,9 @@ fn artifacts_include_private_attention_for_human_but_not_team() {
         "spotlight",
     ]);
     let human = fixture.json(&["export", "json", "--profile", "human"]);
-    assert_eq!(human["version"], 12);
+    assert_eq!(human["version"], 13);
     assert_eq!(human["attention_regions"].as_array().unwrap().len(), 1);
     let team = fixture.json(&["export", "json", "--profile", "team"]);
     assert!(team.get("attention_regions").is_none());
+    assert!(team.get("attention_progress").is_none());
 }

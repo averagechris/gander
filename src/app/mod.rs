@@ -9,13 +9,21 @@
 mod context_expansion;
 mod diff_rows;
 mod split_rows;
+mod stream;
 mod syntax_cache;
 mod word_diff;
 
 pub use context_expansion::Expansion;
 pub use diff_rows::{DiffRow, DiffRowKind};
 pub use split_rows::{SplitRow, split_rows};
+#[allow(unused_imports)]
+pub use stream::{
+    ChapterHeader, Coverage, ReviewStream, SkimAcknowledgeResult, SkimFold, SpotlightTarget,
+    StreamRow, StreamRowKind,
+};
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -36,7 +44,7 @@ use crate::{
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
-    jj::ReviewTarget,
+    jj::{JjChangeSummary, ReviewTarget},
     review,
     state::{
         AuthorKind, Channel, Comment, CommentState, FileState, Identity,
@@ -144,6 +152,15 @@ pub struct ReviewSession {
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
+    /// Cursor and logical top in the continuous cross-file review stream.
+    /// `diff_cursor` remains the selected file's local coordinate for stable
+    /// comments/ranges and legacy zen code.
+    pub stream_cursor: usize,
+    pub stream_scroll: u16,
+    /// Enabled by the TUI runtime after construction. Keeping the legacy
+    /// selected-file viewport available lets zen and non-TUI domain consumers
+    /// retain their established coordinate system.
+    pub stream_mode: bool,
     pub focus: Focus,
     pub syntax: SyntaxConfig,
     pub hide_generated: bool,
@@ -189,6 +206,18 @@ pub struct ReviewSession {
     /// Zen fallback uses these so per-change chapter facts come from that
     /// change's own parent diff instead of the whole reviewed range.
     pub change_diffs: Vec<(String, DiffSet)>,
+    /// Read-only jj metadata used by change-scoped stream chapter headers.
+    pub stack_changes: Vec<JjChangeSummary>,
+    /// Ephemeral in-place skim peeks. Durable acknowledgement lives in the
+    /// active review session's attention progress.
+    pub expanded_skim_folds: BTreeSet<String>,
+    /// Files whose full syntax/folding diff rows have been requested by the
+    /// current stream viewport. All other files stay on cheap parsed-diff
+    /// structural rows.
+    stream_materialized_files: RefCell<BTreeSet<usize>>,
+    stream_cache: RefCell<Option<(u64, Rc<ReviewStream>)>>,
+    #[cfg(test)]
+    stream_projection_builds: Cell<usize>,
     selected_comment_id: Option<String>,
     /// Per-gap context expansion state, keyed by `(path, gap id)`.
     /// Session-only; joins the rows-cache key via [`Self::expansion_epoch`]
@@ -709,6 +738,40 @@ impl ReviewSession {
             .map(DiffRowIdentity::from)
     }
 
+    pub(crate) fn stream_top_identity(&self) -> Option<DiffRowIdentity> {
+        self.review_stream_rows()
+            .get(self.stream_scroll as usize)
+            .map(DiffRowIdentity::from)
+    }
+
+    pub(crate) fn stream_cursor_identity(&self) -> Option<DiffRowIdentity> {
+        self.review_stream_rows()
+            .get(self.stream_cursor)
+            .map(DiffRowIdentity::from)
+    }
+
+    pub(crate) fn restore_stream_top_identity(
+        &mut self,
+        identity: Option<&DiffRowIdentity>,
+        fallback: u16,
+    ) -> bool {
+        let rows = self.review_stream_rows();
+        let (top, recovered) = resolve_diff_row_identity(&rows, identity, fallback as usize);
+        self.stream_scroll = top.min(u16::MAX as usize) as u16;
+        recovered
+    }
+
+    pub(crate) fn restore_stream_cursor_identity(
+        &mut self,
+        identity: Option<&DiffRowIdentity>,
+        fallback: usize,
+    ) -> bool {
+        let rows = self.review_stream_rows();
+        let (cursor, recovered) = resolve_diff_row_identity(&rows, identity, fallback);
+        self.stream_cursor = cursor;
+        recovered
+    }
+
     /// Re-resolve a durable logical top after the selected file's row
     /// projection changes. Visual continuation remains TUI-owned.
     pub(crate) fn restore_diff_top_identity(
@@ -877,6 +940,9 @@ impl ReviewSession {
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
+            stream_cursor: 0,
+            stream_scroll: 0,
+            stream_mode: false,
             focus: Focus::Files,
             syntax,
             hide_generated: false,
@@ -897,6 +963,12 @@ impl ReviewSession {
             review_chunks: Vec::new(),
             change_briefs: Vec::new(),
             change_diffs: Vec::new(),
+            stack_changes: Vec::new(),
+            expanded_skim_folds: BTreeSet::new(),
+            stream_materialized_files: RefCell::new(BTreeSet::new()),
+            stream_cache: RefCell::new(None),
+            #[cfg(test)]
+            stream_projection_builds: Cell::new(0),
             selected_comment_id: None,
             context_expansion: BTreeMap::new(),
             file_contents: BTreeMap::new(),
@@ -936,6 +1008,7 @@ impl ReviewSession {
     }
 
     fn replace_diff_without_comment_refresh(&mut self, target: ReviewTarget, diff: DiffSet) {
+        let stream_mode = self.stream_mode;
         let mut state = self.to_state();
         state.meta = ReviewStateMeta::default();
         *self = Self::new_with_options(
@@ -959,6 +1032,7 @@ impl ReviewSession {
                 target_author_name: self.target_author_name.clone(),
             },
         );
+        self.stream_mode = stream_mode;
     }
 
     /// Like [`Self::replace_diff`], but for background refreshes of the
@@ -969,6 +1043,17 @@ impl ReviewSession {
         // The active file lives in the public viewport fields until we leave
         // it. Snapshot it before moving the per-file map through replacement.
         self.save_current_viewport();
+        let prior_stream = self.review_stream();
+        let stream_cursor_id = prior_stream
+            .rows
+            .get(self.stream_cursor)
+            .map(|row| row.id.clone());
+        let stream_top_id = prior_stream
+            .rows
+            .get(self.stream_scroll as usize)
+            .map(|row| row.id.clone());
+        let prior_stream_cursor = self.stream_cursor;
+        let prior_stream_scroll = self.stream_scroll;
         let file_pane_visible = self.file_pane_visible;
         let focus = self.focus;
         let hide_generated = self.hide_generated;
@@ -1180,6 +1265,44 @@ impl ReviewSession {
             focus.path = path;
             Some(focus)
         });
+        if self.stream_mode {
+            self.materialize_stream_file_reanchored(self.selected);
+        }
+        let stream = self.review_stream();
+        let cursor_by_id = stream_cursor_id
+            .as_ref()
+            .and_then(|id| stream.rows.iter().position(|row| &row.id == id));
+        let numeric_cursor = stream
+            .rows
+            .get(prior_stream_cursor)
+            .filter(|row| row.contains_file(self.selected))
+            .map(|_| prior_stream_cursor);
+        let fallback_entry = self.stream_entry_for_file(self.selected);
+        let next_cursor = cursor_by_id
+            .or(numeric_cursor)
+            .or(fallback_entry)
+            .unwrap_or_else(|| prior_stream_cursor.min(stream.rows.len().saturating_sub(1)));
+        let next_row = stream.rows.get(next_cursor).cloned();
+        let top_by_id = stream_top_id
+            .as_ref()
+            .and_then(|id| stream.rows.iter().position(|row| &row.id == id));
+        let numeric_top = stream
+            .rows
+            .get(prior_stream_scroll as usize)
+            .filter(|row| row.contains_file(self.selected))
+            .map(|_| prior_stream_scroll as usize);
+        drop(stream);
+        self.stream_cursor = next_cursor;
+        if self.stream_mode
+            && let Some(row) = next_row.as_ref()
+        {
+            self.sync_selected_context_from_stream_row(row);
+        }
+        self.stream_scroll = top_by_id
+            .or(numeric_top)
+            .or(fallback_entry)
+            .unwrap_or(prior_stream_scroll as usize)
+            .min(u16::MAX as usize) as u16;
     }
 
     fn refresh_comment_anchors_for_current_diff(
@@ -1470,13 +1593,21 @@ impl ReviewSession {
         }
         self.reveal_file_in_tree(index);
         self.tree_cursor = Some(TreeRowId::File { file_index: index });
-        if index == self.selected {
-            return;
+        if index != self.selected {
+            self.save_current_viewport();
+            self.clear_diff_range_selection();
+            self.selected = index;
+            self.restore_current_viewport();
         }
-        self.save_current_viewport();
-        self.clear_diff_range_selection();
-        self.selected = index;
-        self.restore_current_viewport();
+        if self.stream_mode {
+            self.materialize_stream_file_reanchored(index);
+        }
+        // File-pane selection is navigation into the one continuous stream,
+        // not a request to replace the diff pane's data source.
+        if let Some(row) = self.stream_entry_for_file(index) {
+            self.stream_cursor = row;
+            self.stream_scroll = row.saturating_sub(2).min(u16::MAX as usize) as u16;
+        }
     }
 
     pub(crate) fn select_file_revealed(&mut self, index: usize) -> bool {
@@ -1539,6 +1670,7 @@ impl ReviewSession {
         } else {
             self.diff_cursor = row_index;
         }
+        self.sync_stream_cursor_from_local();
     }
 
     fn save_current_viewport(&mut self) {
@@ -2340,6 +2472,9 @@ impl ReviewSession {
         };
         if self.focus == Focus::Diff {
             self.clear_selected_freshness_marks();
+            if let Some(index) = self.selectable_stream_entry_for_file(self.selected) {
+                self.select_stream_row(index, true);
+            }
         }
         // Never trap: focusing the files pane while it is hidden re-shows it.
         if self.focus == Focus::Files {
@@ -2387,6 +2522,7 @@ impl ReviewSession {
         } else if self.diff_cursor > self.diff_scroll as usize + DIFF_CURSOR_SCROLL_MARGIN {
             self.diff_scroll = self.diff_cursor.saturating_sub(DIFF_CURSOR_SCROLL_MARGIN) as u16;
         }
+        self.sync_stream_cursor_from_local();
         true
     }
 
@@ -2622,6 +2758,7 @@ impl ReviewSession {
                 self.focus = Focus::Diff;
                 self.diff_cursor = target;
                 self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+                self.sync_stream_cursor_from_local();
                 return before
                     != (
                         self.selected,
@@ -2645,6 +2782,19 @@ impl ReviewSession {
     pub fn jump_to_diff_row(&mut self, row_index: usize) {
         self.select_diff_row(row_index);
         self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+    }
+
+    fn sync_stream_cursor_from_local(&mut self) {
+        let selected = self.selected;
+        let local = self.diff_cursor;
+        let stream = self.review_stream();
+        if let Some(index) = stream
+            .rows
+            .iter()
+            .position(|row| row.file_index == Some(selected) && row.local_row == Some(local))
+        {
+            self.stream_cursor = index;
+        }
     }
 
     pub fn selected_comment_anchor(&self) -> Option<CommentAnchor> {
@@ -2897,6 +3047,9 @@ impl ReviewSession {
     }
 
     fn comment_matches_current_selection(&self, comment: &Comment) -> bool {
+        if self.stream_mode && self.focus == Focus::Diff {
+            return self.stream_comment_card_owner(comment) == Some(self.stream_cursor);
+        }
         match self.focus {
             Focus::Diff => self
                 .selected_line_anchor()
@@ -3287,11 +3440,31 @@ impl ReviewSession {
             .iter()
             .position(|file| file.path == target_path)?;
 
-        let row_index = self.comment_card_owner_for_file(file_index, &comment);
         let line_anchored = matches!(
             comment.anchor,
             Some(CommentAnchor::Line { .. } | CommentAnchor::Range { .. })
         );
+        if self.stream_mode {
+            let owner = self.stream_comment_card_owner(&comment);
+            if line_anchored && owner.is_none() {
+                return None;
+            }
+            self.select_file_revealed(file_index);
+            self.selected_comment_id = Some(comment.id.clone());
+            if line_anchored {
+                // File materialization can reshape the stream. Resolve the
+                // card owner again, then let stream landing rebind both the
+                // stream and file-local cursors from the stable anchor.
+                let owner = self.stream_comment_card_owner(&comment)?;
+                self.select_stream_row(owner, false);
+                self.stream_scroll = self.stream_cursor.saturating_sub(5) as u16;
+                return Some(CommentSelection::Diff);
+            }
+            self.focus = Focus::Files;
+            return Some(CommentSelection::File);
+        }
+
+        let row_index = self.comment_card_owner_for_file(file_index, &comment);
         if line_anchored && row_index.is_none() {
             return None;
         }
@@ -3302,6 +3475,7 @@ impl ReviewSession {
             self.focus = Focus::Diff;
             self.diff_cursor = row_index;
             self.diff_scroll = self.diff_cursor.saturating_sub(5) as u16;
+            self.sync_stream_cursor_from_local();
             Some(CommentSelection::Diff)
         } else {
             self.focus = Focus::Files;
@@ -3379,6 +3553,21 @@ impl ReviewSession {
             "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {}",
             self.files.len(),
             self.files.len(),
+            pluralize(self.comments.len(), "comment")
+        )
+    }
+
+    /// TUI review-stream summary. File viewed marks remain in the tree and
+    /// artifacts, while the footer reports the work units that salience asks
+    /// the reviewer to visit or explicitly dismiss.
+    pub fn coverage_summary_line(&self) -> String {
+        let generated = self.files.iter().filter(|file| file.generated).count();
+        let additions: usize = self.files.iter().map(|file| file.additions).sum();
+        let deletions: usize = self.files.iter().map(|file| file.deletions).sum();
+        format!(
+            "{} files ({}, {generated} generated/noisy), +{additions}/-{deletions}, {}",
+            self.files.len(),
+            self.coverage().label(),
             pluralize(self.comments.len(), "comment")
         )
     }

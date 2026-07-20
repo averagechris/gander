@@ -87,6 +87,10 @@ pub(super) enum Action {
     PreviousChangedHunk,
     NextFile,
     PreviousFile,
+    AttentionPromote,
+    AttentionDemote,
+    SpotlightNext,
+    SpotlightPrevious,
     ScrollDown,
     ScrollUp,
     ScrollDiffLeft,
@@ -278,6 +282,22 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         )?;
         add_bindings(&mut bindings, Action::NextFile, &config.next_file)?;
         add_bindings(&mut bindings, Action::PreviousFile, &config.previous_file)?;
+        add_bindings(
+            &mut bindings,
+            Action::AttentionPromote,
+            &config.attention_promote,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::AttentionDemote,
+            &config.attention_demote,
+        )?;
+        add_bindings(&mut bindings, Action::SpotlightNext, &config.spotlight_next)?;
+        add_bindings(
+            &mut bindings,
+            Action::SpotlightPrevious,
+            &config.spotlight_previous,
+        )?;
         add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
         add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;
         add_bindings(
@@ -624,8 +644,9 @@ impl Action {
             | CompareParent | TargetChooser | RevsetInput | StackNext | StackPrevious
             | OperationPicker | JjHelpers | ToggleAgentOrder | FlagList | OpenWork | Activity
             | WalkthroughList | Zen | DraftList | NextUnviewed | PreviousUnviewed | NextComment
-            | PreviousComment | NextFile | PreviousFile | FileSearch | ToggleFilePane
-            | ViewOptions | Comment | CommentList | CancelRangeComment => NORMAL,
+            | PreviousComment | NextFile | PreviousFile | SpotlightNext | SpotlightPrevious
+            | FileSearch | ToggleFilePane | ViewOptions | Comment | CommentList
+            | CancelRangeComment => NORMAL,
             Help => &[
                 KeyContext::NormalFiles,
                 KeyContext::NormalDiff,
@@ -656,11 +677,14 @@ impl Action {
             | RangeComment
             | MarkWalkthrough
             | WidenFilePane
-            | NarrowFilePane => DIFF,
+            | NarrowFilePane
+            | AttentionPromote
+            | AttentionDemote => DIFF,
             MarkViewed | ToggleViewed | MarkAllViewed | ToggleGenerated | CycleViewedFilter => {
                 NORMAL
             }
-            ToggleFold | CollapseFold | ExpandFold => FILES,
+            ToggleFold => NORMAL,
+            CollapseFold | ExpandFold => FILES,
             CycleCommentState | EditComment | DeleteComment => &[
                 KeyContext::NormalFiles,
                 KeyContext::NormalDiff,
@@ -1289,6 +1313,27 @@ mod tests {
     }
 
     #[test]
+    fn default_stream_attention_keys_match_human_decisions() {
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
+            Some(Action::AttentionPromote)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)),
+            Some(Action::AttentionDemote)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)),
+            Some(Action::SpotlightNext)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
+            Some(Action::SpotlightPrevious)
+        );
+    }
+
+    #[test]
     fn rejects_overlapping_bindings_after_canonicalization() {
         let config = KeybindingsConfig {
             quit: vec!["escape".to_owned()],
@@ -1532,21 +1577,21 @@ mod tests {
     #[test]
     fn configured_key_overrides_default_action() {
         let config = KeybindingsConfig {
-            move_down: vec!["alt-n".to_owned()],
+            move_down: vec!["alt-q".to_owned()],
             ..KeybindingsConfig::default()
         };
         let keymap = KeyMap::try_from(&config).unwrap();
 
-        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT);
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT);
 
         assert_eq!(keymap.action_for(&key), Some(Action::MoveDown));
-        assert_eq!(keymap.hint(Action::MoveDown), "alt-n");
+        assert_eq!(keymap.hint(Action::MoveDown), "alt-q");
     }
 
     #[test]
     fn movement_fallbacks_keep_j_k_and_arrows_available() {
         let config = KeybindingsConfig {
-            move_down: vec!["alt-n".to_owned()],
+            move_down: vec!["alt-q".to_owned()],
             move_up: vec!["alt-e".to_owned()],
             target_picker_down: vec!["ctrl-j".to_owned()],
             target_picker_up: vec!["ctrl-k".to_owned()],

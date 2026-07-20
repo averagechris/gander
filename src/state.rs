@@ -12,9 +12,9 @@ use crate::{
     provenance::{CommentObservation, CommentReplyResult},
 };
 
-/// Current on-disk review-state schema. Version 6 adds durable attention
-/// regions and optional anchor evidence on review targets.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 7;
+/// Current on-disk review-state schema. Version 8 adds conservative durable
+/// attention progress for skim acknowledgements and spotlight visits.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 8;
 
 /// Deterministic identity used only when reading pre-v4 local review state.
 /// Configured identities are stamped by adapters when creating new comments;
@@ -448,6 +448,11 @@ pub struct ReviewSession {
     pub disposition: Option<ReviewDisposition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attention_regions: Vec<AttentionRegion>,
+    /// Append-only review-stream progress. A record only counts while its
+    /// fingerprint matches the current projection; older records are retained
+    /// as history so drift never silently acknowledges new code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention_progress: Vec<AttentionProgress>,
     pub walkthroughs: Vec<Walkthrough>,
     pub action_items: Vec<ActionItem>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -524,6 +529,40 @@ pub struct AttentionRegion {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
     pub source: SalienceSource,
+}
+
+/// Stable, fingerprint-independent identity for one member of a rendered
+/// attention target. Cross-file skim folds carry one member per covered
+/// region, in stream order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AttentionProgressMember {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(default)]
+pub struct AttentionProgressTarget {
+    pub members: Vec<AttentionProgressMember>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AttentionProgressKind {
+    SkimAcknowledged,
+    SpotlightVisited,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttentionProgress {
+    pub target: AttentionProgressTarget,
+    pub kind: AttentionProgressKind,
+    /// Aggregate of every current file fingerprint covered by `target`.
+    pub fingerprint: String,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,6 +783,7 @@ struct CompatibleReviewSession {
     status: ReviewSessionStatus,
     disposition: Option<ReviewDisposition>,
     attention_regions: Vec<AttentionRegion>,
+    attention_progress: Vec<AttentionProgress>,
     walkthroughs: Vec<Walkthrough>,
     action_items: Vec<ActionItem>,
     tasks: Vec<ActionItem>,
@@ -773,6 +813,7 @@ impl<'de> Deserialize<'de> for ReviewSession {
             status: compatible.status,
             disposition: compatible.disposition,
             attention_regions: compatible.attention_regions,
+            attention_progress: compatible.attention_progress,
             walkthroughs: compatible.walkthroughs,
             action_items,
             created_at: compatible.created_at,
@@ -965,6 +1006,15 @@ fn merge_session_children(
     external: &mut ReviewSession,
     tombstones: &ReviewStateTombstones,
 ) {
+    for progress in &external.attention_progress {
+        if !local.attention_progress.iter().any(|candidate| {
+            candidate.kind == progress.kind
+                && candidate.target == progress.target
+                && candidate.fingerprint == progress.fingerprint
+        }) {
+            local.attention_progress.push(progress.clone());
+        }
+    }
     merge_vec_by_id(
         &mut local.action_items,
         external.action_items.clone(),
@@ -995,6 +1045,7 @@ fn merge_session_children(
     }
     external.action_items = local.action_items.clone();
     external.walkthroughs = local.walkthroughs.clone();
+    external.attention_progress = local.attention_progress.clone();
 }
 
 fn prefer_external_by_updated_at(
@@ -1270,7 +1321,90 @@ mod tests {
         .unwrap();
 
         assert!(state.sessions[0].attention_regions.is_empty());
+        assert!(state.sessions[0].attention_progress.is_empty());
         assert!(state.sessions[0].target.anchor.is_none());
+    }
+
+    #[test]
+    fn attention_progress_round_trips_with_stable_target_and_fingerprint_history() {
+        let progress = AttentionProgress {
+            target: AttentionProgressTarget {
+                members: vec![AttentionProgressMember {
+                    file: "src/lib.rs".into(),
+                    line: Some(7),
+                    end_line: Some(9),
+                }],
+            },
+            kind: AttentionProgressKind::SkimAcknowledged,
+            fingerprint: "current-diff".into(),
+            recorded_at: chrono::Utc::now(),
+        };
+        let state = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "progress".into(),
+                attention_progress: vec![progress.clone()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let loaded: ReviewState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(loaded.sessions[0].attention_progress, [progress]);
+    }
+
+    #[test]
+    fn external_merge_unions_current_and_stale_attention_progress_history() {
+        let progress = |fingerprint: &str, kind| AttentionProgress {
+            target: AttentionProgressTarget {
+                members: vec![AttentionProgressMember {
+                    file: "src/lib.rs".into(),
+                    line: Some(7),
+                    end_line: Some(7),
+                }],
+            },
+            kind,
+            fingerprint: fingerprint.into(),
+            recorded_at: chrono::Utc::now(),
+        };
+        let mut local = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "review".into(),
+                attention_progress: vec![progress(
+                    "old-fingerprint",
+                    AttentionProgressKind::SpotlightVisited,
+                )],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let external = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "review".into(),
+                attention_progress: vec![
+                    progress("old-fingerprint", AttentionProgressKind::SpotlightVisited),
+                    progress(
+                        "current-fingerprint",
+                        AttentionProgressKind::SkimAcknowledged,
+                    ),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        local.merge_external(external, &ReviewStateTombstones::default());
+        assert_eq!(local.sessions[0].attention_progress.len(), 2);
+        assert!(
+            local.sessions[0]
+                .attention_progress
+                .iter()
+                .any(|entry| entry.fingerprint == "old-fingerprint")
+        );
+        assert!(
+            local.sessions[0]
+                .attention_progress
+                .iter()
+                .any(|entry| entry.fingerprint == "current-fingerprint")
+        );
     }
 
     #[test]

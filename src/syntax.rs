@@ -4,7 +4,7 @@ use serde::Deserialize;
 use tree_sitter::{Language, Parser};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(default)]
 pub struct SyntaxConfig {
     pub enabled: bool,
@@ -15,7 +15,7 @@ pub struct SyntaxConfig {
     pub theme: SyntaxThemeConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Hash)]
 #[serde(default)]
 pub struct SyntaxLanguageMapping {
     pub name: String,
@@ -23,7 +23,7 @@ pub struct SyntaxLanguageMapping {
     pub filenames: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct SyntaxThemeConfig {
     pub attribute: String,

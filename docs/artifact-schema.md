@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `12`.
+Current schema version: `13`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -36,7 +36,7 @@ or `"team"` in config.
 
 ```json
 {
-  "version": 12,
+  "version": 13,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -254,7 +254,14 @@ or `"team"` in config.
       "source": "human",
       "stale": false
     }
-  ]
+  ],
+  "attention_progress": [{
+    "target": { "members": [{ "file": "src/main.rs", "line": 42, "end_line": 42 }] },
+    "kind": "spotlight-visited",
+    "fingerprint": "sha256...",
+    "recorded_at": "2026-07-20T00:00:00Z",
+    "stale": false
+  }]
 }
 ```
 
@@ -271,6 +278,10 @@ Notes:
   Staleness is evaluated against the unfiltered attention diff, so current
   ignore-policy heuristic regions do not become stale merely because the normal
   file view filters them out.
+- `attention_progress` is private append-only skim acknowledgement and
+  spotlight-visit history. Its stable target identity is separate from the
+  aggregate current diff fingerprint; `stale: true` records remain history but
+  never count toward coverage. Team exports omit progress.
 - `session` is present when the exported change matches an open durable review
   session; it includes the session `id` and optional `title`.
 - `comments[].session_id` identifies the durable session that owns a newly
@@ -358,6 +369,8 @@ Notes:
 
 ## Version history
 
+- `13`: private fingerprint-guarded skim acknowledgement and spotlight visit
+  progress, including derived stale status.
 - `12`: walkthrough steps may include an attributed `author` identity. Legacy
   steps omit it and remain neutral; readers must not infer agent authorship.
 - `11`: human/agent artifacts include durable attention assignments and stale
@@ -383,7 +396,9 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
-Review-state schema `7` adds optional walkthrough-step author identity; a
+Review-state schema `8` adds append-only attention progress keyed by stable
+region identity plus current aggregate diff fingerprint. Review-state schema
+`7` adds optional walkthrough-step author identity; a
 missing author remains neutral/unknown and is never guessed. Review-state
 schema `6` adds durable attention regions and optional existing
 anchor/fingerprint evidence on `ReviewTarget`. Review-state schema `5` adds session disposition and permits collaboration todo

@@ -57,7 +57,7 @@ use ratatui::{
 
 use crate::{
     agent::{AgentProcess, ChunkPart},
-    app::{CommentSelection, Focus, NavigationPlacement, ReviewSession},
+    app::{CommentSelection, Focus, NavigationPlacement, ReviewSession, SkimAcknowledgeResult},
     artifact::{
         ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
         render_handoff_markdown,
@@ -391,6 +391,7 @@ enum UiNoticeLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DiffDrag {
     start_row: usize,
+    start_file_index: usize,
     current_row: usize,
     saw_drag: bool,
 }
@@ -437,6 +438,8 @@ pub fn run(
     agent_config: AgentConfig,
     start_tour: bool,
 ) -> Result<()> {
+    session.stream_mode = true;
+    session.materialize_stream_file_reanchored(session.selected);
     let TuiPaths {
         state_file: state_path,
         agent_overlay: agent_overlay_path,
@@ -490,6 +493,7 @@ pub fn run(
         generated_matcher,
         jj,
     };
+    reload_stream_chapter_metadata(&review_loader, session);
 
     // Host a live ACP endpoint so agents can talk to this session while the
     // human reviews. The socket is per-instance (docs/decisions.md D3), and
@@ -837,6 +841,7 @@ fn tour_breadcrumb(stop: &zen::ZenStop) -> String {
 /// Every successful teardown funnels through this helper.
 fn finish_zen_presentation(session: &mut ReviewSession, tui_state: &mut TuiState, zen: &ZenState) {
     zen::end(session, zen);
+    session.stream_mode = true;
     tui_state.restore_presentation_file_pane_scope(session);
 }
 
@@ -926,6 +931,7 @@ fn seed_zen_tour(
                     ),
                 },
             });
+            session.stream_mode = false;
             tui_state.zen = Some(zen);
         }
         None => {
@@ -2548,6 +2554,10 @@ fn handle_normal_action(
             | Action::PreviousUnviewed
             | Action::NextFile
             | Action::PreviousFile
+            | Action::SpotlightNext
+            | Action::SpotlightPrevious
+            | Action::AttentionPromote
+            | Action::AttentionDemote
             | Action::MarkViewed
             | Action::ToggleViewed
             | Action::MarkAllViewed
@@ -2565,11 +2575,27 @@ fn handle_normal_action(
             | Action::DeleteComment
     ) || matches!(action, Action::MoveDown | Action::MoveUp)
         && session.focus == Focus::Files;
-    let transition = (!explicit_viewport_action && indirect_viewport_action).then(|| {
-        tui_state
-            .diff_viewport
-            .transition_snapshot(session, current_diff_inner(session, tui_state))
-    });
+    let stream_navigation_action = session.stream_mode
+        && (matches!(
+            action,
+            Action::NextUnviewed
+                | Action::PreviousUnviewed
+                | Action::NextFile
+                | Action::PreviousFile
+                | Action::MarkViewed
+                | Action::SpotlightNext
+                | Action::SpotlightPrevious
+                | Action::AttentionPromote
+                | Action::AttentionDemote
+        ) || matches!(action, Action::MoveDown | Action::MoveUp));
+    let transition = (!explicit_viewport_action
+        && indirect_viewport_action
+        && !stream_navigation_action)
+        .then(|| {
+            tui_state
+                .diff_viewport
+                .transition_snapshot(session, current_diff_inner(session, tui_state))
+        });
     let top_only_transition = matches!(action, Action::ToggleFocus | Action::ToggleFilePane);
     match action {
         Action::Quit => unreachable!("handled above"),
@@ -2582,24 +2608,46 @@ fn handle_normal_action(
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
             Focus::Diff => {
-                if session.move_diff_cursor(1) {
+                let had_range = session.has_active_diff_range();
+                if if session.stream_mode {
+                    session.move_stream_cursor(1)
+                } else {
+                    session.move_diff_cursor(1)
+                } {
                     ensure_diff_cursor_visible(
                         session,
                         current_diff_inner(session, tui_state),
                         tui_state,
                     );
                 }
+                if had_range && !session.has_active_diff_range() {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: "range selection cancelled at file boundary".to_owned(),
+                    });
+                }
             }
         },
         Action::MoveUp => match session.focus {
             Focus::Files => session.move_selection(-1),
             Focus::Diff => {
-                if session.move_diff_cursor(-1) {
+                let had_range = session.has_active_diff_range();
+                if if session.stream_mode {
+                    session.move_stream_cursor(-1)
+                } else {
+                    session.move_diff_cursor(-1)
+                } {
                     ensure_diff_cursor_visible(
                         session,
                         current_diff_inner(session, tui_state),
                         tui_state,
                     );
+                }
+                if had_range && !session.has_active_diff_range() {
+                    tui_state.notice = Some(UiNotice {
+                        level: UiNoticeLevel::Info,
+                        message: "range selection cancelled at file boundary".to_owned(),
+                    });
                 }
             }
         },
@@ -2735,6 +2783,42 @@ fn handle_normal_action(
         Action::PreviousUnviewed => session.move_to_unviewed(-1),
         Action::NextFile => session.move_file_selection(1),
         Action::PreviousFile => session.move_file_selection(-1),
+        Action::SpotlightNext => {
+            if session.jump_spotlight(1) {
+                tui_state
+                    .diff_viewport
+                    .place_cursor(session, current_diff_inner(session, tui_state));
+            }
+        }
+        Action::SpotlightPrevious => {
+            if session.jump_spotlight(-1) {
+                tui_state
+                    .diff_viewport
+                    .place_cursor(session, current_diff_inner(session, tui_state));
+            }
+        }
+        Action::AttentionPromote => {
+            let changed = session.change_selected_salience(true);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: if changed {
+                    "promoted region with durable human precedence".to_owned()
+                } else {
+                    "no current attention region under cursor".to_owned()
+                },
+            });
+        }
+        Action::AttentionDemote => {
+            let changed = session.change_selected_salience(false);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: if changed {
+                    "demoted region with durable human precedence".to_owned()
+                } else {
+                    "no current attention region under cursor".to_owned()
+                },
+            });
+        }
         Action::FileSearch => {
             *mode = Mode::FileSearch(FileSearchState::new(session));
         }
@@ -2854,12 +2938,39 @@ fn handle_normal_action(
         ),
         Action::MarkViewed => session.mark_selected_viewed(),
         Action::ToggleViewed => session.toggle_viewed(),
-        Action::MarkAllViewed => session.mark_all_viewed(),
+        Action::MarkAllViewed => {
+            if session.stream_mode && session.focus == Focus::Diff {
+                let message = match session.acknowledge_selected_skim_fold() {
+                    SkimAcknowledgeResult::Acknowledged => "acknowledged current skim region",
+                    SkimAcknowledgeResult::NotFold => {
+                        "select a skim fold before acknowledging; no files were marked viewed"
+                    }
+                    SkimAcknowledgeResult::Unavailable => {
+                        "skim acknowledgement unavailable; no files were marked viewed"
+                    }
+                };
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: message.to_owned(),
+                });
+            } else {
+                session.mark_all_viewed();
+            }
+        }
         Action::ToggleGenerated => session.toggle_generated_visibility(),
         Action::CycleViewedFilter => session.cycle_viewed_filter(),
         Action::ToggleFold => {
             if session.focus == Focus::Files {
                 session.toggle_tree_fold();
+            } else if let Some(expanded) = session.toggle_selected_skim_fold() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: if expanded {
+                        "peeked into skim fold".to_owned()
+                    } else {
+                        "collapsed skim fold".to_owned()
+                    },
+                });
             }
         }
         Action::CollapseFold => {
@@ -3381,6 +3492,7 @@ fn load_change_diffs_for_stack(
     session: &mut ReviewSession,
     stack: &[JjChangeSummary],
 ) {
+    session.stack_changes = stack.to_vec();
     for change in stack {
         if session
             .change_diffs
@@ -3396,6 +3508,19 @@ fn load_change_diffs_for_stack(
             session.change_diffs.push((change.change_id.clone(), diff));
         }
     }
+}
+
+fn reload_stream_chapter_metadata(review_loader: &ReviewLoader<'_>, session: &mut ReviewSession) {
+    let mut stack = review_loader
+        .jj
+        .stack_changes(&session.repo, &session.target)
+        .unwrap_or_default();
+    stack.retain(|change| !change.matches_rev(&session.target.base));
+    // A live refresh can update the working-copy diff without changing its
+    // change id. Reload chapter diffs rather than retaining same-id stale
+    // stats; all jj calls remain read-only through the backend.
+    session.change_diffs.clear();
+    load_change_diffs_for_stack(review_loader, session, &stack);
 }
 
 fn change_ids_match_for_tui(a: &str, b: &str) -> bool {
@@ -4901,6 +5026,7 @@ impl ReviewLoader<'_> {
             self.generated_matcher.is_match(&file.path)
                 || crate::generated::diff_content_looks_generated(&file.diff)
         });
+        reload_stream_chapter_metadata(self, session);
         Ok(())
     }
 }
@@ -5204,15 +5330,19 @@ fn handle_left_down(
     if point_in_rect(x, y, files_inner) {
         session.focus = Focus::Files;
         if let Some(row) = row_in_inner(y, files_inner) {
-            let transition = tui_state
-                .diff_viewport
-                .transition_snapshot(session, inner_bordered(layout.diff));
-            session.select_visible_tree_row(row);
-            tui_state.diff_viewport.finish_transition(
-                transition,
-                session,
-                inner_bordered(layout.diff),
-            );
+            if session.stream_mode {
+                session.select_visible_tree_row(row);
+            } else {
+                let transition = tui_state
+                    .diff_viewport
+                    .transition_snapshot(session, inner_bordered(layout.diff));
+                session.select_visible_tree_row(row);
+                tui_state.diff_viewport.finish_transition(
+                    transition,
+                    session,
+                    inner_bordered(layout.diff),
+                );
+            }
         }
         tui_state.diff_drag = None;
         return;
@@ -5227,13 +5357,18 @@ fn handle_left_down(
             render::DiffPointHit::Code(row_index) => {
                 tui_state.diff_viewport.clear_selected_annotation();
                 session.clear_diff_range_selection();
-                session.select_diff_row(row_index);
+                if session.stream_mode {
+                    session.select_stream_row(row_index, true);
+                } else {
+                    session.select_diff_row(row_index);
+                }
                 let normalized = session.diff_cursor;
                 tui_state
                     .diff_viewport
                     .logical_selection(session, diff_inner);
                 tui_state.diff_drag = Some(DiffDrag {
                     start_row: normalized,
+                    start_file_index: session.selected,
                     current_row: normalized,
                     saw_drag: false,
                 });
@@ -5243,7 +5378,11 @@ fn handle_left_down(
                 if let Some(comment_id) = source.comment_id() {
                     session.select_comment_by_id(comment_id);
                 } else {
-                    session.select_diff_row(owner);
+                    if session.stream_mode {
+                        session.select_stream_row(owner, true);
+                    } else {
+                        session.select_diff_row(owner);
+                    }
                 }
                 tui_state.diff_viewport.select_annotation(session, source);
                 tui_state
@@ -5262,7 +5401,11 @@ fn handle_left_drag(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
 ) {
-    let Some(start_row) = tui_state.diff_drag.as_ref().map(|drag| drag.start_row) else {
+    let Some((start_row, start_file_index)) = tui_state
+        .diff_drag
+        .as_ref()
+        .map(|drag| (drag.start_row, drag.start_file_index))
+    else {
         return;
     };
     let diff_inner = inner_bordered(layout.diff);
@@ -5271,14 +5414,47 @@ fn handle_left_drag(
         && let Some(row_index) =
             render::diff_row_at_point(session, diff_inner, x, visible_row, tui_state)
     {
-        session.select_diff_row(row_index);
-        let normalized = session.diff_cursor;
-        if let Some(drag) = tui_state.diff_drag.as_mut() {
-            drag.current_row = normalized;
-            drag.saw_drag = true;
-        }
-        session.set_diff_range_selection(start_row, normalized);
+        apply_diff_drag_row(row_index, start_row, start_file_index, session, tui_state);
     }
+}
+
+fn apply_diff_drag_row(
+    row_index: usize,
+    start_row: usize,
+    start_file_index: usize,
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+) {
+    if session.stream_mode
+        && session
+            .stream_row_path(row_index)
+            .zip(
+                session
+                    .files
+                    .get(start_file_index)
+                    .map(|file| file.path.as_str()),
+            )
+            .is_some_and(|(destination, start)| destination != start)
+    {
+        session.clear_diff_range_selection();
+        tui_state.diff_drag = None;
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "range selection cancelled at file boundary".to_owned(),
+        });
+        return;
+    }
+    if session.stream_mode {
+        session.select_stream_row(row_index, true);
+    } else {
+        session.select_diff_row(row_index);
+    }
+    let normalized = session.diff_cursor;
+    if let Some(drag) = tui_state.diff_drag.as_mut() {
+        drag.current_row = normalized;
+        drag.saw_drag = true;
+    }
+    session.set_diff_range_selection(start_row, normalized);
 }
 
 fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut TuiState) {
@@ -5328,7 +5504,196 @@ mod tests {
     use std::{cell::RefCell, path::Path, rc::Rc};
 
     use crate::jj::{JjBackend, JjChangeSummary, ReviewTarget};
-    use crate::state::{ActionIntent, ActionItem, Comment, CommentKind, CommentState};
+    use crate::state::{
+        ActionIntent, ActionItem, AttentionRegion, Comment, CommentKind, CommentState, Salience,
+        SalienceSource,
+    };
+
+    #[test]
+    fn stream_a_only_acknowledges_selected_fold_and_never_marks_all_on_ordinary_rows() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old_a\n+new_a\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old_b\n+new_b\n";
+        let mut session = snapshot_session(raw);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let mut durable = crate::state::ReviewSession {
+            id: "stream-a".into(),
+            attention_regions: vec![AttentionRegion {
+                target: crate::attention::target_for_diff(&files, "a.rs", None, None).unwrap(),
+                salience: Salience::Skim,
+                rationale: Some("generated churn".into()),
+                source: SalienceSource::Heuristic,
+            }],
+            ..Default::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
+        session.sessions.push(durable);
+        session.stream_mode = true;
+        session.focus = Focus::Diff;
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState::default();
+
+        let ordinary = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| row.path.as_deref() == Some("b.rs") && row.anchor.is_some())
+            .unwrap();
+        session.select_stream_row(ordinary, false);
+        handle_normal_action(
+            Action::MarkAllViewed,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.files.iter().all(|file| !file.viewed));
+        assert!(
+            tui_state
+                .notice
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("no files were marked viewed")
+        );
+
+        let fold = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, crate::app::StreamRowKind::SkimFold(_)))
+            .unwrap();
+        session.select_stream_row(fold, false);
+        handle_normal_action(
+            Action::MarkAllViewed,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.files[0].viewed);
+        assert!(!session.files[1].viewed);
+        assert_eq!(session.sessions[0].attention_progress.len(), 1);
+
+        session.stream_mode = false;
+        session
+            .files
+            .iter_mut()
+            .for_each(|file| file.viewed = false);
+        handle_normal_action(
+            Action::MarkAllViewed,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.files.iter().all(|file| file.viewed));
+    }
+
+    #[test]
+    fn stream_mouse_drag_cancels_cross_file_ranges_in_unified_and_split_views() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old_a\n+new_a\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old_b\n+new_b\n";
+        for split in [false, true] {
+            let mut session = snapshot_session(raw);
+            session.stream_mode = true;
+            session.focus = Focus::Diff;
+            if split {
+                session.toggle_diff_view();
+            }
+            let stream = session.review_stream();
+            let a = stream
+                .rows
+                .iter()
+                .position(|row| row.path.as_deref() == Some("a.rs") && row.anchor.is_some())
+                .unwrap();
+            let b = stream
+                .rows
+                .iter()
+                .position(|row| row.path.as_deref() == Some("b.rs") && row.anchor.is_some())
+                .unwrap();
+            drop(stream);
+            session.select_stream_row(a, false);
+            session.toggle_diff_range_selection();
+            let start = session.diff_cursor;
+            let mut tui_state = TuiState {
+                diff_drag: Some(DiffDrag {
+                    start_row: start,
+                    start_file_index: 0,
+                    current_row: start,
+                    saw_drag: false,
+                }),
+                ..Default::default()
+            };
+            apply_diff_drag_row(b, start, 0, &mut session, &mut tui_state);
+            assert!(session.diff_range_selection.is_none());
+            assert!(tui_state.diff_drag.is_none());
+            assert!(
+                tui_state
+                    .notice
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("file boundary")
+            );
+            session.select_stream_row(a, false);
+            assert!(session.diff_range_selection.is_none());
+        }
+    }
+
+    #[test]
+    fn stream_keyboard_crossing_cancels_range_with_notice() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old_a\n+new_a\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old_b\n+new_b\n";
+        let mut session = snapshot_session(raw);
+        session.stream_mode = true;
+        session.focus = Focus::Diff;
+        let last_a = session
+            .review_stream()
+            .rows
+            .iter()
+            .rposition(|row| row.path.as_deref() == Some("a.rs") && row.anchor.is_some())
+            .unwrap();
+        session.select_stream_row(last_a, false);
+        session.toggle_diff_range_selection();
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState::default();
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        assert!(session.diff_range_selection.is_none());
+        assert!(
+            tui_state
+                .notice
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("file boundary")
+        );
+    }
 
     #[test]
     fn every_mode_declares_review_pointer_ownership() {
@@ -6967,6 +7332,60 @@ mod tests {
                 None => bail!("no file contents configured"),
             }
         }
+    }
+
+    #[test]
+    fn normal_load_and_live_refresh_reload_stream_chapter_metadata() {
+        let first = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let second = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n keep\n";
+        let mut backend = MockJjBackend::with_diff(Ok(first.into()));
+        backend.stack = vec![JjChangeSummary {
+            change_id: "abc123".into(),
+            bookmarks: "feature/chapters".into(),
+            description: "feat: chapter metadata".into(),
+        }];
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut session = snapshot_session("");
+        loader
+            .load(&mut session, ReviewTarget::new("trunk()", "@"))
+            .unwrap();
+        assert_eq!(session.stack_changes, backend.stack);
+        assert_eq!(session.change_diffs.len(), 1);
+        assert_eq!(
+            session.change_diffs[0]
+                .1
+                .files
+                .iter()
+                .map(|file| file.additions)
+                .sum::<usize>(),
+            1
+        );
+
+        backend
+            .diff_queue
+            .borrow_mut()
+            .extend([Ok(second.into()), Ok(second.into())]);
+        loader
+            .load_in_place(&mut session, ReviewTarget::new("trunk()", "@"))
+            .unwrap();
+        assert_eq!(
+            session.stack_changes[0].description,
+            "feat: chapter metadata"
+        );
+        assert_eq!(session.stack_changes[0].bookmarks, "feature/chapters");
+        assert_eq!(
+            session.change_diffs[0]
+                .1
+                .files
+                .iter()
+                .map(|file| file.additions)
+                .sum::<usize>(),
+            2
+        );
     }
 
     #[test]
@@ -9364,6 +9783,7 @@ diff --git a/b.rs b/b.rs
             zen: Some(takeover),
             diff_drag: Some(DiffDrag {
                 start_row: 0,
+                start_file_index: 0,
                 current_row: 0,
                 saw_drag: true,
             }),
@@ -9427,6 +9847,7 @@ diff --git a/b.rs b/b.rs
             let mut tui_state = TuiState {
                 diff_drag: Some(DiffDrag {
                     start_row: before_cursor,
+                    start_file_index: 0,
                     current_row: before_cursor,
                     saw_drag: false,
                 }),
@@ -9513,6 +9934,60 @@ diff --git a/b.rs b/b.rs
         );
         assert_eq!(session.diff_scroll as usize, owner);
         assert!(tui_state.diff_viewport.visual_state(&session).0 > 0);
+    }
+
+    #[test]
+    fn stream_mouse_landing_reanchors_after_detailed_rows_reshape_hit_projection() {
+        let context = (0..8)
+            .map(|line| format!(" fn before_{line}() {{}}\n"))
+            .collect::<String>();
+        let raw = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -10,12 +10,12 @@\n{context}-fn old_target() {{}}\n+fn new_target() {{}}\n fn after_0() {{}}\n fn after_1() {{}}\n fn after_2() {{}}\ndiff --git a/c.rs b/c.rs\n--- a/c.rs\n+++ b/c.rs\n@@ -1,8 +1,8 @@\n-old_0\n+new_0\n-old_1\n+new_1\n-old_2\n+new_2\n-old_3\n+new_3\n"
+        );
+        let mut session = snapshot_session(&raw);
+        session.stream_mode = true;
+        session.fold_context = true;
+        session.file_pane_visible = false;
+        let hit = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| {
+                row.path.as_deref() == Some("b.rs")
+                    && row
+                        .anchor
+                        .as_ref()
+                        .and_then(crate::anchor::CommentAnchor::line)
+                        == Some(18)
+            })
+            .unwrap();
+        session.stream_scroll = hit as u16;
+        let layout = ui_layout(Rect::new(0, 0, 100, 12), false, &UiConfig::default(), 30);
+        let inner = inner_bordered(layout.diff);
+        let mut tui_state = TuiState::default();
+        tui_state.diff_viewport.file_restored(&session);
+
+        handle_left_down(inner.x + 15, inner.y, layout, &mut session, &mut tui_state);
+
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        let stream_row = session.selected_stream_row().unwrap();
+        assert_eq!(
+            stream_row
+                .anchor
+                .as_ref()
+                .and_then(crate::anchor::CommentAnchor::line),
+            Some(18)
+        );
+        assert_eq!(
+            session.diff_rows_for_selected_file()[session.diff_cursor].anchor,
+            stream_row.anchor
+        );
+        assert!(
+            session
+                .diff_rows_for_selected_file()
+                .iter()
+                .any(|row| matches!(row.kind, crate::app::DiffRowKind::ContextFold))
+        );
     }
 
     #[test]
@@ -10601,6 +11076,7 @@ diff --git a/c.rs b/c.rs
         let mut tui_state = TuiState {
             diff_drag: Some(DiffDrag {
                 start_row: 0,
+                start_file_index: 0,
                 current_row: 0,
                 saw_drag: false,
             }),

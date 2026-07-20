@@ -39,11 +39,12 @@ gander handoff --copy
 gander hunks show <hunk-id>
 ```
 
-Review state schema 6 records durable fingerprint-anchored attention regions in
+Review state schema 8 records durable fingerprint-anchored attention regions and
+append-only, fingerprint-current skim/spotlight progress in
 addition to optional comment `session_id`, `path`, immutable
 observations, reply results, annotation authors/channels, and session
 disposition, plus normalized `action_items` when legacy `tasks` state is read.
-Artifact schema 11 and delegation schema 5 expose action-item shape, private
+Artifact schema 13 and delegation schema 5 expose action-item shape, private
 human/agent attention assignments, team-profile
 collaboration exports, plus portable comment-observation and reply-result evidence. A snapshot label or an
 unchanged portable patch is context, not proof that the requested outcome was

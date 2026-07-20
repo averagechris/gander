@@ -41,7 +41,7 @@ pub struct TeamProjection<'a> {
 }
 
 const EXCERPT_CONTEXT_LINES: usize = 3;
-pub const ARTIFACT_SCHEMA_VERSION: u8 = 12;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 13;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -63,6 +63,17 @@ pub struct ReviewArtifact<'a> {
     /// this field to preserve the collaboration-only publication boundary.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attention_regions: Vec<crate::attention::AssignedAttentionRegion>,
+    /// Append-only private progress with a derived stale marker. Team exports
+    /// omit it for the same publication-boundary reason as assignments.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attention_progress: Vec<AttentionProgressArtifact<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttentionProgressArtifact<'a> {
+    #[serde(flatten)]
+    pub progress: &'a crate::state::AttentionProgress,
+    pub stale: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -392,6 +403,23 @@ impl<'a> ReviewArtifact<'a> {
                         crate::attention::list_assigned_attention(active, attention_files)
                     })
                     .unwrap_or_default()
+            },
+            attention_progress: if team {
+                Vec::new()
+            } else {
+                durable
+                    .into_iter()
+                    .flat_map(|active| active.attention_progress.iter())
+                    .map(|progress| AttentionProgressArtifact {
+                        progress,
+                        stale: crate::attention::progress_fingerprint(
+                            &progress.target,
+                            attention_files,
+                        )
+                        .as_deref()
+                            != Some(progress.fingerprint.as_str()),
+                    })
+                    .collect()
             },
         }
     }
@@ -1676,7 +1704,10 @@ mod tests {
         app::ReviewSession,
         diff::DiffSet,
         jj::ReviewTarget as JjReviewTarget,
-        state::{ActionItem, CommentReply, FileState, ReviewSessionStatus, Walkthrough},
+        state::{
+            ActionItem, AttentionProgress, AttentionProgressKind, AttentionProgressMember,
+            AttentionProgressTarget, CommentReply, FileState, ReviewSessionStatus, Walkthrough,
+        },
     };
 
     fn fixture() -> ReviewSession {
@@ -1800,6 +1831,53 @@ mod tests {
             .unwrap(),
             state,
         )
+    }
+
+    #[test]
+    fn artifact_marks_progress_current_or_stale_and_team_keeps_it_private() {
+        let mut session = fixture();
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = AttentionProgressTarget {
+            members: vec![AttentionProgressMember {
+                file: "a.txt".into(),
+                line: Some(1),
+                end_line: Some(1),
+            }],
+        };
+        let current = crate::attention::progress_fingerprint(&target, &files).unwrap();
+        let active = session
+            .sessions
+            .iter_mut()
+            .find(|review| review.id == "active")
+            .unwrap();
+        active.attention_progress = vec![
+            AttentionProgress {
+                target: target.clone(),
+                kind: AttentionProgressKind::SpotlightVisited,
+                fingerprint: current,
+                recorded_at: chrono::DateTime::UNIX_EPOCH,
+            },
+            AttentionProgress {
+                target,
+                kind: AttentionProgressKind::SkimAcknowledged,
+                fingerprint: "stale-fingerprint".into(),
+                recorded_at: chrono::DateTime::UNIX_EPOCH,
+            },
+        ];
+        let human =
+            serde_json::to_value(ReviewArtifact::build(&session, ArtifactProfile::Human)).unwrap();
+        let progress = human["attention_progress"].as_array().unwrap();
+        assert_eq!(progress.len(), 2);
+        assert_eq!(progress[0]["stale"], false);
+        assert_eq!(progress[1]["stale"], true);
+
+        let team =
+            serde_json::to_value(ReviewArtifact::build(&session, ArtifactProfile::Team)).unwrap();
+        assert!(team.get("attention_progress").is_none());
     }
 
     fn compatibility_shape_without_additive_annotations(

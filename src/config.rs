@@ -346,6 +346,10 @@ pub struct KeybindingsConfig {
     pub previous_changed_hunk: Vec<String>,
     pub next_file: Vec<String>,
     pub previous_file: Vec<String>,
+    pub attention_promote: Vec<String>,
+    pub attention_demote: Vec<String>,
+    pub spotlight_next: Vec<String>,
+    pub spotlight_previous: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub scroll_diff_left: Vec<String>,
@@ -608,6 +612,10 @@ struct KeybindingsConfigPatch {
     previous_changed_hunk: Option<Vec<String>>,
     next_file: Option<Vec<String>>,
     previous_file: Option<Vec<String>>,
+    attention_promote: Option<Vec<String>>,
+    attention_demote: Option<Vec<String>>,
+    spotlight_next: Option<Vec<String>>,
+    spotlight_previous: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     scroll_diff_left: Option<Vec<String>>,
@@ -752,6 +760,10 @@ impl KeybindingsConfig {
             previous_changed_hunk: keys(["["]),
             next_file: keys(["."]),
             previous_file: keys([","]),
+            attention_promote: keys(["alt-up"]),
+            attention_demote: keys(["alt-down"]),
+            spotlight_next: keys(["alt-n"]),
+            spotlight_previous: keys(["alt-p"]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             scroll_diff_left: keys(["shift-left"]),
@@ -1086,6 +1098,10 @@ impl KeybindingsConfig {
         apply_optional(&mut self.previous_changed_hunk, patch.previous_changed_hunk);
         apply_optional(&mut self.next_file, patch.next_file);
         apply_optional(&mut self.previous_file, patch.previous_file);
+        apply_optional(&mut self.attention_promote, patch.attention_promote);
+        apply_optional(&mut self.attention_demote, patch.attention_demote);
+        apply_optional(&mut self.spotlight_next, patch.spotlight_next);
+        apply_optional(&mut self.spotlight_previous, patch.spotlight_previous);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.scroll_diff_left, patch.scroll_diff_left);

@@ -239,7 +239,11 @@ impl DiffViewportController {
         inner: Rect,
         split_active: bool,
     ) -> DiffMeasurement {
-        let rows = session.diff_rows_for_selected_file();
+        let rows = if session.stream_mode {
+            session.review_stream_rows()
+        } else {
+            session.diff_rows_for_selected_file()
+        };
         self.measure_rows(session, rows, inner, split_active)
     }
 
@@ -322,8 +326,11 @@ impl DiffViewportController {
         let scope = annotation_scope(session);
         self.prune_annotation_scope(&scope);
         let preferred = self.revalidate_selected_annotation(session);
-        let source =
-            annotation_artifact_card_at_owner(session, session.diff_cursor, preferred.as_ref())?;
+        let source = annotation_artifact_card_at_owner(
+            session,
+            viewport_cursor(session),
+            preferred.as_ref(),
+        )?;
         let id = ScopedCardId { scope, source };
         let mut expanded = self.expanded_cards.borrow_mut();
         let now_expanded = if expanded.remove(&id) {
@@ -386,7 +393,7 @@ impl DiffViewportController {
         let selected = self.selected_annotation.borrow().clone();
         let valid = selected.as_ref().is_some_and(|selected| {
             selected.scope == scope
-                && input.owner_for_source(&selected.source) == Some(session.diff_cursor)
+                && input.owner_for_source(&selected.source) == Some(viewport_cursor(session))
         });
         if !valid {
             self.selected_annotation.borrow_mut().take();
@@ -426,10 +433,14 @@ impl DiffViewportController {
         let identity = Some(measurement.identity.clone());
         let mut state = self.state.borrow_mut();
         let visual = state.by_file.entry(path).or_default();
-        bind_logical_top(visual, session.diff_scroll, session.diff_top_identity());
+        bind_logical_top(
+            visual,
+            viewport_scroll(session),
+            viewport_top_identity(session),
+        );
         let layout_changed = visual.layout_identity.as_ref() != identity.as_ref();
         let start = measurement.viewport_start(
-            session.diff_scroll as usize,
+            viewport_scroll(session) as usize,
             visual.continuation,
             viewport_height,
         );
@@ -437,7 +448,7 @@ impl DiffViewportController {
         // A new measured identity can change the height of the same logical
         // block. Keep the detached logical anchor, but normalize its visual
         // continuation to the newly measured block.
-        visual.continuation = if window_logical == session.diff_scroll {
+        visual.continuation = if window_logical == viewport_scroll(session) {
             normalized_continuation
         } else {
             0
@@ -475,7 +486,7 @@ impl DiffViewportController {
         match pending {
             Some(PendingPlacement::Top) => {
                 self.mark_manual_vertical(session);
-                session.diff_scroll = 0;
+                set_viewport_scroll(session, 0);
                 self.clear_selected_continuation(session);
             }
             Some(PendingPlacement::Bottom) => {
@@ -485,10 +496,12 @@ impl DiffViewportController {
             Some(PendingPlacement::Cursor { margin }) => {
                 self.mark_cursor_placement(session);
                 if let Some(margin) = margin {
-                    session.diff_scroll = session
-                        .diff_cursor
-                        .saturating_sub(margin)
-                        .min(u16::MAX as usize) as u16;
+                    set_viewport_scroll(
+                        session,
+                        viewport_cursor(session)
+                            .saturating_sub(margin)
+                            .min(u16::MAX as usize) as u16,
+                    );
                 }
                 self.clear_selected_continuation(session);
                 self.ensure_cursor_visible_inner(session, inner);
@@ -567,7 +580,7 @@ impl DiffViewportController {
     pub(super) fn scroll_to_bottom(&self, session: &mut ReviewSession, inner: Rect) {
         self.mark_manual_vertical(session);
         if !usable_geometry(session, inner) {
-            session.scroll_diff_to_bottom();
+            scroll_viewport_to_bottom(session);
             self.set_pending(session, PendingPlacement::Bottom);
             return;
         }
@@ -576,7 +589,7 @@ impl DiffViewportController {
     }
 
     fn scroll_to_bottom_ready(&self, session: &mut ReviewSession, inner: Rect) {
-        session.scroll_diff_to_bottom();
+        scroll_viewport_to_bottom(session);
         let layout = self.layout_for(session, inner);
         let target = layout
             .line_count()
@@ -603,7 +616,7 @@ impl DiffViewportController {
         self.set_from_line(session, layout, window.start);
         let start = window.start;
         let end = start.saturating_add(inner.height.max(1) as usize);
-        let Some((first, last)) = layout.cursor_bounds(session.diff_cursor) else {
+        let Some((first, last)) = layout.cursor_bounds(viewport_cursor(session)) else {
             return;
         };
         let height = inner.height.max(1) as usize;
@@ -630,7 +643,7 @@ impl DiffViewportController {
         let layout = self.layout_for(session, inner);
         let window = self.window(session, &layout, inner.height.max(1) as usize);
         layout.cursor_visible(
-            session.diff_cursor,
+            viewport_cursor(session),
             window.start,
             inner.height.max(1) as usize,
         )
@@ -682,14 +695,14 @@ impl DiffViewportController {
         let mut state = self.state.borrow_mut();
         bind_logical_top(
             state.by_file.entry(path).or_default(),
-            session.diff_scroll,
-            session.diff_top_identity(),
+            viewport_scroll(session),
+            viewport_top_identity(session),
         );
     }
 
     pub(super) fn place_top(&self, session: &mut ReviewSession, inner: Rect) {
         self.mark_manual_vertical(session);
-        session.diff_scroll = 0;
+        set_viewport_scroll(session, 0);
         self.clear_selected_continuation(session);
         if !usable_geometry(session, inner) {
             self.set_pending(session, PendingPlacement::Top);
@@ -719,10 +732,12 @@ impl DiffViewportController {
         inner: Rect,
     ) {
         self.mark_cursor_placement(session);
-        session.diff_scroll = session
-            .diff_cursor
-            .saturating_sub(margin)
-            .min(u16::MAX as usize) as u16;
+        set_viewport_scroll(
+            session,
+            viewport_cursor(session)
+                .saturating_sub(margin)
+                .min(u16::MAX as usize) as u16,
+        );
         self.clear_selected_continuation(session);
         if !usable_geometry(session, inner) {
             self.set_pending(
@@ -755,10 +770,10 @@ impl DiffViewportController {
             old_path: session
                 .selected_file()
                 .and_then(|file| file.old_path.clone()),
-            logical_top: session.diff_scroll,
-            top_identity: session.diff_top_identity(),
-            cursor: session.diff_cursor,
-            cursor_identity: session.diff_cursor_identity(),
+            logical_top: viewport_scroll(session),
+            top_identity: viewport_top_identity(session),
+            cursor: viewport_cursor(session),
+            cursor_identity: viewport_cursor_identity(session),
             cursor_was_visible: usable_geometry(session, inner)
                 .then(|| self.cursor_is_visible(session, inner)),
             cursor_following,
@@ -815,12 +830,14 @@ impl DiffViewportController {
         // Explicit scroll/placement transitions have already chosen a new top.
         let (top_recovered, cursor_recovered) = if same_file && !explicit_transition {
             (
-                session.restore_diff_top_identity(
+                restore_viewport_top_identity(
+                    session,
                     snapshot.top_identity.as_ref(),
                     snapshot.logical_top,
                 ),
                 restore_cursor
-                    && session.restore_diff_cursor_identity(
+                    && restore_viewport_cursor_identity(
+                        session,
                         snapshot.cursor_identity.as_ref(),
                         snapshot.cursor,
                     ),
@@ -839,8 +856,9 @@ impl DiffViewportController {
 
         let state = self.state.borrow();
         let same_cursor = cursor_recovered
-            || snapshot.cursor_identity == session.diff_cursor_identity()
-                && (snapshot.cursor_identity.is_some() || snapshot.cursor == session.diff_cursor);
+            || snapshot.cursor_identity == viewport_cursor_identity(session)
+                && (snapshot.cursor_identity.is_some()
+                    || snapshot.cursor == viewport_cursor(session));
         let preserve_cursor = restore_cursor
             && same_file
             && same_cursor
@@ -926,8 +944,8 @@ impl DiffViewportController {
         };
         let mut state = self.state.borrow_mut();
         let visual = state.by_file.entry(path).or_default();
-        visual.logical_top = session.diff_scroll;
-        visual.bound_top_identity = session.diff_top_identity();
+        visual.logical_top = viewport_scroll(session);
+        visual.bound_top_identity = viewport_top_identity(session);
         visual.continuation = 0;
         visual.layout_identity = None;
     }
@@ -938,8 +956,8 @@ impl DiffViewportController {
         };
         let mut state = self.state.borrow_mut();
         let visual = state.by_file.entry(path).or_default();
-        visual.logical_top = session.diff_scroll;
-        visual.bound_top_identity = session.diff_top_identity();
+        visual.logical_top = viewport_scroll(session);
+        visual.bound_top_identity = viewport_top_identity(session);
         visual.layout_identity = None;
     }
 
@@ -953,13 +971,16 @@ impl DiffViewportController {
             return;
         };
         let (logical_top, continuation) = measurement.viewport_from_line(index);
-        session.diff_scroll = logical_top;
-        let identity = Some(measurement.identity.clone());
+        set_viewport_scroll(session, logical_top);
+        let materialized = session.stream_mode
+            && session.materialize_stream_window_reanchored(logical_top as usize, 200) > 0;
+        let effective_top = viewport_scroll(session);
+        let identity = (!materialized).then(|| measurement.identity.clone());
         let mut state = self.state.borrow_mut();
         let visual = state.by_file.entry(path).or_default();
-        visual.logical_top = logical_top;
-        visual.bound_top_identity = session.diff_top_identity();
-        visual.continuation = continuation;
+        visual.logical_top = effective_top;
+        visual.bound_top_identity = viewport_top_identity(session);
+        visual.continuation = if materialized { 0 } else { continuation };
         visual.layout_identity = identity;
     }
 
@@ -1060,8 +1081,84 @@ impl DiffViewportController {
     }
 }
 
+fn viewport_cursor(session: &ReviewSession) -> usize {
+    if session.stream_mode {
+        session.stream_cursor
+    } else {
+        session.diff_cursor
+    }
+}
+
+fn viewport_scroll(session: &ReviewSession) -> u16 {
+    if session.stream_mode {
+        session.stream_scroll
+    } else {
+        session.diff_scroll
+    }
+}
+
+fn set_viewport_scroll(session: &mut ReviewSession, value: u16) {
+    if session.stream_mode {
+        session.stream_scroll = value;
+    } else {
+        session.diff_scroll = value;
+    }
+}
+
+fn viewport_top_identity(session: &ReviewSession) -> Option<DiffRowIdentity> {
+    if session.stream_mode {
+        session.stream_top_identity()
+    } else {
+        session.diff_top_identity()
+    }
+}
+
+fn viewport_cursor_identity(session: &ReviewSession) -> Option<DiffRowIdentity> {
+    if session.stream_mode {
+        session.stream_cursor_identity()
+    } else {
+        session.diff_cursor_identity()
+    }
+}
+
+fn restore_viewport_top_identity(
+    session: &mut ReviewSession,
+    identity: Option<&DiffRowIdentity>,
+    fallback: u16,
+) -> bool {
+    if session.stream_mode {
+        session.restore_stream_top_identity(identity, fallback)
+    } else {
+        session.restore_diff_top_identity(identity, fallback)
+    }
+}
+
+fn restore_viewport_cursor_identity(
+    session: &mut ReviewSession,
+    identity: Option<&DiffRowIdentity>,
+    fallback: usize,
+) -> bool {
+    if session.stream_mode {
+        session.restore_stream_cursor_identity(identity, fallback)
+    } else {
+        session.restore_diff_cursor_identity(identity, fallback)
+    }
+}
+
+fn scroll_viewport_to_bottom(session: &mut ReviewSession) {
+    if session.stream_mode {
+        session.stream_scroll_to_bottom();
+    } else {
+        session.scroll_diff_to_bottom();
+    }
+}
+
 fn selected_path(session: &ReviewSession) -> Option<String> {
-    session.selected_file().map(|file| file.path.clone())
+    if session.stream_mode {
+        (!session.review_stream().rows.is_empty()).then(|| "@review-stream".to_owned())
+    } else {
+        session.selected_file().map(|file| file.path.clone())
+    }
 }
 
 fn annotation_scope(session: &ReviewSession) -> String {
@@ -1083,7 +1180,13 @@ fn annotation_scope(session: &ReviewSession) -> String {
 }
 
 fn usable_geometry(session: &ReviewSession, inner: Rect) -> bool {
-    inner.width > 0 && inner.height > 0 && session.selected_visible_file().is_some()
+    inner.width > 0
+        && inner.height > 0
+        && if session.stream_mode {
+            !session.review_stream().rows.is_empty()
+        } else {
+            session.selected_visible_file().is_some()
+        }
 }
 
 fn viewport_path_mapping(

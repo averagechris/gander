@@ -114,7 +114,7 @@ expression: value
     "title": "Current review"
   },
   "summary": "1 files (0/1 viewed, 0 generated/noisy), +1/-1, 4 comments",
-  "version": 12,
+  "version": 13,
   "walkthroughs": [
     {
       "id": "walk",

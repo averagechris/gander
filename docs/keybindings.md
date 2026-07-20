@@ -109,6 +109,7 @@ remains effective.
 | `next-symbol` / `previous-symbol` | `}` / `{` | normal diff |
 | `next-changed-hunk` / `previous-changed-hunk` | `]` / `[` (`hunk`: Alt-J, `]` / Alt-K, `[`) | normal diff |
 | `next-file` / `previous-file` | `.` / `,` (`hunk`: Alt-L, `.` / Alt-H, `,`) | normal |
+| `spotlight-next` / `spotlight-previous` | Alt-N / Alt-P | normal |
 
 ### Review, diff, and agent actions
 
@@ -116,9 +117,9 @@ remains effective.
 | --- | --- | --- |
 | `scroll-down` / `scroll-up` | `d`, PageDown / `u`, PageUp | normal diff |
 | `scroll-diff-left` / `scroll-diff-right` | Shift-Left / Shift-Right | normal diff |
-| `mark-viewed` / `toggle-viewed` / `mark-all-viewed` | Enter / `v` / `a` | normal |
+| `mark-viewed` / `toggle-viewed` / `mark-all-viewed` | Enter / `v` / `a` | normal (`a` only acknowledges a selected skim fold in stream diff context; ordinary stream rows no-op) |
 | `toggle-generated` / `cycle-viewed-filter` | `h` / `f` | normal |
-| `toggle-fold` | Space | normal files |
+| `toggle-fold` | Space | normal files; selected skim fold in normal diff |
 | `collapse-fold` / `expand-fold` | Left / Right | normal files |
 | `toggle-context-fold` | `z` | normal diff |
 | `expand-context` / `expand-context-all` / `collapse-context` | `+` / `=` / `-` | normal diff |
@@ -126,6 +127,7 @@ remains effective.
 | `toggle-word-highlight` / `toggle-line-background` / `toggle-gutter-bar` / `toggle-diff-wrap` | unbound | normal diff |
 | `toggle-file-pane` / `toggle-diff-view` | `w` / `\|` | normal / normal diff |
 | `widen-file-pane` / `narrow-file-pane` | Alt-Right / Alt-Left | normal diff |
+| `attention-promote` / `attention-demote` | Alt-Up / Alt-Down | normal diff |
 | `toggle-large-diff` | `L` | normal diff |
 | `toggle-agent-order` / `flag-list` | `A` / `F` | normal |
 | `open-work` / `activity` | `X` / Ctrl-A | normal |

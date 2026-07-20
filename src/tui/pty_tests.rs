@@ -33,7 +33,10 @@ use std::{
 /// Hard cap for any single child probe.
 const CHILD_DEADLINE: Duration = Duration::from_secs(15);
 /// How long a child listens for events after detection.
-const EVENT_WINDOW_MS: u64 = 4_000;
+// Parallel suites can briefly starve the parent while a child is already in
+// its event loop (notably large projection tests). Keep this below the hard
+// child deadline but long enough that synchronization events are not dropped.
+const EVENT_WINDOW_MS: u64 = 10_000;
 
 const QUERY: &[u8] = b"\x1b]11;?";
 const DA1_QUERY: &[u8] = b"\x1b[c";
@@ -470,7 +473,10 @@ fn detects_bel_reply_and_preserves_unrelated_input_in_order() {
     probe.write_master(b"\x1b[I");
     probe.write_master(b"\x1b[200~hi!\x1b[201~");
     resize_pty(&probe, 100, 40);
-    std::thread::sleep(Duration::from_millis(80));
+    // Do not race the terminating `Z` against crossterm's SIGWINCH delivery
+    // under a busy parallel test runner. The resize is part of this scenario's
+    // contract, so wait until the child has observed it before stopping.
+    probe.wait_for_out_line("event=Resize(100, 40)");
     probe.write_master(b"q");
     probe.write_master(b"Z");
 

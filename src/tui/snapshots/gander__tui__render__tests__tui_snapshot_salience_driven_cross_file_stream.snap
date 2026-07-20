@@ -1,0 +1,32 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &Mode::Normal, 120, 28)"
+---
+┌files─────────────────────────────┐┌diff──────────────────────────────────────────────────────────────────────────────┐
+│• ▾ src 0/1                       ││⌄ 2 files · generated churn · +2 −2                                               │
+│  • mod     main.rs               ││◆ abc123 · feat: continuous review stream · feature/stream · +1 −1                │
+│• mod     a.gen.rs                ││src/main.rs  +1 -1                                                                │
+│• mod     b.gen.rs                ││@@ -1 +1 @@                                                                       │
+│                                  ││    1 - old_main                                                                  │
+│                                  ││    1 + new_main                                                                  │
+│                                  ││╭────────────────────────────────────────────────────────────────────────────────╮│
+│                                  │││walkthrough  [→ reviewer]  [walkthrough]  [spotlight]                           ││
+│                                  │││Start at main                                                                   ││
+│                                  │││@ src/main.rs:1                                                                 ││
+│                                  │││why: This wires the new behavior together.                                      ││
+│                                  │││rationale: Establishes the entry point                                          ││
+│                                  │││body: Follow the control flow into the supporting helpers.                      ││
+│                                  ││╰────────────────────────────────────────────────────────────────────────────────╯│
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+└──────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────────┘
+3 files (coverage 0/2, 0 generated/noisy), +3/-3, 0 comments · following @
+trunk()..@ · focus diff (wrap) · j/k line · alt-n/alt-p spotlight · alt-up/alt-down salience · space peek fold · a ack f

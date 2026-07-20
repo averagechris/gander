@@ -4,6 +4,22 @@
 
 ### Added
 
+- Added the continuous M18 salience-driven review stream: one cross-file diff
+  projection with stable file/line anchors, contiguous generated-churn skim
+  folds (`Space` peek, contextual `a` acknowledgement), fully expanded
+  spotlight narration, change chapter headers, walkthrough-ordered
+  `Alt-N`/`Alt-P` navigation, `Alt-Up`/`Alt-Down` human overrides, and
+  fingerprint-current coverage in the footer. Review-state schema 8 and
+  artifact schema 13 retain stale acknowledgement/visit history without
+  counting it; partial fold acknowledgement does not mark a file viewed.
+  Effective row partitioning lets narrow human overrides punch through broad
+  Skim assignments, normal stream rows cannot trigger global mark-all, ranges
+  cancel at file boundaries, chapter metadata reloads on retarget/refresh, and
+  one signature-keyed projection cache serves rendering and owner lookups.
+  Offscreen files use cheap parsed-diff structural rows; syntax/folding rows are
+  materialized on demand for the current or visible bounded file window. File
+  jumps choose the first selectable member entry, and refresh fallback remains
+  anchored to the restored selected file when prior row identity disappears.
 - Added the first M18 attention-map package: durable fingerprint-anchored
   spotlight/supporting/skim regions, human > agent > heuristic precedence,
   walkthrough and generated/lockfile/ignore-policy curation, conservative stale

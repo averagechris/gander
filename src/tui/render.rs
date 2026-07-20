@@ -473,7 +473,11 @@ fn draw_diff(
     file_pane_visible: bool,
 ) {
     let theme = &tui_state.theme;
-    if session.selected_visible_file().is_none() {
+    if if session.stream_mode {
+        session.review_stream().rows.is_empty()
+    } else {
+        session.selected_visible_file().is_none()
+    } {
         let generated_hint = if session.hide_generated {
             "Noisy/generated files are hidden. Press the hide-noisy toggle to show them."
         } else {
@@ -851,13 +855,25 @@ pub(super) fn selected_file_annotation_input(
     expanded: &BTreeSet<String>,
     artifact_hint: &str,
 ) -> AnnotationLayoutInput {
-    let changed_hunks = session
-        .selected_visible_file()
-        .map(|file| file.changed_hunks.iter().copied().collect())
-        .unwrap_or_default();
+    // Hunk indices are file-local and therefore ambiguous in a cross-file
+    // stream. Freshness remains visible in the file tree; stream cards and
+    // anchors use their stable file-qualified owners.
+    let changed_hunks = if session.stream_mode {
+        Vec::new()
+    } else {
+        session
+            .selected_visible_file()
+            .map(|file| file.changed_hunks.iter().copied().collect())
+            .unwrap_or_default()
+    };
     let mut signatures = Vec::new();
     for comment in &session.comments {
-        let Some(owner) = session.selected_comment_card_owner(comment) else {
+        let owner = if session.stream_mode {
+            session.stream_comment_card_owner(comment)
+        } else {
+            session.selected_comment_card_owner(comment)
+        };
+        let Some(owner) = owner else {
             continue;
         };
         let source = AnnotationSource::Comment {
@@ -902,7 +918,12 @@ pub(super) fn selected_file_annotations_for_input(
 ) -> SelectedFileAnnotations {
     let mut cards = Vec::with_capacity(input.cards.len());
     for comment in &session.comments {
-        let Some(owner) = session.selected_comment_card_owner(comment) else {
+        let owner = if session.stream_mode {
+            session.stream_comment_card_owner(comment)
+        } else {
+            session.selected_comment_card_owner(comment)
+        };
+        let Some(owner) = owner else {
             continue;
         };
         cards.push(AnnotationCardInput {
@@ -968,7 +989,12 @@ fn for_each_effective_walkthrough_card(
             if effective.salience != Salience::Spotlight {
                 continue;
             }
-            let Some(owner) = session.selected_walkthrough_card_owner(target) else {
+            let owner = if session.stream_mode {
+                session.stream_walkthrough_card_owner(target)
+            } else {
+                session.selected_walkthrough_card_owner(target)
+            };
+            let Some(owner) = owner else {
                 continue;
             };
             visit(step, target, part, owner, effective.rationale);
@@ -1229,6 +1255,22 @@ fn row_comment_count(session: &ReviewSession, row: &DiffRow) -> usize {
     session.comments_for_diff_row_anchor_details(anchor).len()
 }
 
+fn render_cursor(session: &ReviewSession) -> usize {
+    if session.stream_mode {
+        session.stream_cursor
+    } else {
+        session.diff_cursor
+    }
+}
+
+fn render_row_in_range(session: &ReviewSession, row: usize) -> bool {
+    if session.stream_mode {
+        session.stream_row_in_active_range(row)
+    } else {
+        session.diff_row_in_active_range(row)
+    }
+}
+
 fn row_comment_channel(session: &ReviewSession, row: &DiffRow) -> Option<Channel> {
     let anchor = row.anchor.as_ref()?;
     session
@@ -1369,6 +1411,7 @@ fn visual_byte_ranges(text: &str, width: usize, wrap: bool) -> Vec<Option<Range<
 
 fn plain_row_text(row: &DiffRow, annotations: &AnnotationLayoutInput) -> String {
     match row.kind {
+        DiffRowKind::ChapterHeader | DiffRowKind::SkimFold => row.text.clone(),
         DiffRowKind::FileHeader | DiffRowKind::SyntaxSummary | DiffRowKind::Raw => row.text.clone(),
         DiffRowKind::HunkHeader
             if row
@@ -1517,10 +1560,10 @@ fn materialize_diff_source_cached(
             *line,
             card.channel,
             selected_annotation.map_or(
-                session.focus == Focus::Diff && session.diff_cursor == *owner,
+                session.focus == Focus::Diff && render_cursor(session) == *owner,
                 |selected| selected == &card.source,
             ),
-            session.diff_row_in_active_range(*owner),
+            render_row_in_range(session, *owner),
             theme,
         ),
     }
@@ -1591,8 +1634,8 @@ fn prepare_diff_cell(
     };
     let continuation_style = diff_row_style(
         row.kind,
-        session.focus == Focus::Diff && session.diff_cursor == cell.row,
-        session.diff_row_in_active_range(cell.row),
+        session.focus == Focus::Diff && render_cursor(session) == cell.row,
+        render_row_in_range(session, cell.row),
         theme,
     );
     PreparedDiffCell {
@@ -1789,6 +1832,18 @@ fn unified_row_line(
     theme: &AppTheme,
 ) -> Line<'static> {
     let line = match row.kind {
+        DiffRowKind::ChapterHeader => Line::from(Span::styled(
+            row.text.clone(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        DiffRowKind::SkimFold => Line::from(Span::styled(
+            row.text.clone(),
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::ITALIC),
+        )),
         DiffRowKind::FileHeader => Line::from(Span::styled(
             row.text.clone(),
             Style::default()
@@ -1858,7 +1913,7 @@ fn zen_row_dimmed(session: &ReviewSession, row: &DiffRow, index: usize) -> bool 
     {
         return false;
     }
-    if session.focus == Focus::Diff && session.diff_cursor == index {
+    if session.focus == Focus::Diff && render_cursor(session) == index {
         return false;
     }
     match row.kind {
@@ -1906,10 +1961,14 @@ fn diff_line_cell_spans_with_width(
     let DiffRowKind::DiffLine(line_kind) = row.kind else {
         return vec![Span::raw(row.text.clone())];
     };
-    let selected = session.focus == Focus::Diff && session.diff_cursor == index;
-    let in_range = session.diff_row_in_active_range(index);
+    let selected = session.focus == Focus::Diff && render_cursor(session) == index;
+    let in_range = render_row_in_range(session, index);
     let style = diff_row_style(row.kind, selected, in_range, theme);
-    let flagged = session.diff_row_flagged(row);
+    let flagged = if session.stream_mode {
+        session.stream_row_flagged(index, row)
+    } else {
+        session.diff_row_flagged(row)
+    };
     let cues = &session.diff_cues;
     let (comment_mark, mark_style) = if comment_count > 0 {
         (
@@ -2618,7 +2677,11 @@ fn draw_footer(
             keymap.hint(Action::Help),
         ),
     };
-    let mut summary = session.summary_line();
+    let mut summary = if session.stream_mode {
+        session.coverage_summary_line()
+    } else {
+        session.summary_line()
+    };
     let display_target = context
         .zen
         .map(|zen| &zen.home_target)
@@ -2733,19 +2796,42 @@ fn diff_footer_segments(
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
-    let hints = [
-        FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
-        FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
-        FooterHint::new([Action::ViewOptions], "view/wrap"),
-        FooterHint::new([Action::RangeComment], "range"),
-        FooterHint::new([Action::MarkWalkthrough], "walkthrough"),
-        FooterHint::new([Action::Comment], "comment"),
-        FooterHint::new([Action::YankHandoff], "handoff"),
-        FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
-        FooterHint::new([Action::ToggleFocus], "files"),
-        FooterHint::new([Action::Help], "help"),
-        FooterHint::new([Action::Quit], "quit"),
-    ];
+    let hints = if session.stream_mode {
+        vec![
+            FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
+            FooterHint::new(
+                [Action::SpotlightNext, Action::SpotlightPrevious],
+                "spotlight",
+            ),
+            FooterHint::new(
+                [Action::AttentionPromote, Action::AttentionDemote],
+                "salience",
+            ),
+            FooterHint::new([Action::ToggleFold], "peek fold"),
+            FooterHint::new([Action::MarkAllViewed], "ack fold"),
+            FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
+            FooterHint::new([Action::ViewOptions], "view/wrap"),
+            FooterHint::new([Action::Comment], "comment"),
+            FooterHint::new([Action::YankHandoff], "handoff"),
+            FooterHint::new([Action::ToggleFocus], "files"),
+            FooterHint::new([Action::Help], "help"),
+            FooterHint::new([Action::Quit], "quit"),
+        ]
+    } else {
+        vec![
+            FooterHint::new([Action::MoveDown, Action::MoveUp], "line"),
+            FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
+            FooterHint::new([Action::ViewOptions], "view/wrap"),
+            FooterHint::new([Action::RangeComment], "range"),
+            FooterHint::new([Action::MarkWalkthrough], "walkthrough"),
+            FooterHint::new([Action::Comment], "comment"),
+            FooterHint::new([Action::YankHandoff], "handoff"),
+            FooterHint::new([Action::NextUnviewed, Action::PreviousUnviewed], "unviewed"),
+            FooterHint::new([Action::ToggleFocus], "files"),
+            FooterHint::new([Action::Help], "help"),
+            FooterHint::new([Action::Quit], "quit"),
+        ]
+    };
     let target = zen
         .map(|zen| zen.home_target.to_string())
         .unwrap_or_else(|| session.target.to_string());
@@ -2859,6 +2945,19 @@ fn draw_help_popup(
         entry(&[Action::MarkAllViewed], "mark all viewed"),
         section("diff"),
         entry(&[Action::MoveDown, Action::MoveUp], "move cursor"),
+        entry(
+            &[Action::SpotlightNext, Action::SpotlightPrevious],
+            "next/previous spotlight in the review stream",
+        ),
+        entry(
+            &[Action::AttentionPromote, Action::AttentionDemote],
+            "promote/demote region salience",
+        ),
+        entry(&[Action::ToggleFold], "peek/collapse selected skim fold"),
+        entry(
+            &[Action::MarkAllViewed],
+            "ack selected skim fold (no-op on ordinary stream rows)",
+        ),
         entry(&[Action::ScrollDown, Action::ScrollUp], "scroll"),
         entry(
             &[Action::ScrollDiffLeft, Action::ScrollDiffRight],
@@ -5617,6 +5716,84 @@ mod tests {
 
     fn render_tui_text(session: &ReviewSession, mode: &Mode, width: u16, height: u16) -> String {
         render_tui_text_with_zen(session, mode, None, width, height)
+    }
+
+    #[test]
+    fn tui_snapshot_salience_driven_cross_file_stream() {
+        let mut session = snapshot_session(
+            "diff --git a/a.gen.rs b/a.gen.rs\n--- a/a.gen.rs\n+++ b/a.gen.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.gen.rs b/b.gen.rs\n--- a/b.gen.rs\n+++ b/b.gen.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old_main\n+new_main\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let spotlight =
+            crate::attention::target_for_diff(&files, "src/main.rs", Some(1), None).unwrap();
+        let mut durable = crate::state::ReviewSession {
+            id: "stream-review".into(),
+            attention_regions: vec![
+                AttentionRegion {
+                    target: crate::attention::target_for_diff(&files, "a.gen.rs", None, None)
+                        .unwrap(),
+                    salience: Salience::Skim,
+                    rationale: Some("Skim: generated path policy".into()),
+                    source: SalienceSource::Heuristic,
+                },
+                AttentionRegion {
+                    target: crate::attention::target_for_diff(&files, "b.gen.rs", None, None)
+                        .unwrap(),
+                    salience: Salience::Skim,
+                    rationale: Some("Skim: generated content marker".into()),
+                    source: SalienceSource::Heuristic,
+                },
+                AttentionRegion {
+                    target: spotlight.clone(),
+                    salience: Salience::Spotlight,
+                    rationale: Some("Establishes the entry point".into()),
+                    source: SalienceSource::Agent,
+                },
+            ],
+            walkthroughs: vec![Walkthrough {
+                id: "walk".into(),
+                steps: vec![WalkthroughStep {
+                    id: "main".into(),
+                    target: spotlight,
+                    change_id: Some("abc123".into()),
+                    title: Some("Start at main".into()),
+                    why: Some("This wires the new behavior together.".into()),
+                    body: Some("Follow the control flow into the supporting helpers.".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(crate::review::canonical_repo_identity(&session.repo));
+        session.sessions.push(durable);
+        session.stack_changes.push(JjChangeSummary {
+            change_id: "abc123".into(),
+            bookmarks: "feature/stream".into(),
+            description: "feat: continuous review stream".into(),
+        });
+        session.change_diffs.push((
+            "abc123".into(),
+            crate::diff::DiffSet::parse(
+                "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old_main\n+new_main\n",
+            )
+            .unwrap(),
+        ));
+        session.stream_mode = true;
+        session.focus = Focus::Diff;
+        session.stream_cursor = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| row.anchor.is_some())
+            .unwrap();
+        insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 120, 28));
     }
 
     #[test]

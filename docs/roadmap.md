@@ -359,15 +359,15 @@ Status: domain and automation foundation in progress.
 
 - [x] durable per-region salience (spotlight/supporting/skim) on the session;
   sources: human override > agent curation > generated/lockfile heuristics
-- [ ] skim regions render as one-line folds, expandable in place; one key
-  acknowledges a fold and marks contained files viewed
-- [ ] spotlight regions render with inline narration cards (onboarding
+- [x] skim regions render as one-line folds, expandable in place; one key
+  acknowledges a fold and marks only wholly covered files viewed
+- [x] spotlight regions render with inline narration cards (onboarding
   annotations: title/why/rationale, artifacts expandable)
 - [x] inline annotation cards as the single render primitive for comments,
   drafts, and walkthrough steps, channel-colored (see milestone 17)
-- [ ] chapters become change-scoped stream headers (description, bookmarks,
+- [x] chapters become change-scoped stream headers (description, bookmarks,
   stats)
-- [ ] walkthrough = ordering over spotlight regions; next/prev drive the
+- [x] walkthrough = ordering over spotlight regions; next/prev drive the
   normal view; coverage (spotlights visited + skims acknowledged) replaces
   files-viewed as footer progress
 - [ ] focus is a one-key view preset (max fold, file pane hidden, cards
