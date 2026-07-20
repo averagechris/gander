@@ -1,0 +1,34 @@
+---
+source: src/tui/render.rs
+expression: "format!(\"{}\\nstyle runs:\\n{}\", render_tui_text(&session, &mode, 110, 24),\nstyle_runs_for_rows(&buffer,\n&[\"onboard comment\", \"delegate comment\", \"collab comment\",\n\"private comment\",],))"
+---
+┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
+│• mod     a.txt                ││a.txt  +4 -1                                                               │
+│                               ││@@ -1 +1,4 @@                                                              │
+│                               ││    1 - old                                                                │
+│                               ││1   1 + onboarding                                                         │
+│         ┌agent drafts────────────────────────────────────────────────────────────────────────────┐         │
+│         │Agent-drafted comments awaiting your decision                                           │         │
+│         │  [ draft  ] [→ reviewer] a.txt:1 onboard comment                                       │         │
+│         │› [ draft  ] [→ agent] a.txt:2 delegate comment                                         │         │
+│         │  [ draft  ] [→ team] a.txt:3 collab comment                                            │         │
+│         │  [ draft  ] [→ note] a.txt:4 private comment                                           │         │
+│         │                                                                                        │         │
+│         │j/k move · enter accept · e edit then accept · x discard · esc close                    │         │
+│         │                                                                                        │         │
+│         │                                                                                        │         │
+│         │                                                                                        │         │
+│         │                                                                                        │         │
+│         │                                                                                        │         │
+│         └────────────────────────────────────────────────────────────────────────────────────────┘         │
+│                               ││                                                                           │
+│                               ││                                                                           │
+└───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +4/-1, 4 comments · following @
+agent drafts · j/k move · enter accept · e edit · x discard · esc close
+
+style runs:
+onboard comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ reviewer] "=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "onboard comment"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "                                       │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+delegate comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "› "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset).bold() | "[ draft  ] [→ agent] "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:2 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "delegate comment"=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset).bold() | "                                         │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+collab comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ team] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:3 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "collab comment"=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "                                            │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+private comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ note] "=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:4 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "private comment"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "                                           │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)

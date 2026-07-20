@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::{
     generated::{GeneratedPolicy, GeneratedPreset},
-    state::{AuthorKind, CommentState, Identity},
+    state::{AuthorKind, Channel, CommentState, Identity},
     syntax::SyntaxConfig,
 };
 
@@ -109,6 +109,8 @@ impl From<InitialCommentState> for CommentState {
 #[serde(default, rename_all = "kebab-case")]
 pub struct CommentsConfig {
     pub initial_state: InitialCommentState,
+    /// Pin the initial channel instead of applying contextual inference.
+    pub default_channel: Option<Channel>,
 }
 
 /// Diff-pane visual cues. All runtime-toggleable from the view options
@@ -401,6 +403,7 @@ pub struct KeybindingsConfig {
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
     pub delete_char: Vec<String>,
+    pub cycle_comment_channel: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -474,6 +477,7 @@ struct ThemeConfigPatch {
 #[serde(default, rename_all = "kebab-case")]
 struct CommentsConfigPatch {
     initial_state: Option<InitialCommentState>,
+    default_channel: Option<Channel>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -660,6 +664,7 @@ struct KeybindingsConfigPatch {
     cancel_comment: Option<Vec<String>>,
     insert_newline: Option<Vec<String>>,
     delete_char: Option<Vec<String>>,
+    cycle_comment_channel: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -804,6 +809,7 @@ impl KeybindingsConfig {
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
             delete_char: keys(["backspace"]),
+            cycle_comment_channel: keys(["tab"]),
         };
         if preset == KeybindingPresetConfig::Hunk {
             config.next_changed_hunk = keys(["alt-j", "]"]);
@@ -946,6 +952,9 @@ impl Config {
 
         if let Some(initial_state) = patch.comments.initial_state {
             self.comments.initial_state = initial_state;
+        }
+        if let Some(default_channel) = patch.comments.default_channel {
+            self.comments.default_channel = Some(default_channel);
         }
 
         if let Some(name) = patch.identity.name {
@@ -1143,6 +1152,7 @@ impl KeybindingsConfig {
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
         apply_optional(&mut self.insert_newline, patch.insert_newline);
         apply_optional(&mut self.delete_char, patch.delete_char);
+        apply_optional(&mut self.cycle_comment_channel, patch.cycle_comment_channel);
     }
 }
 
@@ -1511,6 +1521,7 @@ presets = ["lockfiles"]
 
 [comments]
 initial-state = "todo"
+default-channel = "collaboration"
 "#,
         )
         .unwrap();
@@ -1546,6 +1557,10 @@ move-down = ["n", "down"]
         assert_eq!(config.keybindings.move_down, ["n", "down"]);
         assert_eq!(config.keybindings.move_up, ["r"]);
         assert_eq!(config.comments.initial_state, InitialCommentState::Todo);
+        assert_eq!(
+            config.comments.default_channel,
+            Some(Channel::Collaboration)
+        );
     }
 
     #[test]

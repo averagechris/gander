@@ -76,7 +76,7 @@ would hide normal `comment`. Esc is an immutable zen-close action; changing
 | draft list | list movement/close plus accept, edit, and discard |
 | comment list | list movement/select/close plus general creation and comment metadata actions |
 | view options | list movement, toggle, select, close |
-| comment editor | local text editing plus configurable newline, save, cancel, backspace |
+| comment editor | local text editing plus configurable channel cycle, newline, save, cancel, backspace |
 | zen focus/reading | configurable stop, card, glance, artifact, detail, and refocus actions; other normal actions fall through |
 | zen glance | list movement/select/close, acknowledge all, back |
 | zen artifact | scroll/select/close and previous/next artifact |
@@ -145,11 +145,13 @@ remains effective.
 | `comment-list-cycle-action` / `comment-list-cycle-kind` | `a` / `K` | comment list |
 | `submit-comment` / `cancel-comment` | Ctrl-S / Esc | comment editor |
 | `insert-newline` / `delete-char` | Enter / Backspace | comment editor |
+| `cycle-comment-channel` | Tab | comment editor; onboarding → delegation → collaboration → note |
 
 The editor also keeps ordinary text insertion, arrows, Home/End, Ctrl-A/E,
 Ctrl-B/F, Ctrl-P/N, Ctrl-H/D, Ctrl-K/U/W, Alt-B/F, and Alt-Backspace as local
-editing controls. Ctrl-D deletes the next complete grapheme, so combining text
-and emoji clusters are never split.
+editing controls. Tab is consumed by channel cycling in this context, so it
+never inserts text or changes global focus. Ctrl-D deletes the next complete
+grapheme, so combining text and emoji clusters are never split.
 
 ### Popup controls
 

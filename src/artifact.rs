@@ -1648,6 +1648,7 @@ mod tests {
                 kind: Some(CommentKind::Issue),
                 action: Some(ActionIntent::Fix),
                 state: CommentState::Todo,
+                channel: Channel::Delegation,
                 replies: vec![CommentReply {
                     id: "reply".into(),
                     body: "extra evidence".into(),
@@ -1671,6 +1672,7 @@ mod tests {
                 path: None,
                 body: "standalone todo".into(),
                 state: CommentState::Todo,
+                channel: Channel::Delegation,
                 ..Default::default()
             },
             Comment {
@@ -1679,6 +1681,7 @@ mod tests {
                 path: Some("a.txt".into()),
                 body: "foreign comment body".into(),
                 state: CommentState::Todo,
+                channel: Channel::Delegation,
                 ..Default::default()
             },
         ]);
@@ -1705,7 +1708,7 @@ mod tests {
             value["comments"][0]["author"],
             serde_json::json!({ "kind": "human", "name": "local" })
         );
-        assert_eq!(value["comments"][0]["channel"], "note");
+        assert_eq!(value["comments"][0]["channel"], "delegation");
         assert_eq!(
             value["comments"][0]["replies"][0]["author"],
             serde_json::json!({ "kind": "agent", "name": "agent" })

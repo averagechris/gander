@@ -504,6 +504,16 @@ impl AppTheme {
     pub(crate) fn channel_note(&self) -> Color {
         self.muted
     }
+
+    /// Single semantic color mapping used by every annotation surface.
+    pub(crate) fn channel_color(&self, channel: crate::state::Channel) -> Color {
+        match channel {
+            crate::state::Channel::Onboarding => self.channel_onboarding(),
+            crate::state::Channel::Delegation => self.channel_delegation(),
+            crate::state::Channel::Collaboration => self.channel_collaboration(),
+            crate::state::Channel::Note => self.channel_note(),
+        }
+    }
 }
 
 /// RGB value of a color the theme emitted (`Rgb` or `Indexed`); used by
@@ -1019,6 +1029,22 @@ mod tests {
         assert_eq!(theme.channel_delegation(), theme.warning);
         assert_eq!(theme.channel_collaboration(), theme.info);
         assert_eq!(theme.channel_note(), theme.muted);
+        assert_eq!(
+            theme.channel_color(crate::state::Channel::Onboarding),
+            theme.accent
+        );
+        assert_eq!(
+            theme.channel_color(crate::state::Channel::Delegation),
+            theme.warning
+        );
+        assert_eq!(
+            theme.channel_color(crate::state::Channel::Collaboration),
+            theme.info
+        );
+        assert_eq!(
+            theme.channel_color(crate::state::Channel::Note),
+            theme.muted
+        );
         // The four channels stay visually distinguishable.
         let colors = [
             theme.channel_onboarding(),

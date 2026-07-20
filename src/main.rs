@@ -480,6 +480,9 @@ enum CommentsCommand {
         /// Initial lifecycle state; overrides [comments] initial-state.
         #[arg(long, value_enum, id = "initial-comment-state")]
         state: Option<InitialCommentStateArg>,
+        /// Annotation channel; overrides [comments] default-channel.
+        #[arg(long, value_enum)]
+        channel: Option<ChannelArg>,
         /// Echo format for the added comment.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
@@ -557,6 +560,9 @@ enum CommentsCommand {
         /// Replacement suggested action intent; use none to clear it.
         #[arg(long, value_enum)]
         action: Option<ActionIntentArg>,
+        /// Replacement annotation channel.
+        #[arg(long, value_enum)]
+        channel: Option<ChannelArg>,
         /// Echo format for the edited comment.
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
@@ -1129,6 +1135,7 @@ fn run() -> color_eyre::Result<()> {
     let mut state = ReviewState::load_or_default(&state_path)?;
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff.clone(), state.clone(), &config);
+    session.set_target_author_name(jj.target_author(&repo, &session.target).unwrap_or(None));
     session.annotate_generated_where(|file| {
         generated_matcher.is_match(&file.path)
             || crate::generated::diff_content_looks_generated(&file.diff)
@@ -1590,6 +1597,7 @@ fn run() -> color_eyre::Result<()> {
                 kind,
                 action,
                 state: initial_state,
+                channel,
                 format,
             } => {
                 if let (Some(start), Some(end)) = (line, end_line)
@@ -1623,6 +1631,22 @@ fn run() -> color_eyre::Result<()> {
                 let initial_state = initial_state
                     .map(Into::into)
                     .unwrap_or_else(|| config.comments.initial_state.into());
+                let channel = channel
+                    .map(Into::into)
+                    .or(config.comments.default_channel)
+                    .unwrap_or_else(|| {
+                        if initial_state == CommentState::Todo {
+                            Channel::Delegation
+                        } else {
+                            Channel::Note
+                        }
+                    });
+                let initial_state =
+                    if initial_state == CommentState::Todo && !channel.permits_todo() {
+                        CommentState::Draft
+                    } else {
+                        initial_state
+                    };
                 let comment = review::add_comment(
                     &mut state.sessions[idx],
                     &mut state.comments,
@@ -1638,11 +1662,7 @@ fn run() -> color_eyre::Result<()> {
                         action: action.and_then(action_intent_arg_to_option),
                         state: initial_state,
                         author: config.human_identity(),
-                        channel: if initial_state == CommentState::Todo {
-                            Channel::Delegation
-                        } else {
-                            Channel::Note
-                        },
+                        channel,
                     },
                 )
                 .map_err(into_user_error)?;
@@ -1775,6 +1795,7 @@ fn run() -> color_eyre::Result<()> {
                 body,
                 kind,
                 action,
+                channel,
                 format,
             } => {
                 let canonical_id =
@@ -1847,6 +1868,7 @@ fn run() -> color_eyre::Result<()> {
                         body,
                         kind: kind.map(|k| Some(k.into())),
                         action: action.map(action_intent_arg_to_option),
+                        channel: channel.map(Into::into),
                     },
                 )
                 .map_err(into_user_error)?;
@@ -4968,6 +4990,7 @@ mod tests {
             kind: Some(crate::state::CommentKind::Issue),
             action: Some(crate::state::ActionIntent::Fix),
             state: crate::state::CommentState::Todo,
+            channel: crate::state::Channel::Delegation,
             created_at: chrono::Utc.with_ymd_and_hms(2026, 7, 4, 0, 0, 0).unwrap(),
             ..Default::default()
         });
@@ -5058,6 +5081,44 @@ mod tests {
                 command: CommentsCommand::List {
                     channel: Some(ChannelArg::Delegation),
                     format: ListFormat::Json
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "add",
+                "--general",
+                "--body",
+                "private",
+                "--channel",
+                "note"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Comments {
+                command: CommentsCommand::Add {
+                    channel: Some(ChannelArg::Note),
+                    ..
+                }
+            })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "gander",
+                "comments",
+                "edit",
+                "abc",
+                "--channel",
+                "collaboration"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Comments {
+                command: CommentsCommand::Edit {
+                    channel: Some(ChannelArg::Collaboration),
+                    ..
                 }
             })
         ));

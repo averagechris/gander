@@ -30,6 +30,12 @@
   navigation conventions, explicit next/previous file actions, configurable
   responsive file-pane auto-hide and split sizing with runtime split controls,
   and an optional live-keymap menu bar.
+- Added M17 annotation-channel ergonomics: shared conservative channel
+  inference using read-only jj author facts and explicit agent/onboarding
+  context, optional `[comments].default-channel`, a live Tab-cycled
+  channel-colored editor chip/border, and one semantic channel color language
+  across gutter marks, inline summaries, comment/open-work lists, and agent
+  draft rows. CLI comment add/edit now accept `--channel` for scriptable parity.
 
 ## v0.7.2 - 2026-07-12
 

@@ -321,16 +321,16 @@ Every annotation knows who wrote it and who it is for. Design:
 [docs/annotations.md](annotations.md). Subsumes backlog item 2
 (reviewer/author metadata).
 
-Status: implementation in progress (domain foundation and draft folding landed).
+Status: complete.
 
 - [x] add `author` (Identity: human/agent + name) and `channel`
   (onboarding/delegation/collaboration/note) to comments, plus reply authors, with
   serde-defaulted migration (todo → delegation, else note)
-- [ ] infer channel from context (thread > onboarding card > agent attached >
+- [x] infer channel from context (thread > onboarding card > agent attached >
   foreign change author > note); `[comments] default-channel` pins it
-- [ ] channel indicator in the comment editor: channel-colored border + one
+- [x] channel indicator in the comment editor: channel-colored border + one
   compact chip; one key cycles channel live while composing
-- [ ] one channel color language across editor, cards, gutter, and comment
+- [x] one channel color language across editor, cards, gutter, and comment
   list (onboarding=accent, delegation=warning, collaboration=info, note=muted)
 - [x] fold agent drafts into the comment model (author=agent, state=draft);
   retire the overlay draft bucket; channel resolved at accept time
@@ -341,6 +341,12 @@ Status: implementation in progress (domain foundation and draft folding landed).
   (comment/approve/request-changes)
 - [x] import preserves foreign authorship so two humans can review over an
   artifact file today
+
+Deferred follow-up (not part of M17 completion):
+
+- [ ] add exact durable source-comment linkage for delegation requests created
+  from onboarding annotations; M17 only preserves the source annotation and
+  co-locates the new delegation comment on the same anchor
 
 ## Milestone 18: attention map and the review stream
 

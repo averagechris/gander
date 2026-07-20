@@ -53,6 +53,59 @@ pub fn validate_body(body: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Facts an interface has gathered before creating or accepting a comment.
+///
+/// Keeping this deliberately free of TUI state makes channel policy shared,
+/// deterministic, and independently testable. Unknown identity/author facts
+/// remain `None`; inference then falls back to the private note channel rather
+/// than guessing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChannelInferenceContext<'a> {
+    /// A real reply remains in its existing thread regardless of defaults.
+    pub thread_channel: Option<Channel>,
+    /// The composition target is an agent-authored onboarding annotation.
+    pub onboarding_target: bool,
+    /// A summoned, contacted, or annotation-producing agent is attached to
+    /// the active review session. Configuration alone is not attachment.
+    pub agent_attached: bool,
+    /// Explicit `[identity].name`; fallback/migration identities are not
+    /// reliable evidence that a jj change is the reviewer's own.
+    pub configured_human_name: Option<&'a str>,
+    /// Consistent author name read across `base..rev` via a read-only jj query.
+    pub target_author_name: Option<&'a str>,
+    /// `[comments].default-channel`, when configured.
+    pub fixed_default: Option<Channel>,
+}
+
+/// Infer the safest annotation channel from already-gathered review facts.
+///
+/// Thread continuity is structural and wins even over a pinned default. A
+/// fixed default otherwise disables contextual inference. Missing or
+/// ambiguous authorship never implies collaboration or ownership.
+pub fn infer_comment_channel(context: ChannelInferenceContext<'_>) -> Channel {
+    if let Some(channel) = context.thread_channel {
+        return channel;
+    }
+    if let Some(channel) = context.fixed_default {
+        return channel;
+    }
+    if context.onboarding_target {
+        return Channel::Delegation;
+    }
+
+    let author_relation = context
+        .configured_human_name
+        .zip(context.target_author_name)
+        .map(|(human, author)| human.trim() == author.trim());
+    if context.agent_attached && author_relation == Some(true) {
+        return Channel::Delegation;
+    }
+    if author_relation == Some(false) {
+        return Channel::Collaboration;
+    }
+    Channel::Note
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
@@ -242,6 +295,7 @@ pub struct CommentEdits {
     pub body: Option<String>,
     pub kind: Option<Option<CommentKind>>,
     pub action: Option<Option<ActionIntent>>,
+    pub channel: Option<Channel>,
 }
 
 pub fn add_comment(
@@ -507,6 +561,12 @@ pub fn edit_comment(
     }
     if let Some(action) = edits.action {
         comment.action = action;
+    }
+    if let Some(channel) = edits.channel {
+        comment.channel = channel;
+        if comment.state == CommentState::Todo && !channel.permits_todo() {
+            comment.state = CommentState::Draft;
+        }
     }
     comment.validate()?;
     let now = chrono::Utc::now();
@@ -1340,6 +1400,54 @@ mod tests {
     }
 
     #[test]
+    fn comment_channel_body_and_state_edit_is_atomic_on_failure_and_success() {
+        for channel in [Channel::Note, Channel::Onboarding] {
+            let mut session = ReviewSession::default();
+            let mut comments = vec![Comment {
+                id: "todo-comment".into(),
+                body: "original body".into(),
+                state: CommentState::Todo,
+                channel: Channel::Delegation,
+                ..Default::default()
+            }];
+            let original_session = session.clone();
+            let original_comments = comments.clone();
+
+            assert!(
+                edit_comment(
+                    &mut session,
+                    &mut comments,
+                    "todo",
+                    CommentEdits {
+                        body: Some("   \n".into()),
+                        channel: Some(channel),
+                        ..Default::default()
+                    },
+                )
+                .is_err()
+            );
+            assert_eq!(session, original_session, "failed {channel:?} edit");
+            assert_eq!(comments, original_comments, "failed {channel:?} edit");
+
+            let edited = edit_comment(
+                &mut session,
+                &mut comments,
+                "todo",
+                CommentEdits {
+                    body: Some("private replacement".into()),
+                    channel: Some(channel),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(edited.body, "private replacement");
+            assert_eq!(edited.channel, channel);
+            assert_eq!(edited.state, CommentState::Draft);
+            assert_eq!(comments[0], edited);
+        }
+    }
+
+    #[test]
     fn resolve_comment_id_canonicalizes_prefix_and_rejects_bad_links() {
         fn comment(id: &str) -> Comment {
             Comment {
@@ -2001,5 +2109,101 @@ mod tests {
             ["linked-closed", "remaining"]
         );
         assert_eq!(list_action_items(&session).len(), 2);
+    }
+
+    fn inference_context() -> ChannelInferenceContext<'static> {
+        ChannelInferenceContext {
+            configured_human_name: Some("Reviewer"),
+            target_author_name: Some("Reviewer"),
+            ..ChannelInferenceContext::default()
+        }
+    }
+
+    #[test]
+    fn channel_inference_thread_wins_every_other_fact_and_preserves_channel() {
+        let mut context = inference_context();
+        context.thread_channel = Some(Channel::Onboarding);
+        context.fixed_default = Some(Channel::Note);
+        context.onboarding_target = true;
+        context.agent_attached = true;
+        context.target_author_name = Some("Teammate");
+
+        assert_eq!(infer_comment_channel(context), Channel::Onboarding);
+    }
+
+    #[test]
+    fn channel_inference_fixed_default_overrides_context_after_thread_rule() {
+        for default in [
+            Channel::Onboarding,
+            Channel::Delegation,
+            Channel::Collaboration,
+            Channel::Note,
+        ] {
+            let context = ChannelInferenceContext {
+                fixed_default: Some(default),
+                onboarding_target: true,
+                agent_attached: true,
+                configured_human_name: Some("Reviewer"),
+                target_author_name: Some("Teammate"),
+                thread_channel: None,
+            };
+            assert_eq!(infer_comment_channel(context), default);
+        }
+    }
+
+    #[test]
+    fn channel_inference_onboarding_target_beats_agent_and_foreign_author() {
+        let context = ChannelInferenceContext {
+            onboarding_target: true,
+            agent_attached: true,
+            configured_human_name: Some("Reviewer"),
+            target_author_name: Some("Teammate"),
+            ..ChannelInferenceContext::default()
+        };
+
+        assert_eq!(infer_comment_channel(context), Channel::Delegation);
+    }
+
+    #[test]
+    fn channel_inference_agent_on_own_change_is_delegation() {
+        let mut context = inference_context();
+        context.agent_attached = true;
+
+        assert_eq!(infer_comment_channel(context), Channel::Delegation);
+    }
+
+    #[test]
+    fn channel_inference_foreign_author_is_collaboration_with_or_without_agent() {
+        for agent_attached in [false, true] {
+            let context = ChannelInferenceContext {
+                agent_attached,
+                configured_human_name: Some("Reviewer"),
+                target_author_name: Some("Teammate"),
+                ..ChannelInferenceContext::default()
+            };
+            assert_eq!(infer_comment_channel(context), Channel::Collaboration);
+        }
+    }
+
+    #[test]
+    fn channel_inference_own_change_without_agent_falls_back_to_note() {
+        assert_eq!(infer_comment_channel(inference_context()), Channel::Note);
+    }
+
+    #[test]
+    fn channel_inference_unknown_identity_or_author_never_guesses() {
+        for (configured_human_name, target_author_name) in [
+            (None, Some("Teammate")),
+            (Some("Reviewer"), None),
+            (None, None),
+        ] {
+            let context = ChannelInferenceContext {
+                agent_attached: true,
+                configured_human_name,
+                target_author_name,
+                ..ChannelInferenceContext::default()
+            };
+            assert_eq!(infer_comment_channel(context), Channel::Note);
+        }
     }
 }

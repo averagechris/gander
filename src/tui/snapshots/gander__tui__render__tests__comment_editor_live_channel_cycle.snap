@@ -1,0 +1,23 @@
+---
+source: src/tui/render.rs
+expression: "format!(\"cycled onboarding → delegation\\n{}\",\nrender_tui_text(&session, &mode, 90, 18))"
+---
+cycled onboarding → delegation
+┌files────────────────────┐┌diff─────────────────────────────────────────────────────────┐
+│No changed files         ││No changed files                                             │
+│                         ││                                                             │
+│Try t for trunk, p for   ││Current target: trunk()..@                                   │
+│parent, b for target     ││                                                             │
+│chooser, or a┌general comment → agent · general────────────────────────────┐er, or pass │
+│--base/--rev/│unchanged text                                               │            │
+│             │                                                             │ filters.   │
+│             │                                                             │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             └tab channel · ctrl-s save · esc cancel───────────────────────┘            │
+│                         ││                                                             │
+│                         ││                                                             │
+└─────────────────────────┘└─────────────────────────────────────────────────────────────┘
+0 files (0/0 viewed, 0 generated/noisy), +0/-0, 0 comments · following @
+new general comment → agent · refresh paused · tab channel · enter newline · ctrl-s save ·

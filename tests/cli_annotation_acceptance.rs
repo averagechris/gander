@@ -291,3 +291,75 @@ fn cli_configured_human_identity_is_stamped_by_executed_comment_and_reply_comman
         json!({ "kind": "human", "name": "CLI Reviewer" })
     );
 }
+
+#[test]
+fn cli_add_and_edit_channel_execute_todo_and_private_coercion_semantics() {
+    let fixture = CliFixture::new(Vec::new());
+    let collaboration = fixture.run_json(&[
+        "comments",
+        "add",
+        "--general",
+        "--state",
+        "todo",
+        "--channel",
+        "collaboration",
+        "--body",
+        "team feedback",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(collaboration["channel"], "collaboration");
+    assert_eq!(collaboration["state"], "todo");
+    let collaboration_id = collaboration["id"].as_str().unwrap();
+
+    let collaboration_edit = fixture.run_json(&[
+        "comments",
+        "edit",
+        collaboration_id,
+        "--channel",
+        "collaboration",
+        "--body",
+        "updated team feedback",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(collaboration_edit["channel"], "collaboration");
+    assert_eq!(collaboration_edit["state"], "todo");
+
+    let note_edit = fixture.run_json(&[
+        "comments",
+        "edit",
+        collaboration_id,
+        "--channel",
+        "note",
+        "--body",
+        "private follow-up",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(note_edit["channel"], "note");
+    assert_eq!(note_edit["state"], "draft");
+
+    for channel in ["note", "onboarding"] {
+        let added = fixture.run_json(&[
+            "comments",
+            "add",
+            "--general",
+            "--state",
+            "todo",
+            "--channel",
+            channel,
+            "--body",
+            "non-actionable annotation",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(added["channel"], channel);
+        assert_eq!(added["state"], "draft");
+    }
+
+    let state = fixture.load_state();
+    assert_eq!(state["comments"][0]["body"], "private follow-up");
+    assert_eq!(state["comments"][0]["channel"], "note");
+    assert_eq!(state["comments"][0]["state"], "draft");
+}

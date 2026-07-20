@@ -74,20 +74,27 @@ hunk ids suitable for `hunks show` and accepts the file as a positional or
 gander comments list [--channel onboarding|delegation|collaboration|note] [--format json|text]
 gander comments add (--path <path> [--line <n>] [--end-line <n>] | --general) --body <text> \
   [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] \
-  [--state draft|todo] [--format json|text]
+  [--state draft|todo] [--channel onboarding|delegation|collaboration|note] [--format json|text]
 gander comments reply <id> --body <text> [--resolve] [--format json|text]
 gander comments resolve <id> [--reply <text>] [--format json|text]
 gander comments set-state <id> --state draft|todo|resolved [--format json|text]
 gander comments ready (<id>... | --all-drafts) [--format json|text]
 gander comments edit <id> [--path <path>] [--line <n> | --start-line <n> --end-line <n>] \
-  [--body <text>] [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] [--format json|text]
+  [--body <text>] [--kind note|issue|question|praise] [--action none|fix|explain|test|follow-up] \
+  [--channel onboarding|delegation|collaboration|note] [--format json|text]
 gander comments delete <id> [--format json|text]
 ```
 
 `add` creates a persisted comment. Exactly one of `--path` or `--general` is
 required. General comments are session-level notes with no file location, line,
 anchor, or excerpt. `--state` overrides the configured initial state for this
-comment. `--end-line` requires `--line`; `edit --line` conflicts with `--start-line`, and `edit --end-line` needs either a supplied start or an existing anchored start. End lines must be greater than or equal to their start. `--line`, `--start-line`, and `--end-line`
+comment. `--channel` overrides `[comments].default-channel`; without either,
+CLI additions retain the legacy state-derived default (todo → delegation,
+draft → note). A non-actionable onboarding/note selection is stored as a draft
+rather than accidentally creating a publishable todo. `edit --channel` is the
+scriptable equivalent of the TUI editor's channel cycle. `--end-line` requires
+`--line`; `edit --line` conflicts with `--start-line`, and `edit --end-line`
+needs either a supplied start or an existing anchored start. End lines must be greater than or equal to their start. `--line`, `--start-line`, and `--end-line`
 are 1-indexed diff line anchors, preferring the new side (post-image). For a
 removed-only line with no new-side coordinate, Gander falls back to the old-side
 line in the current jj diff. Omitting them creates a file-level anchor. `edit`
@@ -114,7 +121,16 @@ New comments default to `[comments].initial-state`, which is `todo`; set it to
 ```toml
 [comments]
 initial-state = "draft" # todo (default) | draft
+# default-channel = "note" # optional fixed default; otherwise the TUI infers
 ```
+
+The TUI infers new-comment channels in this order: existing thread, agent
+onboarding target, actually attached agent on the reviewer's own reviewed
+range, a consistent foreign jj author across `base..rev`, then private note.
+Mixed/empty/ambiguous range authorship stays private. Merely configuring an
+agent command is not attachment. `[comments].default-channel` pins the initial
+choice (thread replies still preserve their thread), and Tab cycles all four
+channels while composing.
 
 Schema compatibility note: missing serialized comment states still deserialize as
 `draft`; this preserves artifacts and state files written before `CommentState`

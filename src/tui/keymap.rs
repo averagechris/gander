@@ -146,6 +146,7 @@ pub(super) enum Action {
     CancelComment,
     InsertNewline,
     DeleteChar,
+    CycleCommentChannel,
 }
 
 /// An effective input surface. Bindings may be reused freely when their
@@ -462,6 +463,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         add_bindings(&mut bindings, Action::CancelComment, &config.cancel_comment)?;
         add_bindings(&mut bindings, Action::InsertNewline, &config.insert_newline)?;
         add_bindings(&mut bindings, Action::DeleteChar, &config.delete_char)?;
+        add_bindings(
+            &mut bindings,
+            Action::CycleCommentChannel,
+            &config.cycle_comment_channel,
+        )?;
         add_safety_fallbacks(&mut bindings)?;
         validate_collisions(&bindings)?;
         Ok(Self { bindings })
@@ -660,7 +666,7 @@ impl Action {
             ZenAcknowledge => &[KeyContext::ZenGlance],
             ZenArtifactNext | ZenArtifactPrevious => &[KeyContext::ZenArtifact],
             ZenClose => &[KeyContext::ZenFocus],
-            SubmitComment | CancelComment | InsertNewline | DeleteChar => {
+            SubmitComment | CancelComment | InsertNewline | DeleteChar | CycleCommentChannel => {
                 &[KeyContext::CommentEditor]
             }
         }
@@ -1625,6 +1631,14 @@ mod tests {
         assert_eq!(
             keymap.comment_action_for(&KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
             Some(Action::SubmitComment)
+        );
+        assert_eq!(
+            keymap.comment_action_for(&KeyEvent::from(KeyCode::Tab)),
+            Some(Action::CycleCommentChannel)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Tab)),
+            Some(Action::ToggleFocus)
         );
     }
 

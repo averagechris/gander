@@ -1,0 +1,26 @@
+---
+source: src/tui/render.rs
+expression: "render_comment_channel_snapshot(Channel::Note)"
+---
+┌files────────────────────┐┌diff─────────────────────────────────────────────────────────┐
+│• mod     a.txt          ││a.txt  +1 -1                                                 │
+│                         ││@@ -1 +1 @@                                                  │
+│                         ││    1 - old                                                  │
+│                         ││    1 + new                                                  │
+│                         ││                                                             │
+│             ┌comment → note · unanchored──────────────────────────────────┐            │
+│             │channel-aware comment                                        │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             │                                                             │            │
+│             └tab channel · ctrl-s save · esc cancel───────────────────────┘            │
+│                         ││                                                             │
+│                         ││                                                             │
+│                         ││                                                             │
+└─────────────────────────┘└─────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+new comment → note · refresh paused · tab channel · enter newline · ctrl-s save · esc canc
+
+styles: border=Some(Rgb(122, 127, 133)) title=Some(Rgb(122, 127, 133))

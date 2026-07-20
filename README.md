@@ -35,6 +35,9 @@ This repo is intentionally early, but the first vertical slice is in place:
 - changed-symbol outline (`o`) with `}`/`{` jumps between changed functions
 - symbol-aware folding of long unchanged context runs (`z`)
 - records lightweight file-level and line-level comments from the TUI
+- infers onboarding/delegation/collaboration/private-note channels from the
+  active review context, shows the channel in the editor border/chip, and lets
+  `Tab` cycle the audience before save
 - tracks comment states (draft saved/private/withheld, todo ready/actionable,
   resolved history), kinds (note/issue/question/praise), and action tags
   (fix/explain/test/follow-up) with a comment list pane (`C`, then `s`/`a`/`K`)
@@ -220,6 +223,8 @@ on_tui_quit = "stdout" # never | write | stdout
 
 [comments]
 initial-state = "todo" # todo (default) | draft; per-comment CLI --state overrides this
+# Optional fixed default disables contextual inference for new comments.
+# default-channel = "note" # onboarding | delegation | collaboration | note
 
 [identity]
 name = "Reviewer" # optional local human name; blank falls back to human:local
@@ -339,6 +344,7 @@ zen-artifact-next = ["l", "right", "tab"]
 zen-artifact-previous = ["h", "left"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
+cycle-comment-channel = ["tab"]
 quit = ["q"]
 
 [agent]
@@ -572,6 +578,7 @@ keymap; the footer only shows the everyday hints.
 | `C` | comment list popup (jump, `s` cycle state, `a` cycle action, `K` cycle kind, `x` delete) |
 | `R` in comment list | ready all active-session draft comments as todo atomically |
 | Enter in comment editor | insert newline |
+| Tab in comment editor | cycle channel: onboarding → delegation → collaboration → note; border/chip update live |
 | Ctrl-S in comment editor | save comment |
 | Home/End, Ctrl-A/E in comment editor | move to line start/end |
 | Ctrl-B/F, Ctrl-P/N in comment editor | move left/right or up/down |

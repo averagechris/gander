@@ -82,6 +82,32 @@ pub enum Channel {
     Note,
 }
 
+impl Channel {
+    /// Stable editor cycle order documented in `docs/keybindings.md`.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Onboarding => Self::Delegation,
+            Self::Delegation => Self::Collaboration,
+            Self::Collaboration => Self::Note,
+            Self::Note => Self::Onboarding,
+        }
+    }
+
+    /// Compact audience label used by TUI channel chips and list rows.
+    pub fn audience_label(self) -> &'static str {
+        match self {
+            Self::Onboarding => "reviewer",
+            Self::Delegation => "agent",
+            Self::Collaboration => "team",
+            Self::Note => "note",
+        }
+    }
+
+    pub fn permits_todo(self) -> bool {
+        matches!(self, Self::Delegation | Self::Collaboration)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReviewState {

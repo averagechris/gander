@@ -1602,6 +1602,7 @@ diff --git a/b.rs b/b.rs
             kind: None,
             action: None,
             state: crate::state::CommentState::Todo,
+            channel: crate::state::Channel::Delegation,
             created_at: chrono::Utc::now(),
             ..Default::default()
         }

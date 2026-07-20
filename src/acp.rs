@@ -961,7 +961,8 @@ pub mod socket {
         /// the event-loop tick.
         #[cfg(test)]
         pub fn process_pending(&mut self, session: &mut ReviewSession, state_path: &Path) -> bool {
-            let (overlay_changed, commands, mutations) = self.drain_ui_commands(session);
+            let (overlay_changed, _had_requests, commands, mutations) =
+                self.drain_ui_commands(session);
             for command in commands {
                 command.respond(Err((
                     -32000,
@@ -984,11 +985,13 @@ pub mod socket {
         pub fn drain_ui_commands(
             &mut self,
             session: &mut ReviewSession,
-        ) -> (bool, Vec<PresentRequest>, Vec<ReviewMutationRequest>) {
+        ) -> (bool, bool, Vec<PresentRequest>, Vec<ReviewMutationRequest>) {
             let mut overlay_changed = false;
+            let mut had_requests = false;
             let mut commands = Vec::new();
             let mut mutations = Vec::new();
             while let Ok(request) = self.receiver.try_recv() {
+                had_requests = true;
                 if let Some(command) = parse_present_request(&request.line, request.reply.clone()) {
                     commands.push(command);
                     continue;
@@ -1024,7 +1027,7 @@ pub mod socket {
                     .reply
                     .send(response.map(|response| response.to_string()));
             }
-            (overlay_changed, commands, mutations)
+            (overlay_changed, had_requests, commands, mutations)
         }
     }
 

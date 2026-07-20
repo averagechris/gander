@@ -793,6 +793,7 @@ mod tests {
                 session_id: Some("s1".into()),
                 body: "general body".into(),
                 state: CommentState::Todo,
+                channel: Channel::Delegation,
                 ..Default::default()
             },
             Comment {
@@ -809,6 +810,7 @@ mod tests {
                 session_id: Some("other".into()),
                 body: "foreign body".into(),
                 state: CommentState::Todo,
+                channel: Channel::Delegation,
                 ..Default::default()
             },
         ]);
@@ -876,6 +878,7 @@ mod tests {
             path: Some("src/lib.rs".into()),
             body: "unlinked body".into(),
             state: CommentState::Todo,
+            channel: Channel::Delegation,
             ..Default::default()
         });
 

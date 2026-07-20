@@ -1,7 +1,7 @@
 # Annotation channels
 
-Every annotation knows who wrote it and who it is for. Status: design
-accepted; implementation tracked in roadmap milestone 17.
+Every annotation knows who wrote it and who it is for. Status: implemented in
+roadmap milestone 17.
 
 ## Why
 
@@ -46,9 +46,12 @@ Kind, state, action intent, anchors, and replies are unchanged and orthogonal.
 | Collaboration | teammate / future forge plugin    | draft → todo → resolved          | `gander export --profile team`                 |
 | Note          | the reviewer only                 | freeform                         | never leaves the machine                       |
 
-Threads may cross channels by linkage, not by mixing: replying to an
-onboarding card with a request creates a linked delegation comment on the
-same anchor rather than mutating the card's channel.
+Threads do not mix channels. Today, composing a request from an onboarding
+card creates a new delegation comment co-located on the same anchor and leaves
+the onboarding comment unchanged. Exact durable source-comment linkage is
+deferred: the current schema does not record which onboarding comment prompted
+the delegation request. A post-M17 follow-up is tracked in the roadmap rather
+than adding a premature linkage field here.
 
 ## Ergonomics
 
@@ -59,16 +62,19 @@ most-specific context first:
 
 1. Replying in a thread → the thread's channel.
 2. Composing on or inside an agent's onboarding card → `delegation`.
-3. An agent is attached to the session (live harness, summoned agent, or
-   agent-authored annotations present) and the change is the reviewer's own
-   → `delegation`.
-4. The target change's jj author is not the configured identity (reviewing
-   someone else's work) → `collaboration`.
+3. An agent is attached to the session (actual live harness contact, an active
+   summoned process, or active-session agent-authored annotations) and the
+   reviewed range is the reviewer's own → `delegation`. Merely configuring
+   `[agent].command` is not attachment evidence.
+4. Every non-empty change in the reviewed `base..rev` range has one consistent
+   jj author that is not the configured identity (reviewing someone else's
+   work) → `collaboration`.
 5. Otherwise → `note`.
 
 The fallback is deliberately the most private channel: a misfire leaks
-nothing. `[comments] default-channel` pins a fixed default for people who
-prefer no inference.
+nothing. Mixed authors, empty ranges, ambiguous author output, or missing
+configured identity all fall back to `note`. `[comments] default-channel` pins
+a fixed default for people who prefer no inference.
 
 **One quiet indicator, which is also the control.** The comment editor's
 border takes the channel color and the title carries a compact chip —

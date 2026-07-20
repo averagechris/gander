@@ -2,6 +2,8 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::state::Channel;
+
 #[cfg(test)]
 use super::text_layout::VisualPosition;
 use super::text_layout::{VisualTextLayout, is_grapheme_boundary};
@@ -16,6 +18,7 @@ pub(super) struct CommentEditor {
     viewport_height: usize,
     scroll: usize,
     preferred_column: Option<usize>,
+    pub(super) channel: Channel,
 }
 
 impl Default for CommentEditor {
@@ -34,7 +37,19 @@ impl CommentEditor {
             viewport_height: 1,
             scroll: 0,
             preferred_column: None,
+            channel: Channel::Note,
         }
+    }
+
+    pub(super) fn with_channel(text: String, channel: Channel) -> Self {
+        Self {
+            channel,
+            ..Self::new(text)
+        }
+    }
+
+    pub(super) fn cycle_channel(&mut self) {
+        self.channel = self.channel.next();
     }
 
     #[cfg(test)]
@@ -253,10 +268,6 @@ impl CommentEditor {
         }
         scroll.min(layout.rows().len().saturating_sub(height))
     }
-
-    pub(super) fn into_text(self) -> String {
-        self.text
-    }
 }
 
 fn previous_grapheme_boundary(text: &str, cursor: usize) -> usize {
@@ -469,5 +480,29 @@ mod tests {
         assert!(narrow_position.row >= wide_position.row);
         let scroll = editor.visible_scroll(7, 2);
         assert!(narrow_position.row >= scroll && narrow_position.row < scroll + 2);
+    }
+
+    #[test]
+    fn channel_cycle_is_stable_and_does_not_edit_text_or_cursor() {
+        let mut editor = CommentEditor::with_channel("keep me".into(), Channel::Onboarding);
+        let cursor = editor.cursor;
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            editor.cycle_channel();
+            seen.push(editor.channel);
+        }
+
+        assert_eq!(
+            seen,
+            [
+                Channel::Delegation,
+                Channel::Collaboration,
+                Channel::Note,
+                Channel::Onboarding,
+            ]
+        );
+        assert_eq!(editor.text, "keep me");
+        assert_eq!(editor.cursor, cursor);
     }
 }

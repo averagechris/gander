@@ -139,7 +139,9 @@ mod tests {
         session.comments[1].id = "independent-todo".into();
         session.comments[2].id = "linked-draft".into();
         session.comments[0].state = CommentState::Todo;
+        session.comments[0].channel = crate::state::Channel::Delegation;
         session.comments[1].state = CommentState::Todo;
+        session.comments[1].channel = crate::state::Channel::Delegation;
         session.comments[2].state = CommentState::Draft;
         let durable_id = session.comments[0].session_id.clone().unwrap();
         let durable = session

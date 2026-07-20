@@ -67,7 +67,7 @@ use crate::{
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
     review,
-    state::{ReviewState, ReviewStateTombstones, WalkthroughStep},
+    state::{AuthorKind, Channel, ReviewState, ReviewStateTombstones, WalkthroughStep},
 };
 use serde_json::{Value, json};
 
@@ -207,6 +207,9 @@ struct TuiState {
     agent_config: AgentConfig,
     /// A summoned agent, if any. Killed on drop so quitting cannot leak it.
     agent_process: Option<AgentProcess>,
+    /// The live ACP bridge has handled at least one agent/harness request for
+    /// this TUI session. Socket existence alone is not attachment evidence.
+    agent_contacted: bool,
     /// This instance's registry entry; heartbeats on input, removed on drop.
     instance_registration: Option<crate::registry::InstanceRegistration>,
     /// The zen walkthrough layer, when active. A layer, not a mode: normal
@@ -254,6 +257,7 @@ impl Default for TuiState {
             agent_log_path: None,
             agent_config: AgentConfig::default(),
             agent_process: None,
+            agent_contacted: false,
             instance_registration: None,
             zen: None,
             last_repo_poll: None,
@@ -967,7 +971,9 @@ fn run_loop(
         // drawing so their effects render this frame.
         #[cfg(unix)]
         if let Some(bridge) = acp_bridge.as_deref_mut() {
-            let (overlay_changed, commands, mutations) = bridge.drain_ui_commands(session);
+            let (overlay_changed, had_requests, commands, mutations) =
+                bridge.drain_ui_commands(session);
+            tui_state.agent_contacted |= had_requests;
             for command in commands {
                 let result = apply_present_command(
                     command.command.clone(),
@@ -2458,7 +2464,10 @@ fn handle_key_event(
             let action = keymap.popup_action_for(KeyContext::CommentList, &key);
             if action == Some(Action::CommentListNewGeneral) {
                 *mode = Mode::CommentInput {
-                    editor: CommentEditor::default(),
+                    editor: CommentEditor::with_channel(
+                        String::new(),
+                        inferred_comment_channel(session, tui_state, false, None),
+                    ),
                     target: CommentInputTarget::NewGeneral,
                 };
             } else if action == Some(Action::EditComment) {
@@ -2467,7 +2476,7 @@ fn handle_key_event(
                     .and_then(|id| session.comments.iter().find(|comment| comment.id == id))
                 {
                     *mode = Mode::CommentInput {
-                        editor: CommentEditor::new(comment.body.clone()),
+                        editor: CommentEditor::with_channel(comment.body.clone(), comment.channel),
                         target: CommentInputTarget::Edit {
                             id: comment.id.clone(),
                         },
@@ -2955,8 +2964,12 @@ fn handle_normal_action(
             tui_state.notice = None;
         }
         Action::Comment => {
+            let onboarding_target = selected_onboarding_target(session);
             *mode = Mode::CommentInput {
-                editor: CommentEditor::default(),
+                editor: CommentEditor::with_channel(
+                    String::new(),
+                    inferred_comment_channel(session, tui_state, onboarding_target, None),
+                ),
                 target: CommentInputTarget::New,
             };
         }
@@ -2978,7 +2991,7 @@ fn handle_normal_action(
         Action::EditComment => {
             if let Some(comment) = session.selected_comment() {
                 *mode = Mode::CommentInput {
-                    editor: CommentEditor::new(comment.body.clone()),
+                    editor: CommentEditor::with_channel(comment.body.clone(), comment.channel),
                     target: CommentInputTarget::Edit {
                         id: comment.id.clone(),
                     },
@@ -3009,6 +3022,7 @@ fn handle_normal_action(
         | Action::CancelComment
         | Action::InsertNewline
         | Action::DeleteChar
+        | Action::CycleCommentChannel
         | Action::TargetPickerMoveDown
         | Action::TargetPickerMoveUp
         | Action::PopupMoveDown
@@ -4190,7 +4204,10 @@ fn handle_draft_list_key(
         Some(Action::DraftEdit) => {
             let draft = list.selected_draft().cloned()?;
             Some(Mode::CommentInput {
-                editor: CommentEditor::new(draft.body),
+                editor: CommentEditor::with_channel(
+                    draft.body,
+                    inferred_comment_channel(session, tui_state, true, None),
+                ),
                 target: CommentInputTarget::AcceptDraft { id: draft.id },
             })
         }
@@ -4219,12 +4236,60 @@ fn handle_draft_list_key(
     }
 }
 
+fn selected_onboarding_target(session: &ReviewSession) -> bool {
+    session.selected_comment().is_some_and(|comment| {
+        comment.author.kind == AuthorKind::Agent && comment.channel == Channel::Onboarding
+    })
+}
+
+fn inferred_comment_channel(
+    session: &ReviewSession,
+    tui_state: &TuiState,
+    onboarding_target: bool,
+    thread_channel: Option<Channel>,
+) -> Channel {
+    let active_session_id = review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
+    .map(|durable| durable.id.as_str());
+    let has_agent_annotation = session.comments.iter().any(|comment| {
+        comment.author.kind == AuthorKind::Agent
+            && active_session_id.map_or(comment.session_id.is_none(), |session_id| {
+                comment.belongs_to_session(session_id)
+            })
+    });
+    let agent_attached =
+        tui_state.agent_process.is_some() || tui_state.agent_contacted || has_agent_annotation;
+    review::infer_comment_channel(review::ChannelInferenceContext {
+        thread_channel,
+        onboarding_target,
+        agent_attached,
+        configured_human_name: session.configured_human_name.as_deref(),
+        target_author_name: session.target_author_name.as_deref(),
+        fixed_default: session.comment_default_channel,
+    })
+}
+
 /// Accept a pending durable agent draft, optionally with an edited body.
 fn accept_agent_draft(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
     draft_id: &str,
     body_override: Option<String>,
+) -> bool {
+    let channel = inferred_comment_channel(session, tui_state, true, None);
+    accept_agent_draft_with_channel(session, tui_state, draft_id, body_override, channel)
+}
+
+fn accept_agent_draft_with_channel(
+    session: &mut ReviewSession,
+    tui_state: &mut TuiState,
+    draft_id: &str,
+    body_override: Option<String>,
+    channel: Channel,
 ) -> bool {
     let Some(draft) = session
         .pending_agent_drafts()
@@ -4237,7 +4302,7 @@ fn accept_agent_draft(
     let transition = tui_state
         .diff_viewport
         .transition_snapshot(session, current_diff_inner(session, tui_state));
-    match session.accept_agent_draft(&draft, body) {
+    match session.accept_agent_draft(&draft, body, channel) {
         Some(_comment_id) => {
             tui_state.diff_viewport.finish_transition(
                 transition,
@@ -4717,6 +4782,10 @@ impl ReviewLoader<'_> {
         target: ReviewTarget,
         preserve_view: bool,
     ) -> Result<()> {
+        let target_author = self
+            .jj
+            .target_author(&session.repo, &target)
+            .unwrap_or(None);
         let diff_text = self
             .jj
             .diff(&session.repo, &target)
@@ -4729,6 +4798,7 @@ impl ReviewLoader<'_> {
         } else {
             session.replace_diff(target, diff);
         }
+        session.set_target_author_name(target_author);
         session.annotate_generated_where(|file| {
             self.generated_matcher.is_match(&file.path)
                 || crate::generated::diff_content_looks_generated(&file.diff)
@@ -4776,33 +4846,48 @@ fn handle_comment_action(
     match action {
         Action::CancelComment => return true,
         Action::SubmitComment => {
-            let body = std::mem::take(editor).into_text();
+            let channel = editor.channel;
+            let body = editor.text.clone();
             if let CommentInputTarget::AcceptDraft { id } = target {
-                accept_agent_draft(session, tui_state, id, Some(body));
-                return true;
+                return accept_agent_draft_with_channel(
+                    session,
+                    tui_state,
+                    id,
+                    Some(body),
+                    channel,
+                );
             }
             let transition = tui_state
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
-            match target {
-                CommentInputTarget::New => session.add_comment(body),
-                CommentInputTarget::NewGeneral => session.add_general_comment(body),
+            let saved = match target {
+                CommentInputTarget::New => session.add_comment_in_channel(body, channel),
+                CommentInputTarget::NewGeneral => {
+                    session.add_general_comment_in_channel(body, channel)
+                }
                 CommentInputTarget::Edit { id } => {
-                    session.update_comment_body(id, body);
+                    session.update_comment_body_and_channel(id, body, channel)
                 }
                 CommentInputTarget::AcceptDraft { .. } => unreachable!("handled above"),
-            }
+            };
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
                 current_diff_inner(session, tui_state),
             );
-            return true;
+            if saved {
+                return true;
+            }
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Error,
+                message: "comment was not saved; body must contain non-whitespace text".to_owned(),
+            });
         }
         Action::InsertNewline => editor.insert_newline(),
         Action::DeleteChar => {
             editor.backspace();
         }
+        Action::CycleCommentChannel => editor.cycle_channel(),
         _ => {}
     }
     false
@@ -5087,7 +5172,15 @@ fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut 
     };
     if drag.saw_drag && session.selected_range_anchor().is_some() {
         *mode = Mode::CommentInput {
-            editor: CommentEditor::default(),
+            editor: CommentEditor::with_channel(
+                String::new(),
+                inferred_comment_channel(
+                    session,
+                    tui_state,
+                    selected_onboarding_target(session),
+                    None,
+                ),
+            ),
             target: CommentInputTarget::New,
         };
     }
@@ -5428,6 +5521,7 @@ mod tests {
             kind: Some(CommentKind::Issue),
             action: Some(ActionIntent::Fix),
             state: CommentState::Todo,
+            channel: Channel::Delegation,
             created_at: chrono::Utc::now(),
             ..Default::default()
         });
@@ -5565,6 +5659,265 @@ mod tests {
         );
         session.add_comment("private feedback".to_owned());
         assert_eq!(session.comments[0].state, CommentState::Draft);
+    }
+
+    #[test]
+    fn tui_new_and_general_flows_store_inferred_channels_at_creation() {
+        let diff = crate::diff::DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut config = crate::config::Config::default();
+        config.identity.name = Some("Reviewer".into());
+        config.agent.command = Some("agent-cli".into());
+        let mut session = ReviewSession::new_with_config(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+            &config,
+        );
+        session.set_target_author_name(Some("Reviewer".into()));
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            agent_config: config.agent.clone(),
+            agent_contacted: true,
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+
+        handle_normal_action(
+            Action::Comment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        let Mode::CommentInput { editor, target } = &mut mode else {
+            panic!("comment action should open editor");
+        };
+        assert_eq!(editor.channel, Channel::Delegation);
+        editor.text = "delegate this".into();
+        editor.cursor = editor.text.len();
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            editor,
+            target,
+            &mut tui_state,
+        ));
+        assert_eq!(session.comments[0].channel, Channel::Delegation);
+        assert_eq!(session.comments[0].state, CommentState::Todo);
+
+        session.set_target_author_name(Some("Teammate".into()));
+        tui_state.agent_config.command = None;
+        let channel = inferred_comment_channel(&session, &tui_state, false, None);
+        let mut editor = CommentEditor::with_channel(String::new(), channel);
+        let target = CommentInputTarget::NewGeneral;
+        editor.text = "team feedback".into();
+        editor.cursor = editor.text.len();
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &target,
+            &mut tui_state,
+        ));
+        assert!(session.comments[1].is_general());
+        assert_eq!(session.comments[1].channel, Channel::Collaboration);
+        assert_eq!(session.comments[1].state, CommentState::Todo);
+    }
+
+    #[test]
+    fn configured_agent_command_alone_is_not_attachment_evidence() {
+        let diff = crate::diff::DiffSet::parse(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap();
+        let mut config = crate::config::Config::default();
+        config.identity.name = Some("Reviewer".into());
+        config.agent.command = Some("configured-but-not-running".into());
+        let mut session = ReviewSession::new_with_config(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            diff,
+            ReviewState::default(),
+            &config,
+        );
+        session.set_target_author_name(Some("Reviewer".into()));
+        let tui_state = TuiState {
+            agent_config: config.agent,
+            ..TuiState::default()
+        };
+
+        assert_eq!(
+            inferred_comment_channel(&session, &tui_state, false, None),
+            Channel::Note
+        );
+    }
+
+    #[test]
+    fn tui_range_and_edit_flows_fallback_private_preserve_then_cycle_channel() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n-old\n+new\n+more\n",
+        );
+        session.toggle_focus();
+        session.set_diff_range_selection(2, 3);
+        let mut tui_state = TuiState::default();
+        let channel = inferred_comment_channel(&session, &tui_state, false, None);
+        assert_eq!(channel, Channel::Note);
+        session.add_comment_in_channel("private range".into(), channel);
+        assert_eq!(session.comments[0].channel, Channel::Note);
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+
+        session.comments[0].channel = Channel::Collaboration;
+        let id = session.comments[0].id.clone();
+        let mut editor = CommentEditor::with_channel(
+            session.comments[0].body.clone(),
+            session.comments[0].channel,
+        );
+        let target = CommentInputTarget::Edit { id: id.clone() };
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &target,
+            &mut tui_state,
+        ));
+        assert_eq!(session.comments[0].channel, Channel::Collaboration);
+
+        let mut editor = CommentEditor::with_channel(
+            session.comments[0].body.clone(),
+            session.comments[0].channel,
+        );
+        assert!(!handle_comment_action(
+            Action::CycleCommentChannel,
+            &mut session,
+            &mut editor,
+            &target,
+            &mut tui_state,
+        ));
+        assert_eq!(editor.channel, Channel::Note);
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &target,
+            &mut tui_state,
+        ));
+        assert_eq!(session.comments[0].channel, Channel::Note);
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+    }
+
+    #[test]
+    fn failed_private_channel_edit_is_atomic_and_keeps_editor_open() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.toggle_focus();
+        assert!(session.add_comment_in_channel("actionable".into(), Channel::Delegation));
+        let id = session.comments[0].id.clone();
+        session.comments[0].state = CommentState::Todo;
+        let original = session.comments[0].clone();
+        let mut mode = Mode::CommentInput {
+            editor: CommentEditor::with_channel("   ".into(), Channel::Note),
+            target: CommentInputTarget::Edit { id: id.clone() },
+        };
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = TuiState::default();
+
+        assert!(
+            !handle_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &mut session,
+                &mut mode,
+                &keymap,
+                &loader,
+                &mut tui_state,
+            )
+            .unwrap()
+        );
+        let Mode::CommentInput { editor, .. } = &mut mode else {
+            panic!("failed edit must keep the editor open");
+        };
+        assert_eq!(editor.text, "   ");
+        assert_eq!(editor.channel, Channel::Note);
+        assert_eq!(session.comments[0], original);
+        assert!(tui_state.notice.as_ref().is_some_and(|notice| {
+            notice.level == UiNoticeLevel::Error && notice.message.contains("not saved")
+        }));
+
+        editor.text = "private replacement".into();
+        editor.cursor = editor.text.len();
+        assert!(
+            !handle_key_event(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &mut session,
+                &mut mode,
+                &keymap,
+                &loader,
+                &mut tui_state,
+            )
+            .unwrap()
+        );
+        assert!(matches!(mode, Mode::Normal));
+        assert_eq!(session.comments[0].body, "private replacement");
+        assert_eq!(session.comments[0].channel, Channel::Note);
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+    }
+
+    #[test]
+    fn composing_on_onboarding_annotation_creates_new_delegation_without_mutating_card() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let onboarding = session
+            .add_agent_draft("a.txt".into(), Some(1), "agent narration".into())
+            .unwrap();
+        session.select_comment_by_id(&onboarding.id);
+        assert!(selected_onboarding_target(&session));
+        let mut tui_state = TuiState::default();
+        let mut editor = CommentEditor::with_channel(
+            String::new(),
+            inferred_comment_channel(&session, &tui_state, true, None),
+        );
+        editor.text = "please change this".into();
+        editor.cursor = editor.text.len();
+
+        assert!(handle_comment_action(
+            Action::SubmitComment,
+            &mut session,
+            &mut editor,
+            &CommentInputTarget::New,
+            &mut tui_state,
+        ));
+
+        let original = session
+            .comments
+            .iter()
+            .find(|comment| comment.id == onboarding.id)
+            .unwrap();
+        assert_eq!(original.channel, Channel::Onboarding);
+        assert_eq!(original.body, "agent narration");
+        let request = session
+            .comments
+            .iter()
+            .find(|comment| comment.id != onboarding.id)
+            .unwrap();
+        assert_eq!(request.channel, Channel::Delegation);
+        assert_eq!(request.anchor, original.anchor);
     }
 
     #[test]
@@ -7087,6 +7440,70 @@ diff --git a/b.rs b/b.rs
             crate::state::Channel::Delegation
         );
         assert_eq!(session.comments[0].id, "draft-1");
+    }
+
+    #[test]
+    fn accepting_onboarding_draft_honors_fixed_private_channel_without_todo_publishability() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        session.comment_default_channel = Some(Channel::Note);
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..TuiState::default()
+        };
+
+        assert!(accept_agent_draft(
+            &mut session,
+            &mut tui_state,
+            "draft-1",
+            None,
+        ));
+
+        assert_eq!(session.comments[0].channel, Channel::Note);
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+        assert!(session.pending_agent_drafts().is_empty());
+    }
+
+    #[test]
+    fn accepting_agent_draft_as_collaboration_creates_team_todo() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..TuiState::default()
+        };
+
+        assert!(accept_agent_draft_with_channel(
+            &mut session,
+            &mut tui_state,
+            "draft-1",
+            None,
+            Channel::Collaboration,
+        ));
+        assert_eq!(session.comments[0].channel, Channel::Collaboration);
+        assert_eq!(session.comments[0].state, CommentState::Todo);
+        assert!(session.pending_agent_drafts().is_empty());
+    }
+
+    #[test]
+    fn accepting_agent_draft_as_onboarding_acknowledges_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
+        let mut tui_state = TuiState {
+            agent_overlay_path: Some(overlay_path),
+            ..TuiState::default()
+        };
+
+        assert!(accept_agent_draft_with_channel(
+            &mut session,
+            &mut tui_state,
+            "draft-1",
+            None,
+            Channel::Onboarding,
+        ));
+        assert_eq!(session.comments[0].channel, Channel::Onboarding);
+        assert_eq!(session.comments[0].state, CommentState::Resolved);
+        assert!(session.pending_agent_drafts().is_empty());
     }
 
     #[test]

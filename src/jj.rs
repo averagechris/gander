@@ -19,6 +19,12 @@ pub trait JjBackend {
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the reviewed range (`base..rev`), oldest first.
     fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>>;
+    /// Consistent author name across the non-empty reviewed range, read
+    /// without snapshotting or mutating the workspace. Mixed/empty/ambiguous
+    /// ranges return `None`.
+    fn target_author(&self, _repo: &Path, _target: &ReviewTarget) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Deliberately snapshot the working copy so subsequent read-only queries
     /// can observe disk edits without each query implicitly writing an op.
     fn snapshot_working_copy(&self, repo: &Path) -> Result<()>;
@@ -259,6 +265,37 @@ impl JjCommand {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    pub fn target_author(
+        binary: &Path,
+        repo: &Path,
+        target: &ReviewTarget,
+    ) -> Result<Option<String>> {
+        let output = Command::new(binary)
+            .arg("--ignore-working-copy")
+            .arg("log")
+            .arg("-r")
+            .arg(format!("{}..{}", target.base, target.rev))
+            .arg("--no-graph")
+            .arg("--color=never")
+            .arg("--no-pager")
+            .arg("--template")
+            .arg("author.name() ++ \"\\0\"")
+            .stdin(Stdio::null())
+            .current_dir(repo)
+            .output()?;
+
+        if !output.status.success() {
+            bail!(
+                "jj log failed reading authors for {target} with status {}:\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(parse_consistent_author(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
     fn log_summaries(
         binary: &Path,
         repo: &Path,
@@ -339,6 +376,10 @@ impl JjBackend for JjCliBackend {
 
     fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>> {
         JjCommand::stack_changes(&self.binary, repo, target)
+    }
+
+    fn target_author(&self, repo: &Path, target: &ReviewTarget) -> Result<Option<String>> {
+        JjCommand::target_author(&self.binary, repo, target)
     }
 
     fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
@@ -431,6 +472,23 @@ fn parse_change_summaries(output: &str) -> Result<Vec<JjChangeSummary>> {
             })
         })
         .collect()
+}
+
+fn parse_consistent_author(output: &str) -> Option<String> {
+    let records = output.strip_suffix('\0').unwrap_or(output).split('\0');
+    let mut author: Option<&str> = None;
+    for record in records {
+        let record = record.trim();
+        if record.is_empty() {
+            return None;
+        }
+        match author {
+            None => author = Some(record),
+            Some(expected) if expected == record => {}
+            Some(_) => return None,
+        }
+    }
+    author.map(str::to_owned)
 }
 
 fn resolve_binary_with_probe(
@@ -634,6 +692,63 @@ mod tests {
         assert!(parse_operation_summaries("\tno id\n").is_err());
     }
 
+    #[test]
+    fn target_author_requires_one_consistent_nonempty_range_author() {
+        assert_eq!(
+            parse_consistent_author("Reviewer\0"),
+            Some("Reviewer".into())
+        );
+        assert_eq!(
+            parse_consistent_author("  Reviewer  \0"),
+            Some("Reviewer".into())
+        );
+        assert_eq!(
+            parse_consistent_author("Reviewer\0 Reviewer \0Reviewer\0"),
+            Some("Reviewer".into())
+        );
+        assert_eq!(parse_consistent_author(""), None);
+        assert_eq!(parse_consistent_author("Reviewer\0Teammate\0"), None);
+        assert_eq!(parse_consistent_author("Reviewer\0\0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_author_fake_backend_handles_single_same_mixed_and_empty_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("jj-fake-author");
+        let args_path = dir.path().join("args");
+        let target = ReviewTarget::new("main", "feature");
+        for (output, expected) in [
+            ("Reviewer\\0", Some("Reviewer")),
+            ("Reviewer\\0Reviewer\\0", Some("Reviewer")),
+            ("Reviewer\\0Teammate\\0", None),
+            ("", None),
+        ] {
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '{}'\n",
+                    args_path.display(),
+                    output
+                ),
+            )
+            .unwrap();
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+
+            assert_eq!(
+                JjCommand::target_author(&script, dir.path(), &target).unwrap(),
+                expected.map(str::to_owned),
+                "fake output {output:?}"
+            );
+            let args = fs::read_to_string(&args_path).unwrap();
+            assert!(args.starts_with("--ignore-working-copy\n"));
+            assert!(args.contains("-r\nmain..feature\n"));
+            assert!(args.contains("author.name()"));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn read_only_commands_ignore_working_copy() {
@@ -687,6 +802,12 @@ mod tests {
                 .unwrap()
                 .starts_with("--ignore-working-copy\n")
         );
+
+        JjCommand::target_author(&script, dir.path(), &target).unwrap();
+        let args = fs::read_to_string(&args_path).unwrap();
+        assert!(args.starts_with("--ignore-working-copy\n"));
+        assert!(args.contains("-r\ntrunk()..@\n"));
+        assert!(args.contains("author.name()"));
     }
 
     #[cfg(unix)]

@@ -124,8 +124,15 @@ pub struct ReviewSession {
     pub sessions: Vec<crate::state::ReviewSession>,
     /// Configured lifecycle state for newly accepted durable comments.
     pub comment_initial_state: CommentState,
+    pub comment_default_channel: Option<Channel>,
     pub human_identity: Identity,
+    /// Explicit configured identity name, distinct from the migration-safe
+    /// `human:local` fallback used for authorship stamping.
+    pub configured_human_name: Option<String>,
     pub agent_identity: Identity,
+    /// Author of exactly one target revision, populated by a read-only jj
+    /// query. `None` means unavailable or ambiguous and inference stays private.
+    pub target_author_name: Option<String>,
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
@@ -559,8 +566,11 @@ struct ReviewSessionOptions {
     limits: LimitsConfig,
     diff_cues: DiffConfig,
     comment_initial_state: CommentState,
+    comment_default_channel: Option<Channel>,
     human_identity: Identity,
+    configured_human_name: Option<String>,
     agent_identity: Identity,
+    target_author_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -673,6 +683,10 @@ pub struct ReviewFile {
 }
 
 impl ReviewSession {
+    pub fn set_target_author_name(&mut self, author: Option<String>) {
+        self.target_author_name = author.filter(|name| !name.trim().is_empty());
+    }
+
     /// Stable logical identity of the row currently anchoring the diff top.
     /// Terminal geometry deliberately does not participate in this identity.
     pub(crate) fn diff_top_identity(&self) -> Option<DiffRowIdentity> {
@@ -758,8 +772,11 @@ impl ReviewSession {
                 limits: config.limits.clone(),
                 diff_cues: config.diff.clone(),
                 comment_initial_state: config.comments.initial_state.into(),
+                comment_default_channel: config.comments.default_channel,
                 human_identity: config.human_identity(),
+                configured_human_name: config.identity.name.clone(),
                 agent_identity: config.agent_identity(),
+                target_author_name: None,
             },
         )
     }
@@ -782,8 +799,11 @@ impl ReviewSession {
                 limits: LimitsConfig::default(),
                 diff_cues: DiffConfig::default(),
                 comment_initial_state: CommentState::Draft,
+                comment_default_channel: None,
                 human_identity: Identity::local_human(),
+                configured_human_name: None,
                 agent_identity: Identity::agent(),
+                target_author_name: None,
             },
         )
     }
@@ -800,8 +820,11 @@ impl ReviewSession {
             limits,
             diff_cues,
             comment_initial_state,
+            comment_default_channel,
             human_identity,
+            configured_human_name,
             agent_identity,
+            target_author_name,
         } = options;
         let mut state = state;
         state.normalize_legacy_file_state();
@@ -838,8 +861,11 @@ impl ReviewSession {
             comments,
             sessions,
             comment_initial_state,
+            comment_default_channel,
             human_identity,
+            configured_human_name,
             agent_identity,
+            target_author_name,
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
@@ -918,8 +944,11 @@ impl ReviewSession {
                 },
                 diff_cues: self.diff_cues.clone(),
                 comment_initial_state: self.comment_initial_state,
+                comment_default_channel: self.comment_default_channel,
                 human_identity: self.human_identity.clone(),
+                configured_human_name: self.configured_human_name.clone(),
                 agent_identity: self.agent_identity.clone(),
+                target_author_name: self.target_author_name.clone(),
             },
         );
     }
@@ -1684,16 +1713,21 @@ impl ReviewSession {
             .filter(|comment| {
                 comment.author.kind == AuthorKind::Agent
                     && comment.state == CommentState::Draft
+                    && comment.channel == Channel::Onboarding
                     && comment.belongs_to_session(active_session_id)
             })
             .cloned()
             .collect()
     }
 
-    /// Accept a durable agent draft, preserving its id and anchor. Until WP-B
-    /// context inference lands, acceptance conservatively makes it an
-    /// actionable delegation todo.
-    pub fn accept_agent_draft(&mut self, draft: &Comment, body: String) -> Option<String> {
+    /// Accept a durable agent draft, preserving its id and anchor while the
+    /// TUI-selected channel resolves its lifecycle.
+    pub fn accept_agent_draft(
+        &mut self,
+        draft: &Comment,
+        body: String,
+        channel: Channel,
+    ) -> Option<String> {
         if body.trim().is_empty() {
             return None;
         }
@@ -1708,15 +1742,21 @@ impl ReviewSession {
             &draft.id,
             review::CommentEdits {
                 body: Some(body),
+                channel: Some(channel),
                 ..Default::default()
             },
         )
         .ok()?;
+        let accepted_state = match channel {
+            Channel::Delegation | Channel::Collaboration => CommentState::Todo,
+            Channel::Onboarding => CommentState::Resolved,
+            Channel::Note => CommentState::Draft,
+        };
         let accepted = review::set_comment_state(
             &mut self.sessions[index],
             &mut self.comments,
             &draft.id,
-            CommentState::Todo,
+            accepted_state,
         )
         .ok()?;
         Some(accepted.id)
@@ -2752,7 +2792,23 @@ impl ReviewSession {
         }
     }
 
+    #[cfg(test)]
     pub fn update_comment_body(&mut self, id: &str, body: String) -> bool {
+        let channel = self
+            .comments
+            .iter()
+            .find(|comment| comment.id == id)
+            .map(|comment| comment.channel)
+            .unwrap_or(Channel::Note);
+        self.update_comment_body_and_channel(id, body, channel)
+    }
+
+    pub fn update_comment_body_and_channel(
+        &mut self,
+        id: &str,
+        body: String,
+        channel: Channel,
+    ) -> bool {
         let index = self.ensure_active_review_session_index();
         review::edit_comment(
             &mut self.sessions[index],
@@ -2760,6 +2816,7 @@ impl ReviewSession {
             id,
             review::CommentEdits {
                 body: Some(body),
+                channel: Some(channel),
                 ..Default::default()
             },
         )
@@ -2849,38 +2906,67 @@ impl ReviewSession {
         true
     }
 
+    #[cfg(test)]
     pub fn add_comment(&mut self, body: String) {
+        let channel = if self.comment_initial_state == CommentState::Todo {
+            Channel::Delegation
+        } else {
+            Channel::Note
+        };
+        self.add_comment_in_channel(body, channel);
+    }
+
+    pub fn add_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
         match self.focus {
-            Focus::Files => self.add_file_comment(body),
+            Focus::Files => self.add_file_comment_in_channel(body, channel),
             Focus::Diff => {
                 if let Some(anchor) = self.selected_comment_anchor() {
-                    self.add_comment_with_anchor(body, anchor);
+                    let added = self.add_comment_with_anchor_and_channel(body, anchor, channel);
                     self.clear_diff_range_selection();
+                    added
+                } else {
+                    false
                 }
             }
         }
     }
 
+    #[cfg(test)]
     pub fn add_file_comment(&mut self, body: String) {
+        let channel = if self.comment_initial_state == CommentState::Todo {
+            Channel::Delegation
+        } else {
+            Channel::Note
+        };
+        self.add_file_comment_in_channel(body, channel);
+    }
+
+    pub fn add_file_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
         let Some(file) = self.selected_file() else {
-            return;
+            return false;
         };
         let anchor = CommentAnchor::File {
             path: file.path.clone(),
             old_path: file.old_path.clone(),
             diff_fingerprint: file.fingerprint.clone(),
         };
-        self.add_comment_with_anchor(body, anchor);
+        self.add_comment_with_anchor_and_channel(body, anchor, channel)
     }
 
-    pub fn add_comment_with_anchor(&mut self, body: String, anchor: CommentAnchor) {
+    pub fn add_comment_with_anchor_and_channel(
+        &mut self,
+        body: String,
+        anchor: CommentAnchor,
+        channel: Channel,
+    ) -> bool {
         let index = self.ensure_active_review_session_index();
         let session_id = self.sessions[index].id.clone();
         let observation = crate::provenance::CommentObservation::new(
             self.provenance_snapshot(index),
             Some(anchor.clone()),
         );
-        let _ = review::add_comment(
+        let state = self.initial_state_for_channel(channel);
+        review::add_comment(
             &mut self.sessions[index],
             &mut self.comments,
             review::NewComment {
@@ -2898,15 +2984,12 @@ impl ReviewSession {
                 body,
                 kind: None,
                 action: None,
-                state: self.comment_initial_state,
+                state,
                 author: self.human_identity.clone(),
-                channel: if self.comment_initial_state == CommentState::Todo {
-                    Channel::Delegation
-                } else {
-                    Channel::Note
-                },
+                channel,
             },
-        );
+        )
+        .is_ok()
     }
 
     /// Add an agent-authored durable draft for TUI triage. This is the shared
@@ -2982,12 +3065,23 @@ impl ReviewSession {
         )
     }
 
+    #[cfg(test)]
     pub fn add_general_comment(&mut self, body: String) {
+        let channel = if self.comment_initial_state == CommentState::Todo {
+            Channel::Delegation
+        } else {
+            Channel::Note
+        };
+        self.add_general_comment_in_channel(body, channel);
+    }
+
+    pub fn add_general_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
         let index = self.ensure_active_review_session_index();
         let session_id = self.sessions[index].id.clone();
         let observation =
             crate::provenance::CommentObservation::new(self.provenance_snapshot(index), None);
-        let _ = review::add_comment(
+        let state = self.initial_state_for_channel(channel);
+        review::add_comment(
             &mut self.sessions[index],
             &mut self.comments,
             review::NewComment {
@@ -3000,15 +3094,20 @@ impl ReviewSession {
                 body,
                 kind: None,
                 action: None,
-                state: self.comment_initial_state,
+                state,
                 author: self.human_identity.clone(),
-                channel: if self.comment_initial_state == CommentState::Todo {
-                    Channel::Delegation
-                } else {
-                    Channel::Note
-                },
+                channel,
             },
-        );
+        )
+        .is_ok()
+    }
+
+    fn initial_state_for_channel(&self, channel: Channel) -> CommentState {
+        if self.comment_initial_state == CommentState::Todo && !channel.permits_todo() {
+            CommentState::Draft
+        } else {
+            self.comment_initial_state
+        }
     }
 
     fn provenance_snapshot(&self, session_index: usize) -> crate::provenance::SnapshotEvidence {

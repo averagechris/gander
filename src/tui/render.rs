@@ -20,7 +20,7 @@ use crate::{
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     jj::JjChangeSummary,
-    state::{Comment, ReviewTarget},
+    state::{Channel, Comment, ReviewTarget},
     syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
@@ -635,6 +635,7 @@ struct CommentSummary {
     action: Option<crate::state::ActionIntent>,
     kind: Option<crate::state::CommentKind>,
     headline: String,
+    channel: Channel,
 }
 
 impl CommentSummary {
@@ -646,6 +647,7 @@ impl CommentSummary {
             action: comment.action,
             kind: comment.kind,
             headline: comment_summary_headline(comment),
+            channel: comment.channel,
         }
     }
 
@@ -653,7 +655,7 @@ impl CommentSummary {
     /// the theme, so this mirrors [`Self::line`]'s span structure textually
     /// (checked by `comment_summary_text_matches_rendered_line`).
     fn text(&self) -> String {
-        let mut text = format!("      ↳ {} [{}] ", self.short_id, self.state.label());
+        let mut text = format!("      ▎ {} [{}] ", self.short_id, self.state.label());
         if let Some(action) = self.action
             && action != crate::state::ActionIntent::None
         {
@@ -669,7 +671,10 @@ impl CommentSummary {
     /// The rendered summary row, styled with the active theme.
     fn line(&self, theme: &AppTheme) -> Line<'static> {
         let mut spans = vec![
-            Span::styled("      ↳ ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "      ▎ ",
+                inline_annotation_card_border_style(self.channel, theme),
+            ),
             Span::styled(
                 format!("{} ", self.short_id),
                 Style::default().fg(theme.muted),
@@ -695,10 +700,18 @@ impl CommentSummary {
         }
         spans.push(Span::styled(
             self.headline.clone(),
-            Style::default().fg(theme.accent),
+            Style::default().fg(theme.channel_color(self.channel)),
         ));
         Line::from(spans)
     }
+}
+
+/// Current lightweight inline-card boundary. M18 can replace this summary
+/// primitive without changing the semantic channel-color contract.
+fn inline_annotation_card_border_style(channel: Channel, theme: &AppTheme) -> Style {
+    Style::default()
+        .fg(theme.channel_color(channel))
+        .add_modifier(Modifier::BOLD)
 }
 
 #[derive(Debug, Clone)]
@@ -1046,6 +1059,14 @@ fn row_comment_count(session: &ReviewSession, row: &DiffRow) -> usize {
         return 0;
     };
     session.comments_for_diff_row_anchor_details(anchor).len()
+}
+
+fn row_comment_channel(session: &ReviewSession, row: &DiffRow) -> Option<Channel> {
+    let anchor = row.anchor.as_ref()?;
+    session
+        .comments_for_diff_row_anchor_details(anchor)
+        .first()
+        .map(|comment| comment.channel)
 }
 
 fn append_comment_lines(
@@ -1698,7 +1719,9 @@ fn diff_line_cell_spans_with_width(
                 1..=9 => comment_count.to_string(),
                 _ => "+".to_owned(),
             },
-            Style::default().fg(theme.accent),
+            Style::default().fg(row_comment_channel(session, row)
+                .map(|channel| theme.channel_color(channel))
+                .unwrap_or(theme.muted)),
         )
     } else if flagged {
         // Agent-flagged section: pinned in the gutter.
@@ -2289,14 +2312,16 @@ fn draw_footer(
             }
             text
         }
-        Mode::CommentInput { target, .. } => format!(
-            "{kind} comment · refresh paused · {newline} newline · {submit} save · {cancel} cancel",
+        Mode::CommentInput { editor, target } => format!(
+            "{kind} comment → {audience} · refresh paused · {channel} channel · {newline} newline · {submit} save · {cancel} cancel",
             kind = match target {
                 CommentInputTarget::New => "new",
                 CommentInputTarget::NewGeneral => "new general",
                 CommentInputTarget::Edit { .. } => "edit",
                 CommentInputTarget::AcceptDraft { .. } => "accept draft",
             },
+            audience = editor.channel.audience_label(),
+            channel = keymap.hint(Action::CycleCommentChannel),
             newline = keymap.hint(Action::InsertNewline),
             submit = keymap.hint(Action::SubmitComment),
             cancel = keymap.hint(Action::CancelComment),
@@ -2700,6 +2725,10 @@ fn draw_help_popup(
             "create general comment (sequence)",
         ),
         entry(&[Action::CommentListReady], "ready all draft comments"),
+        entry(
+            &[Action::CycleCommentChannel],
+            "cycle comment channel while composing",
+        ),
         entry(&[Action::OpenWork], "action items & todo feedback"),
         entry(&[Action::WalkthroughList], "walkthrough panel"),
         entry(&[Action::MarkWalkthrough], "mark for walkthrough"),
@@ -2778,9 +2807,15 @@ fn draw_comment_popup(
         .map(|(row, _)| Line::raw(layout.row_text(row)))
         .collect::<Vec<_>>();
     clear_popup(frame, popup, theme);
-    let title = comment_popup_title(session, target, popup.width.saturating_sub(4) as usize);
+    let title = comment_popup_title(
+        session,
+        target,
+        editor.channel,
+        popup.width.saturating_sub(4) as usize,
+    );
     let hint = format!(
-        "{} save · {} cancel",
+        "{} channel · {} save · {} cancel",
+        keymap.hint(Action::CycleCommentChannel),
         keymap.hint(Action::SubmitComment),
         keymap.hint(Action::CancelComment)
     );
@@ -2788,7 +2823,11 @@ fn draw_comment_popup(
         Paragraph::new(rows).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(title)
+                .border_style(Style::default().fg(theme.channel_color(editor.channel)))
+                .title(Line::from(Span::styled(
+                    title,
+                    Style::default().fg(theme.channel_color(editor.channel)),
+                )))
                 .title_bottom(Line::from(Span::styled(
                     hint,
                     Style::default().fg(theme.muted),
@@ -2817,6 +2856,7 @@ fn comment_popup_rect(area: Rect) -> Rect {
 fn comment_popup_title(
     session: &ReviewSession,
     target: &CommentInputTarget,
+    channel: Channel,
     max_width: usize,
 ) -> String {
     let kind = match target {
@@ -2848,7 +2888,10 @@ fn comment_popup_title(
             )
             .unwrap_or_else(|| "unanchored".to_owned())
     };
-    truncate_middle(&format!("{kind} · {location}"), max_width)
+    truncate_middle(
+        &format!("{kind} → {} · {location}", channel.audience_label()),
+        max_width,
+    )
 }
 
 fn draw_revset_input_popup(
@@ -3657,14 +3700,17 @@ fn derived_summary(lines: &[String]) -> String {
 fn zen_stop_comment_lines(
     session: &ReviewSession,
     stop: &super::chunks::WalkthroughRow,
-) -> Vec<String> {
+) -> Vec<(String, Channel)> {
     super::zen::comments_for_stop(&session.comments, stop)
         .into_iter()
         .map(|comment| {
             let state = comment.state.label();
             let id = truncate_tail(&comment.id, 8);
             let first_line = comment.body.lines().next().unwrap_or_default().trim();
-            format!("comment [{state}] {id}: {first_line}")
+            (
+                format!("comment [{state}] {id}: {first_line}"),
+                comment.channel,
+            )
         })
         .collect()
 }
@@ -3806,10 +3852,10 @@ fn draw_zen_stop(
             Style::default().fg(theme.muted),
         )));
     }
-    for comment in comment_lines {
+    for (comment, channel) in comment_lines {
         explanation_lines.push(Line::from(Span::styled(
             comment,
-            Style::default().fg(theme.info),
+            Style::default().fg(theme.channel_color(channel)),
         )));
     }
     prose_lines.extend(explanation_lines);
@@ -4466,10 +4512,10 @@ fn draw_draft_list_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(theme.accent)
+                            .fg(theme.channel_color(draft.channel))
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(theme.subtle)
+                        Style::default().fg(theme.channel_color(draft.channel))
                     };
                     let path = draft.path.as_deref().unwrap_or("<general>");
                     let location = match draft.line {
@@ -4487,7 +4533,11 @@ fn draw_draft_list_popup(
                         Span::styled(format!("{marker} "), style),
                         Span::styled(
                             format!("[{:^8}] ", draft.state.label()),
-                            Style::default().fg(theme.secondary),
+                            Style::default().fg(theme.channel_color(draft.channel)),
+                        ),
+                        Span::styled(
+                            format!("[→ {}] ", draft.channel.audience_label()),
+                            Style::default().fg(theme.channel_color(draft.channel)),
                         ),
                         Span::styled(format!("{location} "), Style::default().fg(theme.detail)),
                         Span::styled(summary, style),
@@ -4867,10 +4917,10 @@ fn draw_comment_list_popup(
                     let marker = if selected { "›" } else { " " };
                     let style = if selected {
                         Style::default()
-                            .fg(theme.accent)
+                            .fg(theme.channel_color(comment.channel))
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(theme.subtle)
+                        Style::default().fg(theme.channel_color(comment.channel))
                     };
                     let location = comment_list_location(comment);
                     let summary = comment
@@ -4882,6 +4932,10 @@ fn draw_comment_list_popup(
                         .to_owned();
                     let mut spans = vec![
                         Span::styled(format!("{marker} "), style),
+                        Span::styled(
+                            format!("[→ {}] ", comment.channel.audience_label()),
+                            Style::default().fg(theme.channel_color(comment.channel)),
+                        ),
                         Span::styled(
                             format!("[{:^8}] ", comment.state.label()),
                             comment_state_style(comment.state, theme),
@@ -5062,7 +5116,11 @@ fn open_work_line(
                 ),
                 Span::styled(
                     if nested { "[evidence] " } else { "[feedback] " },
-                    Style::default().fg(theme.info),
+                    Style::default().fg(theme.channel_color(comment.channel)),
+                ),
+                Span::styled(
+                    format!("[→ {}] ", comment.channel.audience_label()),
+                    Style::default().fg(theme.channel_color(comment.channel)),
                 ),
                 Span::styled(
                     format!("{} ", comment_list_location(comment)),
@@ -5634,10 +5692,65 @@ mod tests {
         )
     }
 
+    fn render_comment_channel_snapshot(channel: Channel) -> String {
+        let session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mode = Mode::CommentInput {
+            editor: CommentEditor::with_channel("channel-aware comment".into(), channel),
+            target: CommentInputTarget::New,
+        };
+        let width = 90;
+        let height = 20;
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, width, height);
+        let popup = comment_popup_rect(Rect::new(0, 0, width, height));
+        let border = buffer[(popup.x, popup.y)].style().fg;
+        let title = buffer[(popup.x + 1, popup.y)].style().fg;
+        format!(
+            "{}\nstyles: border={border:?} title={title:?}",
+            render_tui_text(&session, &mode, width, height)
+        )
+    }
+
     fn buffer_row(buffer: &Buffer, area: Rect, row: u16) -> String {
         (area.x..area.x + area.width)
             .map(|x| buffer[(x, area.y + row)].symbol())
             .collect::<String>()
+    }
+
+    fn style_runs_for_rows(buffer: &Buffer, needles: &[&str]) -> String {
+        needles
+            .iter()
+            .map(|needle| {
+                let area = buffer.area;
+                let y = (area.y..area.y + area.height)
+                    .find(|y| {
+                        let row = (area.x..area.x + area.width)
+                            .map(|x| buffer[(x, *y)].symbol())
+                            .collect::<String>();
+                        row.contains(needle)
+                    })
+                    .unwrap_or_else(|| panic!("missing style-run row {needle:?}"));
+                let mut runs = Vec::new();
+                let mut x = area.x;
+                while x < area.x + area.width {
+                    let style = buffer[(x, y)].style();
+                    let start = x;
+                    x += 1;
+                    while x < area.x + area.width && buffer[(x, y)].style() == style {
+                        x += 1;
+                    }
+                    let text = (start..x)
+                        .map(|column| buffer[(column, y)].symbol())
+                        .collect::<String>();
+                    if !text.trim().is_empty() {
+                        runs.push(format!("{text:?}={style:?}"));
+                    }
+                }
+                format!("{needle}: {}", runs.join(" | "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn render_tui_text_with_state(
@@ -6161,6 +6274,45 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
+    fn tui_snapshots_each_comment_editor_channel_border_and_chip() {
+        insta::assert_snapshot!(
+            "comment_editor_channel_onboarding",
+            render_comment_channel_snapshot(Channel::Onboarding)
+        );
+        insta::assert_snapshot!(
+            "comment_editor_channel_delegation",
+            render_comment_channel_snapshot(Channel::Delegation)
+        );
+        insta::assert_snapshot!(
+            "comment_editor_channel_collaboration",
+            render_comment_channel_snapshot(Channel::Collaboration)
+        );
+        insta::assert_snapshot!(
+            "comment_editor_channel_note",
+            render_comment_channel_snapshot(Channel::Note)
+        );
+    }
+
+    #[test]
+    fn tui_snapshot_comment_editor_live_channel_cycle() {
+        let session = snapshot_session("");
+        let mut editor = CommentEditor::with_channel("unchanged text".into(), Channel::Onboarding);
+        editor.cycle_channel();
+        let mode = Mode::CommentInput {
+            editor,
+            target: CommentInputTarget::NewGeneral,
+        };
+
+        insta::assert_snapshot!(
+            "comment_editor_live_channel_cycle",
+            format!(
+                "cycled onboarding → delegation\n{}",
+                render_tui_text(&session, &mode, 90, 18)
+            )
+        );
+    }
+
+    #[test]
     fn comment_popup_renders_prewrapped_rows_and_exact_soft_wrap_cursor() {
         let session = snapshot_session("");
         let terminal_area = Rect::new(0, 0, 20, 15);
@@ -6317,6 +6469,131 @@ diff --git a/README.md b/README.md
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
     }
 
+    fn session_with_all_channel_comments() -> ReviewSession {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,4 @@\n-old\n+onboarding\n+delegation\n+collaboration\n+note\n",
+        );
+        session.toggle_focus();
+        for (line, channel, id) in [
+            (1, Channel::Onboarding, "onboard"),
+            (2, Channel::Delegation, "delegate"),
+            (3, Channel::Collaboration, "collab"),
+            (4, Channel::Note, "private"),
+        ] {
+            let row = session
+                .diff_rows_for_selected_file()
+                .iter()
+                .position(|row| row.new_lineno == Some(line))
+                .unwrap();
+            session.select_diff_row(row);
+            session.add_comment_in_channel(format!("{id} comment"), channel);
+            session.comments.last_mut().unwrap().id = id.into();
+        }
+        session
+    }
+
+    #[test]
+    fn tui_snapshot_channel_colored_gutter_marks() {
+        let session = session_with_all_channel_comments();
+        let theme = AppTheme::default();
+        let rows = session.diff_rows_for_selected_file();
+        let colors = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let count = row_comment_count(&session, row);
+                (count > 0).then(|| {
+                    let line = unified_row_line(&session, row, index, count, &theme);
+                    format!(
+                        "{}={:?}",
+                        row.text,
+                        line.spans.first().and_then(|span| span.style.fg)
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+
+        insta::assert_snapshot!(
+            "annotation_channel_gutter_rows",
+            format!(
+                "gutter styles: {colors}\n{}",
+                render_tui_text(&session, &Mode::Normal, 100, 22)
+            )
+        );
+    }
+
+    #[test]
+    fn tui_snapshot_channel_colored_inline_card_style_runs() {
+        let session = session_with_all_channel_comments();
+        let mode = Mode::Normal;
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 100, 22);
+
+        insta::assert_snapshot!(
+            "annotation_channel_inline_card_style_runs",
+            style_runs_for_rows(
+                &buffer,
+                &[
+                    "onboard comment",
+                    "delegate comment",
+                    "collab comment",
+                    "private comment",
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn tui_snapshot_all_channel_comment_list_rows() {
+        let session = session_with_all_channel_comments();
+        let mode = Mode::CommentList(CommentListState { selected: 2 });
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 110, 24);
+
+        insta::assert_snapshot!(
+            "annotation_channel_comment_list_rows",
+            format!(
+                "{}\nstyle runs:\n{}",
+                render_tui_text(&session, &mode, 110, 24),
+                style_runs_for_rows(
+                    &buffer,
+                    &[
+                        "onboard comment",
+                        "delegate comment",
+                        "collab comment",
+                        "private comment",
+                    ],
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn tui_snapshot_all_channel_draft_rows() {
+        let session = session_with_all_channel_comments();
+        let mode = Mode::DraftList(DraftListState {
+            drafts: session.comments.clone(),
+            selected: 1,
+        });
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 110, 24);
+
+        insta::assert_snapshot!(
+            "annotation_channel_draft_rows",
+            format!(
+                "{}\nstyle runs:\n{}",
+                render_tui_text(&session, &mode, 110, 24),
+                style_runs_for_rows(
+                    &buffer,
+                    &[
+                        "onboard comment",
+                        "delegate comment",
+                        "collab comment",
+                        "private comment",
+                    ],
+                )
+            )
+        );
+    }
+
     #[test]
     fn tui_snapshot_open_work() {
         let mut session = snapshot_session(
@@ -6337,8 +6614,10 @@ diff --git a/README.md b/README.md
         session.comments[1].action = Some(crate::state::ActionIntent::Test);
         session.comments[1].kind = Some(crate::state::CommentKind::Issue);
         session.comments[1].state = crate::state::CommentState::Todo;
+        session.comments[1].channel = Channel::Delegation;
         session.comments[2].id = "standalone-feedback".to_owned();
         session.comments[2].state = crate::state::CommentState::Todo;
+        session.comments[2].channel = Channel::Collaboration;
         let durable_id = session.comments[1].session_id.clone().unwrap();
         session
             .sessions
@@ -6359,8 +6638,13 @@ diff --git a/README.md b/README.md
                 ..crate::state::ActionItem::default()
             });
         let mode = Mode::OpenWork(OpenWorkListState::new(&session));
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 100, 24);
 
-        insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 24));
+        insta::assert_snapshot!(format!(
+            "{}\nstyle runs:\n{}",
+            render_tui_text(&session, &mode, 100, 24),
+            style_runs_for_rows(&buffer, &["[evidence] [→ agent]", "[feedback] [→ team]"],)
+        ));
     }
 
     #[test]
@@ -6565,14 +6849,14 @@ diff --git a/README.md b/README.md
         session.diff_scroll = 2;
 
         let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
-        assert!(unscrolled.contains("↳ pinned"));
+        assert!(unscrolled.contains("▎ pinned"));
 
         // Scrolling past the commented row must not shift or duplicate the
         // remaining lines: line 4 of the full render becomes the first
         // diff line after scrolling by 4.
         session.diff_scroll = 4;
         let scrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
-        assert!(scrolled.contains("↳ pinned"));
+        assert!(scrolled.contains("▎ pinned"));
         assert!(!scrolled.contains("a.txt  +1 -1"));
     }
 
@@ -8112,6 +8396,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         previous = summary;
 
         session.comments[0].state = CommentState::Todo;
+        session.comments[0].channel = Channel::Delegation;
         let state = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
         assert!(!Rc::ptr_eq(&previous, &state));
         previous = state;
@@ -8473,6 +8758,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             action: Some(ActionIntent::Fix),
             kind: Some(CommentKind::Question),
             state: CommentState::Todo,
+            channel: Channel::Delegation,
             ..Default::default()
         };
         let summary = CommentSummary::from_comment(&comment);
@@ -8536,8 +8822,8 @@ diff --git a/Cargo.toml b/Cargo.toml
         let rendered = render_tui_text(&session, &Mode::Normal, 100, 16);
 
         assert!(rendered.contains("2   1 - old"));
-        assert!(rendered.contains("↳ c1 [draft] first note"));
-        assert!(rendered.contains("↳ c2 [draft] second note"));
+        assert!(rendered.contains("▎ c1 [draft] first note"));
+        assert!(rendered.contains("▎ c2 [draft] second note"));
     }
 
     #[test]

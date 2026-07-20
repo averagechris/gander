@@ -9,7 +9,7 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │                            ││    1 + new                                                         │
 │                            ││                                                                    │
 │                            ││                                                                    │
-│              ┌comment · src/app.rs:1──────────────────────────────────────────────┐              │
+│              ┌comment → note · src/app.rs:1───────────────────────────────────────┐              │
 │              │Looks good                                                          │              │
 │              │except this line                                                    │              │
 │              │                                                                    │              │
@@ -18,11 +18,11 @@ expression: "render_tui_text(&session, &mode, 100, 24)"
 │              │                                                                    │              │
 │              │                                                                    │              │
 │              │                                                                    │              │
-│              └ctrl-s save · esc cancel────────────────────────────────────────────┘              │
+│              └tab channel · ctrl-s save · esc cancel──────────────────────────────┘              │
 │                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-new comment · refresh paused · enter newline · ctrl-s save · esc cancel
+new comment → note · refresh paused · tab channel · enter newline · ctrl-s save · esc cancel

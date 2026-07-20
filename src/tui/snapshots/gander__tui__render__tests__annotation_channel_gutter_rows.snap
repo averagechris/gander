@@ -1,0 +1,27 @@
+---
+source: src/tui/render.rs
+expression: "format!(\"gutter styles: {colors}\\n{}\",\nrender_tui_text(&session, &Mode::Normal, 100, 22))"
+---
+gutter styles: onboarding=Some(Rgb(210, 153, 34)) · delegation=Some(Rgb(231, 113, 55)) · collaboration=Some(Rgb(88, 166, 255)) · note=Some(Rgb(122, 127, 133))
+┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
+│• mod     a.txt             ││a.txt  +4 -1                                                        │
+│                            ││@@ -1 +1,4 @@                                                       │
+│                            ││    1 - old                                                         │
+│                            ││1   1 + onboarding                                                  │
+│                            ││      ▎ onboard [draft] onboard comment                             │
+│                            ││1   2 + delegation                                                  │
+│                            ││      ▎ delegate [draft] delegate comment                           │
+│                            ││1   3 + collaboration                                               │
+│                            ││      ▎ collab [draft] collab comment                               │
+│                            ││1   4 + note                                                        │
+│                            ││      ▎ private [draft] private comment                             │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +4/-1, 4 comments · following @
+trunk()..@ · focus diff (wrap) · j/k line · d/u scroll · V view/wrap · r range · Y walkthrough · c c
