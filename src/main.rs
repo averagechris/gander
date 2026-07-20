@@ -857,6 +857,31 @@ enum AttentionCommand {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
+    /// Show spotlight-visit and skim-acknowledgement coverage.
+    Coverage {
+        #[command(subcommand)]
+        command: AttentionCoverageCommand,
+    },
+    /// List current review-stream skim folds and stale skim history.
+    SkimFold {
+        #[command(subcommand)]
+        command: AttentionSkimFoldCommand,
+    },
+    /// Acknowledge one explicit skim target/fold or every current unacknowledged skim.
+    Acknowledge {
+        #[arg(long, alias = "file", conflicts_with_all = ["all", "fold_id"])]
+        path: Option<String>,
+        #[arg(long, requires = "path")]
+        line: Option<usize>,
+        #[arg(long = "end-line", requires = "line")]
+        end_line: Option<usize>,
+        #[arg(long, conflicts_with_all = ["path", "fold_id"])]
+        all: bool,
+        #[arg(long = "fold-id", conflicts_with_all = ["path", "all"])]
+        fold_id: Option<String>,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
     /// Set a durable human override for a file or line range.
     Set {
         #[arg(long, alias = "file")]
@@ -916,6 +941,24 @@ enum AttentionCommand {
     },
     /// Re-evaluate current heuristics while retaining fingerprint-drifted regions as stale.
     RecomputeHeuristics {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AttentionCoverageCommand {
+    /// Show current fingerprint-guarded coverage counts.
+    Show {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AttentionSkimFoldCommand {
+    /// List current folds and stale durable skim entries.
+    List {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
@@ -2412,6 +2455,95 @@ fn run() -> color_eyre::Result<()> {
                         }
                     }
                 }
+                AttentionCommand::Coverage { command } => match command {
+                    AttentionCoverageCommand::Show { format } => {
+                        warn_session_target_mismatch(&state, &target_spec);
+                        let durable = review::find_session_for_target(&state, &target_spec)
+                            .cloned()
+                            .unwrap_or_default();
+                        let coverage =
+                            attention::attention_coverage(&durable, &attention_diff.files);
+                        match format {
+                            ListFormat::Json => print_json(&coverage)?,
+                            ListFormat::Text => println!(
+                                "coverage {}/{} · spotlights {}/{} · skims {}/{}",
+                                coverage.covered,
+                                coverage.total,
+                                coverage.spotlight_visited,
+                                coverage.spotlight_total,
+                                coverage.skim_acknowledged,
+                                coverage.skim_total,
+                            ),
+                        }
+                    }
+                },
+                AttentionCommand::SkimFold { command } => match command {
+                    AttentionSkimFoldCommand::List { format } => {
+                        warn_session_target_mismatch(&state, &target_spec);
+                        let durable = review::find_session_for_target(&state, &target_spec)
+                            .cloned()
+                            .unwrap_or_default();
+                        let folds =
+                            attention::list_skim_folds(&durable, &attention_diff.files, true);
+                        match format {
+                            ListFormat::Json => print_json(&serde_json::json!({
+                                "folds": folds,
+                                "current": folds.iter().filter(|fold| fold.current).count(),
+                                "stale": folds.iter().filter(|fold| fold.stale).count(),
+                            }))?,
+                            ListFormat::Text => print_skim_folds_text(&folds),
+                        }
+                    }
+                },
+                AttentionCommand::Acknowledge {
+                    path,
+                    line,
+                    end_line,
+                    all,
+                    fold_id,
+                    format,
+                } => {
+                    let selection = match (all, fold_id, path) {
+                        (true, None, None) => attention::SkimSelection::AllCurrent,
+                        (false, Some(id), None) if !id.trim().is_empty() => {
+                            attention::SkimSelection::StableId(id)
+                        }
+                        (false, None, Some(path)) => attention::SkimSelection::Target {
+                            path,
+                            line,
+                            end_line,
+                        },
+                        _ => {
+                            return Err(user_error(
+                                "attention acknowledge requires exactly one of --path, --fold-id, or --all",
+                            ));
+                        }
+                    };
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    let outcome = attention::acknowledge_skim_folds(
+                        durable,
+                        &attention_diff.files,
+                        &selection,
+                    )
+                    .map_err(into_user_error)?;
+                    attention::apply_whole_file_viewed_effects(
+                        &mut state,
+                        &attention_diff.files,
+                        &outcome.whole_files_viewed,
+                    );
+                    state.save(&state_path)?;
+                    match format {
+                        ListFormat::Json => print_json(&outcome)?,
+                        ListFormat::Text => println!(
+                            "matched {} · acknowledged {} · already {} · stale {} · whole files viewed {}",
+                            outcome.matched,
+                            outcome.acknowledged,
+                            outcome.already_acknowledged,
+                            outcome.stale,
+                            outcome.whole_files_viewed.len(),
+                        ),
+                    }
+                }
                 AttentionCommand::Set {
                     path,
                     line,
@@ -3595,6 +3727,26 @@ fn attention_effective_text(regions: &[attention::EffectiveAttentionRegion]) -> 
         ));
     }
     out
+}
+
+fn print_skim_folds_text(folds: &[attention::SkimFoldSummary]) {
+    for fold in folds {
+        println!(
+            "{:<14} {:<8} +{:<5} -{:<5} {:<42} {}",
+            if fold.stale {
+                "stale"
+            } else if fold.acknowledged {
+                "acknowledged"
+            } else {
+                "current"
+            },
+            format!("{} file(s)", fold.file_count),
+            fold.additions,
+            fold.deletions,
+            ellipsize(&fold.paths.join(", "), 42),
+            ellipsize(&fold.rationale, 72),
+        );
+    }
 }
 
 fn print_attention_region(

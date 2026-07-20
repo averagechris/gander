@@ -105,7 +105,7 @@ status.
   *this* line" gap without making gander a chat app. Likely built on the
   harness's API or MCP sampling; requires gander to act as a spec-ACP
   *client* or harness-API client — deliberately deferred.
-- **zen mode** (`T`/`Z`, formerly tour mode): a focused-walkthrough layer
+- **zen mode** (`T`, formerly tour mode): a legacy focused-walkthrough layer
   stepping through durable walkthrough steps/chapters (or files when no
   walkthrough exists) with their rationale displayed; gander-native, reads
   local review state, needs no live agent.

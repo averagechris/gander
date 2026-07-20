@@ -4,6 +4,20 @@
 
 ### Added
 
+- Added the M18 attention Focus preset and glance board. `Z` now applies and
+  exactly restores maximum stream/supporting-context folding, file-pane
+  override, narration-card state, and viewport context without entering a mode;
+  the complete normal review vocabulary remains available. `Alt-G` opens a
+  responsive current-attention popup with jump, `Space` peek, selected `a`, and
+  current-only bulk `A` acknowledgement, including visible but inert stale
+  history. Shared CLI/MCP services expose coverage, skim-fold listing, explicit
+  target/stable-id acknowledgement, bulk acknowledgement, and conservative
+  whole-file viewed effects. Attention-only TUI mutations participate in
+  autosave, Focus refresh preserves both active and underlying viewports,
+  spotlight navigation repins exact narration, glance peek is idempotent, and
+  CLI/MCP selectors reject unknown, ambiguous, conflicting, or invalid targets.
+  Failed keyboard or presenter legacy-zen startup now atomically restores both
+  active and underlying Focus snapshots; successful startup still exits Focus.
 - Added the continuous M18 salience-driven review stream: one cross-file diff
   projection with stable file/line anchors, contiguous generated-churn skim
   folds (`Space` peek, contextual `a` acknowledgement), fully expanded

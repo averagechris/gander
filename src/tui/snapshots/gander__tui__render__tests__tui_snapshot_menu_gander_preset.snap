@@ -2,7 +2,7 @@
 source: src/tui/render.rs
 expression: rendered
 ---
- ? help  ] hunk  . file  c comment  V view  w pane  q quit
+ ? help  ] hunk  . file  c comment  V view  Z focus  alt-g glance  w pane  q quit
 ┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
 │• mod     a.rs                 ││a.rs  +1 -1                                                                │
 │                               ││@@ -1 +1 @@                                                                │

@@ -267,7 +267,7 @@ a handful of full-screen *focus stops* that teach the critical lines,
 then everything mechanical acknowledged in bulk. Design decisions:
 
 - **Zen subsumes tour mode.** The old modal `Mode::Tour` is gone; `T`
-  (or `Z`) now enters zen. One walkthrough mode, not two.
+  enters legacy zen. `Z` is now reserved for the M18 attention Focus preset.
 - **Three surfaces, one state machine** (`ZenPhase`):
   - *Spotlight slide* (default): a full-screen, full-bleed slide per spotlight
     stop — dim breadcrumb, progress dots, a bold title, syntax-highlighted
@@ -334,7 +334,7 @@ then everything mechanical acknowledged in bulk. Design decisions:
   session-only, consistent with §3.
 
 Config: the `tour` keybinding is renamed `zen` (serde alias keeps old
-configs working); defaults are `T` and `Z`.
+  configs working); the remaining default is `T` (`Z` toggles attention Focus).
 
 ## Sequencing
 

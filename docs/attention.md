@@ -59,8 +59,8 @@ startup fingerprints for attention staleness.
 Current automation is available through
 `gander attention list|set|clear|promote|demote|seed-heuristics|recompute-heuristics`
 and matching MCP tools. TUI folds, narration cards, chapters, walkthrough
-navigation, and coverage are implemented; focus/glance presets and zen removal
-remain later packages.
+navigation, coverage, the ephemeral Focus preset, and the attention glance
+board are implemented. Legacy zen removal remains a later package.
 
 ## The review stream
 
@@ -104,7 +104,17 @@ chapter card.
   full review vocabulary (comments, folds, search, retargeting) works
   throughout — there is no modal phase to exit and no vocabulary loss.
 - The glance board survives as a summary popup over the attention map: skim
-  folds, acknowledgment state, and bulk acknowledge.
+  folds, acknowledgment state, and bulk acknowledge. `Alt-G` opens it from
+  normal review; `Space` peeks the selected current fold in the stream, `a`
+  acknowledges one, and `A` acknowledges every current unacknowledged fold.
+  Stale durable skim history is visible but cannot be acknowledged or count.
+
+`Z` toggles Focus. Focus captures and restores the exact explicit pane override,
+skim peeks, supporting-context expansions/folds, inline-card expansion and
+selection, and viewport context. While active it hides the pane, applies maximum
+folding, and pins narration at the current spotlight. It is not a `Mode` or
+phase: comments, ranges, search, retargeting, file navigation, and salience
+actions keep their normal dispatch.
 
 ## What this deletes
 
@@ -133,3 +143,11 @@ chapter card.
   no-op and never falls through to global mark-all. Stream range selections are
   single-file and cancel when keyboard or mouse movement crosses a file
   boundary.
+
+The shared automation surface is `gander attention coverage show`, `gander
+attention skim-fold list`, and `gander attention acknowledge (--path ... |
+--fold-id ... | --all)`, with matching MCP tools. All adapters use the same
+stable fold identity, progress fingerprint, stale exclusion, and whole-file
+viewed-effect service. Explicit unknown/ambiguous selectors fail rather than
+reporting a successful zero-match operation; only bulk acknowledgement of an
+empty current set is a documented no-op.

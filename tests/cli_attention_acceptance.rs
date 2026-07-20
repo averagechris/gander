@@ -313,3 +313,150 @@ fn artifacts_include_private_attention_for_human_but_not_team() {
     assert!(team.get("attention_regions").is_none());
     assert!(team.get("attention_progress").is_none());
 }
+
+#[test]
+fn cli_coverage_skim_folds_and_acknowledgement_share_progress_and_viewed_semantics() {
+    let fixture = Fixture::new();
+    fixture.run(&["attention", "seed-heuristics"]);
+
+    let listed = fixture.json(&["attention", "skim-fold", "list"]);
+    assert!(listed["current"].as_u64().unwrap() >= 1);
+    assert_eq!(listed["stale"], 0);
+    let first = &listed["folds"][0];
+    assert_eq!(first["current"], true);
+    assert_eq!(first["acknowledged"], false);
+    assert!(first["id"].as_str().unwrap().starts_with("fold:"));
+
+    let before = fixture.json(&["attention", "coverage", "show"]);
+    assert_eq!(before["skim_acknowledged"], 0);
+    let acknowledged = fixture.json(&["attention", "acknowledge", "--all"]);
+    assert_eq!(
+        acknowledged["acknowledged"], before["skim_total"],
+        "bulk acknowledgement covers every current fold"
+    );
+    assert!(
+        acknowledged["whole_files_viewed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path == "Cargo.lock")
+    );
+    let after = fixture.json(&["attention", "coverage", "show"]);
+    assert_eq!(after["covered"], after["total"]);
+
+    let state: Value = serde_json::from_slice(&fs::read(&fixture.state).unwrap()).unwrap();
+    assert!(state["files"]["Cargo.lock"]["viewed"].as_bool().unwrap());
+    assert!(
+        state["files"]["Cargo.lock"]["viewed_fingerprints"]
+            .as_array()
+            .is_some_and(|values| !values.is_empty())
+    );
+}
+
+#[test]
+fn cli_partial_acknowledgement_does_not_mark_the_file_viewed_and_stale_does_not_count() {
+    let fixture = Fixture::new();
+    fixture.run(&[
+        "attention",
+        "set",
+        "--path",
+        "src/lib.rs",
+        "--line",
+        "1",
+        "--salience",
+        "skim",
+    ]);
+    let acknowledged = fixture.json(&[
+        "attention",
+        "acknowledge",
+        "--path",
+        "src/lib.rs",
+        "--line",
+        "1",
+    ]);
+    assert_eq!(acknowledged["acknowledged"], 1);
+    assert!(
+        acknowledged["whole_files_viewed"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let state: Value = serde_json::from_slice(&fs::read(&fixture.state).unwrap()).unwrap();
+    assert!(state["files"].get("src/lib.rs").is_none());
+
+    let mut state: Value = state;
+    state["sessions"][0]["attention_regions"][0]["target"]["anchor"] = Value::Null;
+    fs::write(&fixture.state, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let stale = fixture.json(&["attention", "skim-fold", "list"]);
+    let stale_id = stale["folds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fold| fold["stale"] == true)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outcome = fixture.json(&["attention", "acknowledge", "--fold-id", &stale_id]);
+    assert_eq!(outcome["stale"], 1);
+    assert_eq!(outcome["acknowledged"], 0);
+}
+
+#[test]
+fn cli_acknowledge_rejects_unknown_and_ambiguous_explicit_selectors() {
+    let fixture = Fixture::new();
+    for (line, rationale) in [(1, "first fold"), (2, "second fold")] {
+        fixture.run(&[
+            "attention",
+            "set",
+            "--path",
+            "src/lib.rs",
+            "--line",
+            &line.to_string(),
+            "--salience",
+            "skim",
+            "--rationale",
+            rationale,
+        ]);
+    }
+
+    let ambiguous = fixture.run_raw(&["attention", "acknowledge", "--path", "src/lib.rs"]);
+    assert!(!ambiguous.status.success());
+    let message = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(message.contains("ambiguous across 2 folds"), "{message}");
+    assert!(message.contains("--line/--end-line or --fold-id"));
+
+    for args in [
+        vec![
+            "attention",
+            "acknowledge",
+            "--fold-id",
+            "fold:does-not-exist",
+        ],
+        vec!["attention", "acknowledge", "--path", "missing.rs"],
+    ] {
+        let output = fixture.run_raw(&args);
+        assert!(!output.status.success(), "unexpected success for {args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gander attention skim-fold list")
+        );
+    }
+
+    let selected = fixture.json(&[
+        "attention",
+        "acknowledge",
+        "--path",
+        "src/lib.rs",
+        "--line",
+        "1",
+    ]);
+    assert_eq!(selected["acknowledged"], 1);
+}
+
+#[test]
+fn cli_acknowledge_all_is_the_only_successful_empty_selector() {
+    let fixture = Fixture::new();
+    let empty = fixture.json(&["attention", "acknowledge", "--all"]);
+    assert_eq!(empty["matched"], 0);
+    assert_eq!(empty["acknowledged"], 0);
+}

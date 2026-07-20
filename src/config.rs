@@ -348,6 +348,11 @@ pub struct KeybindingsConfig {
     pub previous_file: Vec<String>,
     pub attention_promote: Vec<String>,
     pub attention_demote: Vec<String>,
+    pub attention_focus: Vec<String>,
+    pub attention_glance: Vec<String>,
+    pub glance_peek: Vec<String>,
+    pub glance_acknowledge: Vec<String>,
+    pub glance_acknowledge_all: Vec<String>,
     pub spotlight_next: Vec<String>,
     pub spotlight_previous: Vec<String>,
     pub scroll_down: Vec<String>,
@@ -614,6 +619,11 @@ struct KeybindingsConfigPatch {
     previous_file: Option<Vec<String>>,
     attention_promote: Option<Vec<String>>,
     attention_demote: Option<Vec<String>>,
+    attention_focus: Option<Vec<String>>,
+    attention_glance: Option<Vec<String>>,
+    glance_peek: Option<Vec<String>>,
+    glance_acknowledge: Option<Vec<String>>,
+    glance_acknowledge_all: Option<Vec<String>>,
     spotlight_next: Option<Vec<String>>,
     spotlight_previous: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
@@ -738,7 +748,7 @@ impl KeybindingsConfig {
             open_work: keys(["X"]),
             activity: keys(["ctrl-a"]),
             walkthrough_list: keys(["W"]),
-            zen: keys(["T", "Z"]),
+            zen: keys(["T"]),
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
@@ -762,6 +772,11 @@ impl KeybindingsConfig {
             previous_file: keys([","]),
             attention_promote: keys(["alt-up"]),
             attention_demote: keys(["alt-down"]),
+            attention_focus: keys(["Z"]),
+            attention_glance: keys(["alt-g"]),
+            glance_peek: keys(["space"]),
+            glance_acknowledge: keys(["a"]),
+            glance_acknowledge_all: keys(["A"]),
             spotlight_next: keys(["alt-n"]),
             spotlight_previous: keys(["alt-p"]),
             scroll_down: keys(["d", "pagedown"]),
@@ -1100,6 +1115,14 @@ impl KeybindingsConfig {
         apply_optional(&mut self.previous_file, patch.previous_file);
         apply_optional(&mut self.attention_promote, patch.attention_promote);
         apply_optional(&mut self.attention_demote, patch.attention_demote);
+        apply_optional(&mut self.attention_focus, patch.attention_focus);
+        apply_optional(&mut self.attention_glance, patch.attention_glance);
+        apply_optional(&mut self.glance_peek, patch.glance_peek);
+        apply_optional(&mut self.glance_acknowledge, patch.glance_acknowledge);
+        apply_optional(
+            &mut self.glance_acknowledge_all,
+            patch.glance_acknowledge_all,
+        );
         apply_optional(&mut self.spotlight_next, patch.spotlight_next);
         apply_optional(&mut self.spotlight_previous, patch.spotlight_previous);
         apply_optional(&mut self.scroll_down, patch.scroll_down);

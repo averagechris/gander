@@ -89,6 +89,11 @@ pub(super) enum Action {
     PreviousFile,
     AttentionPromote,
     AttentionDemote,
+    AttentionFocus,
+    AttentionGlance,
+    GlancePeek,
+    GlanceAcknowledge,
+    GlanceAcknowledgeAll,
     SpotlightNext,
     SpotlightPrevious,
     ScrollDown,
@@ -175,6 +180,7 @@ pub(super) enum KeyContext {
     SymbolOutline,
     CommentList,
     ViewOptions,
+    AttentionGlance,
     CommentEditor,
     ZenFocus,
     ZenGlance,
@@ -291,6 +297,27 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::AttentionDemote,
             &config.attention_demote,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::AttentionFocus,
+            &config.attention_focus,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::AttentionGlance,
+            &config.attention_glance,
+        )?;
+        add_bindings(&mut bindings, Action::GlancePeek, &config.glance_peek)?;
+        add_bindings(
+            &mut bindings,
+            Action::GlanceAcknowledge,
+            &config.glance_acknowledge,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::GlanceAcknowledgeAll,
+            &config.glance_acknowledge_all,
         )?;
         add_bindings(&mut bindings, Action::SpotlightNext, &config.spotlight_next)?;
         add_bindings(
@@ -602,6 +629,7 @@ impl Action {
             KeyContext::SymbolOutline,
             KeyContext::CommentList,
             KeyContext::ViewOptions,
+            KeyContext::AttentionGlance,
             KeyContext::ZenGlance,
             KeyContext::ZenArtifact,
         ];
@@ -618,6 +646,7 @@ impl Action {
             KeyContext::SymbolOutline,
             KeyContext::CommentList,
             KeyContext::ViewOptions,
+            KeyContext::AttentionGlance,
             KeyContext::ZenGlance,
             KeyContext::ZenArtifact,
         ];
@@ -636,6 +665,7 @@ impl Action {
             KeyContext::SymbolOutline,
             KeyContext::CommentList,
             KeyContext::ViewOptions,
+            KeyContext::AttentionGlance,
             KeyContext::ZenGlance,
             KeyContext::ZenArtifact,
         ];
@@ -646,7 +676,7 @@ impl Action {
             | WalkthroughList | Zen | DraftList | NextUnviewed | PreviousUnviewed | NextComment
             | PreviousComment | NextFile | PreviousFile | SpotlightNext | SpotlightPrevious
             | FileSearch | ToggleFilePane | ViewOptions | Comment | CommentList
-            | CancelRangeComment => NORMAL,
+            | CancelRangeComment | AttentionFocus | AttentionGlance => NORMAL,
             Help => &[
                 KeyContext::NormalFiles,
                 KeyContext::NormalDiff,
@@ -700,6 +730,7 @@ impl Action {
                 KeyContext::ViewOptions,
                 KeyContext::ZenArtifact,
             ],
+            GlancePeek | GlanceAcknowledge | GlanceAcknowledgeAll => &[KeyContext::AttentionGlance],
             CommentListNewGeneral
             | CommentListReady
             | CommentListCycleIntent
@@ -909,6 +940,7 @@ impl KeyContext {
             Self::SymbolOutline => "symbol outline",
             Self::CommentList => "comment list",
             Self::ViewOptions => "view options",
+            Self::AttentionGlance => "attention glance",
             Self::CommentEditor => "comment editor",
             Self::ZenFocus => "zen focus",
             Self::ZenGlance => "zen glance",
@@ -1150,7 +1182,11 @@ mod tests {
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('Z'))),
-            Some(Action::Zen)
+            Some(Action::AttentionFocus)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)),
+            Some(Action::AttentionGlance)
         );
         assert_eq!(
             keymap.action_for(&KeyEvent::from(KeyCode::Char('D'))),
@@ -1330,6 +1366,46 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
             Some(Action::SpotlightPrevious)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('Z'))),
+            Some(Action::AttentionFocus)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)),
+            Some(Action::AttentionGlance)
+        );
+        assert_eq!(
+            keymap.popup_action_for(
+                KeyContext::AttentionGlance,
+                &KeyEvent::from(KeyCode::Char(' '))
+            ),
+            Some(Action::GlancePeek)
+        );
+    }
+
+    #[test]
+    fn attention_view_hints_and_dispatch_follow_live_remaps() {
+        let config = KeybindingsConfig {
+            attention_focus: vec!["alt-z".into()],
+            attention_glance: vec!["alt-b".into()],
+            glance_peek: vec!["p".into()],
+            glance_acknowledge: vec!["x".into()],
+            glance_acknowledge_all: vec!["X".into()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        assert_eq!(keymap.hint(Action::AttentionFocus), "alt-z");
+        assert_eq!(keymap.hint(Action::AttentionGlance), "alt-b");
+        assert_eq!(keymap.hint(Action::GlancePeek), "p");
+        assert_eq!(keymap.hint(Action::GlanceAcknowledge), "x");
+        assert_eq!(keymap.hint(Action::GlanceAcknowledgeAll), "X");
+        assert_eq!(
+            keymap.popup_action_for(
+                KeyContext::AttentionGlance,
+                &KeyEvent::from(KeyCode::Char('p'))
+            ),
+            Some(Action::GlancePeek)
         );
     }
 

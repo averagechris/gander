@@ -279,7 +279,9 @@ toggle-agent-order = ["A"]
 flag-list = ["F"]
 open-work = ["X"]
 walkthrough-list = ["W"]
-zen = ["T", "Z"]
+attention-focus = ["Z"]
+attention-glance = ["alt-g"]
+zen = ["T"] # legacy presentation until the next M18 package
 draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
@@ -549,7 +551,9 @@ keymap; the footer only shows the everyday hints.
 | `F` | agent-flagged sections popup |
 | `X` | open work popup for action items and todo comments (jump to linked evidence, cycle state) |
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
-| `T` / `Z` | zen mode: focused walkthrough of authored steps (or files), marking files viewed |
+| `Z` | toggle the attention Focus preset (maximum folding, pane hidden, narration pinned; toggle restores exactly) |
+| `Alt-G` | open the attention glance board (jump/peek/selected or bulk acknowledge) |
+| `T` | legacy zen walkthrough until the next M18 removal package |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `V` | View Options popup for word highlights, line backgrounds, gutter bar, soft wrap, file pane, and side-by-side view |
 | `w` / `\|` | hide/show the file pane / toggle unified vs side-by-side diff view |
@@ -729,7 +733,7 @@ opencode:
 
 When a review is large (thresholds under `[limits]`), the TUI nudges you
 that an agent can organize it: summon one with `@` or ask your harness,
-then press `T` (or `Z`) for **zen mode** — a focused walkthrough of authored
+then press `T` for the legacy **zen mode** — a focused walkthrough of authored
 steps and chapters. The file pane hides, rows outside the current stop dim, and
 a bottom panel shows progress and rationale; advancing (Enter/`n`) marks the
 file viewed. Without walkthrough steps, zen walks the files in review order

@@ -72,6 +72,10 @@ hunk ids suitable for `hunks show` and accepts the file as a positional or
 
 ```sh
 gander attention list [--mode effective|assigned] [--format json|text]
+gander attention coverage show [--format json|text]
+gander attention skim-fold list [--format json|text]
+gander attention acknowledge (--path <path> [--line <n> [--end-line <n>]] | \
+  --fold-id <stable-id> | --all) [--format json|text]
 gander attention set --path <path> [--line <n> [--end-line <n>]] \
   --salience spotlight|supporting|skim [--rationale <text>] [--format json|text]
 gander attention clear --path <path> [--line <n> [--end-line <n>]] [--format json|text]
@@ -100,6 +104,20 @@ write only Gander review state.
 `clear` resolves only normalized file/range identity, so it can remove a stale
 human assignment for a missing file or out-of-range line. `set`, `promote`, and
 `demote` require a target in the current unfiltered attention diff.
+
+`coverage show` reports current spotlight visits and skim acknowledgements.
+`skim-fold list` returns the same stable fold ids, paths/file count, churn,
+rationale, current/stale state, acknowledgement state, and whole-file coverage
+used by the TUI glance board. `acknowledge` has no implicit cursor: select an
+exact file/range, a returned stable id, or `--all`. Only current folds record
+fingerprint-guarded progress. Stale entries remain history and never acknowledge
+or count. A whole-file fold also writes that file's current fingerprint to
+viewed state; a partial fold never marks the file viewed. JSON acknowledgement
+output includes `matched`, `acknowledged`, `already_acknowledged`, `stale`, and
+`whole_files_viewed` counts/effects. Unknown ids/targets are errors. A path-only
+selector is accepted when it identifies one fold; multiple partial folds on the
+same path require an exact range or stable id. `--all` is the sole intentional
+successful no-op: `matched: 0` means there are no current unacknowledged folds.
 
 ## Comments
 

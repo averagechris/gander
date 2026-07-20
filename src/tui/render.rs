@@ -38,6 +38,7 @@ use super::{
     drafts::DraftListState,
     editor::CommentEditor,
     flags::FlagListState,
+    glance::GlanceBoardState,
     helpers::{JjHelperOption, JjHelperState},
     keymap::{Action, KeyMap},
     ops::OperationPickerState,
@@ -67,6 +68,7 @@ struct FooterContext<'a> {
     identity_chip: Option<&'a str>,
     notice: Option<&'a UiNotice>,
     zen: Option<&'a ZenState>,
+    attention_focus: bool,
 }
 
 fn footer_context<'a>(
@@ -82,6 +84,7 @@ fn footer_context<'a>(
         identity_chip: tui_state.current_identity_chip.as_deref(),
         notice,
         zen,
+        attention_focus: tui_state.attention_focus.is_some(),
     }
 }
 
@@ -224,6 +227,9 @@ pub(super) fn draw(
             theme,
             effective_file_pane.visible,
         ),
+        Mode::AttentionGlance(board) => {
+            draw_attention_glance_popup(frame, frame.area(), board, keymap, theme)
+        }
         Mode::CommentInput { editor, target } => {
             draw_comment_popup(frame, frame.area(), session, editor, target, keymap, theme)
         }
@@ -294,6 +300,8 @@ fn draw_menu_bar(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, th
         ("file", Action::NextFile),
         ("comment", Action::Comment),
         ("view", Action::ViewOptions),
+        ("focus", Action::AttentionFocus),
+        ("glance", Action::AttentionGlance),
         ("pane", Action::ToggleFilePane),
         ("quit", Action::Quit),
     ];
@@ -340,6 +348,101 @@ pub(super) fn row_in_inner(y: u16, inner: Rect) -> Option<usize> {
 fn clear_popup(frame: &mut ratatui::Frame<'_>, area: Rect, theme: &AppTheme) {
     frame.render_widget(Clear, area);
     frame.buffer_mut().set_style(area, theme.base_style());
+}
+
+fn draw_attention_glance_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    board: &GlanceBoardState,
+    keymap: &KeyMap,
+    theme: &AppTheme,
+) {
+    let popup = centered_rect(if area.width < 72 { 96 } else { 88 }, 72, area);
+    clear_popup(frame, popup, theme);
+    let footer = format!(
+        "{} jump  {} peek  {} acknowledge  {} acknowledge all  {} close",
+        keymap.hint(Action::PopupSelect),
+        keymap.hint(Action::GlancePeek),
+        keymap.hint(Action::GlanceAcknowledge),
+        keymap.hint(Action::GlanceAcknowledgeAll),
+        keymap.hint(Action::PopupClose),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title(format!(
+            " attention glance · {} skim folds ",
+            board.rows.len()
+        ))
+        .title_bottom(Line::from(truncate_tail(
+            &footer,
+            popup.width.saturating_sub(4) as usize,
+        )))
+        .style(theme.base_style());
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if board.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No skim folds on the effective attention map")
+                .style(Style::default().fg(theme.muted)),
+            inner,
+        );
+        return;
+    }
+    let width = inner.width.saturating_sub(3) as usize;
+    let items = board
+        .rows
+        .iter()
+        .map(|row| {
+            let state = if row.stale {
+                "stale"
+            } else if row.acknowledged {
+                "✓ acknowledged"
+            } else {
+                "current"
+            };
+            let paths = if row.paths.is_empty() {
+                "(missing target)".to_owned()
+            } else {
+                row.paths.join(", ")
+            };
+            let first = format!(
+                "{} · {} file{} · +{} −{} · {}",
+                state,
+                row.file_count,
+                if row.file_count == 1 { "" } else { "s" },
+                row.additions,
+                row.deletions,
+                row.rationale
+            );
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    truncate_tail(&first, width),
+                    Style::default().fg(if row.stale {
+                        theme.muted
+                    } else if row.acknowledged {
+                        theme.positive
+                    } else {
+                        theme.accent
+                    }),
+                )),
+                Line::from(Span::styled(
+                    truncate_tail(&paths, width),
+                    Style::default().fg(theme.detail),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(Some(board.selected));
+    frame.render_stateful_widget(
+        List::new(items).highlight_symbol("› ").highlight_style(
+            Style::default()
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        inner,
+        &mut state,
+    );
 }
 
 fn draw_files(
@@ -701,6 +804,15 @@ impl AnnotationLayoutInput {
             .iter()
             .find(|card| &card.source == source)
             .map(|card| card.owner)
+    }
+
+    pub(super) fn walkthrough_source_at_owner(&self, owner: usize) -> Option<AnnotationSource> {
+        self.cards
+            .iter()
+            .find(|card| {
+                card.owner == owner && matches!(card.source, AnnotationSource::Walkthrough { .. })
+            })
+            .map(|card| card.source.clone())
     }
 }
 
@@ -2548,6 +2660,9 @@ fn draw_footer(
                     },
                 ),
             ));
+            if context.attention_focus {
+                text = format!("Focus preset · {text}");
+            }
             if session.selected_comment().is_some() {
                 text.push_str(&format!(
                     " · {} state · {} edit · {} delete",
@@ -2668,6 +2783,16 @@ fn draw_footer(
                 keymap.hint(Action::PopupCloseQ),
             )
         }
+        Mode::AttentionGlance(_) => format!(
+            "attention glance · refresh paused · {down}/{up} move · {jump} jump · {peek} peek · {ack} acknowledge · {all} acknowledge all · {close} close",
+            down = keymap.hint(Action::PopupMoveDown),
+            up = keymap.hint(Action::PopupMoveUp),
+            jump = keymap.hint(Action::PopupSelect),
+            peek = keymap.hint(Action::GlancePeek),
+            ack = keymap.hint(Action::GlanceAcknowledge),
+            all = keymap.hint(Action::GlanceAcknowledgeAll),
+            close = keymap.hint(Action::PopupClose),
+        ),
         Mode::Help => format!(
             "help · {}/{} or page keys scroll · {}/{}/{} close",
             keymap.hint(Action::PopupMoveDown),
@@ -2807,6 +2932,8 @@ fn diff_footer_segments(
                 [Action::AttentionPromote, Action::AttentionDemote],
                 "salience",
             ),
+            FooterHint::new([Action::AttentionFocus], "Focus"),
+            FooterHint::new([Action::AttentionGlance], "glance"),
             FooterHint::new([Action::ToggleFold], "peek fold"),
             FooterHint::new([Action::MarkAllViewed], "ack fold"),
             FooterHint::new([Action::ScrollDown, Action::ScrollUp], "scroll"),
@@ -2899,7 +3026,9 @@ fn draw_help_popup(
         ),
         entry(&[Action::MarkViewed], "mark viewed and advance"),
         entry(&[Action::Comment], "comment on what needs work"),
-        entry(&[Action::Zen], "zen briefing for a focused pass"),
+        entry(&[Action::AttentionFocus], "toggle attention Focus preset"),
+        entry(&[Action::AttentionGlance], "open attention glance board"),
+        entry(&[Action::Zen], "legacy zen briefing"),
         entry(&[Action::YankHandoff], "copy handoff when done"),
         section("diff & view"),
         entry(&[Action::MoveDown, Action::MoveUp], "move diff cursor"),
@@ -2991,7 +3120,16 @@ fn draw_help_popup(
         entry(&[Action::ToggleLargeDiff], "expand/collapse huge diff"),
     ];
     let right = vec![
-        section("zen keys"),
+        section("attention views"),
+        entry(&[Action::AttentionFocus], "toggle Focus preset"),
+        entry(&[Action::AttentionGlance], "open glance board"),
+        entry(&[Action::GlancePeek], "peek selected skim fold"),
+        entry(&[Action::GlanceAcknowledge], "acknowledge selected skim"),
+        entry(
+            &[Action::GlanceAcknowledgeAll],
+            "acknowledge all current skims",
+        ),
+        section("legacy zen keys"),
         entry(&[Action::ZenNext, Action::ZenPrevious], "next/back stop"),
         entry(&[Action::ZenToggleView], "toggle focus card / reading view"),
         entry(&[Action::ZenGlance], "open glance board"),
@@ -5794,6 +5932,53 @@ mod tests {
             .position(|row| row.anchor.is_some())
             .unwrap();
         insta::assert_snapshot!(render_tui_text(&session, &Mode::Normal, 120, 28));
+    }
+
+    #[test]
+    fn tui_snapshots_attention_glance_wide_and_narrow() {
+        let mut session = snapshot_session(
+            "diff --git a/a.gen.rs b/a.gen.rs\n--- a/a.gen.rs\n+++ b/a.gen.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.gen.rs b/b.gen.rs\n--- a/b.gen.rs\n+++ b/b.gen.rs\n@@ -1 +1 @@\n-old_b\n+new_b\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let mut stale = crate::attention::target_for_diff(&files, "b.gen.rs", None, None).unwrap();
+        stale.anchor = None;
+        let mut durable = crate::state::ReviewSession {
+            id: "glance-review".into(),
+            attention_regions: vec![
+                AttentionRegion {
+                    target: crate::attention::target_for_diff(&files, "a.gen.rs", None, None)
+                        .unwrap(),
+                    salience: Salience::Skim,
+                    rationale: Some("Skim: generated path policy".into()),
+                    source: SalienceSource::Heuristic,
+                },
+                AttentionRegion {
+                    target: stale,
+                    salience: Salience::Skim,
+                    rationale: Some("old generated assignment".into()),
+                    source: SalienceSource::Human,
+                },
+            ],
+            ..Default::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(crate::review::canonical_repo_identity(&session.repo));
+        session.sessions.push(durable);
+        session.stream_mode = true;
+        let mode = Mode::AttentionGlance(super::super::GlanceBoardState::new(&session));
+        insta::assert_snapshot!(
+            "tui_snapshot_attention_glance_wide",
+            render_tui_text(&session, &mode, 120, 26)
+        );
+        insta::assert_snapshot!(
+            "tui_snapshot_attention_glance_narrow",
+            render_tui_text(&session, &mode, 54, 18)
+        );
     }
 
     #[test]

@@ -82,8 +82,9 @@ prefer `walkthrough_*` for new curation, with optional stack `change_id`),
 `draft_comment`, `review_disposition`, `review_disposition_set`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
 `comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
-live in the reviewer's terminal (ordering via `A`, flags via `F`, walkthrough/zen
-mode via `T`/`Z`, comments via `C`, and open work via `X`). MCP must preserve CLI
+live in the reviewer's terminal (ordering via `A`, flags via `F`, legacy zen via
+`T`, attention Focus via `Z`, glance via `Alt-G`, comments via `C`, and open work
+via `X`). MCP must preserve CLI
 semantics: new comments honor the configured initial state unless an explicit
 state is supplied; draft comments are durable/private/withheld, delegation todos
 are agent-directed work, collaboration todos are open team feedback, resolved comments are history,
@@ -136,6 +137,9 @@ scriptable surface.
 | `walkthrough_move_step` | `gander walkthrough move-step <id> --to <zero-based-index>` |
 | `walkthrough_show` | `gander walkthrough show` |
 | `attention_list` | `gander attention list [--mode effective|assigned]` |
+| `attention_coverage_show` | `gander attention coverage show` |
+| `attention_skim_fold_list` | `gander attention skim-fold list` |
+| `attention_skim_fold_acknowledge` | `gander attention acknowledge (--path ... \| --fold-id ... \| --all)` |
 | `attention_set` | `gander attention set --path <path> ... --salience <value>` |
 | `attention_clear` | `gander attention clear --path <path> ...` |
 | `attention_promote` / `attention_demote` | `gander attention promote|demote --path <path> ...` |

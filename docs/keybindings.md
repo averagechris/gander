@@ -77,6 +77,7 @@ would hide normal `comment`. Esc is an immutable zen-close action; changing
 | comment list | list movement/select/close plus general creation and comment metadata actions |
 | view options | list movement, toggle, select, close |
 | comment editor | local text editing plus configurable channel cycle, newline, save, cancel, backspace |
+| attention glance | list movement/select/close plus peek, selected acknowledge, and bulk acknowledge |
 | zen focus/reading | configurable stop, card, glance, artifact, detail, and refocus actions; other normal actions fall through |
 | zen glance | list movement/select/close, acknowledge all, back |
 | zen artifact | scroll/select/close and previous/next artifact |
@@ -128,11 +129,12 @@ remains effective.
 | `toggle-file-pane` / `toggle-diff-view` | `w` / `\|` | normal / normal diff |
 | `widen-file-pane` / `narrow-file-pane` | Alt-Right / Alt-Left | normal diff |
 | `attention-promote` / `attention-demote` | Alt-Up / Alt-Down | normal diff |
+| `attention-focus` / `attention-glance` | `Z` / Alt-G | normal; Focus is an ephemeral preset, glance is a popup |
 | `toggle-large-diff` | `L` | normal diff |
 | `toggle-agent-order` / `flag-list` | `A` / `F` | normal |
 | `open-work` / `activity` | `X` / Ctrl-A | normal |
 | `walkthrough-list` / `mark-walkthrough` | `W` / `Y` | normal / normal diff |
-| `zen` / `draft-list` | `T`, `Z` / `D` | normal |
+| `zen` / `draft-list` | `T` / `D` | normal (legacy zen remains until its M18 removal package) |
 
 ### Comments and editor
 
@@ -169,6 +171,8 @@ grapheme, so combining text and emoji clusters are never split.
 | `draft-accept` / `draft-edit` / `draft-discard` | Enter, `a` / `e` / `x` | draft list |
 | `walkthrough-delete` | `d` | walkthrough list |
 | `walkthrough-move-down` / `walkthrough-move-up` | `J` / `K` | walkthrough list |
+| `glance-peek` | Space | attention glance; opens the selected current fold in the stream and closes |
+| `glance-acknowledge` / `glance-acknowledge-all` | `a` / `A` | attention glance; stale entries remain inert |
 
 ### Zen controls
 

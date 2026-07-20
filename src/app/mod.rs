@@ -267,6 +267,30 @@ struct FileViewport {
     cursor_identity: Option<DiffRowIdentity>,
 }
 
+/// Exact ephemeral fold state captured by the TUI Focus preset. Kept opaque
+/// outside the app core so every fold-producing cache is invalidated together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FocusFoldingSnapshot {
+    fold_context: bool,
+    expanded_skim_folds: BTreeSet<String>,
+    context_expansion: BTreeMap<(String, usize), Expansion>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FocusViewSnapshot {
+    selected: usize,
+    diff_scroll: u16,
+    diff_cursor: usize,
+    stream_scroll: u16,
+    stream_cursor: usize,
+    focus: Focus,
+    folding: FocusFoldingSnapshot,
+    viewport_by_path: BTreeMap<String, FileViewport>,
+    tree_cursor: Option<TreeRowId>,
+    diff_range_selection: Option<DiffRangeSelection>,
+    selected_comment_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DiffRowIdentity {
     old_lineno: Option<usize>,
@@ -1494,6 +1518,98 @@ impl ReviewSession {
         // Row indices shift when folds appear/disappear; snap the cursor back
         // to a commentable row.
         self.ensure_diff_cursor_commentable();
+    }
+
+    pub(crate) fn apply_maximum_attention_folding(&mut self) -> FocusFoldingSnapshot {
+        let snapshot = FocusFoldingSnapshot {
+            fold_context: self.fold_context,
+            expanded_skim_folds: self.expanded_skim_folds.clone(),
+            context_expansion: self.context_expansion.clone(),
+        };
+        self.fold_context = true;
+        self.expanded_skim_folds.clear();
+        if !self.context_expansion.is_empty() {
+            self.context_expansion.clear();
+            self.expansion_epoch = self.expansion_epoch.wrapping_add(1);
+            self.rows_cache.borrow_mut().clear();
+            self.stream_cache.borrow_mut().take();
+        }
+        snapshot
+    }
+
+    pub(crate) fn restore_attention_folding(&mut self, snapshot: FocusFoldingSnapshot) {
+        let expansion_changed = self.context_expansion != snapshot.context_expansion;
+        self.fold_context = snapshot.fold_context;
+        self.expanded_skim_folds = snapshot.expanded_skim_folds;
+        self.context_expansion = snapshot.context_expansion;
+        if expansion_changed {
+            self.expansion_epoch = self.expansion_epoch.wrapping_add(1);
+            self.rows_cache.borrow_mut().clear();
+            self.stream_cache.borrow_mut().take();
+        }
+    }
+
+    pub(crate) fn capture_focus_view_and_fold(&mut self) -> FocusViewSnapshot {
+        let snapshot = FocusViewSnapshot {
+            selected: self.selected,
+            diff_scroll: self.diff_scroll,
+            diff_cursor: self.diff_cursor,
+            stream_scroll: self.stream_scroll,
+            stream_cursor: self.stream_cursor,
+            focus: self.focus,
+            folding: FocusFoldingSnapshot {
+                fold_context: self.fold_context,
+                expanded_skim_folds: self.expanded_skim_folds.clone(),
+                context_expansion: self.context_expansion.clone(),
+            },
+            viewport_by_path: self.viewport_by_path.clone(),
+            tree_cursor: self.tree_cursor.clone(),
+            diff_range_selection: self.diff_range_selection.clone(),
+            selected_comment_id: self.selected_comment_id.clone(),
+        };
+        let _ = self.apply_maximum_attention_folding();
+        snapshot
+    }
+
+    pub(crate) fn restore_focus_view(&mut self, snapshot: FocusViewSnapshot) {
+        self.restore_attention_folding(snapshot.folding);
+        self.selected = snapshot.selected.min(self.files.len().saturating_sub(1));
+        self.diff_scroll = snapshot.diff_scroll;
+        self.diff_cursor = snapshot.diff_cursor;
+        self.stream_scroll = snapshot.stream_scroll;
+        self.stream_cursor = snapshot.stream_cursor;
+        self.focus = snapshot.focus;
+        self.viewport_by_path = snapshot.viewport_by_path;
+        self.tree_cursor = snapshot.tree_cursor;
+        self.diff_range_selection = snapshot.diff_range_selection;
+        self.selected_comment_id = snapshot.selected_comment_id;
+    }
+
+    pub(crate) fn restore_focus_folding_from_view(&mut self, snapshot: FocusViewSnapshot) {
+        self.restore_attention_folding(snapshot.folding);
+    }
+
+    /// Restore the active Focus-side navigation after the underlying pre-Focus
+    /// view has independently passed through a refresh. `prior` is itself
+    /// refreshed against the new diff, so these coordinates are current while
+    /// the separate Focus restore snapshot remains untouched.
+    pub(crate) fn restore_active_focus_view_from(&mut self, prior: &ReviewSession) {
+        self.selected = prior.selected.min(self.files.len().saturating_sub(1));
+        self.diff_scroll = prior.diff_scroll;
+        self.diff_cursor = prior.diff_cursor;
+        self.stream_scroll = prior.stream_scroll;
+        self.stream_cursor = prior.stream_cursor;
+        self.focus = prior.focus;
+        self.fold_context = prior.fold_context;
+        self.expanded_skim_folds = prior.expanded_skim_folds.clone();
+        self.context_expansion = prior.context_expansion.clone();
+        self.viewport_by_path = prior.viewport_by_path.clone();
+        self.tree_cursor = prior.tree_cursor.clone();
+        self.diff_range_selection = prior.diff_range_selection.clone();
+        self.selected_comment_id = prior.selected_comment_id.clone();
+        self.expansion_epoch = self.expansion_epoch.wrapping_add(1);
+        self.rows_cache.borrow_mut().clear();
+        self.stream_cache.borrow_mut().take();
     }
 
     /// Toggle word-level emphasis of changed tokens within modified line
@@ -6548,5 +6664,41 @@ diff --git a/src/c.rs b/src/c.rs
                 .iter()
                 .any(|comment| comment.id == "discarded")
         );
+    }
+}
+
+#[cfg(test)]
+mod focus_folding_tests {
+    use super::*;
+
+    #[test]
+    fn maximum_attention_folding_restores_context_expansions_and_skim_peeks_exactly() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::parent_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10 +10 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        session.fold_context = false;
+        session.expanded_skim_folds.insert("fold:peeked".into());
+        session
+            .context_expansion
+            .insert(("a.rs".into(), 0), Expansion { above: 3, below: 2 });
+        let expected_expansion = session.context_expansion.clone();
+
+        let snapshot = session.apply_maximum_attention_folding();
+        assert!(session.fold_context);
+        assert!(session.expanded_skim_folds.is_empty());
+        assert!(session.context_expansion.is_empty());
+        session.restore_attention_folding(snapshot);
+        assert!(!session.fold_context);
+        assert_eq!(
+            session.expanded_skim_folds,
+            BTreeSet::from(["fold:peeked".into()])
+        );
+        assert_eq!(session.context_expansion, expected_expansion);
     }
 }

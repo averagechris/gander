@@ -416,6 +416,17 @@ pub struct AttentionClearParams {
     pub end_line: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttentionAcknowledgeParams {
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    /// Stable id returned by `attention_skim_fold_list`.
+    pub fold_id: Option<String>,
+    /// Acknowledge every current unacknowledged skim fold.
+    pub all: Option<bool>,
+}
+
 #[tool_router]
 impl GanderMcp {
     pub fn new(
@@ -1271,6 +1282,123 @@ impl GanderMcp {
     }
 
     #[tool(
+        description = "Show fingerprint-guarded attention coverage. Equivalent to `gander attention coverage show`."
+    )]
+    fn attention_coverage_show(&self) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let state = self.load_state()?;
+        let target = Self::target_for_context(&context);
+        let session = review::find_session_for_target(&state, &target)
+            .cloned()
+            .unwrap_or_default();
+        json_result(to_value(crate::attention::attention_coverage(
+            &session, &files,
+        ))?)
+    }
+
+    #[tool(
+        description = "List current review-stream skim folds and stale skim history. Equivalent to `gander attention skim-fold list`."
+    )]
+    fn attention_skim_fold_list(&self) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let state = self.load_state()?;
+        let target = Self::target_for_context(&context);
+        let session = review::find_session_for_target(&state, &target)
+            .cloned()
+            .unwrap_or_default();
+        let folds = crate::attention::list_skim_folds(&session, &files, true);
+        json_result(json!({
+            "current": folds.iter().filter(|fold| fold.current).count(),
+            "stale": folds.iter().filter(|fold| fold.stale).count(),
+            "folds": folds,
+        }))
+    }
+
+    #[tool(
+        description = "Acknowledge one explicit current skim target/stable id or all current skims. Equivalent to `gander attention acknowledge`."
+    )]
+    fn attention_skim_fold_acknowledge(
+        &self,
+        Parameters(params): Parameters<AttentionAcknowledgeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let all = params.all.unwrap_or(false);
+        let has_coordinates = params.line.is_some() || params.end_line.is_some();
+        if all && (params.path.is_some() || params.fold_id.is_some() || has_coordinates) {
+            return Err(McpError::invalid_params(
+                "all=true cannot be combined with path, line, end_line, or fold_id".to_owned(),
+                None,
+            ));
+        }
+        if params.fold_id.is_some() && (params.path.is_some() || has_coordinates) {
+            return Err(McpError::invalid_params(
+                "fold_id cannot be combined with path, line, or end_line".to_owned(),
+                None,
+            ));
+        }
+        if params.path.is_none() && params.line.is_some() {
+            return Err(McpError::invalid_params(
+                "line requires path".to_owned(),
+                None,
+            ));
+        }
+        if params.end_line.is_some() && params.line.is_none() {
+            return Err(McpError::invalid_params(
+                "end_line requires line".to_owned(),
+                None,
+            ));
+        }
+        if params.line == Some(0) || params.end_line == Some(0) {
+            return Err(McpError::invalid_params(
+                "line numbers are 1-indexed".to_owned(),
+                None,
+            ));
+        }
+        if let (Some(start), Some(end)) = (params.line, params.end_line)
+            && end < start
+        {
+            return Err(McpError::invalid_params(
+                "end_line must be greater than or equal to line".to_owned(),
+                None,
+            ));
+        }
+        let selection = match (all, params.fold_id, params.path) {
+            (true, None, None) => crate::attention::SkimSelection::AllCurrent,
+            (false, Some(id), None) if !id.trim().is_empty() => {
+                crate::attention::SkimSelection::StableId(id)
+            }
+            (false, None, Some(path)) => crate::attention::SkimSelection::Target {
+                path,
+                line: params.line,
+                end_line: params.end_line,
+            },
+            _ => {
+                return Err(McpError::invalid_params(
+                    "provide exactly one of path, fold_id, or all=true".to_owned(),
+                    None,
+                ));
+            }
+        };
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let mut state = self.load_state()?;
+        let idx = self.ensure_session_index_for_context(&mut state, &context);
+        let outcome =
+            crate::attention::acknowledge_skim_folds(&mut state.sessions[idx], &files, &selection)
+                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        crate::attention::apply_whole_file_viewed_effects(
+            &mut state,
+            &files,
+            &outcome.whole_files_viewed,
+        );
+        state
+            .save(&self.state_path)
+            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        json_result(to_value(outcome)?)
+    }
+
+    #[tool(
         description = "Set an explicit durable human attention override. Equivalent to `gander attention set`."
     )]
     fn attention_set(
@@ -1663,8 +1791,9 @@ impl ServerHandler for GanderMcp {
                  change's walkthrough stops), set_chunks/update_chunks/remove_chunks (3-7 \
                  importance=spotlight chunks with a \
                  teaching `explanation` each; importance=glance for the routine \
-                 rest — the human tours spotlights full-screen and skims glance \
-                 items in bulk; on a stack, give each chunk the change_id it \
+                 rest — spotlight narration appears inline in the review stream, \
+                 while routine skim folds are summarized and acknowledged from \
+                 the attention glance board; on a stack, give each chunk the change_id it \
                  belongs to with line numbers from that change_diff, in stack \
                  order, so the walkthrough flows through the stack change by \
                  change; spotlight chunks and briefs may attach artifacts — \
@@ -2568,6 +2697,128 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(cleared["cleared"], true);
+    }
+
+    #[test]
+    fn attention_coverage_and_skim_acknowledgement_match_cli_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        server
+            .attention_set(Parameters(AttentionMutationParams {
+                path: "src/app.rs".into(),
+                line: None,
+                end_line: None,
+                salience: Salience::Skim,
+                rationale: Some("generated churn".into()),
+            }))
+            .unwrap();
+        let listed = result_json(&server.attention_skim_fold_list().unwrap());
+        assert_eq!(listed["current"], 1);
+        assert_eq!(listed["folds"][0]["acknowledged"], false);
+
+        let outcome = result_json(
+            &server
+                .attention_skim_fold_acknowledge(Parameters(AttentionAcknowledgeParams {
+                    path: None,
+                    line: None,
+                    end_line: None,
+                    fold_id: None,
+                    all: Some(true),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(outcome["acknowledged"], 1);
+        assert_eq!(outcome["whole_files_viewed"][0], "src/app.rs");
+        let coverage = result_json(&server.attention_coverage_show().unwrap());
+        assert_eq!(coverage["covered"], coverage["total"]);
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert!(state.files["src/app.rs"].viewed);
+    }
+
+    #[test]
+    fn attention_acknowledge_rejects_mcp_selector_conflicts_and_invalid_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let invalid = [
+            (
+                AttentionAcknowledgeParams {
+                    path: Some("src/app.rs".into()),
+                    line: None,
+                    end_line: None,
+                    fold_id: Some("fold:id".into()),
+                    all: None,
+                },
+                "fold_id cannot be combined",
+            ),
+            (
+                AttentionAcknowledgeParams {
+                    path: None,
+                    line: Some(1),
+                    end_line: None,
+                    fold_id: Some("fold:id".into()),
+                    all: None,
+                },
+                "fold_id cannot be combined",
+            ),
+            (
+                AttentionAcknowledgeParams {
+                    path: Some("src/app.rs".into()),
+                    line: Some(1),
+                    end_line: None,
+                    fold_id: None,
+                    all: Some(true),
+                },
+                "all=true cannot be combined",
+            ),
+            (
+                AttentionAcknowledgeParams {
+                    path: None,
+                    line: Some(1),
+                    end_line: None,
+                    fold_id: None,
+                    all: None,
+                },
+                "line requires path",
+            ),
+            (
+                AttentionAcknowledgeParams {
+                    path: Some("src/app.rs".into()),
+                    line: Some(0),
+                    end_line: None,
+                    fold_id: None,
+                    all: None,
+                },
+                "1-indexed",
+            ),
+            (
+                AttentionAcknowledgeParams {
+                    path: Some("src/app.rs".into()),
+                    line: Some(4),
+                    end_line: Some(2),
+                    fold_id: None,
+                    all: None,
+                },
+                "greater than or equal",
+            ),
+        ];
+        for (params, expected) in invalid {
+            let error = server
+                .attention_skim_fold_acknowledge(Parameters(params))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        let unknown = server
+            .attention_skim_fold_acknowledge(Parameters(AttentionAcknowledgeParams {
+                path: None,
+                line: None,
+                end_line: None,
+                fold_id: Some("fold:missing".into()),
+                all: None,
+            }))
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("unknown skim fold id"), "{unknown}");
     }
 
     #[test]

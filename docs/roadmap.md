@@ -230,7 +230,8 @@ Status: designed, in progress.
 - [x] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
   `jj file show` content; expanded rows not commentable in v1
 - [x] zen mode (tour mode + the above + agent-curated walkthroughs): tour
-  evolved into a non-modal walkthrough layer (`T`/`Z`) — file pane
+  evolved into a non-modal walkthrough layer (now legacy `T`; `Z` belongs to
+  M18 Focus) — file pane
   hidden, out-of-stop rows dimmed, progress panel, file-order fallback when no
   walkthrough exists, full review vocabulary available mid-walkthrough
   (docs/focused-diff-ux.md §6)
@@ -370,9 +371,9 @@ Status: domain and automation foundation in progress.
 - [x] walkthrough = ordering over spotlight regions; next/prev drive the
   normal view; coverage (spotlights visited + skims acknowledged) replaces
   files-viewed as footer progress
-- [ ] focus is a one-key view preset (max fold, file pane hidden, cards
+- [x] focus is a one-key view preset (max fold, file pane hidden, cards
   pinned) — no modal phases, full review vocabulary throughout
-- [ ] glance board becomes a summary popup over the attention map
+- [x] glance board becomes a summary popup over the attention map
 - [ ] delete `ZenPhase` machinery and the overlay-chunk model + `set_chunks`
   compatibility path; regions re-anchor/stale via fingerprints instead of
   tearing down on retarget

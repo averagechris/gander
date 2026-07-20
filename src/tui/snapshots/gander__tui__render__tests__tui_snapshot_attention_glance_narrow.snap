@@ -1,0 +1,22 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &mode, 54, 18)"
+---
+┌files─────────────┐┌diff────────────────────────────┐
+│• mod     a.gen.rs││⌄ 1 file · generated churn · +1 │
+│• mod     b.gen.rs││−1                              │
+│╭ attention glance · 2 skim folds ─────────────────╮│
+││› current · 1 file · +1 −1 · generated churn      ││
+││  a.gen.rs                                        ││
+││  stale · 1 file · +0 −0 · generated churn        ││
+││  b.gen.rs                                        ││
+││                                                  ││
+││                                                  ││
+││                                                  ││
+││                                                  ││
+││                                                  ││
+││                                                  ││
+│╰enter jump  space peek  a acknowledge  A acknow…──╯│
+└──────────────────┘└────────────────────────────────┘
+2 files (coverage 0/1, 0 generated/noisy), +2/-2, 0 co
+attention glance · refresh paused · j/k move · enter j

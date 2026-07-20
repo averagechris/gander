@@ -6,7 +6,10 @@
 //! higher salience, then canonical target/rationale order. Stale assignments are
 //! retained for re-anchoring but do not affect the current diff.
 
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use color_eyre::eyre::{Result, eyre};
 use globset::{Glob, GlobSetBuilder};
@@ -19,8 +22,8 @@ use crate::{
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset, diff_content_looks_generated},
     state::{
         AttentionProgress, AttentionProgressKind, AttentionProgressMember, AttentionProgressTarget,
-        AttentionRegion, ReviewSession, ReviewTarget, Salience, SalienceSource, StepImportance,
-        StepKind,
+        AttentionRegion, ReviewSession, ReviewState, ReviewTarget, Salience, SalienceSource,
+        StepImportance, StepKind,
     },
 };
 
@@ -56,6 +59,507 @@ pub struct HeuristicUpdate {
     pub updated: usize,
     pub removed: usize,
     pub preserved_stale: usize,
+}
+
+/// One row on the current attention glance board. Current rows are the same
+/// stable, fingerprint-guarded skim identities used by the review stream;
+/// stale rows retain durable assignment history but can never be acknowledged.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SkimFoldSummary {
+    pub id: String,
+    pub target: AttentionProgressTarget,
+    pub paths: Vec<String>,
+    pub file_count: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub rationale: String,
+    pub current: bool,
+    pub stale: bool,
+    pub acknowledged: bool,
+    pub whole_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct AttentionCoverage {
+    pub covered: usize,
+    pub total: usize,
+    pub skim_acknowledged: usize,
+    pub skim_total: usize,
+    pub spotlight_visited: usize,
+    pub spotlight_total: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkimSelection {
+    AllCurrent,
+    StableId(String),
+    Target {
+        path: String,
+        line: Option<usize>,
+        end_line: Option<usize>,
+    },
+}
+
+impl SkimSelection {
+    fn validate(&self) -> Result<()> {
+        let Self::Target {
+            path,
+            line,
+            end_line,
+        } = self
+        else {
+            return Ok(());
+        };
+        if path.trim().is_empty() {
+            return Err(eyre!("skim target path must not be empty"));
+        }
+        match (*line, *end_line) {
+            (None, None) => Ok(()),
+            (None, Some(_)) => Err(eyre!("skim target end line requires a start line")),
+            (Some(0), _) | (_, Some(0)) => Err(eyre!("skim target line numbers are 1-indexed")),
+            (Some(start), Some(end)) if end < start => Err(eyre!(
+                "skim target end line must be greater than or equal to its start line"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SkimAcknowledgeOutcome {
+    pub matched: usize,
+    pub acknowledged: usize,
+    pub already_acknowledged: usize,
+    pub stale: usize,
+    pub whole_files_viewed: Vec<String>,
+}
+
+#[derive(Debug)]
+struct PendingSkimFold {
+    rationale: String,
+    targets: Vec<ReviewTarget>,
+    paths: BTreeSet<String>,
+    additions: usize,
+    deletions: usize,
+    whole_files: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoldSignature {
+    salience: Salience,
+    rationale: Option<String>,
+    source: Option<SalienceSource>,
+}
+
+fn fold_signature(region: &EffectiveAttentionRegion) -> FoldSignature {
+    FoldSignature {
+        salience: region.salience,
+        rationale: region.rationale.clone(),
+        source: region.source,
+    }
+}
+
+/// Canonical stable identity shared by the stream, glance popup, CLI, and MCP.
+pub fn skim_fold_id(target: &AttentionProgressTarget, rationale: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"gander-skim-fold-v1\0");
+    hash.update(serde_json::to_vec(target).unwrap_or_default());
+    hash.update(rationale.as_bytes());
+    format!("fold:{:x}", hash.finalize())
+}
+
+fn stale_skim_fold_id(region: &AttentionRegion) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"gander-stale-skim-fold-v1\0");
+    hash.update([source_rank(region.source)]);
+    hash.update(serde_json::to_vec(&region.target).unwrap_or_default());
+    format!("stale:{:x}", hash.finalize())
+}
+
+pub fn skim_rationale(rationale: Option<String>) -> String {
+    let value = rationale.unwrap_or_else(|| "skimmed change".to_owned());
+    let value = value.trim().trim_start_matches("Skim:").trim();
+    let lowercase = value.to_ascii_lowercase();
+    if lowercase.contains("generated") {
+        "generated churn".to_owned()
+    } else if lowercase.contains("lockfile") {
+        "lockfile churn".to_owned()
+    } else if lowercase.contains("ignore") {
+        "policy-matched churn".to_owned()
+    } else if value.is_empty() {
+        "skimmed change".to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn flush_skim_summary(
+    pending: &mut Option<PendingSkimFold>,
+    output: &mut Vec<SkimFoldSummary>,
+    session: &ReviewSession,
+    files: &[FileDiff],
+) {
+    let Some(pending) = pending.take() else {
+        return;
+    };
+    let target = AttentionProgressTarget::from_targets(pending.targets.iter());
+    let refs = files.iter().collect::<Vec<_>>();
+    let acknowledged = attention_progress_is_current_refs(
+        session,
+        &target,
+        AttentionProgressKind::SkimAcknowledged,
+        &refs,
+    );
+    let paths = pending.paths.into_iter().collect::<Vec<_>>();
+    output.push(SkimFoldSummary {
+        id: skim_fold_id(&target, &pending.rationale),
+        target,
+        file_count: paths.len(),
+        paths,
+        additions: pending.additions,
+        deletions: pending.deletions,
+        rationale: pending.rationale,
+        current: true,
+        stale: false,
+        acknowledged,
+        whole_files: pending.whole_files.into_iter().collect(),
+    });
+}
+
+fn append_skim_summary(
+    pending: &mut Option<PendingSkimFold>,
+    next: PendingSkimFold,
+    output: &mut Vec<SkimFoldSummary>,
+    session: &ReviewSession,
+    files: &[FileDiff],
+) {
+    if let Some(current) = pending.as_mut()
+        && current.rationale == next.rationale
+    {
+        current.targets.extend(next.targets);
+        current.paths.extend(next.paths);
+        current.additions += next.additions;
+        current.deletions += next.deletions;
+        current.whole_files.extend(next.whole_files);
+        return;
+    }
+    flush_skim_summary(pending, output, session, files);
+    *pending = Some(next);
+}
+
+/// Derive current stream folds plus optional stale durable skim assignments
+/// directly from the effective attention map. No cursor or ZenPhase state is
+/// consulted, so every adapter observes the same identities and progress.
+pub fn list_skim_folds(
+    session: &ReviewSession,
+    files: &[FileDiff],
+    include_stale: bool,
+) -> Vec<SkimFoldSummary> {
+    let mut output = Vec::new();
+    let mut pending = None;
+    for file in files {
+        let file_target = target_for_file_diff(file, &file.path, None, None).ok();
+        let mut rows = Vec::new();
+        for hunk in &file.hunks {
+            for line in &hunk.lines {
+                let Some(number) = line.new_lineno.or(line.old_lineno) else {
+                    continue;
+                };
+                let Ok(target) = target_for_file_diff(file, &file.path, Some(number), None) else {
+                    continue;
+                };
+                let effective = resolve_effective_attention(session, &target, files);
+                rows.push((target, effective, line.kind));
+            }
+        }
+        let whole_signature = rows.first().map(|(_, region, _)| fold_signature(region));
+        let whole_file_skim = if rows.is_empty() {
+            file_target.as_ref().is_some_and(|target| {
+                resolve_effective_attention(session, target, files).salience == Salience::Skim
+            })
+        } else {
+            whole_signature.as_ref().is_some_and(|signature| {
+                signature.salience == Salience::Skim
+                    && rows
+                        .iter()
+                        .all(|(_, region, _)| fold_signature(region) == *signature)
+            })
+        };
+        if whole_file_skim {
+            let effective = file_target
+                .as_ref()
+                .map(|target| resolve_effective_attention(session, target, files));
+            let rationale = skim_rationale(
+                rows.first()
+                    .and_then(|(_, region, _)| region.rationale.clone())
+                    .or_else(|| effective.and_then(|region| region.rationale)),
+            );
+            append_skim_summary(
+                &mut pending,
+                PendingSkimFold {
+                    rationale,
+                    targets: file_target.into_iter().collect(),
+                    paths: BTreeSet::from([file.path.clone()]),
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    whole_files: BTreeSet::from([file.path.clone()]),
+                },
+                &mut output,
+                session,
+                files,
+            );
+            continue;
+        }
+        for (target, effective, kind) in rows {
+            if effective.salience != Salience::Skim {
+                flush_skim_summary(&mut pending, &mut output, session, files);
+                continue;
+            }
+            append_skim_summary(
+                &mut pending,
+                PendingSkimFold {
+                    rationale: skim_rationale(effective.rationale),
+                    targets: vec![target],
+                    paths: BTreeSet::from([file.path.clone()]),
+                    additions: usize::from(matches!(kind, crate::diff::DiffLineKind::Added)),
+                    deletions: usize::from(matches!(kind, crate::diff::DiffLineKind::Removed)),
+                    whole_files: BTreeSet::new(),
+                },
+                &mut output,
+                session,
+                files,
+            );
+        }
+    }
+    flush_skim_summary(&mut pending, &mut output, session, files);
+
+    if include_stale {
+        let mut stale = BTreeMap::<String, SkimFoldSummary>::new();
+        for region in session
+            .attention_regions
+            .iter()
+            .filter(|region| region.salience == Salience::Skim && region_is_stale(region, files))
+        {
+            let target = AttentionProgressTarget::from_targets([&region.target]);
+            let rationale = skim_rationale(region.rationale.clone());
+            let paths = region.target.file.clone().into_iter().collect::<Vec<_>>();
+            let id = stale_skim_fold_id(region);
+            stale
+                .entry(id.clone())
+                .and_modify(|existing| {
+                    if rationale < existing.rationale {
+                        existing.rationale = rationale.clone();
+                    }
+                    existing.paths.extend(paths.clone());
+                    existing.paths.sort();
+                    existing.paths.dedup();
+                    existing.file_count = existing.paths.len();
+                })
+                .or_insert(SkimFoldSummary {
+                    id,
+                    target,
+                    file_count: paths.len(),
+                    paths,
+                    additions: 0,
+                    deletions: 0,
+                    rationale,
+                    current: false,
+                    stale: true,
+                    acknowledged: false,
+                    whole_files: Vec::new(),
+                });
+        }
+        output.extend(stale.into_values());
+    }
+    output
+}
+
+fn selection_matches(selection: &SkimSelection, fold: &SkimFoldSummary) -> bool {
+    match selection {
+        SkimSelection::AllCurrent => fold.current && !fold.acknowledged,
+        SkimSelection::StableId(id) => fold.id == *id || fold.id.starts_with(id),
+        SkimSelection::Target {
+            path,
+            line,
+            end_line,
+        } => {
+            let members = fold
+                .target
+                .members
+                .iter()
+                .filter(|member| member.file == *path)
+                .collect::<Vec<_>>();
+            let Some(selected_start) = *line else {
+                return !members.is_empty();
+            };
+            let selected_end = end_line.unwrap_or(selected_start);
+            let mut bounds = members.iter().filter_map(|member| {
+                let start = member.line?;
+                Some((start, member.end_line.unwrap_or(start)))
+            });
+            let Some((first_start, first_end)) = bounds.next() else {
+                return false;
+            };
+            let (start, end) = bounds.fold(
+                (first_start, first_end),
+                |(minimum, maximum), (start, end)| (minimum.min(start), maximum.max(end)),
+            );
+            start == selected_start && end == selected_end
+        }
+    }
+}
+
+pub fn acknowledge_skim_folds(
+    session: &mut ReviewSession,
+    files: &[FileDiff],
+    selection: &SkimSelection,
+) -> Result<SkimAcknowledgeOutcome> {
+    selection.validate()?;
+    let folds = list_skim_folds(session, files, true);
+    let matches = folds
+        .iter()
+        .filter(|fold| selection_matches(selection, fold))
+        .cloned()
+        .collect::<Vec<_>>();
+    if matches.is_empty() && !matches!(selection, SkimSelection::AllCurrent) {
+        return Err(match selection {
+            SkimSelection::StableId(id) => eyre!(
+                "unknown skim fold id `{id}`; run `gander attention skim-fold list` to list stable ids"
+            ),
+            SkimSelection::Target { path, line, .. } => match line {
+                Some(line) => eyre!(
+                    "no skim fold matches `{path}:{line}`; run `gander attention skim-fold list` to inspect current ranges"
+                ),
+                None => eyre!(
+                    "no skim fold matches `{path}`; run `gander attention skim-fold list` to inspect current targets"
+                ),
+            },
+            SkimSelection::AllCurrent => unreachable!("handled above"),
+        });
+    }
+    if matches.len() > 1 && !matches!(selection, SkimSelection::AllCurrent) {
+        return Err(match selection {
+            SkimSelection::Target {
+                path, line: None, ..
+            } => eyre!(
+                "skim target `{path}` is ambiguous across {} folds; provide --line/--end-line or --fold-id",
+                matches.len()
+            ),
+            _ => eyre!(
+                "skim selector is ambiguous across {} folds; provide an exact range or stable fold id",
+                matches.len()
+            ),
+        });
+    }
+    let refs = files.iter().collect::<Vec<_>>();
+    let mut outcome = SkimAcknowledgeOutcome {
+        matched: matches.len(),
+        ..Default::default()
+    };
+    let mut whole_files = BTreeSet::new();
+    for fold in matches {
+        if fold.stale || !fold.current {
+            outcome.stale += 1;
+            continue;
+        }
+        if fold.acknowledged {
+            outcome.already_acknowledged += 1;
+            continue;
+        }
+        record_attention_progress_refs(
+            session,
+            fold.target,
+            AttentionProgressKind::SkimAcknowledged,
+            &refs,
+        )?;
+        outcome.acknowledged += 1;
+        whole_files.extend(fold.whole_files);
+    }
+    outcome.whole_files_viewed = whole_files.into_iter().collect();
+    Ok(outcome)
+}
+
+/// Apply the conservative whole-file side effect returned by skim
+/// acknowledgement. CLI and MCP both use this service; partial folds pass an
+/// empty path list and therefore cannot mark a file viewed.
+pub fn apply_whole_file_viewed_effects(
+    state: &mut ReviewState,
+    files: &[FileDiff],
+    paths: &[String],
+) {
+    let paths = paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    for file in files
+        .iter()
+        .filter(|file| paths.contains(file.path.as_str()))
+    {
+        let saved = state.files.entry(file.path.clone()).or_default();
+        saved.normalize_legacy();
+        saved.fingerprint = file.fingerprint.clone();
+        saved.viewed = true;
+        saved.viewed_fingerprints.insert(file.fingerprint.clone());
+        saved.caught_up_fingerprints.remove(&file.fingerprint);
+    }
+}
+
+pub fn attention_coverage(session: &ReviewSession, files: &[FileDiff]) -> AttentionCoverage {
+    let folds = list_skim_folds(session, files, false);
+    let skim_acknowledged = folds.iter().filter(|fold| fold.acknowledged).count();
+    let refs = files.iter().collect::<Vec<_>>();
+    let mut spotlights = Vec::<AttentionProgressTarget>::new();
+    for file in files {
+        let mut pending = Vec::<ReviewTarget>::new();
+        let mut signature = None;
+        for hunk in &file.hunks {
+            for line in &hunk.lines {
+                let Some(number) = line.new_lineno.or(line.old_lineno) else {
+                    continue;
+                };
+                let Ok(target) = target_for_file_diff(file, &file.path, Some(number), None) else {
+                    continue;
+                };
+                let effective = resolve_effective_attention(session, &target, files);
+                let next = fold_signature(&effective);
+                if effective.salience == Salience::Spotlight {
+                    if signature.as_ref().is_some_and(|current| current != &next)
+                        && !pending.is_empty()
+                    {
+                        spotlights.push(AttentionProgressTarget::from_targets(pending.iter()));
+                        pending.clear();
+                    }
+                    signature = Some(next);
+                    pending.push(target);
+                } else if !pending.is_empty() {
+                    spotlights.push(AttentionProgressTarget::from_targets(pending.iter()));
+                    pending.clear();
+                    signature = None;
+                }
+            }
+        }
+        if !pending.is_empty() {
+            spotlights.push(AttentionProgressTarget::from_targets(pending.iter()));
+        }
+    }
+    spotlights.sort();
+    spotlights.dedup();
+    let spotlight_visited = spotlights
+        .iter()
+        .filter(|target| {
+            attention_progress_is_current_refs(
+                session,
+                target,
+                AttentionProgressKind::SpotlightVisited,
+                &refs,
+            )
+        })
+        .count();
+    AttentionCoverage {
+        covered: skim_acknowledged + spotlight_visited,
+        total: folds.len() + spotlights.len(),
+        skim_acknowledged,
+        skim_total: folds.len(),
+        spotlight_visited,
+        spotlight_total: spotlights.len(),
+    }
 }
 
 impl AttentionProgressTarget {
@@ -985,6 +1489,234 @@ mod tests {
             &drifted_refs,
         ));
         assert_eq!(session.attention_progress.len(), 1, "history is retained");
+    }
+
+    #[test]
+    fn skim_fold_service_lists_acknowledges_and_applies_whole_file_semantics() {
+        let files = files();
+        let mut session = ReviewSession {
+            attention_regions: vec![region(
+                &files,
+                SalienceSource::Human,
+                Salience::Skim,
+                None,
+                None,
+            )],
+            ..Default::default()
+        };
+        let folds = list_skim_folds(&session, &files, true);
+        assert_eq!(folds.len(), 1);
+        assert!(folds[0].current);
+        assert!(!folds[0].stale);
+        assert_eq!(folds[0].whole_files, ["src/lib.rs"]);
+
+        let outcome = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::StableId(folds[0].id.clone()),
+        )
+        .unwrap();
+        assert_eq!(outcome.acknowledged, 1);
+        assert_eq!(outcome.whole_files_viewed, ["src/lib.rs"]);
+        assert!(list_skim_folds(&session, &files, false)[0].acknowledged);
+        let coverage = attention_coverage(&session, &files);
+        assert_eq!((coverage.covered, coverage.total), (1, 1));
+    }
+
+    #[test]
+    fn partial_and_stale_skims_never_claim_whole_file_progress() {
+        let files = files();
+        let mut session = ReviewSession {
+            attention_regions: vec![region(
+                &files,
+                SalienceSource::Human,
+                Salience::Skim,
+                Some(2),
+                None,
+            )],
+            ..Default::default()
+        };
+        let fold = list_skim_folds(&session, &files, false)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(fold.whole_files.is_empty());
+        let outcome = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::Target {
+                path: "src/lib.rs".into(),
+                line: Some(2),
+                end_line: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.acknowledged, 1);
+        assert!(outcome.whole_files_viewed.is_empty());
+
+        session.attention_regions[0].target.anchor = None;
+        let stale = list_skim_folds(&session, &files, true)
+            .into_iter()
+            .find(|fold| fold.stale)
+            .unwrap();
+        let outcome =
+            acknowledge_skim_folds(&mut session, &files, &SkimSelection::StableId(stale.id))
+                .unwrap();
+        assert_eq!(outcome.stale, 1);
+        assert_eq!(outcome.acknowledged, 0);
+    }
+
+    #[test]
+    fn explicit_skim_selectors_reject_unknown_and_ambiguous_targets() {
+        let files = ten_line_files();
+        let mut session = ReviewSession {
+            attention_regions: vec![
+                region(
+                    &files,
+                    SalienceSource::Human,
+                    Salience::Skim,
+                    Some(2),
+                    Some(3),
+                ),
+                region(
+                    &files,
+                    SalienceSource::Human,
+                    Salience::Skim,
+                    Some(7),
+                    Some(8),
+                ),
+            ],
+            ..Default::default()
+        };
+        let unknown_id = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::StableId("fold:missing".into()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown_id.contains("unknown skim fold id"), "{unknown_id}");
+        let unknown_path = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::Target {
+                path: "missing.rs".into(),
+                line: None,
+                end_line: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            unknown_path.contains("no skim fold matches"),
+            "{unknown_path}"
+        );
+        let ambiguous = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::Target {
+                path: "src/lib.rs".into(),
+                line: None,
+                end_line: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            ambiguous.contains("ambiguous across 2 folds"),
+            "{ambiguous}"
+        );
+        assert!(ambiguous.contains("--line/--end-line or --fold-id"));
+
+        let selected = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::Target {
+                path: "src/lib.rs".into(),
+                line: Some(2),
+                end_line: Some(3),
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.acknowledged, 1);
+
+        let empty = acknowledge_skim_folds(
+            &mut ReviewSession::default(),
+            &files,
+            &SkimSelection::AllCurrent,
+        )
+        .unwrap();
+        assert_eq!(empty.matched, 0, "explicit bulk on an empty set is a no-op");
+    }
+
+    #[test]
+    fn stale_fold_ids_include_source_and_anchor_and_aggregate_identical_rows() {
+        let files = files();
+        let mut human = region(&files, SalienceSource::Human, Salience::Skim, Some(2), None);
+        let mut agent = human.clone();
+        agent.source = SalienceSource::Agent;
+        human.target.anchor = None;
+        agent.target.anchor = None;
+        let duplicate_human = human.clone();
+        let mut session = ReviewSession {
+            attention_regions: vec![human.clone(), agent.clone(), duplicate_human],
+            ..Default::default()
+        };
+        let first = list_skim_folds(&session, &files, true)
+            .into_iter()
+            .filter(|fold| fold.stale)
+            .map(|fold| fold.id)
+            .collect::<Vec<_>>();
+        assert_eq!(first.len(), 2, "identical malformed rows aggregate");
+        assert_ne!(first[0], first[1], "source participates in stale identity");
+        session.attention_regions.reverse();
+        let reversed = list_skim_folds(&session, &files, true)
+            .into_iter()
+            .filter(|fold| fold.stale)
+            .map(|fold| fold.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first, reversed,
+            "stale board ordering and ids are deterministic"
+        );
+        let prefix = &first[0][..first[0].len() - 8];
+        let outcome = acknowledge_skim_folds(
+            &mut session,
+            &files,
+            &SkimSelection::StableId(prefix.into()),
+        )
+        .unwrap();
+        assert_eq!(outcome.stale, 1, "unique stale prefixes resolve stably");
+
+        let mut anchored_a = region(&files, SalienceSource::Human, Salience::Skim, Some(2), None);
+        let mut anchored_b = anchored_a.clone();
+        for (region, fingerprint) in [(&mut anchored_a, "old-a"), (&mut anchored_b, "old-b")] {
+            match region.target.anchor.as_mut().unwrap() {
+                CommentAnchor::File {
+                    diff_fingerprint, ..
+                }
+                | CommentAnchor::Line {
+                    diff_fingerprint, ..
+                }
+                | CommentAnchor::Range {
+                    diff_fingerprint, ..
+                } => *diff_fingerprint = fingerprint.into(),
+            }
+        }
+        let anchored = ReviewSession {
+            attention_regions: vec![anchored_a, anchored_b],
+            ..Default::default()
+        };
+        let ids = list_skim_folds(&anchored, &files, true)
+            .into_iter()
+            .filter(|fold| fold.stale)
+            .map(|fold| fold.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(
+            ids[0], ids[1],
+            "anchor fingerprint participates in identity"
+        );
     }
 
     #[test]

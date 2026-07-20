@@ -1165,30 +1165,71 @@ impl ReviewSession {
     }
 
     fn acknowledge_skim_fold(&mut self, fold: SkimFold) -> SkimAcknowledgeResult {
-        let files = self.files.iter().map(|file| &file.diff).collect::<Vec<_>>();
-        let Some(index) = self.active_durable_session_index() else {
-            return SkimAcknowledgeResult::Unavailable;
-        };
-        if attention::record_attention_progress_refs(
-            &mut self.sessions[index],
-            fold.target,
-            AttentionProgressKind::SkimAcknowledged,
-            &files,
-        )
-        .is_err()
+        let expected_whole_files = fold.whole_files;
+        match self.acknowledge_skim_selection_outcome(&attention::SkimSelection::StableId(fold.id))
         {
-            return SkimAcknowledgeResult::Unavailable;
+            Some(outcome) if outcome.matched > 0 && outcome.stale == 0 => {
+                if outcome.acknowledged > 0 {
+                    debug_assert_eq!(
+                        outcome
+                            .whole_files_viewed
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>(),
+                        expected_whole_files
+                    );
+                }
+                SkimAcknowledgeResult::Acknowledged
+            }
+            _ => SkimAcknowledgeResult::Unavailable,
         }
-        if !fold.whole_files.is_empty() {
-            self.mark_files_viewed_where(|file| fold.whole_files.contains(&file.path));
-        }
-        SkimAcknowledgeResult::Acknowledged
     }
 
+    pub fn acknowledge_skim_fold_id(&mut self, id: &str) -> attention::SkimAcknowledgeOutcome {
+        self.acknowledge_skim_selection_outcome(&attention::SkimSelection::StableId(id.to_owned()))
+            .unwrap_or_default()
+    }
+
+    pub fn acknowledge_all_current_skims(&mut self) -> attention::SkimAcknowledgeOutcome {
+        self.acknowledge_skim_selection_outcome(&attention::SkimSelection::AllCurrent)
+            .unwrap_or_default()
+    }
+
+    fn acknowledge_skim_selection_outcome(
+        &mut self,
+        selection: &attention::SkimSelection,
+    ) -> Option<attention::SkimAcknowledgeOutcome> {
+        let files = self
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let index = self.active_durable_session_index()?;
+        let outcome =
+            attention::acknowledge_skim_folds(&mut self.sessions[index], &files, selection).ok()?;
+        if !outcome.whole_files_viewed.is_empty() {
+            let whole_files = outcome
+                .whole_files_viewed
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            self.mark_files_viewed_where(|file| whole_files.contains(&file.path));
+        }
+        Some(outcome)
+    }
+
+    #[cfg(test)]
     pub fn jump_spotlight(&mut self, delta: isize) -> bool {
+        self.jump_spotlight_with_identity(delta).is_some()
+    }
+
+    /// Jump through the walkthrough ordering and return the exact narration
+    /// card identity chosen by that jump. Focus uses this to repin colocated
+    /// spotlight cards without guessing from the destination row.
+    pub(crate) fn jump_spotlight_with_identity(&mut self, delta: isize) -> Option<(String, usize)> {
         let stream = self.review_stream();
         if stream.spotlights.is_empty() {
-            return false;
+            return None;
         }
         let current = stream.rows.get(self.stream_cursor);
         let current_target = current
@@ -1205,21 +1246,21 @@ impl ReviewSession {
             (None, false) => 0,
             (None, true) => stream.spotlights.len() - 1,
         };
-        let target = &stream.spotlights[next].target;
-        let Some((row_index, row)) = stream.rows.iter().enumerate().find(|(_, row)| {
+        let spotlight = &stream.spotlights[next];
+        let identity = (spotlight.step_id.clone(), spotlight.part);
+        let target = &spotlight.target;
+        let (row_index, row) = stream.rows.iter().enumerate().find(|(_, row)| {
             row.anchor
                 .as_ref()
                 .and_then(target_from_anchor)
                 .is_some_and(|row_target| targets_overlap(target, &row_target))
-        }) else {
-            return false;
-        };
+        })?;
         let resolved = self.land_on_stream_row(row, row_index, true);
         // The destination file may just have acquired gap/fold/syntax rows.
         // Frame the resolved row in that rebuilt projection, never its stale
         // structural index.
         self.stream_scroll = resolved.saturating_sub(5).min(u16::MAX as usize) as u16;
-        true
+        Some(identity)
     }
 
     pub fn change_selected_salience(&mut self, promote: bool) -> bool {
@@ -1442,7 +1483,7 @@ fn flush_fold(
         return;
     };
     let target = AttentionProgressTarget::from_targets(pending.targets.iter());
-    let id = fold_id(&target, &pending.rationale);
+    let id = attention::skim_fold_id(&target, &pending.rationale);
     let acknowledged = durable.is_some_and(|session| {
         attention::attention_progress_is_current_refs(
             session,
@@ -1525,29 +1566,8 @@ fn row_id(path: &str, row: &DiffRow) -> String {
     format!("row:{:x}", hash.finalize())
 }
 
-fn fold_id(target: &AttentionProgressTarget, rationale: &str) -> String {
-    let mut hash = Sha256::new();
-    hash.update(b"gander-skim-fold-v1\0");
-    hash.update(serde_json::to_vec(target).unwrap_or_default());
-    hash.update(rationale.as_bytes());
-    format!("fold:{:x}", hash.finalize())
-}
-
 fn fold_rationale(rationale: Option<String>) -> String {
-    let value = rationale.unwrap_or_else(|| "skimmed change".to_owned());
-    let value = value.trim().trim_start_matches("Skim:").trim();
-    let lowercase = value.to_ascii_lowercase();
-    if lowercase.contains("generated") {
-        "generated churn".to_owned()
-    } else if lowercase.contains("lockfile") {
-        "lockfile churn".to_owned()
-    } else if lowercase.contains("ignore") {
-        "policy-matched churn".to_owned()
-    } else if value.is_empty() {
-        "skimmed change".to_owned()
-    } else {
-        value.to_owned()
-    }
+    attention::skim_rationale(rationale)
 }
 
 fn target_from_anchor(anchor: &CommentAnchor) -> Option<StateReviewTarget> {

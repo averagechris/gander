@@ -281,7 +281,10 @@ Notes:
 - `attention_progress` is private append-only skim acknowledgement and
   spotlight-visit history. Its stable target identity is separate from the
   aggregate current diff fingerprint; `stale: true` records remain history but
-  never count toward coverage. Team exports omit progress.
+  never count toward coverage. Team exports omit progress. Inspect and mutate
+  these semantics through `gander attention coverage show`, `attention
+  skim-fold list`, and explicit `attention acknowledge`; CLI, MCP, and TUI use
+  the same fold identity and fingerprint checks.
 - `session` is present when the exported change matches an open durable review
   session; it includes the session `id` and optional `title`.
 - `comments[].session_id` identifies the durable session that owns a newly

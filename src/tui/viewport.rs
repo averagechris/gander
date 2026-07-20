@@ -358,6 +358,28 @@ impl DiffViewportController {
         });
     }
 
+    /// Pin the current spotlight narration by selecting the walkthrough card
+    /// owned by the stream cursor. Cursor placement then keeps its complete
+    /// inline block visible without introducing another rendering primitive.
+    pub(super) fn pin_current_spotlight(&self, session: &ReviewSession) -> bool {
+        let scope = annotation_scope(session);
+        self.prune_annotation_scope(&scope);
+        let expanded = self
+            .expanded_cards
+            .borrow()
+            .iter()
+            .filter(|card| card.scope == scope)
+            .map(|card| card.source.stable_id())
+            .collect::<BTreeSet<_>>();
+        let hint = self.artifact_hint.borrow().clone();
+        let input = selected_file_annotation_input(session, &expanded, &hint);
+        let Some(source) = input.walkthrough_source_at_owner(viewport_cursor(session)) else {
+            return false;
+        };
+        *self.selected_annotation.borrow_mut() = Some(ScopedCardId { scope, source });
+        true
+    }
+
     pub(super) fn clear_selected_annotation(&self) {
         self.selected_annotation.borrow_mut().take();
     }

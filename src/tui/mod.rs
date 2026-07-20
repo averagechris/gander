@@ -16,6 +16,7 @@ mod comments;
 mod drafts;
 mod editor;
 mod flags;
+mod glance;
 mod helpers;
 mod keymap;
 mod ops;
@@ -78,6 +79,7 @@ use comments::CommentListState;
 use drafts::DraftListState;
 use editor::CommentEditor;
 use flags::FlagListState;
+use glance::GlanceBoardState;
 use helpers::JjHelperState;
 use keymap::{Action, KeyContext, KeyMap};
 use ops::OperationPickerState;
@@ -131,6 +133,7 @@ enum Mode {
     SymbolOutline(SymbolOutlineState),
     CommentList(CommentListState),
     ViewOptions(ViewOptionsState),
+    AttentionGlance(GlanceBoardState),
     WalkthroughList(WalkthroughListState),
     CommentInput {
         editor: CommentEditor,
@@ -164,6 +167,7 @@ impl Mode {
             | Self::SymbolOutline(_)
             | Self::CommentList(_)
             | Self::ViewOptions(_)
+            | Self::AttentionGlance(_)
             | Self::WalkthroughList(_)
             | Self::CommentInput { .. } => ReviewPointerPolicy::BlockedByModal,
         }
@@ -238,6 +242,9 @@ struct TuiState {
     osc_guard: OscTailGuard,
     layout_config: UiConfig,
     file_pane: FilePaneState,
+    /// Ephemeral attention Focus preset. This is view state, never a Mode or
+    /// durable review phase, so normal review dispatch remains untouched.
+    attention_focus: Option<AttentionFocusState>,
 }
 
 impl Default for TuiState {
@@ -274,9 +281,32 @@ impl Default for TuiState {
                 presentation_scope: None,
                 split_percent: layout_config.file_pane_split_percent,
             },
+            attention_focus: None,
             layout_config,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct AttentionFocusState {
+    target_key: String,
+    prior_file_pane: FilePaneState,
+    prior_file_pane_visible: bool,
+    prior_app_view: crate::app::FocusViewSnapshot,
+    prior_viewport: viewport::ControllerTransactionSnapshot,
+}
+
+struct AttentionFocusZenRollback {
+    session: ReviewSession,
+    focus: AttentionFocusState,
+    file_pane: FilePaneState,
+    viewport: viewport::ControllerTransactionSnapshot,
+}
+
+struct ActiveAttentionFocusRefresh {
+    session: ReviewSession,
+    viewport_transaction: viewport::ControllerTransactionSnapshot,
+    viewport_refresh: viewport::RefreshSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,7 +351,9 @@ impl TuiState {
         let responsive_preference = session.file_pane_visible
             && terminal_width >= self.layout_config.file_pane_auto_hide_width;
         EffectiveFilePane {
-            visible: if self.file_pane.presentation_scope.is_some() {
+            visible: if self.file_pane.presentation_scope.is_some()
+                || self.attention_focus.is_some()
+            {
                 false
             } else {
                 self.file_pane
@@ -365,6 +397,136 @@ impl TuiState {
             self.file_pane.explicit_override = scope.prior_explicit_override;
         }
         self.correct_file_pane_focus(session, self.terminal_size.width);
+    }
+
+    fn enter_attention_focus(&mut self, session: &mut ReviewSession) {
+        debug_assert!(self.attention_focus.is_none());
+        let selected_row_id = session.selected_stream_row().map(|row| row.id);
+        // Capture every pre-preset coordinate before folding mutates the
+        // stream projection or invalidates measured annotation geometry.
+        let prior_viewport = self.diff_viewport.transaction_snapshot();
+        let prior_file_pane = self.file_pane;
+        let prior_file_pane_visible = session.file_pane_visible;
+        let prior_app_view = session.capture_focus_view_and_fold();
+        let state = AttentionFocusState {
+            target_key: session.target.to_string(),
+            prior_file_pane,
+            prior_file_pane_visible,
+            prior_app_view,
+            prior_viewport,
+        };
+        self.attention_focus = Some(state);
+        session.stream_mode = true;
+        if let Some(id) = selected_row_id {
+            session.reanchor_stream_cursor(&id);
+        }
+        session.focus = Focus::Diff;
+        self.correct_file_pane_focus(session, self.terminal_size.width);
+        let _ = self.diff_viewport.pin_current_spotlight(session);
+        self.diff_viewport
+            .place_cursor(session, current_diff_inner(session, self));
+    }
+
+    fn leave_attention_focus(&mut self, session: &mut ReviewSession) {
+        let Some(state) = self.attention_focus.take() else {
+            return;
+        };
+        self.file_pane = state.prior_file_pane;
+        session.file_pane_visible = state.prior_file_pane_visible;
+        if state.target_key == session.target.to_string() {
+            session.restore_focus_view(state.prior_app_view);
+            self.diff_viewport.restore_transaction(state.prior_viewport);
+        } else {
+            session.restore_focus_folding_from_view(state.prior_app_view);
+            session.focus = Focus::Diff;
+            self.diff_viewport.reset(session);
+        }
+        self.correct_file_pane_focus(session, self.terminal_size.width);
+        self.diff_viewport
+            .reflow(session, current_diff_inner(session, self), false);
+    }
+
+    fn toggle_attention_focus(&mut self, session: &mut ReviewSession) -> bool {
+        if self.attention_focus.is_some() {
+            self.leave_attention_focus(session);
+            false
+        } else {
+            self.enter_attention_focus(session);
+            true
+        }
+    }
+
+    fn suspend_attention_focus_for_refresh(
+        &mut self,
+        session: &mut ReviewSession,
+    ) -> Option<ActiveAttentionFocusRefresh> {
+        self.attention_focus.as_ref()?;
+        let inner = current_diff_inner(session, self);
+        let active = ActiveAttentionFocusRefresh {
+            session: session.clone(),
+            viewport_transaction: self.diff_viewport.transaction_snapshot(),
+            viewport_refresh: self.diff_viewport.refresh_snapshot(session, inner),
+        };
+        self.leave_attention_focus(session);
+        Some(active)
+    }
+
+    fn resume_attention_focus_after_refresh(
+        &mut self,
+        session: &mut ReviewSession,
+        review_loader: &ReviewLoader<'_>,
+        active: ActiveAttentionFocusRefresh,
+        refreshed: bool,
+    ) {
+        self.enter_attention_focus(session);
+        let mut active_session = active.session;
+        if refreshed
+            && review_loader
+                .load_in_place(&mut active_session, session.target.clone())
+                .is_err()
+        {
+            return;
+        }
+        session.restore_active_focus_view_from(&active_session);
+        self.diff_viewport
+            .restore_transaction(active.viewport_transaction);
+        if refreshed {
+            self.diff_viewport.refreshed(
+                active.viewport_refresh,
+                session,
+                current_diff_inner(session, self),
+            );
+        } else {
+            self.diff_viewport
+                .reflow(session, current_diff_inner(session, self), false);
+        }
+    }
+
+    fn suspend_attention_focus_for_zen(
+        &mut self,
+        session: &mut ReviewSession,
+    ) -> Option<AttentionFocusZenRollback> {
+        let focus = self.attention_focus.clone()?;
+        let rollback = AttentionFocusZenRollback {
+            session: session.clone(),
+            focus,
+            file_pane: self.file_pane,
+            viewport: self.diff_viewport.transaction_snapshot(),
+        };
+        self.leave_attention_focus(session);
+        Some(rollback)
+    }
+
+    fn rollback_attention_focus_zen_start(
+        &mut self,
+        session: &mut ReviewSession,
+        rollback: AttentionFocusZenRollback,
+    ) {
+        *session = rollback.session;
+        self.file_pane = rollback.file_pane;
+        self.attention_focus = Some(rollback.focus);
+        self.diff_viewport.restore_transaction(rollback.viewport);
+        self.zen = None;
     }
 }
 
@@ -845,11 +1007,23 @@ fn finish_zen_presentation(session: &mut ReviewSession, tui_state: &mut TuiState
     tui_state.restore_presentation_file_pane_scope(session);
 }
 
+fn finish_ephemeral_views_on_quit(session: &mut ReviewSession, tui_state: &mut TuiState) {
+    if let Some(zen) = tui_state.zen.take() {
+        finish_zen_presentation(session, tui_state, &zen);
+    }
+    if tui_state.attention_focus.is_some() {
+        tui_state.leave_attention_focus(session);
+    }
+}
+
 fn seed_zen_tour(
     session: &mut ReviewSession,
     review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) {
+    // Legacy zen and attention Focus own different scoped presentation state.
+    // Never stack them: starting zen first restores the exact pre-Focus view.
+    let focus_rollback = tui_state.suspend_attention_focus_for_zen(session);
     let mut stack = review_loader
         .jj
         .stack_changes(&session.repo, &session.target)
@@ -864,7 +1038,11 @@ fn seed_zen_tour(
         let desired = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
         let mut probe = session.clone();
         if review_loader.load(&mut probe, desired).is_err() {
-            tui_state.zen = None;
+            if let Some(rollback) = focus_rollback {
+                tui_state.rollback_attention_focus_zen_start(session, rollback);
+            } else {
+                tui_state.zen = None;
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: "zen could not start — initial stop is unavailable".into(),
@@ -893,7 +1071,11 @@ fn seed_zen_tour(
                     tui_state
                         .diff_viewport
                         .restore_transaction(prior_viewport.clone());
-                    tui_state.zen = None;
+                    if let Some(rollback) = focus_rollback {
+                        tui_state.rollback_attention_focus_zen_start(session, rollback);
+                    } else {
+                        tui_state.zen = None;
+                    }
                     tui_state.notice = Some(UiNotice {
                         level: UiNoticeLevel::Error,
                         message: "zen could not start — initial stop is unavailable".into(),
@@ -908,8 +1090,12 @@ fn seed_zen_tour(
             {
                 *session = prior_session;
                 tui_state.diff_viewport.restore_transaction(prior_viewport);
-                tui_state.zen = None;
                 tui_state.restore_presentation_file_pane_scope(session);
+                if let Some(rollback) = focus_rollback {
+                    tui_state.rollback_attention_focus_zen_start(session, rollback);
+                } else {
+                    tui_state.zen = None;
+                }
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Error,
                     message: "zen could not start — initial stop is unavailable".into(),
@@ -935,6 +1121,9 @@ fn seed_zen_tour(
             tui_state.zen = Some(zen);
         }
         None => {
+            if let Some(rollback) = focus_rollback {
+                tui_state.rollback_attention_focus_zen_start(session, rollback);
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "nothing to review — no changed files in this target".to_owned(),
@@ -1122,9 +1311,7 @@ fn run_loop(
             }
         }
         if quit {
-            if let Some(zen) = tui_state.zen.take() {
-                finish_zen_presentation(session, tui_state, &zen);
-            }
+            finish_ephemeral_views_on_quit(session, tui_state);
             if let Some(state_path) = state_path {
                 autosave_state(session, state_path, tui_state);
             }
@@ -1604,6 +1791,7 @@ fn mode_label(mode: &Mode) -> &'static str {
         Mode::SymbolOutline(_) => "symbol outline",
         Mode::CommentList(_) => "comment list",
         Mode::ViewOptions(_) => "view options",
+        Mode::AttentionGlance(_) => "attention glance",
         Mode::WalkthroughList(_) => "walkthrough list",
         Mode::CommentInput { .. } => "comment editor",
     }
@@ -1838,6 +2026,7 @@ fn start_present_tour(
     if tui_state.zen.is_some() {
         return Ok(());
     }
+    let focus_rollback = tui_state.suspend_attention_focus_for_zen(session);
     let mut stack = review_loader
         .jj
         .stack_changes(&session.repo, &session.target)
@@ -1845,6 +2034,9 @@ fn start_present_tour(
     stack.retain(|change| !change.matches_rev(&session.target.base));
     load_change_diffs_for_stack(review_loader, session, &stack);
     let Some(mut zen) = ZenState::new(session, &stack) else {
+        if let Some(rollback) = focus_rollback {
+            tui_state.rollback_attention_focus_zen_start(session, rollback);
+        }
         return Err((
             -32002,
             "nothing to review — no changed files in this target".to_owned(),
@@ -1858,6 +2050,9 @@ fn start_present_tour(
     {
         *session = prior_session;
         tui_state.restore_presentation_file_pane_scope(session);
+        if let Some(rollback) = focus_rollback {
+            tui_state.rollback_attention_focus_zen_start(session, rollback);
+        }
         return Err((-32002, "initial zen stop is unavailable".into()));
     }
     tui_state.zen = Some(zen);
@@ -1914,6 +2109,9 @@ fn refresh_current_target(
     previous_fingerprint: &str,
     fingerprint: &str,
 ) {
+    // Re-anchor the pre-preset viewport through refresh, then reapply Focus.
+    // This avoids restoring a stale controller snapshot when Z is toggled off.
+    let active_attention_focus = tui_state.suspend_attention_focus_for_refresh(session);
     let old_inner = current_diff_inner(session, tui_state);
     let viewport_snapshot = tui_state.diff_viewport.refresh_snapshot(session, old_inner);
     if let Err(error) = review_loader.load_in_place(session, session.target.clone()) {
@@ -1921,6 +2119,9 @@ fn refresh_current_target(
             level: UiNoticeLevel::Error,
             message: format!("failed to refresh review: {error:?}"),
         });
+        if let Some(active) = active_attention_focus {
+            tui_state.resume_attention_focus_after_refresh(session, review_loader, active, false);
+        }
         return;
     }
     tui_state.diff_viewport.refreshed(
@@ -2001,6 +2202,9 @@ fn refresh_current_target(
         level: UiNoticeLevel::Info,
         message,
     });
+    if let Some(active) = active_attention_focus {
+        tui_state.resume_attention_focus_after_refresh(session, review_loader, active, true);
+    }
 }
 
 fn refresh_identity_chip(
@@ -2222,11 +2426,13 @@ fn invalid_chunk_notice(count: usize) -> String {
     )
 }
 
-/// Cheap change-detection payload: only the persistable parts of the session
-/// (viewed marks and comments), excluding volatile metadata like `saved_at`.
+/// Cheap change-detection payload for every durable TUI mutation, excluding
+/// only volatile metadata such as `saved_at`. Session-level attention,
+/// walkthrough, action-item, disposition, and lifecycle edits must never be
+/// skipped merely because no file/comment changed in the same event.
 fn state_fingerprint(session: &ReviewSession) -> String {
     let state = session.to_state();
-    serde_json::to_string(&(&state.files, &state.comments)).unwrap_or_default()
+    serde_json::to_string(&(&state.files, &state.comments, &state.sessions)).unwrap_or_default()
 }
 
 fn autosave_state(session: &mut ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
@@ -2496,6 +2702,11 @@ fn handle_key_event(
                 *mode = Mode::Normal;
             }
         }
+        Mode::AttentionGlance(board) => {
+            if handle_attention_glance_key(key, board, session, keymap, tui_state) {
+                *mode = Mode::Normal;
+            }
+        }
         Mode::CommentInput { editor, target } => {
             let mut leave_comment_input = false;
             if let Some(action) = keymap.comment_action_for(&key) {
@@ -2573,6 +2784,7 @@ fn handle_normal_action(
             | Action::ToggleDiffView
             | Action::CycleCommentState
             | Action::DeleteComment
+            | Action::AttentionFocus
     ) || matches!(action, Action::MoveDown | Action::MoveUp)
         && session.focus == Focus::Files;
     let stream_navigation_action = session.stream_mode
@@ -2784,14 +2996,20 @@ fn handle_normal_action(
         Action::NextFile => session.move_file_selection(1),
         Action::PreviousFile => session.move_file_selection(-1),
         Action::SpotlightNext => {
-            if session.jump_spotlight(1) {
+            if let Some((step_id, part)) = session.jump_spotlight_with_identity(1) {
+                if tui_state.attention_focus.is_some() {
+                    repin_exact_spotlight_narration(session, tui_state, &step_id, part);
+                }
                 tui_state
                     .diff_viewport
                     .place_cursor(session, current_diff_inner(session, tui_state));
             }
         }
         Action::SpotlightPrevious => {
-            if session.jump_spotlight(-1) {
+            if let Some((step_id, part)) = session.jump_spotlight_with_identity(-1) {
+                if tui_state.attention_focus.is_some() {
+                    repin_exact_spotlight_narration(session, tui_state, &step_id, part);
+                }
                 tui_state
                     .diff_viewport
                     .place_cursor(session, current_diff_inner(session, tui_state));
@@ -2818,6 +3036,36 @@ fn handle_normal_action(
                     "no current attention region under cursor".to_owned()
                 },
             });
+        }
+        Action::AttentionFocus => {
+            if tui_state.zen.is_some() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "finish the legacy zen presentation before applying Focus".to_owned(),
+                });
+            } else {
+                let active = tui_state.toggle_attention_focus(session);
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: if active {
+                        "Focus applied — pane hidden, context maximally folded, narration pinned"
+                            .to_owned()
+                    } else {
+                        "Focus restored the prior review view".to_owned()
+                    },
+                });
+            }
+        }
+        Action::AttentionGlance => {
+            let board = GlanceBoardState::new(session);
+            if board.rows.is_empty() {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "no current or stale skim folds on the attention map".to_owned(),
+                });
+            } else {
+                *mode = Mode::AttentionGlance(board);
+            }
         }
         Action::FileSearch => {
             *mode = Mode::FileSearch(FileSearchState::new(session));
@@ -3202,7 +3450,10 @@ fn handle_normal_action(
         | Action::ZenAcknowledge
         | Action::ZenArtifactNext
         | Action::ZenArtifactPrevious
-        | Action::ZenClose => {}
+        | Action::ZenClose
+        | Action::GlancePeek
+        | Action::GlanceAcknowledge
+        | Action::GlanceAcknowledgeAll => {}
     }
     // Only indirect row/file/geometry mutations need a snapshot pair.
     // Explicit scrolling and placement already cross the controller boundary,
@@ -3223,6 +3474,43 @@ fn handle_normal_action(
         }
     }
     Ok(false)
+}
+
+fn repin_exact_spotlight_narration(
+    session: &mut ReviewSession,
+    tui_state: &TuiState,
+    step_id: &str,
+    part: usize,
+) {
+    let target = review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
+    .into_iter()
+    .flat_map(|durable| durable.walkthroughs.iter())
+    .flat_map(|walkthrough| walkthrough.steps.iter())
+    .find(|step| step.id == step_id)
+    .and_then(|step| {
+        std::iter::once(&step.target)
+            .chain(step.extra_targets.iter())
+            .nth(part)
+            .cloned()
+    });
+    if let Some(owner) = target
+        .as_ref()
+        .and_then(|target| session.stream_walkthrough_card_owner(target))
+    {
+        session.select_stream_row(owner, true);
+    }
+    tui_state.diff_viewport.select_annotation(
+        session,
+        annotation_card::AnnotationSource::Walkthrough {
+            step_id: step_id.to_owned(),
+            part,
+        },
+    );
 }
 
 fn current_diff_inner(session: &ReviewSession, tui_state: &TuiState) -> Rect {
@@ -3465,9 +3753,16 @@ fn step_stack(
 
     let change = &stack[next];
     let target = ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone());
+    let reapply_attention_focus = tui_state.attention_focus.is_some();
+    if reapply_attention_focus {
+        tui_state.leave_attention_focus(session);
+    }
     match review_loader.load(session, target) {
         Ok(()) => {
             tui_state.diff_viewport.reset(session);
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
+            }
             let description = if change.description.is_empty() {
                 "(no description)"
             } else {
@@ -3479,6 +3774,9 @@ fn step_stack(
             });
         }
         Err(error) => {
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: format!("failed to load stack change: {error:?}"),
@@ -3708,6 +4006,10 @@ fn apply_incremental_review(
     operation: &crate::jj::JjOperationSummary,
     tui_state: &mut TuiState,
 ) {
+    let reapply_attention_focus = tui_state.attention_focus.is_some();
+    if reapply_attention_focus {
+        tui_state.leave_attention_focus(session);
+    }
     let target = session.target.clone();
     let viewport_snapshot = tui_state
         .diff_viewport
@@ -3719,6 +4021,9 @@ fn apply_incremental_review(
                 "failed to refresh {target} before prior-operation compare: {error:?}"
             ),
         });
+        if reapply_attention_focus {
+            tui_state.enter_attention_focus(session);
+        }
         return;
     }
     tui_state.diff_viewport.refreshed(
@@ -3736,6 +4041,9 @@ fn apply_incremental_review(
                     operation.operation_id
                 ),
             });
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
+            }
             return;
         }
     };
@@ -3756,6 +4064,9 @@ fn apply_incremental_review(
             operation.operation_id
         ),
     });
+    if reapply_attention_focus {
+        tui_state.enter_attention_focus(session);
+    }
 }
 
 fn handle_jj_helpers_key(
@@ -3806,9 +4117,16 @@ fn run_jj_helper(
 ) {
     match review_loader.jj.run_command(&session.repo, &option.args) {
         Ok(_) => {
+            let reapply_attention_focus = tui_state.attention_focus.is_some();
+            if reapply_attention_focus {
+                tui_state.leave_attention_focus(session);
+            }
             let reload = review_loader.load(session, session.target.clone());
             if reload.is_ok() {
                 tui_state.diff_viewport.reset(session);
+            }
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
             }
             tui_state.notice = Some(match reload {
                 Ok(()) => UiNotice {
@@ -4356,6 +4674,140 @@ fn handle_zen_artifact_key(
         _ => {}
     }
     ZenKeyOutcome::Consumed
+}
+
+/// Normal-review glance popup controls. Enter jumps to the selected fold,
+/// Space peeks it in place and closes the popup, while acknowledgements stay
+/// on the board so their state change is immediately visible.
+fn handle_attention_glance_key(
+    key: KeyEvent,
+    board: &mut GlanceBoardState,
+    session: &mut ReviewSession,
+    keymap: &KeyMap,
+    tui_state: &mut TuiState,
+) -> bool {
+    match keymap.popup_action_for(KeyContext::AttentionGlance, &key) {
+        Some(Action::PopupClose) => true,
+        Some(Action::PopupMoveDown) => {
+            board.move_selection(1);
+            false
+        }
+        Some(Action::PopupMoveUp) => {
+            board.move_selection(-1);
+            false
+        }
+        Some(Action::PopupSelect) => {
+            let Some(row) = board.selected().cloned() else {
+                return false;
+            };
+            if !row.current || row.stale {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "stale skim history has no current stream target".to_owned(),
+                });
+                return false;
+            }
+            jump_to_glance_fold(session, &row.id, false, tui_state)
+        }
+        Some(Action::GlancePeek) => {
+            let Some(row) = board.selected().cloned() else {
+                return false;
+            };
+            if !row.current || row.stale {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "stale skim history cannot be peeked".to_owned(),
+                });
+                return false;
+            }
+            jump_to_glance_fold(session, &row.id, true, tui_state)
+        }
+        Some(Action::GlanceAcknowledge) => {
+            let Some(row) = board.selected().cloned() else {
+                return false;
+            };
+            let outcome = session.acknowledge_skim_fold_id(&row.id);
+            board.refresh(session);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: if outcome.stale > 0 {
+                    "stale skim history was not acknowledged".to_owned()
+                } else if outcome.acknowledged > 0 {
+                    format!(
+                        "acknowledged {} skim fold; {} whole file(s) marked viewed",
+                        outcome.acknowledged,
+                        outcome.whole_files_viewed.len()
+                    )
+                } else if outcome.already_acknowledged > 0 {
+                    "selected skim fold is already acknowledged".to_owned()
+                } else {
+                    "selected skim fold is no longer current".to_owned()
+                },
+            });
+            false
+        }
+        Some(Action::GlanceAcknowledgeAll) => {
+            let outcome = session.acknowledge_all_current_skims();
+            board.refresh(session);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: format!(
+                    "acknowledged {} current skim fold(s); {} whole file(s) marked viewed",
+                    outcome.acknowledged,
+                    outcome.whole_files_viewed.len()
+                ),
+            });
+            false
+        }
+        _ => false,
+    }
+}
+
+fn jump_to_glance_fold(
+    session: &mut ReviewSession,
+    id: &str,
+    peek: bool,
+    tui_state: &mut TuiState,
+) -> bool {
+    let destination = {
+        let stream = session.review_stream();
+        stream
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.id == id)
+            .map(|(index, row)| {
+                let expanded = matches!(
+                    &row.kind,
+                    crate::app::StreamRowKind::SkimFold(fold) if fold.expanded
+                );
+                (index, expanded)
+            })
+    };
+    let Some((index, already_expanded)) = destination else {
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "selected skim fold is no longer current".to_owned(),
+        });
+        return false;
+    };
+    session.stream_mode = true;
+    session.select_stream_row(index, false);
+    if peek && !already_expanded {
+        let _ = session.toggle_selected_skim_fold();
+    }
+    tui_state
+        .diff_viewport
+        .place_cursor(session, current_diff_inner(session, tui_state));
+    tui_state.notice = Some(UiNotice {
+        level: UiNoticeLevel::Info,
+        message: if peek {
+            "peeked selected skim fold in the review stream".to_owned()
+        } else {
+            "jumped to selected skim fold".to_owned()
+        },
+    });
+    true
 }
 
 /// Returns the next mode when the popup should change state.
@@ -5037,9 +5489,16 @@ fn load_review_target(
     target: ReviewTarget,
     tui_state: &mut TuiState,
 ) {
+    let reapply_attention_focus = tui_state.attention_focus.is_some();
+    if reapply_attention_focus {
+        tui_state.leave_attention_focus(session);
+    }
     match review_loader.load(session, target.clone()) {
         Ok(()) => {
             tui_state.diff_viewport.reset(session);
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
+            }
             // Re-raise the large-change nudge when the newly loaded target
             // is itself big and unorganized.
             let message = match session.large_change_nudge() {
@@ -5052,6 +5511,9 @@ fn load_review_target(
             });
         }
         Err(error) => {
+            if reapply_attention_focus {
+                tui_state.enter_attention_focus(session);
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: format!("failed to load {target}: {error:?}"),
@@ -5508,6 +5970,468 @@ mod tests {
         ActionIntent, ActionItem, AttentionRegion, Comment, CommentKind, CommentState, Salience,
         SalienceSource,
     };
+
+    fn attention_session(raw: &str, path: &str, salience: Salience) -> ReviewSession {
+        let mut session = snapshot_session(raw);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let mut durable = crate::state::ReviewSession {
+            id: "attention-view".into(),
+            attention_regions: vec![AttentionRegion {
+                target: crate::attention::target_for_diff(&files, path, None, None).unwrap(),
+                salience,
+                rationale: Some("generated churn".into()),
+                source: SalienceSource::Human,
+            }],
+            ..Default::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
+        session.sessions.push(durable);
+        session.stream_mode = true;
+        session
+    }
+
+    #[test]
+    fn attention_focus_restores_exact_pane_folds_cards_and_viewport_state() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Skim);
+        session.focus = Focus::Files;
+        session.fold_context = false;
+        session.expanded_skim_folds.insert("prior-peek".into());
+        session.stream_cursor = 0;
+        session.stream_scroll = 0;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(44, 18),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                split_percent: 35,
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        let prior_pane = tui_state.file_pane;
+        let prior_folds = session.expanded_skim_folds.clone();
+
+        tui_state.enter_attention_focus(&mut session);
+        assert!(tui_state.attention_focus.is_some());
+        assert!(!tui_state.effective_file_pane(&session, 44).visible);
+        assert!(session.fold_context);
+        assert!(session.expanded_skim_folds.is_empty());
+        assert_eq!(session.focus, Focus::Diff);
+
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(tui_state.file_pane, prior_pane);
+        assert_eq!(session.expanded_skim_folds, prior_folds);
+        assert!(!session.fold_context);
+        assert_eq!(session.focus, Focus::Files);
+        assert!(tui_state.effective_file_pane(&session, 44).visible);
+    }
+
+    #[test]
+    fn attention_focus_keeps_normal_comment_range_search_and_salience_vocabulary() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        let mut mode = Mode::Normal;
+        let anchor_row = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| row.anchor.is_some())
+            .unwrap();
+        session.select_stream_row(anchor_row, false);
+        tui_state.enter_attention_focus(&mut session);
+
+        handle_normal_action(
+            Action::RangeComment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.has_active_diff_range());
+        handle_normal_action(
+            Action::Comment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::CommentInput { .. }));
+        mode = Mode::Normal;
+        handle_normal_action(
+            Action::FileSearch,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::FileSearch(_)));
+        assert!(tui_state.attention_focus.is_some());
+    }
+
+    #[test]
+    fn attention_focus_pins_current_spotlight_and_preserves_card_expansion() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        session.sessions[0]
+            .walkthroughs
+            .push(crate::state::Walkthrough {
+                id: "walk".into(),
+                steps: vec![WalkthroughStep {
+                    id: "spot".into(),
+                    target: target.clone(),
+                    title: Some("Current narration".into()),
+                    why: Some("This is the mental-model delta".into()),
+                    artifacts: vec![crate::state::StepArtifact {
+                        title: "example".into(),
+                        kind: crate::state::StepArtifactKind::Example,
+                        body: "expanded body".into(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let owner = session.stream_walkthrough_card_owner(&target).unwrap();
+        session.select_stream_row(owner, false);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+
+        tui_state.enter_attention_focus(&mut session);
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "spot".into(),
+                part: 0,
+            })
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(false),
+            "the exact pre-Focus artifact expansion was restored"
+        );
+    }
+
+    #[test]
+    fn focus_spotlight_navigation_repins_the_exact_narration_card() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n-old_one\n+new_one\n middle\n-old_three\n+new_three\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Supporting);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let first = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let second = crate::attention::target_for_diff(&files, "a.rs", Some(3), None).unwrap();
+        session.sessions[0].attention_regions = vec![
+            AttentionRegion {
+                target: first.clone(),
+                salience: Salience::Spotlight,
+                rationale: Some("first contract".into()),
+                source: SalienceSource::Human,
+            },
+            AttentionRegion {
+                target: second.clone(),
+                salience: Salience::Spotlight,
+                rationale: Some("second contract".into()),
+                source: SalienceSource::Human,
+            },
+        ];
+        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+            id: "walk".into(),
+            steps: vec![
+                WalkthroughStep {
+                    id: "first-card".into(),
+                    target: first,
+                    title: Some("First".into()),
+                    ..Default::default()
+                },
+                WalkthroughStep {
+                    id: "second-card".into(),
+                    target: second,
+                    title: Some("Second".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }];
+        let first_row = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| {
+                row.anchor
+                    .as_ref()
+                    .and_then(crate::anchor::CommentAnchor::line)
+                    == Some(1)
+            })
+            .unwrap();
+        session.select_stream_row(first_row, false);
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+
+        handle_normal_action(
+            Action::SpotlightNext,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "second-card".into(),
+                part: 0,
+            })
+        );
+        handle_normal_action(
+            Action::SpotlightPrevious,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "first-card".into(),
+                part: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn attention_focus_reapplies_safely_across_retarget_and_refresh() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Skim);
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+        load_review_target(
+            &loader,
+            &mut session,
+            ReviewTarget::new("main", "@"),
+            &mut tui_state,
+        );
+        assert!(tui_state.attention_focus.is_some());
+        assert!(session.fold_context);
+        assert!(!tui_state.effective_file_pane(&session, 100).visible);
+
+        refresh_current_target(&loader, &mut session, &mut tui_state, "old", "new");
+        assert!(tui_state.attention_focus.is_some());
+        assert!(session.fold_context);
+        tui_state.leave_attention_focus(&mut session);
+        assert!(tui_state.effective_file_pane(&session, 100).visible);
+    }
+
+    #[test]
+    fn focus_refresh_preserves_active_navigation_and_original_restore_viewport() {
+        let removed = (1..=30)
+            .map(|line| format!("-old_{line}\n"))
+            .collect::<String>();
+        let added = (1..=30)
+            .map(|line| format!("+new_{line}\n"))
+            .collect::<String>();
+        let raw = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old_a\n+new_a\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1,30 +1,30 @@\n{removed}{added}"
+        );
+        let mut session = attention_session(&raw, "a.rs", Salience::Skim);
+        session.focus = Focus::Diff;
+        let underlying_fold = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, crate::app::StreamRowKind::SkimFold(_)))
+            .unwrap();
+        session.select_stream_row(underlying_fold, false);
+        session.stream_scroll = underlying_fold as u16;
+        let underlying_selected = session.selected;
+        let underlying_cursor = session.stream_cursor;
+        let underlying_scroll = session.stream_scroll;
+
+        let backend = MockJjBackend::with_diff(Ok(raw.clone()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 18),
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+        let active_b = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| {
+                row.path.as_deref() == Some("b.rs")
+                    && row
+                        .anchor
+                        .as_ref()
+                        .and_then(crate::anchor::CommentAnchor::line)
+                        == Some(30)
+            })
+            .unwrap();
+        session.select_stream_row(active_b, false);
+        session.stream_scroll = active_b.saturating_sub(1) as u16;
+        let active_anchor = session.selected_stream_row().unwrap().anchor;
+        let active_scroll = session.stream_scroll;
+
+        refresh_current_target(&loader, &mut session, &mut tui_state, "old", "new");
+        assert!(tui_state.attention_focus.is_some());
+        assert_eq!(session.selected_file().unwrap().path, "b.rs");
+        assert_eq!(session.selected_stream_row().unwrap().anchor, active_anchor);
+        assert_eq!(session.stream_scroll, active_scroll);
+
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(session.selected, underlying_selected);
+        assert_eq!(session.stream_cursor, underlying_cursor);
+        assert_eq!(session.stream_scroll, underlying_scroll);
+        assert!(matches!(
+            session.selected_stream_row().unwrap().kind,
+            crate::app::StreamRowKind::SkimFold(_)
+        ));
+    }
+
+    #[test]
+    fn attention_glance_acknowledges_selected_and_bulk_and_peeks_in_stream() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old_a\n+new_a\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old_b\n+new_b\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Skim);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        session.sessions[0].attention_regions.push(AttentionRegion {
+            target: crate::attention::target_for_diff(&files, "b.rs", None, None).unwrap(),
+            salience: Salience::Skim,
+            rationale: Some("lockfile churn".into()),
+            source: SalienceSource::Human,
+        });
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut board = GlanceBoardState::new(&session);
+        assert_eq!(board.rows.len(), 2);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+
+        assert!(!handle_attention_glance_key(
+            KeyEvent::from(KeyCode::Char('a')),
+            &mut board,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert_eq!(board.rows.iter().filter(|row| row.acknowledged).count(), 1);
+        assert!(!handle_attention_glance_key(
+            KeyEvent::from(KeyCode::Char('A')),
+            &mut board,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert!(board.rows.iter().all(|row| row.acknowledged));
+        assert!(session.files.iter().all(|file| file.viewed));
+
+        assert!(handle_attention_glance_key(
+            KeyEvent::from(KeyCode::Char(' ')),
+            &mut board,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        let expanded = session.expanded_skim_folds.clone();
+        assert!(!expanded.is_empty());
+        assert!(handle_attention_glance_key(
+            KeyEvent::from(KeyCode::Char(' ')),
+            &mut board,
+            &mut session,
+            &keymap,
+            &mut tui_state,
+        ));
+        assert_eq!(
+            session.expanded_skim_folds, expanded,
+            "glance Space is idempotent and never collapses an existing peek"
+        );
+    }
+
+    #[test]
+    fn glance_selection_tracks_unique_stale_identity_across_reordering() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Skim);
+        session.sessions[0].attention_regions[0].target.anchor = None;
+        let mut agent = session.sessions[0].attention_regions[0].clone();
+        agent.source = SalienceSource::Agent;
+        session.sessions[0].attention_regions.push(agent);
+        let mut board = GlanceBoardState::new(&session);
+        assert_eq!(board.rows.len(), 2);
+        board.selected = 1;
+        let selected = board.selected().unwrap().id.clone();
+
+        session.sessions[0].attention_regions.reverse();
+        board.refresh(&session);
+        assert_eq!(board.selected().unwrap().id, selected);
+    }
 
     #[test]
     fn stream_a_only_acknowledges_selected_fold_and_never_marks_all_on_ordinary_rows() {
@@ -7461,6 +8385,148 @@ mod tests {
     }
 
     #[test]
+    fn autosave_fingerprint_tracks_all_mutable_durable_session_fields() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Skim);
+        let mut previous = state_fingerprint(&session);
+        session.sessions[0].title = Some("Review title".into());
+        let next = state_fingerprint(&session);
+        assert_ne!(previous, next);
+        previous = next;
+
+        session.sessions[0]
+            .walkthroughs
+            .push(crate::state::Walkthrough {
+                id: "walk".into(),
+                ..Default::default()
+            });
+        let next = state_fingerprint(&session);
+        assert_ne!(previous, next);
+        previous = next;
+
+        session.sessions[0].action_items.push(ActionItem {
+            id: "item".into(),
+            title: "Check behavior".into(),
+            ..Default::default()
+        });
+        let next = state_fingerprint(&session);
+        assert_ne!(previous, next);
+        previous = next;
+
+        session.sessions[0].disposition = Some(crate::state::ReviewDisposition::Approve);
+        let next = state_fingerprint(&session);
+        assert_ne!(previous, next);
+    }
+
+    #[test]
+    fn attention_only_mutations_autosave_and_quit_flushes_latest_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,5 +1,5 @@\n one\n two\n-old\n+new\n four\n five\n";
+        let mut session = snapshot_session(raw);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let skim = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let spotlight = crate::attention::target_for_diff(&files, "a.rs", Some(4), None).unwrap();
+        let mut durable = crate::state::ReviewSession {
+            id: "autosave-attention".into(),
+            attention_regions: vec![
+                AttentionRegion {
+                    target: skim,
+                    salience: Salience::Skim,
+                    rationale: Some("skip setup".into()),
+                    source: SalienceSource::Human,
+                },
+                AttentionRegion {
+                    target: spotlight.clone(),
+                    salience: Salience::Spotlight,
+                    rationale: Some("read contract".into()),
+                    source: SalienceSource::Agent,
+                },
+            ],
+            walkthroughs: vec![crate::state::Walkthrough {
+                id: "walk".into(),
+                steps: vec![WalkthroughStep {
+                    id: "spot".into(),
+                    target: spotlight,
+                    title: Some("Contract".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
+        session.sessions.push(durable);
+        session.stream_mode = true;
+        session.focus = Focus::Diff;
+        let baseline = session.to_state();
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            last_autosave: Some(state_fingerprint(&session)),
+            ..TuiState::default()
+        };
+
+        let fold = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, crate::app::StreamRowKind::SkimFold(_)))
+            .unwrap();
+        session.select_stream_row(fold, false);
+        assert_eq!(
+            session.acknowledge_selected_skim_fold(),
+            SkimAcknowledgeResult::Acknowledged
+        );
+        autosave_state(&mut session, &state_path, &mut tui_state);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert_eq!(saved.files, baseline.files);
+        assert_eq!(saved.comments, baseline.comments);
+        assert_eq!(
+            saved.sessions[0].attention_progress[0].kind,
+            crate::state::AttentionProgressKind::SkimAcknowledged
+        );
+
+        assert!(session.jump_spotlight_with_identity(1).is_some());
+        autosave_state(&mut session, &state_path, &mut tui_state);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.sessions[0].attention_progress.iter().any(|progress| {
+            progress.kind == crate::state::AttentionProgressKind::SpotlightVisited
+        }));
+
+        assert!(session.change_selected_salience(true));
+        autosave_state(&mut session, &state_path, &mut tui_state);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.sessions[0].attention_regions.iter().any(|region| {
+            region.source == SalienceSource::Human && region.salience == Salience::Spotlight
+        }));
+
+        assert!(session.change_selected_salience(false));
+        autosave_state(&mut session, &state_path, &mut tui_state);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.sessions[0].attention_regions.iter().any(|region| {
+            region.source == SalienceSource::Human && region.salience == Salience::Supporting
+        }));
+
+        // The final promote is intentionally persisted only by the same flush
+        // path the run loop uses after a quit event.
+        assert!(session.change_selected_salience(true));
+        tui_state.enter_attention_focus(&mut session);
+        finish_ephemeral_views_on_quit(&mut session, &mut tui_state);
+        autosave_state(&mut session, &state_path, &mut tui_state);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.sessions[0].attention_regions.iter().any(|region| {
+            region.source == SalienceSource::Human && region.salience == Salience::Spotlight
+        }));
+        assert!(tui_state.attention_focus.is_none());
+    }
+
+    #[test]
     fn autosave_merges_unseen_disk_state_from_other_targets() {
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("state.json");
@@ -9142,6 +10208,29 @@ diff --git a/b.rs b/b.rs
         }
     }
 
+    fn unavailable_change_anchored_zen_session() -> ReviewSession {
+        let mut session = zen_session();
+        for chunk in &mut session.review_chunks {
+            chunk.change_id = Some("abc".into());
+        }
+        for step in session
+            .sessions
+            .iter_mut()
+            .flat_map(|durable| durable.walkthroughs.iter_mut())
+            .flat_map(|walkthrough| walkthrough.steps.iter_mut())
+        {
+            step.change_id = Some("abc".into());
+        }
+        session.change_diffs.push((
+            "abc".into(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            )
+            .unwrap(),
+        ));
+        session
+    }
+
     #[test]
     fn zen_advances_through_stops_marking_files_viewed() {
         let mut session = zen_session();
@@ -9287,7 +10376,7 @@ diff --git a/b.rs b/b.rs
 
         assert!(matches!(
             handle_zen_key(
-                KeyEvent::from(KeyCode::Char('Z')),
+                KeyEvent::from(KeyCode::Char('T')),
                 &mut zen,
                 &mut session,
                 &keymap,
@@ -11254,6 +12343,83 @@ diff --git a/c.rs b/c.rs
     }
 
     #[test]
+    fn focus_and_legacy_zen_start_end_without_stacking_presentation_state() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+        assert!(tui_state.attention_focus.is_some());
+
+        seed_zen_tour(&mut session, &loader, &mut tui_state);
+        assert!(tui_state.attention_focus.is_none());
+        assert!(tui_state.zen.is_some());
+        assert!(tui_state.file_pane.presentation_scope.is_some());
+
+        let mut mode = Mode::Normal;
+        handle_normal_action(
+            Action::AttentionFocus,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.attention_focus.is_none());
+        assert!(tui_state.zen.is_some());
+
+        let zen = tui_state.zen.take().unwrap();
+        finish_zen_presentation(&mut session, &mut tui_state, &zen);
+        assert!(tui_state.zen.is_none());
+        assert!(tui_state.file_pane.presentation_scope.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert!(session.stream_mode);
+    }
+
+    #[test]
+    fn quit_cleanup_restores_focus_or_zen_ephemeral_view_state() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut focused = attention_session(raw, "a.rs", Salience::Skim);
+        focused.focus = Focus::Files;
+        focused.fold_context = false;
+        focused.expanded_skim_folds.insert("prior-peek".into());
+        let mut focus_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        focus_state.enter_attention_focus(&mut focused);
+        finish_ephemeral_views_on_quit(&mut focused, &mut focus_state);
+        assert!(focus_state.attention_focus.is_none());
+        assert_eq!(focus_state.file_pane.explicit_override, Some(true));
+        assert_eq!(focused.focus, Focus::Files);
+        assert!(!focused.fold_context);
+        assert!(focused.expanded_skim_folds.contains("prior-peek"));
+
+        let mut zen_session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut zen_state = TuiState::default();
+        seed_zen_tour(&mut zen_session, &loader, &mut zen_state);
+        assert!(zen_state.zen.is_some());
+        finish_ephemeral_views_on_quit(&mut zen_session, &mut zen_state);
+        assert!(zen_state.zen.is_none());
+        assert!(zen_state.file_pane.presentation_scope.is_none());
+        assert!(zen_session.stream_mode);
+        assert!(zen_session.zen_focus.is_none());
+    }
+
+    #[test]
     fn zen_scope_hides_forced_pane_geometry_and_hit_testing_then_restores_override() {
         let mut session = zen_session();
         let backend = MockJjBackend::with_diff(Ok(String::new()));
@@ -11406,18 +12572,218 @@ diff --git a/c.rs b/c.rs
     }
 
     #[test]
-    fn unavailable_initial_zen_stop_restores_startup_state() {
+    fn focus_keyboard_zen_no_slides_keeps_active_and_underlying_snapshots() {
+        let mut session = snapshot_session("");
+        session.focus = Focus::Files;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        let underlying = (session.focus, tui_state.file_pane);
+        tui_state.enter_attention_focus(&mut session);
+        let active = (
+            session.focus,
+            session.stream_cursor,
+            session.stream_scroll,
+            session.fold_context,
+        );
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('T')),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.attention_focus.is_some());
+        assert!(tui_state.zen.is_none());
+        assert_eq!(
+            (
+                session.focus,
+                session.stream_cursor,
+                session.stream_scroll,
+                session.fold_context,
+            ),
+            active
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!((session.focus, tui_state.file_pane), underlying);
+    }
+
+    #[test]
+    fn focus_keyboard_zen_unavailable_stop_keeps_active_and_underlying_snapshots() {
+        let mut session = unavailable_change_anchored_zen_session();
+        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
+        backend.stack = vec![stack_change("abc", "change")];
+        let loader = zen_loader(&backend);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        let underlying = (session.selected, session.stream_cursor, tui_state.file_pane);
+        tui_state.enter_attention_focus(&mut session);
+        session.move_stream_cursor(1);
+        let active = (
+            session.selected,
+            session.stream_cursor,
+            session.stream_scroll,
+        );
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('T')),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.attention_focus.is_some());
+        assert!(tui_state.zen.is_none());
+        assert_eq!(
+            (
+                session.selected,
+                session.stream_cursor,
+                session.stream_scroll
+            ),
+            active
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(
+            (session.selected, session.stream_cursor, tui_state.file_pane),
+            underlying
+        );
+    }
+
+    #[test]
+    fn focus_keyboard_zen_success_exits_focus_cleanly() {
         let mut session = zen_session();
-        for chunk in &mut session.review_chunks {
-            chunk.change_id = Some("abc".into());
-        }
-        session.change_diffs.push((
-            "abc".into(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            )
-            .unwrap(),
-        ));
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState::default();
+        tui_state.enter_attention_focus(&mut session);
+
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('T')),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.attention_focus.is_none());
+        assert!(tui_state.zen.is_some());
+        assert!(tui_state.file_pane.presentation_scope.is_some());
+    }
+
+    #[test]
+    fn focus_presenter_zen_no_slides_keeps_active_and_underlying_snapshots() {
+        let mut session = snapshot_session("");
+        session.focus = Focus::Files;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        let underlying = (session.focus, tui_state.file_pane);
+        tui_state.enter_attention_focus(&mut session);
+        let active = (session.focus, session.stream_cursor, session.fold_context);
+
+        let error = start_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
+        assert!(error.1.contains("nothing to review"));
+        assert!(tui_state.attention_focus.is_some());
+        assert!(tui_state.zen.is_none());
+        assert_eq!(
+            (session.focus, session.stream_cursor, session.fold_context),
+            active
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!((session.focus, tui_state.file_pane), underlying);
+    }
+
+    #[test]
+    fn focus_presenter_zen_unavailable_stop_keeps_active_and_underlying_snapshots() {
+        let mut session = unavailable_change_anchored_zen_session();
+        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
+        backend.stack = vec![stack_change("abc", "change")];
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 20),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                ..FilePaneState::default()
+            },
+            ..TuiState::default()
+        };
+        let underlying = (session.selected, session.stream_cursor, tui_state.file_pane);
+        tui_state.enter_attention_focus(&mut session);
+        session.move_stream_cursor(1);
+        let active = (
+            session.selected,
+            session.stream_cursor,
+            session.stream_scroll,
+        );
+
+        let error = start_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
+        assert!(error.1.contains("unavailable"));
+        assert!(tui_state.attention_focus.is_some());
+        assert!(tui_state.zen.is_none());
+        assert_eq!(
+            (
+                session.selected,
+                session.stream_cursor,
+                session.stream_scroll
+            ),
+            active
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(
+            (session.selected, session.stream_cursor, tui_state.file_pane),
+            underlying
+        );
+    }
+
+    #[test]
+    fn focus_presenter_zen_success_exits_focus_cleanly() {
+        let mut session = zen_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = zen_loader(&backend);
+        let mut tui_state = TuiState::default();
+        tui_state.enter_attention_focus(&mut session);
+
+        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
+        assert!(tui_state.attention_focus.is_none());
+        assert!(tui_state.zen.is_some());
+        assert!(tui_state.file_pane.presentation_scope.is_some());
+    }
+
+    #[test]
+    fn unavailable_initial_zen_stop_restores_startup_state() {
+        let mut session = unavailable_change_anchored_zen_session();
         let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
         backend.stack = vec![stack_change("abc", "change")];
         let loader = ReviewLoader {

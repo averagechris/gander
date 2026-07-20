@@ -2,7 +2,7 @@
 source: src/tui/render.rs
 expression: rendered
 ---
- alt-1 help  alt-2 hunk  alt-3 file  alt-4 comment  alt-5 view  alt-6 pane  alt-7 quit
+ alt-1 help  alt-2 hunk  alt-3 file  alt-4 comment  alt-5 view  Z focus  alt-g glance  alt-6 pane  alt-7 quit
 ┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
 │• mod     a.rs                 ││a.rs  +1 -1                                                                │
 │                               ││@@ -1 +1 @@                                                                │
