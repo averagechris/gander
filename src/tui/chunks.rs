@@ -19,6 +19,7 @@ pub(super) struct WalkthroughRow {
     /// Stable source curation id. Multi-target stops share this id so zen can
     /// group their glance entry and cross-reference sibling stops.
     pub(super) source_id: String,
+    pub(super) author: Option<crate::state::Identity>,
     pub(super) title: String,
     pub(super) importance: ChunkImportance,
     /// The jj change the walkthrough stop is anchored to, when the review spans a
@@ -43,17 +44,21 @@ impl WalkthroughRowList {
             rows: session
                 .review_chunks
                 .iter()
-                .flat_map(overlay_chunk_rows)
+                .flat_map(|chunk| overlay_chunk_rows(chunk, &session.agent_identity))
                 .collect(),
             selected: 0,
         }
     }
 }
 
-pub(super) fn overlay_chunk_rows(chunk: &ReviewChunk) -> Vec<WalkthroughRow> {
+pub(super) fn overlay_chunk_rows(
+    chunk: &ReviewChunk,
+    author: &crate::state::Identity,
+) -> Vec<WalkthroughRow> {
     if chunk.parts.is_empty() {
         return vec![WalkthroughRow {
             source_id: chunk.id.clone(),
+            author: Some(author.clone()),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -72,6 +77,7 @@ pub(super) fn overlay_chunk_rows(chunk: &ReviewChunk) -> Vec<WalkthroughRow> {
         .enumerate()
         .map(|(index, part)| WalkthroughRow {
             source_id: chunk.id.clone(),
+            author: Some(author.clone()),
             title: chunk.title.clone(),
             importance: chunk.importance,
             change_id: chunk.change_id.clone(),
@@ -102,6 +108,7 @@ pub(super) fn durable_walkthrough_rows(step: &WalkthroughStep) -> Vec<Walkthroug
     if parts.is_empty() {
         return vec![WalkthroughRow {
             source_id: step.id.clone(),
+            author: step.author.clone(),
             title,
             importance,
             change_id: step.change_id.clone(),
@@ -119,6 +126,7 @@ pub(super) fn durable_walkthrough_rows(step: &WalkthroughStep) -> Vec<Walkthroug
         .enumerate()
         .map(|(index, part)| WalkthroughRow {
             source_id: step.id.clone(),
+            author: step.author.clone(),
             title: title.clone(),
             importance,
             change_id: step.change_id.clone(),
@@ -170,6 +178,10 @@ mod tests {
     #[test]
     fn chunks_flatten_into_part_rows() {
         let mut session = snapshot_session("");
+        session.agent_identity = crate::state::Identity {
+            kind: crate::state::AuthorKind::Agent,
+            name: "configured-review-agent".into(),
+        };
         session.apply_agent_overlay(&AgentOverlay {
             chunks: vec![
                 ReviewChunk {
@@ -207,6 +219,12 @@ mod tests {
         assert_eq!(state.rows[2].title, "docs only");
         assert_eq!(state.rows[2].source_id, "c2");
         assert!(state.rows[2].part.is_none());
+        assert!(
+            state
+                .rows
+                .iter()
+                .all(|row| { row.author.as_ref() == Some(&session.agent_identity) })
+        );
     }
 
     #[test]

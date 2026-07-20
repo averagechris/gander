@@ -9,6 +9,7 @@
 //! This file owns the event loop, mode state machine, and event handling.
 
 mod action_items;
+mod annotation_card;
 mod chooser;
 mod chunks;
 mod comments;
@@ -85,9 +86,10 @@ use outline::SymbolOutlineState;
 #[cfg(test)]
 use render::diff_cursor_is_visible;
 use render::{
-    comment_editor_inner, downgrade_diff_theme, draw, ensure_diff_cursor_visible, inner_bordered,
-    point_in_rect, row_in_inner, scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual,
-    scroll_diff_visual, terminal_supports_truecolor, ui_layout,
+    comment_editor_inner, diff_hit_at_point, downgrade_diff_theme, draw,
+    ensure_diff_cursor_visible, inner_bordered, point_in_rect, row_in_inner,
+    scroll_diff_horizontal_visual, scroll_diff_to_bottom_visual, scroll_diff_visual,
+    terminal_supports_truecolor, ui_layout,
 };
 use revset::RevsetInputState;
 use search::FileSearchState;
@@ -1430,7 +1432,7 @@ fn maybe_reload_review_state(
 fn validated_overlay_for_tui(
     session: &ReviewSession,
     review_loader: &ReviewLoader<'_>,
-    mut overlay: crate::agent::AgentOverlay,
+    overlay: crate::agent::AgentOverlay,
 ) -> (
     crate::agent::AgentOverlay,
     Vec<crate::agent::InvalidChunkPart>,
@@ -1473,9 +1475,6 @@ fn validated_overlay_for_tui(
             change_diffs,
         },
     );
-    if !invalid.is_empty() {
-        overlay.chunks = crate::agent::remove_invalid_chunk_parts(&overlay.chunks, &invalid);
-    }
     (overlay, invalid)
 }
 
@@ -2559,6 +2558,7 @@ fn handle_normal_action(
             | Action::ExpandContextAll
             | Action::CollapseContext
             | Action::ToggleDiffWrap
+            | Action::ToggleAnnotationArtifacts
             | Action::ToggleFilePane
             | Action::ToggleDiffView
             | Action::CycleCommentState
@@ -2790,6 +2790,14 @@ fn handle_normal_action(
         }
         Action::NextComment => {
             if let Some(selection) = session.move_to_comment(1) {
+                if let Some(comment) = session.selected_comment() {
+                    tui_state.diff_viewport.select_annotation(
+                        session,
+                        annotation_card::AnnotationSource::Comment {
+                            id: comment.id.clone(),
+                        },
+                    );
+                }
                 apply_navigation_viewport_placement(
                     session,
                     match selection {
@@ -2802,6 +2810,14 @@ fn handle_normal_action(
         }
         Action::PreviousComment => {
             if let Some(selection) = session.move_to_comment(-1) {
+                if let Some(comment) = session.selected_comment() {
+                    tui_state.diff_viewport.select_annotation(
+                        session,
+                        annotation_card::AnnotationSource::Comment {
+                            id: comment.id.clone(),
+                        },
+                    );
+                }
                 apply_navigation_viewport_placement(
                     session,
                     match selection {
@@ -2885,6 +2901,30 @@ fn handle_normal_action(
         Action::ToggleDiffWrap => {
             session.toggle_diff_wrap();
         }
+        Action::ToggleAnnotationArtifacts => {
+            if session.focus == Focus::Diff {
+                match tui_state.diff_viewport.toggle_annotation_artifacts(session) {
+                    Some(true) => {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: "expanded annotation artifacts".to_owned(),
+                        });
+                    }
+                    Some(false) => {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: "collapsed annotation artifacts".to_owned(),
+                        });
+                    }
+                    None => {
+                        tui_state.notice = Some(UiNotice {
+                            level: UiNoticeLevel::Info,
+                            message: "no annotation artifacts on this row".to_owned(),
+                        });
+                    }
+                }
+            }
+        }
         Action::ToggleFilePane => {
             tui_state.toggle_file_pane(session, tui_state.terminal_size.width);
         }
@@ -2964,7 +3004,7 @@ fn handle_normal_action(
             tui_state.notice = None;
         }
         Action::Comment => {
-            let onboarding_target = selected_onboarding_target(session);
+            let onboarding_target = selected_onboarding_target(session, tui_state);
             *mode = Mode::CommentInput {
                 editor: CommentEditor::with_channel(
                     String::new(),
@@ -3154,6 +3194,7 @@ fn walkthrough_target_from_selection(
         file: Some(anchor.path().to_owned()),
         line: Some(line),
         end_line: anchor.end_line().filter(|end| *end != line),
+        anchor: Some(anchor),
         ..Default::default()
     })
 }
@@ -3170,14 +3211,22 @@ fn walkthrough_step_title(_session: &ReviewSession, target: &crate::state::Revie
 fn add_walkthrough_step_from_selection(session: &mut ReviewSession) -> Option<(usize, String)> {
     let target = walkthrough_target_from_selection(session)?;
     let title = walkthrough_step_title(session, &target);
+    let author = session.human_identity.clone();
     let durable = ensure_tui_review_session(session);
     let step = review::add_walkthrough_step(
         durable,
         WalkthroughStep {
             target,
+            author: Some(author),
             title: Some(title.clone()),
             ..Default::default()
         },
+    );
+    let _ = crate::attention::set_human_attention(
+        durable,
+        step.target.clone(),
+        crate::state::Salience::Spotlight,
+        step.why.clone(),
     );
     let index = durable
         .walkthroughs
@@ -4236,9 +4285,35 @@ fn handle_draft_list_key(
     }
 }
 
-fn selected_onboarding_target(session: &ReviewSession) -> bool {
+fn selected_onboarding_target(session: &ReviewSession, tui_state: &TuiState) -> bool {
+    if let Some(source) = tui_state.diff_viewport.selected_annotation_source(session) {
+        if let Some(comment_id) = source.comment_id() {
+            return session.comments.iter().any(|comment| {
+                comment.id == comment_id
+                    && comment.author.kind == AuthorKind::Agent
+                    && comment.channel == Channel::Onboarding
+            });
+        }
+        if let Some(step_id) = source.walkthrough_step_id() {
+            return review::active_session_for_loaded_review(
+                &session.sessions,
+                &session.repo,
+                &session.target.base,
+                &session.target.rev,
+            )
+            .into_iter()
+            .flat_map(|durable| durable.walkthroughs.iter())
+            .flat_map(|walkthrough| walkthrough.steps.iter())
+            .find(|step| step.id == step_id)
+            .and_then(|step| step.author.as_ref())
+            .is_some_and(|author| author.kind == AuthorKind::Agent);
+        }
+        return false;
+    }
     session.selected_comment().is_some_and(|comment| {
-        comment.author.kind == AuthorKind::Agent && comment.channel == Channel::Onboarding
+        comment.author.kind == AuthorKind::Agent
+            && comment.channel == Channel::Onboarding
+            && session.selected_comment_card_owner(comment) == Some(session.diff_cursor)
     })
 }
 
@@ -4424,6 +4499,10 @@ fn handle_comment_list_key(
                 if let Some(id) = list.selected_comment_id(session)
                     && let Some(selection) = session.select_comment_by_id(&id)
                 {
+                    tui_state.diff_viewport.select_annotation(
+                        session,
+                        annotation_card::AnnotationSource::Comment { id },
+                    );
                     apply_navigation_viewport_placement(
                         session,
                         match selection {
@@ -4538,6 +4617,14 @@ fn handle_open_work_key(
                 if let Some(row) = list.selected_row().cloned()
                     && let Some(placement) = enter_open_work_row(session, &row)
                 {
+                    if let Some(comment) = session.selected_comment() {
+                        tui_state.diff_viewport.select_annotation(
+                            session,
+                            annotation_card::AnnotationSource::Comment {
+                                id: comment.id.clone(),
+                            },
+                        );
+                    }
                     apply_navigation_viewport_placement(session, placement, tui_state);
                 }
                 return true;
@@ -4677,6 +4764,13 @@ fn handle_walkthrough_list_key(
                 if let Some(step) = selected_walkthrough_step(session, list).cloned()
                     && let Some(placement) = jump_to_walkthrough_step(session, &step)
                 {
+                    tui_state.diff_viewport.select_annotation(
+                        session,
+                        annotation_card::AnnotationSource::Walkthrough {
+                            step_id: step.id.clone(),
+                            part: 0,
+                        },
+                    );
                     apply_navigation_viewport_placement(session, placement, tui_state);
                 }
                 return true;
@@ -4758,6 +4852,10 @@ fn jump_to_walkthrough_step(
     };
     let placement = session.jump_to_chunk_part(&part)?;
     session.focus = Focus::Diff;
+    if let Some(owner) = session.selected_walkthrough_card_owner(&step.target) {
+        session.jump_to_diff_row(owner);
+        return Some(NavigationViewportPlacement::Cursor);
+    }
     Some(core_navigation_placement(placement))
 }
 
@@ -5123,20 +5221,37 @@ fn handle_left_down(
     let diff_inner = inner_bordered(layout.diff);
     if point_in_rect(x, y, diff_inner)
         && let Some(visible_row) = row_in_inner(y, diff_inner)
-        && let Some(row_index) =
-            render::diff_row_at_point(session, diff_inner, x, visible_row, tui_state)
+        && let Some(hit) = diff_hit_at_point(session, diff_inner, x, visible_row, tui_state)
     {
-        session.clear_diff_range_selection();
-        session.select_diff_row(row_index);
-        let normalized = session.diff_cursor;
-        tui_state
-            .diff_viewport
-            .logical_selection(session, diff_inner);
-        tui_state.diff_drag = Some(DiffDrag {
-            start_row: normalized,
-            current_row: normalized,
-            saw_drag: false,
-        });
+        match hit {
+            render::DiffPointHit::Code(row_index) => {
+                tui_state.diff_viewport.clear_selected_annotation();
+                session.clear_diff_range_selection();
+                session.select_diff_row(row_index);
+                let normalized = session.diff_cursor;
+                tui_state
+                    .diff_viewport
+                    .logical_selection(session, diff_inner);
+                tui_state.diff_drag = Some(DiffDrag {
+                    start_row: normalized,
+                    current_row: normalized,
+                    saw_drag: false,
+                });
+            }
+            render::DiffPointHit::Annotation { owner, source } => {
+                session.clear_diff_range_selection();
+                if let Some(comment_id) = source.comment_id() {
+                    session.select_comment_by_id(comment_id);
+                } else {
+                    session.select_diff_row(owner);
+                }
+                tui_state.diff_viewport.select_annotation(session, source);
+                tui_state
+                    .diff_viewport
+                    .logical_selection(session, diff_inner);
+                tui_state.diff_drag = None;
+            }
+        }
     }
 }
 
@@ -5177,7 +5292,7 @@ fn handle_left_up(session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut 
                 inferred_comment_channel(
                     session,
                     tui_state,
-                    selected_onboarding_target(session),
+                    selected_onboarding_target(session, tui_state),
                     None,
                 ),
             ),
@@ -5887,8 +6002,8 @@ mod tests {
             .add_agent_draft("a.txt".into(), Some(1), "agent narration".into())
             .unwrap();
         session.select_comment_by_id(&onboarding.id);
-        assert!(selected_onboarding_target(&session));
         let mut tui_state = TuiState::default();
+        assert!(selected_onboarding_target(&session, &tui_state));
         let mut editor = CommentEditor::with_channel(
             String::new(),
             inferred_comment_channel(&session, &tui_state, true, None),
@@ -5918,6 +6033,571 @@ mod tests {
             .unwrap();
         assert_eq!(request.channel, Channel::Delegation);
         assert_eq!(request.anchor, original.anchor);
+    }
+
+    #[test]
+    fn walkthrough_onboarding_inference_requires_explicit_agent_author() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.txt", Some(1), None).unwrap();
+        let durable = ensure_tui_review_session(&mut session);
+        durable.walkthroughs.push(crate::state::Walkthrough {
+            id: "walk".into(),
+            steps: vec![WalkthroughStep {
+                id: "step".into(),
+                author: Some(crate::state::Identity {
+                    kind: AuthorKind::Agent,
+                    name: "configured-agent".into(),
+                }),
+                target: target.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        durable
+            .attention_regions
+            .push(crate::state::AttentionRegion {
+                target,
+                salience: crate::state::Salience::Spotlight,
+                rationale: None,
+                source: crate::state::SalienceSource::Agent,
+            });
+        let owner = session
+            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .unwrap();
+        session.select_diff_row(owner);
+        let tui_state = TuiState::default();
+        tui_state.diff_viewport.select_annotation(
+            &session,
+            annotation_card::AnnotationSource::Walkthrough {
+                step_id: "step".into(),
+                part: 0,
+            },
+        );
+        assert!(selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(
+                &session,
+                &tui_state,
+                selected_onboarding_target(&session, &tui_state),
+                None,
+            ),
+            Channel::Delegation
+        );
+
+        session.sessions[0].walkthroughs[0].steps[0].author = Some(crate::state::Identity {
+            kind: AuthorKind::Human,
+            name: "Ada".into(),
+        });
+        assert!(!selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(
+                &session,
+                &tui_state,
+                selected_onboarding_target(&session, &tui_state),
+                None,
+            ),
+            Channel::Note
+        );
+        session.sessions[0].walkthroughs[0].steps[0].author = None;
+        assert!(!selected_onboarding_target(&session, &tui_state));
+    }
+
+    #[test]
+    fn tui_walkthrough_steps_stamp_configured_human_and_current_anchor() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.human_identity = crate::state::Identity {
+            kind: AuthorKind::Human,
+            name: "Configured Human".into(),
+        };
+        session.toggle_focus();
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(1))
+            .unwrap();
+        session.select_diff_row(row);
+        add_walkthrough_step_from_selection(&mut session).unwrap();
+        let durable = &session.sessions[0];
+        let step = &durable.walkthroughs[0].steps[0];
+        assert_eq!(step.author.as_ref().unwrap().name, "Configured Human");
+        assert!(step.target.anchor.is_some());
+        assert_eq!(durable.attention_regions.len(), 1);
+        assert_eq!(
+            durable.attention_regions[0].source,
+            crate::state::SalienceSource::Human
+        );
+    }
+
+    #[test]
+    fn walkthrough_jump_uses_the_same_right_side_range_card_owner() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n-old\n+new one\n+new two\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.txt", Some(1), Some(2)).unwrap();
+        let expected = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "new two")
+            .unwrap();
+        let step = WalkthroughStep {
+            target,
+            ..Default::default()
+        };
+        assert_eq!(
+            jump_to_walkthrough_step(&mut session, &step),
+            Some(NavigationViewportPlacement::Cursor)
+        );
+        assert_eq!(session.diff_cursor, expected);
+    }
+
+    #[test]
+    fn clicking_second_colocated_card_targets_state_edit_and_delete_exactly() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.file_pane_visible = false;
+        session.toggle_focus();
+        session.add_comment("first card".into());
+        session.add_comment("second card".into());
+        session.comments[0].id = "first".into();
+        session.comments[1].id = "second".into();
+        let size = ratatui::prelude::Size::new(100, 30);
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            ..TuiState::default()
+        };
+        let area = Rect::new(0, 0, size.width, size.height);
+        let layout = tui_state.review_layout(&session, area);
+        let inner = inner_bordered(layout.diff);
+        let source = annotation_card::AnnotationSource::Comment {
+            id: "second".into(),
+        };
+        let visible = tui_state
+            .diff_viewport
+            .annotation_visible_row(&session, inner, &source)
+            .expect("second card visible");
+        let mut mode = Mode::Normal;
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: inner.x + 4,
+                row: inner.y + visible as u16,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(session.selected_comment().unwrap().id, "second");
+
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_normal_action(
+            Action::CycleCommentState,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(session.comments[0].state, CommentState::Draft);
+        assert_eq!(session.comments[1].state, CommentState::Todo);
+
+        handle_normal_action(
+            Action::EditComment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(
+            mode,
+            Mode::CommentInput {
+                target: CommentInputTarget::Edit { ref id },
+                ..
+            } if id == "second"
+        ));
+        mode = Mode::Normal;
+        handle_normal_action(
+            Action::DeleteComment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(session.comments.len(), 1);
+        assert_eq!(session.comments[0].id, "first");
+    }
+
+    #[test]
+    fn annotation_selection_tracks_exact_owner_across_click_and_keyboard_navigation() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+        );
+        session.file_pane_visible = false;
+        session.focus = Focus::Diff;
+        session.agent_identity = crate::state::Identity {
+            kind: AuthorKind::Agent,
+            name: "configured-review-agent".into(),
+        };
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            briefs: vec![crate::agent::ChangeBrief {
+                change_id: "change-1".into(),
+                summary: "Agent-authored chapter".into(),
+                artifacts: Vec::new(),
+            }],
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "guided-lines".into(),
+                title: "Agent-guided lines".into(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
+                rationale: Some("Each line has its own card owner".into()),
+                explanation: Some("Use the card at the current line".into()),
+                artifacts: vec![crate::agent::Artifact {
+                    title: "evidence".into(),
+                    kind: crate::agent::ArtifactKind::Example,
+                    body: "CURRENT ROW ARTIFACT".into(),
+                }],
+                parts: vec![
+                    crate::agent::ChunkPart {
+                        path: "a.txt".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    },
+                    crate::agent::ChunkPart {
+                        path: "a.txt".into(),
+                        start_line: Some(2),
+                        end_line: Some(2),
+                    },
+                ],
+            }],
+            ..Default::default()
+        });
+
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let configured_agent = session.agent_identity.clone();
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        let chapter = durable.walkthroughs[0]
+            .steps
+            .iter()
+            .find(|step| step.id == "chapter-change-1")
+            .unwrap();
+        assert_eq!(chapter.author.as_ref(), Some(&configured_agent));
+        let persisted_guided = durable.walkthroughs[0]
+            .steps
+            .iter()
+            .find(|step| step.id == "guided-lines")
+            .unwrap();
+        assert_eq!(persisted_guided.author.as_ref(), Some(&configured_agent));
+        assert!(persisted_guided.target.anchor.is_some());
+        assert_eq!(persisted_guided.extra_targets.len(), 1);
+        assert!(persisted_guided.extra_targets[0].anchor.is_some());
+        let effective = crate::attention::resolve_effective_attention(
+            durable,
+            &persisted_guided.target,
+            &files,
+        );
+        assert_eq!(effective.salience, crate::state::Salience::Spotlight);
+        assert_eq!(effective.source, Some(crate::state::SalienceSource::Agent));
+        let projected_card = annotation_card::AnnotationCard::from_walkthrough_step(
+            persisted_guided,
+            &persisted_guided.target,
+            0,
+            None,
+            false,
+        );
+        let projected_layout = projected_card.layout(
+            72,
+            annotation_card::AnnotationCardDensity::Expanded,
+            false,
+            "E",
+        );
+        let rendered_card = (0..projected_layout.len())
+            .map(|index| projected_layout.plain_line(index))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered_card.contains("agent:configured-review-agent"));
+
+        let size = ratatui::prelude::Size::new(100, 36);
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            ..TuiState::default()
+        };
+        let layout = tui_state.review_layout(&session, Rect::new(0, 0, size.width, size.height));
+        let inner = inner_bordered(layout.diff);
+        let first_source = annotation_card::AnnotationSource::Walkthrough {
+            step_id: "guided-lines".into(),
+            part: 0,
+        };
+        let visible = tui_state
+            .diff_viewport
+            .annotation_visible_row(&session, inner, &first_source)
+            .expect("first agent card visible");
+        let mut mode = Mode::Normal;
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: inner.x + 4,
+                row: inner.y + visible as u16,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(first_source)
+        );
+        assert!(selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(
+                &session,
+                &tui_state,
+                selected_onboarding_target(&session, &tui_state),
+                None,
+            ),
+            Channel::Delegation
+        );
+        render::reconcile_diff_viewport(
+            &mut session,
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width.saturating_sub(12),
+                inner.height,
+            ),
+            true,
+            &tui_state,
+        );
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "guided-lines".into(),
+                part: 0,
+            }),
+            "layout reflow on the same owner must preserve exact card selection"
+        );
+
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        let second_owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(2))
+            .unwrap();
+        assert_eq!(session.diff_cursor, second_owner);
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            None
+        );
+        assert!(!selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(&session, &tui_state, false, None),
+            Channel::Note
+        );
+
+        handle_normal_action(
+            Action::ToggleAnnotationArtifacts,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        handle_normal_action(
+            Action::MoveUp,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(true),
+            "E on the second owner must not expand the formerly selected first card"
+        );
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(false),
+            "the current-row card was the one expanded by E"
+        );
+    }
+
+    #[test]
+    fn invalid_overlay_parts_remain_durable_stale_and_non_rendered() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+        );
+        let valid_overlay = crate::agent::AgentOverlay {
+            chunks: vec![crate::agent::ReviewChunk {
+                id: "out-of-range".into(),
+                title: "Initially current".into(),
+                importance: crate::agent::ChunkImportance::Spotlight,
+                change_id: None,
+                rationale: None,
+                explanation: None,
+                artifacts: Vec::new(),
+                parts: vec![crate::agent::ChunkPart {
+                    path: "a.txt".into(),
+                    start_line: Some(2),
+                    end_line: Some(2),
+                }],
+            }],
+            ..Default::default()
+        };
+        session.apply_agent_overlay(&valid_overlay);
+        let original_assignment = session.sessions[0].attention_regions[0].clone();
+
+        session.replace_diff(
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old one\n+new one\n",
+            )
+            .unwrap(),
+        );
+        session.apply_agent_overlay(&crate::agent::AgentOverlay {
+            chunks: vec![
+                valid_overlay.chunks[0].clone(),
+                crate::agent::ReviewChunk {
+                    id: "missing-file".into(),
+                    title: "Missing file".into(),
+                    importance: crate::agent::ChunkImportance::Spotlight,
+                    change_id: None,
+                    rationale: None,
+                    explanation: None,
+                    artifacts: Vec::new(),
+                    parts: vec![crate::agent::ChunkPart {
+                        path: "missing.txt".into(),
+                        start_line: Some(1),
+                        end_line: Some(1),
+                    }],
+                },
+            ],
+            ..Default::default()
+        });
+
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        let steps = &durable.walkthroughs[0].steps;
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|step| step.target.anchor.is_none()));
+        assert_eq!(
+            durable.attention_regions.as_slice(),
+            std::slice::from_ref(&original_assignment)
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        assert!(crate::attention::region_is_stale(
+            &original_assignment,
+            &files
+        ));
+        let input = render::selected_file_annotation_input(&session, &BTreeSet::new(), "E");
+        for step_id in ["out-of-range", "missing-file"] {
+            assert!(
+                !input.contains_source(&annotation_card::AnnotationSource::Walkthrough {
+                    step_id: step_id.into(),
+                    part: 0,
+                })
+            );
+        }
+
+        session.replace_diff(
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+            )
+            .unwrap(),
+        );
+        session.apply_agent_overlay(&valid_overlay);
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        assert!(durable.walkthroughs[0].steps[0].target.anchor.is_some());
+        assert!(!crate::attention::region_is_stale(
+            &durable.attention_regions[0],
+            &session
+                .files
+                .iter()
+                .map(|file| file.diff.clone())
+                .collect::<Vec<_>>(),
+        ));
+        assert!(
+            render::selected_file_annotation_input(&session, &BTreeSet::new(), "E")
+                .contains_source(&annotation_card::AnnotationSource::Walkthrough {
+                    step_id: "out-of-range".into(),
+                    part: 0,
+                })
+        );
     }
 
     #[test]
@@ -6188,7 +6868,18 @@ mod tests {
 
         reapply_agent_overlay(&mut session, &loader, &mut tui_state);
 
-        assert!(session.review_chunks.is_empty());
+        assert_eq!(session.review_chunks.len(), 1);
+        assert_eq!(session.review_chunks[0].parts.len(), 1);
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        assert_eq!(durable.walkthroughs[0].steps.len(), 1);
+        assert!(durable.walkthroughs[0].steps[0].target.anchor.is_none());
+        assert!(durable.attention_regions.is_empty());
         assert_eq!(tui_state.invalid_chunk_parts.len(), 1);
         assert_eq!(
             tui_state
@@ -7372,8 +8063,20 @@ diff --git a/b.rs b/b.rs
         maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
 
         assert_eq!(session.review_chunks.len(), 1);
-        assert_eq!(session.review_chunks[0].parts.len(), 1);
+        assert_eq!(session.review_chunks[0].parts.len(), 2);
         assert_eq!(session.review_chunks[0].parts[0].path, "a.rs");
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        let step = &durable.walkthroughs[0].steps[0];
+        assert!(step.target.anchor.is_some());
+        assert_eq!(step.extra_targets.len(), 1);
+        assert!(step.extra_targets[0].anchor.is_none());
+        assert_eq!(durable.attention_regions.len(), 1);
         assert!(
             tui_state
                 .notice

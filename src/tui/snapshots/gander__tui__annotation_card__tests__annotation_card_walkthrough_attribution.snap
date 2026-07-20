@@ -1,0 +1,23 @@
+---
+source: src/tui/annotation_card.rs
+expression: output
+---
+-- agent --
+╭────────────────────────────────────────────────────────╮
+│agent:review-agent  [→ reviewer]  [walkthrough]  [spotli│
+│ght]                                                    │
+│Understand the boundary                                 │
+│@ src/lib.rs:9                                          │
+╰────────────────────────────────────────────────────────╯
+-- human --
+╭────────────────────────────────────────────────────────╮
+│human:Ada  [→ reviewer]  [walkthrough]  [spotlight]     │
+│Understand the boundary                                 │
+│@ src/lib.rs:9                                          │
+╰────────────────────────────────────────────────────────╯
+-- neutral --
+╭────────────────────────────────────────────────────────╮
+│walkthrough  [→ reviewer]  [walkthrough]  [spotlight]   │
+│Understand the boundary                                 │
+│@ src/lib.rs:9                                          │
+╰────────────────────────────────────────────────────────╯

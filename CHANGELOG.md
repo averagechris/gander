@@ -8,6 +8,14 @@
   spotlight/supporting/skim regions, human > agent > heuristic precedence,
   walkthrough and generated/lockfile/ignore-policy curation, conservative stale
   handling, CLI/MCP automation parity, and private human/agent artifact export.
+- Added M18 inline annotation cards as the shared channel-colored presentation
+  for durable comments, agent drafts, and spotlight walkthrough narration,
+  including identity/lifecycle badges, replies, deterministic diff ownership,
+  and ephemeral in-place example/diagram expansion with `E`.
+- Added optional durable walkthrough-step authorship. New TUI/CLI steps are
+  attributed to the configured human and MCP-authored steps to the configured
+  agent; legacy missing authors remain explicitly neutral. Review-state schema
+  7 and artifact schema 12 carry the additive field.
 - Added durable annotation authors and onboarding/delegation/collaboration/note
   channels to comments, plus reply authors and a one-release migration that
   derives legacy channels and identities and folds pending agent-overlay drafts
@@ -38,7 +46,7 @@
   inference using read-only jj author facts and explicit agent/onboarding
   context, optional `[comments].default-channel`, a live Tab-cycled
   channel-colored editor chip/border, and one semantic channel color language
-  across gutter marks, inline summaries, comment/open-work lists, and agent
+  across gutter marks, inline cards, comment/open-work lists, and agent
   draft rows. CLI comment add/edit now accept `--channel` for scriptable parity.
 
 ## v0.7.2 - 2026-07-12

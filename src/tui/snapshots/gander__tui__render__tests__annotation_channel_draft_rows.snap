@@ -1,34 +1,32 @@
 ---
 source: src/tui/render.rs
-expression: "format!(\"{}\\nstyle runs:\\n{}\", render_tui_text(&session, &mode, 110, 24),\nstyle_runs_for_rows(&buffer,\n&[\"onboard comment\", \"delegate comment\", \"collab comment\",\n\"private comment\",],))"
+expression: "format!(\"{}\\nstyle runs:\\n{}\", render_tui_text(&session, &mode, 110, 24),\nstyle_runs_for_rows(&buffer,\n&[\"agent onboarding line draft\", \"agent onboarding file draft\",],))"
 ---
 ┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
 │• mod     a.txt                ││a.txt  +4 -1                                                               │
 │                               ││@@ -1 +1,4 @@                                                              │
 │                               ││    1 - old                                                                │
-│                               ││1   1 + onboarding                                                         │
-│         ┌agent drafts────────────────────────────────────────────────────────────────────────────┐         │
-│         │Agent-drafted comments awaiting your decision                                           │         │
-│         │  [ draft  ] [→ reviewer] a.txt:1 onboard comment                                       │         │
-│         │› [ draft  ] [→ agent] a.txt:2 delegate comment                                         │         │
-│         │  [ draft  ] [→ team] a.txt:3 collab comment                                            │         │
-│         │  [ draft  ] [→ note] a.txt:4 private comment                                           │         │
-│         │                                                                                        │         │
-│         │j/k move · enter accept · e edit then accept · x discard · esc close                    │         │
-│         │                                                                                        │         │
-│         │                                                                                        │         │
-│         │                                                                                        │         │
-│         │                                                                                        │         │
-│         │                                                                                        │         │
-│         └────────────────────────────────────────────────────────────────────────────────────────┘         │
-│                               ││                                                                           │
-│                               ││                                                                           │
+│                               ││3   1 + onboarding                                                         │
+│         ┌agent drafts────────────────────────────────────────────────────────────────────────────┐────────╮│
+│         │Agent-drafted comments awaiting your decision                                           │        ││
+│         │  [→ reviewer] agent:configured-review-agent [draft] a.txt:1 agent onboarding line draft│        ││
+│         │› [→ reviewer] agent:configured-review-agent [draft] a.txt agent onboarding file draft  │        ││
+│         │                                                                                        │────────╯│
+│         │j/k move · enter accept · e edit then accept · x discard · esc close                    │────────╮│
+│         │                                                                                        │        ││
+│         │                                                                                        │        ││
+│         │                                                                                        │        ││
+│         │                                                                                        │────────╯│
+│         │                                                                                        │────────╮│
+│         │                                                                                        │        ││
+│         │                                                                                        │        ││
+│         └────────────────────────────────────────────────────────────────────────────────────────┘        ││
+│                               ││╰─────────────────────────────────────────────────────────────────────────╯│
+│                               ││1   2 + delegation                                                         │
 └───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
-1 files (0/1 viewed, 0 generated/noisy), +4/-1, 4 comments · following @
+1 files (0/1 viewed, 0 generated/noisy), +4/-1, 7 comments · following @
 agent drafts · j/k move · enter accept · e edit · x discard · esc close
 
 style runs:
-onboard comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ reviewer] "=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "onboard comment"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "                                       │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
-delegate comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "› "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset).bold() | "[ draft  ] [→ agent] "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:2 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "delegate comment"=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset).bold() | "                                         │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
-collab comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ team] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:3 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "collab comment"=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "                                            │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
-private comment: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [ draft  ] [→ note] "=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:4 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "private comment"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "                                           │         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+agent onboarding line draft: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "  [→ reviewer] "=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "agent:configured-review-agent [draft] "=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "agent onboarding line draft"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "        │"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+agent onboarding file draft: "│         │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "› [→ reviewer] "=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "agent:configured-review-agent [draft] "=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "a.txt "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "agent onboarding file draft"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset).bold() | "  │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(210, 153, 34)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)

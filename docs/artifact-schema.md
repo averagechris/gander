@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `11`.
+Current schema version: `12`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -36,7 +36,7 @@ or `"team"` in config.
 
 ```json
 {
-  "version": 11,
+  "version": 12,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -219,6 +219,7 @@ or `"team"` in config.
       "steps": [
         {
           "id": "step-id",
+          "author": { "kind": "agent", "name": "review-agent" },
           "kind": "step",
           "importance": "spotlight",
           "change_id": "change-id",
@@ -357,6 +358,8 @@ Notes:
 
 ## Version history
 
+- `12`: walkthrough steps may include an attributed `author` identity. Legacy
+  steps omit it and remain neutral; readers must not infer agent authorship.
 - `11`: human/agent artifacts include durable attention assignments and stale
   status; team artifacts exclude the private attention map.
 - `10`: team JSON exports collaboration `todo`/`resolved` threads only,
@@ -380,7 +383,9 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
-Review-state schema `6` adds durable attention regions and optional existing
+Review-state schema `7` adds optional walkthrough-step author identity; a
+missing author remains neutral/unknown and is never guessed. Review-state
+schema `6` adds durable attention regions and optional existing
 anchor/fingerprint evidence on `ReviewTarget`. Review-state schema `5` adds session disposition and permits collaboration todo
 comments for team feedback. Review-state schema `4` adds durable comment
 author/channel and reply author fields. Delegation schema `5` carries author/channel on comment evidence and

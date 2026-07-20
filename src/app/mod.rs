@@ -32,6 +32,7 @@ use crate::{
         CommentAnchor, DiffSide, RangeLineAnchor, comment_anchor_for_file_lines,
         comment_anchor_for_sided_lines, fingerprint_range, line_anchor_for_side_line,
     },
+    attention,
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
@@ -60,10 +61,14 @@ const GENERATED_TREE_GROUP: &str = "generated/noisy";
 /// Rough number of diff rows kept visible below the cursor when auto-scrolling.
 const DIFF_CURSOR_SCROLL_MARGIN: usize = 15;
 
-fn chunk_to_step(chunk: &ReviewChunk) -> WalkthroughStep {
-    let mut targets = chunk.parts.iter().map(chunk_part_to_target);
+fn chunk_to_step(chunk: &ReviewChunk, author: &Identity, files: &[FileDiff]) -> WalkthroughStep {
+    let mut targets = chunk
+        .parts
+        .iter()
+        .map(|part| chunk_part_to_target(part, files));
     WalkthroughStep {
         id: chunk.id.clone(),
+        author: Some(author.clone()),
         title: Some(chunk.title.clone()),
         importance: match chunk.importance {
             crate::agent::ChunkImportance::Spotlight => StepImportance::Spotlight,
@@ -80,9 +85,10 @@ fn chunk_to_step(chunk: &ReviewChunk) -> WalkthroughStep {
     }
 }
 
-fn brief_to_step(brief: &ChangeBrief) -> WalkthroughStep {
+fn brief_to_step(brief: &ChangeBrief, author: &Identity) -> WalkthroughStep {
     WalkthroughStep {
         id: format!("chapter-{}", brief.change_id),
+        author: Some(author.clone()),
         title: Some(brief.change_id.clone()),
         kind: StepKind::Chapter,
         change_id: Some(brief.change_id.clone()),
@@ -92,13 +98,15 @@ fn brief_to_step(brief: &ChangeBrief) -> WalkthroughStep {
     }
 }
 
-fn chunk_part_to_target(part: &ChunkPart) -> StateReviewTarget {
-    StateReviewTarget {
-        file: Some(part.path.clone()),
-        line: part.start_line,
-        end_line: part.end_line,
-        ..Default::default()
-    }
+fn chunk_part_to_target(part: &ChunkPart, files: &[FileDiff]) -> StateReviewTarget {
+    attention::target_for_diff(files, &part.path, part.start_line, part.end_line).unwrap_or_else(
+        |_| StateReviewTarget {
+            file: Some(part.path.clone()),
+            line: part.start_line,
+            end_line: part.end_line,
+            ..Default::default()
+        },
+    )
 }
 
 fn agent_artifact_to_step(artifact: &crate::agent::Artifact) -> StepArtifact {
@@ -1664,6 +1672,12 @@ impl ReviewSession {
             revision: Some(self.target.rev.clone()),
             ..Default::default()
         };
+        let agent_identity = self.agent_identity.clone();
+        let files = self
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
         let session = if let Some(index) = self.sessions.iter().position(|session| {
             session.status == ReviewSessionStatus::Open && session.target == target
         }) {
@@ -1680,8 +1694,13 @@ impl ReviewSession {
         let mut steps: Vec<WalkthroughStep> = overlay
             .briefs
             .iter()
-            .map(brief_to_step)
-            .chain(overlay.chunks.iter().map(chunk_to_step))
+            .map(|brief| brief_to_step(brief, &agent_identity))
+            .chain(
+                overlay
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk_to_step(chunk, &agent_identity, &files)),
+            )
             .collect();
         if steps.is_empty() {
             return;
@@ -1695,6 +1714,8 @@ impl ReviewSession {
         }
         session.walkthroughs[0].steps.clear();
         session.walkthroughs[0].steps.append(&mut steps);
+        attention::sync_agent_attention(session, &files)
+            .expect("overlay-derived attention targets are normalized from the loaded diff");
     }
 
     /// Durable agent-authored comments still awaiting human triage.
@@ -1992,6 +2013,7 @@ impl ReviewSession {
         side: DiffSide,
         line: usize,
     ) -> Option<usize> {
+        self.files.get(file_index)?;
         let rows = self.diff_rows_for_file_index(file_index);
         rows.iter()
             .position(|row| match side {
@@ -2703,6 +2725,100 @@ impl ReviewSession {
             .collect()
     }
 
+    /// Canonical full-width card owner for a durable comment. Rendering,
+    /// navigation, hit testing, and reflow all resolve through this endpoint.
+    /// Range cards belong to their final visual row (the right/new endpoint
+    /// when present), while line cards belong to their exact anchored row.
+    pub(crate) fn comment_card_owner_for_file(
+        &self,
+        file_index: usize,
+        comment: &Comment,
+    ) -> Option<usize> {
+        let file = self.files.get(file_index)?;
+        let target_path = comment
+            .anchor
+            .as_ref()
+            .map(CommentAnchor::path)
+            .or(comment.path.as_deref())?;
+        if target_path != file.path {
+            return None;
+        }
+        let rows = self.diff_rows_for_file_index(file_index);
+        match &comment.anchor {
+            Some(anchor @ CommentAnchor::Line { side, line, .. }) => rows
+                .iter()
+                .position(|row| row.anchor.as_ref() == Some(anchor))
+                .or_else(|| self.projected_row_for_side_line(file_index, *side, *line)),
+            Some(CommentAnchor::Range { lines, .. }) => rows
+                .iter()
+                .rposition(|row| {
+                    row.anchor.as_ref().is_some_and(|anchor| {
+                        matches!(
+                            anchor,
+                            CommentAnchor::Line { line_fingerprint, .. }
+                                if lines.iter().any(|line| &line.line_fingerprint == line_fingerprint)
+                        )
+                    })
+                })
+                .or_else(|| {
+                    lines.iter().rev().find_map(|line| {
+                        self.projected_row_for_side_line(file_index, line.side, line.line)
+                    })
+                }),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn selected_comment_card_owner(&self, comment: &Comment) -> Option<usize> {
+        self.comment_card_owner_for_file(self.selected, comment)
+    }
+
+    /// Canonical owner for a walkthrough target. Walkthrough coordinates are
+    /// new-side coordinates; a range card is placed after its final new-side
+    /// row, with an anchor-line fallback for legacy targets.
+    pub(crate) fn walkthrough_card_owner_for_file(
+        &self,
+        file_index: usize,
+        target: &StateReviewTarget,
+    ) -> Option<usize> {
+        let file = self.files.get(file_index)?;
+        if target.file.as_deref() != Some(file.path.as_str()) {
+            return None;
+        }
+        let rows = self.diff_rows_for_file_index(file_index);
+        let Some(start) = target.line else {
+            return rows.iter().position(|row| row.anchor.is_some());
+        };
+        let end = target.end_line.unwrap_or(start);
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.new_lineno
+                    .is_some_and(|line| line >= start && line <= end)
+            })
+            .map(|(index, _)| index)
+            .next_back()
+            .or_else(|| {
+                rows.iter()
+                    .enumerate()
+                    .filter(|(_, row)| {
+                        row.anchor
+                            .as_ref()
+                            .and_then(CommentAnchor::line)
+                            .is_some_and(|line| line >= start && line <= end)
+                    })
+                    .map(|(index, _)| index)
+                    .next_back()
+            })
+    }
+
+    pub(crate) fn selected_walkthrough_card_owner(
+        &self,
+        target: &StateReviewTarget,
+    ) -> Option<usize> {
+        self.walkthrough_card_owner_for_file(self.selected, target)
+    }
+
     fn comment_matches_diff_row_anchor(&self, comment: &Comment, anchor: &CommentAnchor) -> bool {
         let row_fingerprint = match anchor {
             CommentAnchor::Line {
@@ -3171,31 +3287,7 @@ impl ReviewSession {
             .iter()
             .position(|file| file.path == target_path)?;
 
-        let row_index = match &comment.anchor {
-            Some(anchor @ CommentAnchor::Line { side, line, .. }) => self
-                .diff_rows_for_file_index(file_index)
-                .iter()
-                .position(|row| row.anchor.as_ref() == Some(anchor))
-                .or_else(|| self.projected_row_for_side_line(file_index, *side, *line)),
-            Some(CommentAnchor::Range { lines, .. }) => self
-                .diff_rows_for_file_index(file_index)
-                .iter()
-                .position(|row| {
-                    row.anchor.as_ref().is_some_and(|anchor| {
-                        matches!(
-                            anchor,
-                            CommentAnchor::Line { line_fingerprint, .. }
-                                if lines.iter().any(|line| &line.line_fingerprint == line_fingerprint)
-                        )
-                    })
-                })
-                .or_else(|| {
-                    lines.iter().find_map(|line| {
-                        self.projected_row_for_side_line(file_index, line.side, line.line)
-                    })
-                }),
-            _ => None,
-        };
+        let row_index = self.comment_card_owner_for_file(file_index, &comment);
         let line_anchored = matches!(
             comment.anchor,
             Some(CommentAnchor::Line { .. } | CommentAnchor::Range { .. })

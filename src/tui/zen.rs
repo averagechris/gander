@@ -974,6 +974,7 @@ fn fallback_file_row(
     };
     WalkthroughRow {
         source_id: format!("file:{}", file.path),
+        author: None,
         title: format!("{} · {}", file.path, file_role(&file.path).label()),
         importance: ChunkImportance::Glance,
         change_id,
@@ -1142,6 +1143,7 @@ fn hunk_churn(h: &Hunk) -> (usize, usize) {
 fn whole_file_row(path: String, rationale: Option<String>) -> WalkthroughRow {
     WalkthroughRow {
         source_id: format!("file:{path}"),
+        author: None,
         title: path.clone(),
         importance: ChunkImportance::Glance,
         change_id: None,
@@ -1612,6 +1614,7 @@ diff --git a/b.rs b/b.rs
     fn comments_match_stop_line_ranges_and_file_level_stops() {
         let row = WalkthroughRow {
             source_id: "file:src/retry.rs".to_owned(),
+            author: None,
             title: "retry".to_owned(),
             importance: ChunkImportance::Spotlight,
             change_id: None,

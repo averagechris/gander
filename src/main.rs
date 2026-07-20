@@ -2621,6 +2621,7 @@ fn run() -> color_eyre::Result<()> {
                     rs,
                     WalkthroughStep {
                         id: String::new(),
+                        author: Some(config.human_identity()),
                         title: Some(title),
                         body,
                         why,
@@ -2641,7 +2642,8 @@ fn run() -> color_eyre::Result<()> {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
-                let step = review::add_chapter(rs, change_id, summary, None);
+                let step =
+                    review::add_chapter(rs, change_id, summary, None, config.human_identity());
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
@@ -2661,6 +2663,9 @@ fn run() -> color_eyre::Result<()> {
                     .map(|walkthrough| walkthrough.steps.as_slice())
                     .unwrap_or(&[]);
                 spec.steps = review::preserve_walkthrough_step_ids(prior, spec.steps);
+                for step in &mut spec.steps {
+                    step.author = Some(config.human_identity());
+                }
                 anchor_walkthrough_steps(&mut spec.steps, &attention_diff.files);
                 warn_walkthrough_set_issues(&session, &jj, &spec)?;
                 let new_count = spec.steps.len();

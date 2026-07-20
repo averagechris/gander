@@ -1191,6 +1191,7 @@ impl GanderMcp {
                 &mut state.sessions[idx],
                 WalkthroughStep {
                     id: String::new(),
+                    author: Some(this.agent_identity.clone()),
                     title: Some(params.title),
                     body: params.body,
                     why: params.why,
@@ -2477,7 +2478,11 @@ mod tests {
     #[test]
     fn walkthrough_add_step_then_show() {
         let dir = tempfile::tempdir().unwrap();
-        let server = server(dir.path());
+        let mut server = server(dir.path());
+        server.agent_identity = Identity {
+            kind: crate::state::AuthorKind::Agent,
+            name: "Configured Walkthrough Agent".into(),
+        };
 
         let step = result_json(
             &server
@@ -2496,6 +2501,8 @@ mod tests {
 
         assert_eq!(shown["walkthroughs"][0]["steps"][0]["id"], step["id"]);
         assert_eq!(shown["walkthroughs"][0]["steps"][0]["title"], "Read app");
+        assert_eq!(step["author"]["kind"], "agent");
+        assert_eq!(step["author"]["name"], "Configured Walkthrough Agent");
         let state = ReviewState::load_or_default(&server.state_path).unwrap();
         assert_eq!(state.sessions[0].attention_regions.len(), 1);
         assert_eq!(

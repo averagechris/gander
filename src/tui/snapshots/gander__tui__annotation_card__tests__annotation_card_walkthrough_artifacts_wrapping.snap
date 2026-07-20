@@ -1,0 +1,49 @@
+---
+source: src/tui/annotation_card.rs
+expression: output
+---
+NARROW COLLAPSED
+╭──────────────────────────────────╮
+│walkthrough  [→ reviewer]  [walkth│
+│rough]  [spotlight]               │
+│The parser now commits only after │
+│validation                        │
+│@ src/parser/stream.rs:40-48      │
+│why: This changes the failure boun│
+│dary and the caller's mental model│
+│.                                 │
+│rationale: Highest mental-model de│
+│lta in this change.               │
+│body: Read validation first, then │
+│follow the commit into the buffere│
+│d stream.                         │
+│E expand 2 artifact(s): usage, flo│
+│w                                 │
+╰──────────────────────────────────╯
+
+WIDE COLLAPSED
+╭──────────────────────────────────────────────────────────────────────────╮
+│walkthrough  [→ reviewer]  [walkthrough]  [spotlight]                     │
+│The parser now commits only after validation                              │
+│@ src/parser/stream.rs:40-48                                              │
+│why: This changes the failure boundary and the caller's mental model.     │
+│rationale: Highest mental-model delta in this change.                     │
+│body: Read validation first, then follow the commit into the buffered stre│
+│am.                                                                       │
+│E expand 2 artifact(s): usage, flow                                       │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+WIDE EXPANDED
+╭──────────────────────────────────────────────────────────────────────────╮
+│walkthrough  [→ reviewer]  [walkthrough]  [spotlight]                     │
+│The parser now commits only after validation                              │
+│@ src/parser/stream.rs:40-48                                              │
+│why: This changes the failure boundary and the caller's mental model.     │
+│rationale: Highest mental-model delta in this change.                     │
+│body: Read validation first, then follow the commit into the buffered stre│
+│am.                                                                       │
+│E collapse artifacts                                                      │
+│example · usage: let parsed = stream.validate()?.commit();                │
+│diagram · flow: input -> validate -> commit                               │
+│          \-> reject                                                      │
+╰──────────────────────────────────────────────────────────────────────────╯

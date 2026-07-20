@@ -501,32 +501,6 @@ pub fn validate_review_chunks(
     invalid
 }
 
-pub fn remove_invalid_chunk_parts(
-    chunks: &[ReviewChunk],
-    invalid: &[InvalidChunkPart],
-) -> Vec<ReviewChunk> {
-    chunks
-        .iter()
-        .map(|chunk| {
-            let mut chunk = chunk.clone();
-            let chunk_id = chunk.id.clone();
-            chunk.parts = chunk
-                .parts
-                .into_iter()
-                .enumerate()
-                .filter(|(index, _)| {
-                    !invalid
-                        .iter()
-                        .any(|part| part.chunk_id == chunk_id && part.part_index == *index + 1)
-                })
-                .map(|(_, part)| part)
-                .collect();
-            chunk
-        })
-        .filter(|chunk| !chunk.parts.is_empty())
-        .collect()
-}
-
 fn invalid_part(
     chunk: &ReviewChunk,
     index: usize,

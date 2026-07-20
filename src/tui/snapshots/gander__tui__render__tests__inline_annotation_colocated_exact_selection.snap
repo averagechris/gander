@@ -1,0 +1,32 @@
+---
+source: src/tui/render.rs
+expression: "format!(\"{}\\nstyle runs:\\n{}\",\nrender_tui_text_with_state(&session, &Mode::Normal, &state, 84, 24),\nstyle_runs_for_rows(&buffer, &[\"first\", \"second\"]))"
+---
+┌diff · a.txt──────────────────────────────────────────────────────────────────────┐
+│a.txt  +1 -1                                                                      │
+│@@ -1 +1 @@                                                                       │
+│2   1 - old                                                                       │
+│╭────────────────────────────────────────────────────────────────────────────────╮│
+││human:local  [→ note]  [draft]                                                  ││
+││first                                                                           ││
+││@ a.txt:1                                                                       ││
+│╰────────────────────────────────────────────────────────────────────────────────╯│
+│╭────────────────────────────────────────────────────────────────────────────────╮│
+││human:local  [→ note]  [draft]                                                  ││
+││second                                                                          ││
+││@ a.txt:1                                                                       ││
+│╰────────────────────────────────────────────────────────────────────────────────╯│
+│    1 + new                                                                       │
+│                                                                                  │
+│                                                                                  │
+│                                                                                  │
+│                                                                                  │
+│                                                                                  │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 2 comments · following @
+trunk()..@ · focus diff (wrap) · j/k line · d/u scroll · V view/wrap · r range · Y w
+
+style runs:
+first: "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "first"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset).bold() | "                                                                           │"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+second: "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Rgb(48, 52, 58)).underline_color(Color::Reset) | "second"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Rgb(48, 52, 58)).underline_color(Color::Reset).bold() | "                                                                          │"=Style::new().fg(Color::Rgb(122, 127, 133)).bg(Color::Rgb(48, 52, 58)).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)

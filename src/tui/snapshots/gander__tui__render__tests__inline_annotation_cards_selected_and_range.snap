@@ -1,0 +1,32 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text(&session, &Mode::Normal, 88, 28)"
+---
+┌diff · a.rs───────────────────────────────────────────────────────────────────────────┐
+│a.rs  +2 -2                                                                           │
+│@@ -1,2 +1,2 @@                                                                       │
+│    1 - old one                                                                       │
+│    2 - old two                                                                       │
+│2   1 + new one                                                                       │
+│╭────────────────────────────────────────────────────────────────────────────────────╮│
+││agent:review-agent  [→ reviewer]  [draft]                                           ││
+││Selected agent draft                                                                ││
+││@ a.rs:1                                                                            ││
+││body: The detailed explanation remains inline.                                      ││
+│╰────────────────────────────────────────────────────────────────────────────────────╯│
+│1   2 + new two                                                                       │
+│╭────────────────────────────────────────────────────────────────────────────────────╮│
+││human:local  [→ agent]  [todo]  [issue]  [fix]                                      ││
+││Range todo                                                                          ││
+││@ a.rs:1-2                                                                          ││
+││body: Own the card at the range endpoint.                                           ││
+│╰────────────────────────────────────────────────────────────────────────────────────╯│
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +2/-2, 2 comments · following @
+trunk()..@ · focus diff (range active) (wrap) · j/k line · d/u scroll · V view/wrap · r

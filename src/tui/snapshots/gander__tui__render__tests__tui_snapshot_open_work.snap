@@ -6,16 +6,16 @@ expression: "format!(\"{}\\nstyle runs:\\n{}\", render_tui_text(&session, &mode,
 │• ▾ src 0/1                 ││src/app.rs  +1 -1                                                   │
 │  • mod     app.rs          ││@@ -1 +1 @@                                                         │
 │                            ││2   1 - old                                                         │
-│                            ││      ▎ test-evi [todo] [test] [issue] Branch is untested           │
-│        ╭ Action items & feedback ───────────────────────────────────────────────────────╮        │
-│        │› [item] [test] src/app.rs:1 Cover fallback with a regression test              │        │
-│        │└ [evidence] [→ agent] src/app.rs:1 [todo] [test] [issue] Branch is untested    │        │
-│        │[feedback] [→ team] src/app.rs:1 [todo] Please document the fallback            │        │
-│        │                                                                                │        │
-│        │j/k move · enter jump · esc close                                               │        │
-│        │                                                                                │        │
-│        │                                                                                │        │
-│        │                                                                                │        │
+│                            ││╭──────────────────────────────────────────────────────────────────╮│
+│        ╭ Action items & feedback ───────────────────────────────────────────────────────╮       ││
+│        │› [item] [test] src/app.rs:1 Cover fallback with a regression test              │       ││
+│        │└ [evidence] [→ agent] src/app.rs:1 [todo] [test] [issue] Branch is untested    │       ││
+│        │[feedback] [→ team] src/app.rs:1 [todo] Please document the fallback            │───────╯│
+│        │                                                                                │───────╮│
+│        │j/k move · enter jump · esc close                                               │       ││
+│        │                                                                                │       ││
+│        │                                                                                │       ││
+│        │                                                                                │───────╯│
 │        │                                                                                │        │
 │        │                                                                                │        │
 │        │                                                                                │        │
@@ -28,5 +28,5 @@ expression: "format!(\"{}\\nstyle runs:\\n{}\", render_tui_text(&session, &mode,
 action items & feedback · j/k move · enter jump · esc close
 
 style runs:
-[evidence] [→ agent]: "│        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "└ "=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "[evidence] [→ agent] "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset) | "src/app.rs:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "[todo] "=Style::new().fg(Color::Rgb(248, 81, 73)).bg(Color::Reset).underline_color(Color::Reset) | "[test] "=Style::new().fg(Color::Rgb(168, 124, 164)).bg(Color::Reset).underline_color(Color::Reset) | "[issue] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "Branch is untested"=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "    │        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
-[feedback] [→ team]: "│        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "[feedback] [→ team] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "src/app.rs:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "[todo] "=Style::new().fg(Color::Rgb(248, 81, 73)).bg(Color::Reset).underline_color(Color::Reset) | "Please document the fallback"=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "            │        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+[evidence] [→ agent]: "│        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "└ "=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "[evidence] [→ agent] "=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Reset).underline_color(Color::Reset) | "src/app.rs:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "[todo] "=Style::new().fg(Color::Rgb(248, 81, 73)).bg(Color::Reset).underline_color(Color::Reset) | "[test] "=Style::new().fg(Color::Rgb(168, 124, 164)).bg(Color::Reset).underline_color(Color::Reset) | "[issue] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "Branch is untested"=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "    │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Rgb(48, 52, 58)).underline_color(Color::Reset) | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)
+[feedback] [→ team]: "│        │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "[feedback] [→ team] "=Style::new().fg(Color::Rgb(88, 166, 255)).bg(Color::Reset).underline_color(Color::Reset) | "src/app.rs:1 "=Style::new().fg(Color::Rgb(76, 176, 168)).bg(Color::Reset).underline_color(Color::Reset) | "[todo] "=Style::new().fg(Color::Rgb(248, 81, 73)).bg(Color::Reset).underline_color(Color::Reset) | "Please document the fallback"=Style::new().fg(Color::Rgb(169, 175, 181)).bg(Color::Reset).underline_color(Color::Reset) | "            │"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset) | "───────╯"=Style::new().fg(Color::Rgb(231, 113, 55)).bg(Color::Rgb(48, 52, 58)).underline_color(Color::Reset).bold() | "│"=Style::new().fg(Color::Rgb(230, 237, 243)).bg(Color::Reset).underline_color(Color::Reset)

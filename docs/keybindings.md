@@ -146,6 +146,7 @@ remains effective.
 | `submit-comment` / `cancel-comment` | Ctrl-S / Esc | comment editor |
 | `insert-newline` / `delete-char` | Enter / Backspace | comment editor |
 | `cycle-comment-channel` | Tab | comment editor; onboarding → delegation → collaboration → note |
+| `toggle-annotation-artifacts` | `E` | normal diff; expands/collapses artifacts only when the cursor's inline card has artifacts |
 
 The editor also keeps ordinary text insertion, arrows, Home/End, Ctrl-A/E,
 Ctrl-B/F, Ctrl-P/N, Ctrl-H/D, Ctrl-K/U/W, Alt-B/F, and Alt-Backspace as local

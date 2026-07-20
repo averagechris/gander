@@ -363,7 +363,7 @@ Status: domain and automation foundation in progress.
   acknowledges a fold and marks contained files viewed
 - [ ] spotlight regions render with inline narration cards (onboarding
   annotations: title/why/rationale, artifacts expandable)
-- [ ] inline annotation cards as the single render primitive for comments,
+- [x] inline annotation cards as the single render primitive for comments,
   drafts, and walkthrough steps, channel-colored (see milestone 17)
 - [ ] chapters become change-scoped stream headers (description, bookmarks,
   stats)

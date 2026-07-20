@@ -1,8 +1,11 @@
 //! All drawing code: panes, popups, styles, and layout math.
 
-#[cfg(test)]
-use std::rc::Rc;
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::{BTreeSet, HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    ops::Range,
+    rc::Rc,
+};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -20,13 +23,16 @@ use crate::{
     diff::DiffLineKind,
     file_tree::{FlatTreeRow, FlatTreeRowKind},
     jj::JjChangeSummary,
-    state::{Channel, Comment, ReviewTarget},
+    state::{Channel, Comment, ReviewTarget, Salience},
     syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
 };
 
 use super::{
     ActivityListState, CommentInputTarget, Mode, TuiState, UiNotice, UiNoticeLevel,
     action_items::{OpenWorkListState, OpenWorkRow},
+    annotation_card::{
+        AnnotationCard, AnnotationCardDensity, AnnotationCardLayout, AnnotationSource,
+    },
     chooser::TargetChooserState,
     comments::CommentListState,
     drafts::DraftListState,
@@ -89,6 +95,11 @@ pub(super) fn draw(
     zen: Option<&ZenState>,
 ) {
     let theme = &tui_state.theme;
+    tui_state.diff_viewport.set_annotation_artifact_hint(
+        keymap
+            .bound_hint(Action::ToggleAnnotationArtifacts)
+            .unwrap_or("unbound"),
+    );
     let full_area = frame.area();
     frame.buffer_mut().set_style(full_area, theme.base_style());
     let effective_file_pane = tui_state.effective_file_pane(session, full_area.width);
@@ -539,7 +550,7 @@ pub(super) fn diff_split_is_active(session: &ReviewSession, inner: Rect) -> bool
     session.diff_cues.view == DiffViewModeConfig::SideBySide && inner.width >= MIN_SPLIT_WIDTH
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DiffVisualHit {
     Full(usize),
     Split {
@@ -547,30 +558,56 @@ enum DiffVisualHit {
         right: Option<usize>,
         divider: usize,
     },
+    Annotation {
+        owner: usize,
+        source: AnnotationSource,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DiffPointHit {
+    Code(usize),
+    Annotation {
+        owner: usize,
+        source: AnnotationSource,
+    },
 }
 
 impl DiffVisualHit {
-    fn contains(self, row: usize) -> bool {
+    fn contains(&self, row: usize) -> bool {
         match self {
-            Self::Full(owner) => owner == row,
-            Self::Split { left, right, .. } => left == Some(row) || right == Some(row),
+            Self::Full(owner) => *owner == row,
+            Self::Split { left, right, .. } => *left == Some(row) || *right == Some(row),
+            Self::Annotation { owner, .. } => *owner == row,
         }
     }
 
-    fn row_at(self, column: usize) -> Option<usize> {
+    fn row_at(&self, column: usize) -> Option<usize> {
         match self {
-            Self::Full(row) => Some(row),
+            Self::Full(row) => Some(*row),
             Self::Split {
                 left,
                 right,
                 divider,
             } => {
-                if column < divider {
-                    left
+                if column < *divider {
+                    *left
                 } else {
-                    right
+                    *right
                 }
             }
+            Self::Annotation { owner, .. } => Some(*owner),
+        }
+    }
+
+    fn point_at(&self, column: usize) -> Option<DiffPointHit> {
+        match self {
+            Self::Full(row) => Some(DiffPointHit::Code(*row)),
+            Self::Split { .. } => self.row_at(column).map(DiffPointHit::Code),
+            Self::Annotation { owner, source } => Some(DiffPointHit::Annotation {
+                owner: *owner,
+                source: source.clone(),
+            }),
         }
     }
 }
@@ -616,102 +653,13 @@ enum DiffVisualSource {
         left_width: usize,
         right_width: usize,
     },
-    Comment {
+    Annotation {
         owner: usize,
-        summary: CommentSummary,
-        byte_range: Range<usize>,
+        card: Rc<AnnotationCard>,
+        layout: Rc<AnnotationCardLayout>,
+        line: usize,
         width: usize,
     },
-}
-
-/// The comment fields the inline summary row actually consumes: id prefix,
-/// state, badges, and headline. Layout and cached visual lines snapshot
-/// this instead of whole `Comment`s so bodies, replies, and evidence never
-/// get cloned per visible row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommentSummary {
-    short_id: String,
-    state: crate::state::CommentState,
-    action: Option<crate::state::ActionIntent>,
-    kind: Option<crate::state::CommentKind>,
-    headline: String,
-    channel: Channel,
-}
-
-impl CommentSummary {
-    fn from_comment(comment: &Comment) -> Self {
-        Self {
-            // Comment ids are UUIDs; a short prefix keeps the gutter readable.
-            short_id: comment.id.chars().take(8).collect(),
-            state: comment.state,
-            action: comment.action,
-            kind: comment.kind,
-            headline: comment_summary_headline(comment),
-            channel: comment.channel,
-        }
-    }
-
-    /// Plain text used for wrap geometry. Measurement must never depend on
-    /// the theme, so this mirrors [`Self::line`]'s span structure textually
-    /// (checked by `comment_summary_text_matches_rendered_line`).
-    fn text(&self) -> String {
-        let mut text = format!("      ▎ {} [{}] ", self.short_id, self.state.label());
-        if let Some(action) = self.action
-            && action != crate::state::ActionIntent::None
-        {
-            text.push_str(&format!("[{}] ", action_intent_label(action)));
-        }
-        if let Some(kind) = self.kind {
-            text.push_str(&format!("[{}] ", comment_kind_label(kind)));
-        }
-        text.push_str(&self.headline);
-        text
-    }
-
-    /// The rendered summary row, styled with the active theme.
-    fn line(&self, theme: &AppTheme) -> Line<'static> {
-        let mut spans = vec![
-            Span::styled(
-                "      ▎ ",
-                inline_annotation_card_border_style(self.channel, theme),
-            ),
-            Span::styled(
-                format!("{} ", self.short_id),
-                Style::default().fg(theme.muted),
-            ),
-            Span::styled(
-                format!("[{}] ", self.state.label()),
-                comment_state_style(self.state, theme),
-            ),
-        ];
-        if let Some(action) = self.action
-            && action != crate::state::ActionIntent::None
-        {
-            spans.push(Span::styled(
-                format!("[{}] ", action_intent_label(action)),
-                Style::default().fg(theme.secondary),
-            ));
-        }
-        if let Some(kind) = self.kind {
-            spans.push(Span::styled(
-                format!("[{}] ", comment_kind_label(kind)),
-                Style::default().fg(theme.info),
-            ));
-        }
-        spans.push(Span::styled(
-            self.headline.clone(),
-            Style::default().fg(theme.channel_color(self.channel)),
-        ));
-        Line::from(spans)
-    }
-}
-
-/// Current lightweight inline-card boundary. M18 can replace this summary
-/// primitive without changing the semantic channel-color contract.
-fn inline_annotation_card_border_style(channel: Channel, theme: &AppTheme) -> Style {
-    Style::default()
-        .fg(theme.channel_color(channel))
-        .add_modifier(Modifier::BOLD)
 }
 
 #[derive(Debug, Clone)]
@@ -730,33 +678,48 @@ pub(super) struct MeasuredDiffLayout {
     pub(super) horizontal_limit: usize,
 }
 
-/// Selected-file review state that can change measured diff geometry.
-///
-/// Comment association is represented by logical row ownership, including
-/// one entry per owner for range comments. The exact rendered summary text is
-/// the only comment content measurement consumes; bodies after that summary,
-/// replies, timestamps, unrelated files, and presentation-only session state
-/// deliberately do not participate in equality.
+/// Cheap selected-file signature used before a layout cache hit. It owns no
+/// reply/artifact payloads; visible text is hashed in place from durable state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct AnnotationLayoutInput {
     pub(super) changed_hunks: Vec<usize>,
-    comments: Vec<AnnotationCommentInput>,
+    cards: Vec<AnnotationCardSignature>,
+    artifact_hint: String,
+}
+
+impl AnnotationLayoutInput {
+    pub(super) fn contains_source(&self, source: &AnnotationSource) -> bool {
+        self.cards.iter().any(|card| &card.source == source)
+    }
+
+    pub(super) fn owner_for_source(&self, source: &AnnotationSource) -> Option<usize> {
+        self.cards
+            .iter()
+            .find(|card| &card.source == source)
+            .map(|card| card.owner)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AnnotationCommentInput {
+struct AnnotationCardSignature {
     owner: usize,
-    summary: String,
+    source: AnnotationSource,
+    geometry_hash: u64,
+    artifacts_expanded: bool,
 }
 
-/// Geometry input plus a snapshot of each measured comment summary.
-/// Keeping these vectors aligned lets cached visual lines own their
-/// summary (rendered with the active theme at draw time) instead of
-/// retaining a fragile index into session-wide comments.
+#[derive(Debug, Clone)]
+struct AnnotationCardInput {
+    owner: usize,
+    card: Rc<AnnotationCard>,
+    artifacts_expanded: bool,
+}
+
+/// Geometry input for selected-file comments and spotlight narration.
 #[derive(Debug, Clone, Default)]
 pub(super) struct SelectedFileAnnotations {
     pub(super) input: AnnotationLayoutInput,
-    rendered_comments: Vec<CommentSummary>,
+    cards: Vec<AnnotationCardInput>,
 }
 
 impl MeasuredDiffLayout {
@@ -784,6 +747,20 @@ impl MeasuredDiffLayout {
 
     pub(super) fn row_at(&self, line: usize, column: usize) -> Option<usize> {
         self.lines.get(line)?.hit.row_at(column)
+    }
+
+    pub(super) fn hit_at(&self, line: usize, column: usize) -> Option<DiffPointHit> {
+        self.lines.get(line)?.hit.point_at(column)
+    }
+
+    #[cfg(test)]
+    pub(super) fn annotation_line(&self, source: &AnnotationSource) -> Option<usize> {
+        self.lines.iter().position(|line| {
+            matches!(
+                &line.hit,
+                DiffVisualHit::Annotation { source: candidate, .. } if candidate == source
+            )
+        })
     }
 
     pub(super) fn viewport_start(
@@ -850,35 +827,226 @@ pub(super) fn cached_diff_layout(
         .test_layout_rc()
 }
 
+#[cfg(test)]
 pub(super) fn selected_file_annotations(
     session: &ReviewSession,
     rows: &[DiffRow],
 ) -> SelectedFileAnnotations {
+    selected_file_annotations_with_expansion(session, rows, &BTreeSet::new(), "E")
+}
+
+#[cfg(test)]
+pub(super) fn selected_file_annotations_with_expansion(
+    session: &ReviewSession,
+    _rows: &[DiffRow],
+    expanded: &BTreeSet<String>,
+    artifact_hint: &str,
+) -> SelectedFileAnnotations {
+    let input = selected_file_annotation_input(session, expanded, artifact_hint);
+    selected_file_annotations_for_input(session, input, expanded)
+}
+
+pub(super) fn selected_file_annotation_input(
+    session: &ReviewSession,
+    expanded: &BTreeSet<String>,
+    artifact_hint: &str,
+) -> AnnotationLayoutInput {
     let changed_hunks = session
         .selected_visible_file()
         .map(|file| file.changed_hunks.iter().copied().collect())
         .unwrap_or_default();
-    let mut comments = Vec::new();
-    let mut rendered_comments = Vec::new();
-    for (owner, row) in rows.iter().enumerate() {
-        let Some(anchor) = row.anchor.as_ref() else {
+    let mut signatures = Vec::new();
+    for comment in &session.comments {
+        let Some(owner) = session.selected_comment_card_owner(comment) else {
             continue;
         };
-        for comment in session.comments_for_diff_row_anchor_details(anchor) {
-            let summary = CommentSummary::from_comment(comment);
-            comments.push(AnnotationCommentInput {
-                owner,
-                summary: summary.text(),
-            });
-            rendered_comments.push(summary);
+        let source = AnnotationSource::Comment {
+            id: comment.id.clone(),
+        };
+        signatures.push(AnnotationCardSignature {
+            owner,
+            geometry_hash: comment_geometry_hash(comment),
+            artifacts_expanded: false,
+            source,
+        });
+    }
+    for_each_effective_walkthrough_card(session, |step, target, part, owner, rationale| {
+        let source = AnnotationSource::Walkthrough {
+            step_id: step.id.clone(),
+            part,
+        };
+        let artifacts_expanded = expanded.contains(&source.stable_id());
+        signatures.push(AnnotationCardSignature {
+            owner,
+            geometry_hash: walkthrough_geometry_hash(
+                step,
+                target,
+                rationale.as_deref(),
+                artifacts_expanded,
+            ),
+            artifacts_expanded,
+            source,
+        });
+    });
+    AnnotationLayoutInput {
+        changed_hunks,
+        cards: signatures,
+        artifact_hint: artifact_hint.to_owned(),
+    }
+}
+
+pub(super) fn selected_file_annotations_for_input(
+    session: &ReviewSession,
+    input: AnnotationLayoutInput,
+    expanded: &BTreeSet<String>,
+) -> SelectedFileAnnotations {
+    let mut cards = Vec::with_capacity(input.cards.len());
+    for comment in &session.comments {
+        let Some(owner) = session.selected_comment_card_owner(comment) else {
+            continue;
+        };
+        cards.push(AnnotationCardInput {
+            owner,
+            card: Rc::new(AnnotationCard::from_comment(comment)),
+            artifacts_expanded: false,
+        });
+    }
+    for_each_effective_walkthrough_card(session, |step, target, part, owner, rationale| {
+        let card = Rc::new(AnnotationCard::from_walkthrough_step(
+            step,
+            target,
+            part,
+            rationale,
+            expanded.contains(
+                &AnnotationSource::Walkthrough {
+                    step_id: step.id.clone(),
+                    part,
+                }
+                .stable_id(),
+            ),
+        ));
+        cards.push(AnnotationCardInput {
+            owner,
+            artifacts_expanded: expanded.contains(&card.source.stable_id()),
+            card,
+        });
+    });
+    SelectedFileAnnotations { input, cards }
+}
+
+fn for_each_effective_walkthrough_card(
+    session: &ReviewSession,
+    mut visit: impl FnMut(&crate::state::WalkthroughStep, &ReviewTarget, usize, usize, Option<String>),
+) {
+    let Some(durable) = crate::review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    ) else {
+        return;
+    };
+    let files = session
+        .files
+        .iter()
+        .map(|file| &file.diff)
+        .collect::<Vec<_>>();
+    for step in durable
+        .walkthroughs
+        .iter()
+        .flat_map(|walkthrough| walkthrough.steps.iter())
+    {
+        for (part, target) in std::iter::once(&step.target)
+            .chain(step.extra_targets.iter())
+            .enumerate()
+        {
+            if !crate::attention::target_is_current(target, &files) {
+                continue;
+            }
+            let effective =
+                crate::attention::resolve_effective_attention_refs(durable, target, &files);
+            if effective.salience != Salience::Spotlight {
+                continue;
+            }
+            let Some(owner) = session.selected_walkthrough_card_owner(target) else {
+                continue;
+            };
+            visit(step, target, part, owner, effective.rationale);
         }
     }
-    SelectedFileAnnotations {
-        input: AnnotationLayoutInput {
-            changed_hunks,
-            comments,
-        },
-        rendered_comments,
+}
+
+fn comment_geometry_hash(comment: &Comment) -> u64 {
+    let mut hash = DefaultHasher::new();
+    comment.id.hash(&mut hash);
+    comment.body.hash(&mut hash);
+    comment.author.name.hash(&mut hash);
+    (comment.author.kind as u8).hash(&mut hash);
+    comment.channel.audience_label().hash(&mut hash);
+    comment.state.label().hash(&mut hash);
+    comment.kind.map(|kind| kind as u8).hash(&mut hash);
+    comment.action.map(|action| action as u8).hash(&mut hash);
+    comment.path.hash(&mut hash);
+    comment.line.hash(&mut hash);
+    comment.end_line.hash(&mut hash);
+    for reply in &comment.replies {
+        reply.author.name.hash(&mut hash);
+        (reply.author.kind as u8).hash(&mut hash);
+        reply.body.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+fn walkthrough_geometry_hash(
+    step: &crate::state::WalkthroughStep,
+    target: &ReviewTarget,
+    rationale: Option<&str>,
+    artifacts_expanded: bool,
+) -> u64 {
+    let mut hash = DefaultHasher::new();
+    step.id.hash(&mut hash);
+    step.author
+        .as_ref()
+        .map(|author| &author.name)
+        .hash(&mut hash);
+    step.author
+        .as_ref()
+        .map(|author| author.kind as u8)
+        .hash(&mut hash);
+    step.title.hash(&mut hash);
+    step.body.hash(&mut hash);
+    step.why.hash(&mut hash);
+    rationale.hash(&mut hash);
+    target.file.hash(&mut hash);
+    target.line.hash(&mut hash);
+    target.end_line.hash(&mut hash);
+    for artifact in &step.artifacts {
+        artifact.title.hash(&mut hash);
+        (artifact.kind as u8).hash(&mut hash);
+        if artifacts_expanded {
+            artifact.body.hash(&mut hash);
+        }
+    }
+    hash.finish()
+}
+
+pub(super) fn annotation_artifact_card_at_owner(
+    session: &ReviewSession,
+    owner: usize,
+    preferred: Option<&AnnotationSource>,
+) -> Option<AnnotationSource> {
+    let mut found = Vec::new();
+    for_each_effective_walkthrough_card(session, |step, _, part, card_owner, _| {
+        if card_owner == owner && !step.artifacts.is_empty() {
+            found.push(AnnotationSource::Walkthrough {
+                step_id: step.id.clone(),
+                part,
+            });
+        }
+    });
+    match preferred {
+        Some(preferred) => found.into_iter().find(|candidate| candidate == preferred),
+        None => found.into_iter().next(),
     }
 }
 
@@ -970,7 +1138,7 @@ fn measured_unified_layout(
                 is_comment: false,
             });
         }
-        append_comment_lines(&mut lines, annotations, index, index, width);
+        append_comment_lines(&mut lines, annotations, index, width);
     }
     MeasuredDiffLayout {
         lines,
@@ -1006,7 +1174,7 @@ fn measured_split_layout(
                         is_comment: false,
                     });
                 }
-                append_comment_lines(&mut lines, annotations, index, index, width);
+                append_comment_lines(&mut lines, annotations, index, width);
             }
             SplitRow::Pair { left, right } => {
                 let anchor = left.or(right).unwrap_or(0);
@@ -1043,7 +1211,7 @@ fn measured_split_layout(
                 let mut owners: Vec<_> = left.into_iter().chain(right).collect();
                 owners.dedup();
                 for owner in owners {
-                    append_comment_lines(&mut lines, annotations, owner, anchor, width);
+                    append_comment_lines(&mut lines, annotations, owner, width);
                 }
             }
         }
@@ -1073,29 +1241,33 @@ fn append_comment_lines(
     lines: &mut Vec<DiffVisualLine>,
     annotations: &SelectedFileAnnotations,
     owner: usize,
-    block_anchor: usize,
     width: usize,
 ) {
-    for (comment, rendered) in annotations
-        .input
-        .comments
+    for input in annotations
+        .cards
         .iter()
-        .zip(&annotations.rendered_comments)
-        .filter(|(comment, _)| comment.owner == owner)
+        .filter(|input| input.owner == owner)
     {
-        for byte_range in visual_byte_ranges(&comment.summary, width.max(1), true)
-            .into_iter()
-            .flatten()
-        {
+        let layout = Rc::new(input.card.layout(
+            width.max(1),
+            AnnotationCardDensity::Expanded,
+            input.artifacts_expanded,
+            &annotations.input.artifact_hint,
+        ));
+        for line in 0..layout.len() {
             lines.push(DiffVisualLine {
-                source: DiffVisualSource::Comment {
+                source: DiffVisualSource::Annotation {
                     owner,
-                    summary: rendered.clone(),
-                    byte_range,
+                    card: Rc::clone(&input.card),
+                    layout: Rc::clone(&layout),
+                    line,
                     width,
                 },
-                hit: DiffVisualHit::Full(owner),
-                block_anchor,
+                hit: DiffVisualHit::Annotation {
+                    owner,
+                    source: input.card.source.clone(),
+                },
+                block_anchor: owner,
                 is_comment: true,
             });
         }
@@ -1214,6 +1386,7 @@ fn plain_row_text(row: &DiffRow, annotations: &AnnotationLayoutInput) -> String 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn materialize_diff_window(
     session: &ReviewSession,
     rows: &[DiffRow],
@@ -1221,6 +1394,7 @@ pub(super) fn materialize_diff_window(
     start: usize,
     height: usize,
     horizontal: usize,
+    selected_annotation: Option<&AnnotationSource>,
     theme: &AppTheme,
 ) -> Vec<Line<'static>> {
     let mut prepared = HashMap::new();
@@ -1235,6 +1409,7 @@ pub(super) fn materialize_diff_window(
                 rows,
                 layout.line_number_width,
                 horizontal,
+                selected_annotation,
                 &visual.source,
                 &mut prepared,
                 theme,
@@ -1256,17 +1431,20 @@ fn materialize_diff_source(
         rows,
         line_number_width,
         horizontal,
+        None,
         source,
         &mut HashMap::new(),
         &AppTheme::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_diff_source_cached(
     session: &ReviewSession,
     rows: &[DiffRow],
     line_number_width: usize,
     horizontal: usize,
+    selected_annotation: Option<&AnnotationSource>,
     source: &DiffVisualSource,
     prepared: &mut HashMap<(usize, Option<usize>), PreparedDiffCell>,
     theme: &AppTheme,
@@ -1329,21 +1507,29 @@ fn materialize_diff_source_cached(
             ));
             Line::from(spans)
         }
-        DiffVisualSource::Comment {
-            summary,
-            byte_range,
+        DiffVisualSource::Annotation {
+            owner,
+            card,
+            layout,
+            line,
             ..
-        } => Line::from(pad_spans(
-            slice_spans_bytes(&summary.line(theme).spans, byte_range.clone()),
-            source.width(),
-        )),
+        } => layout.line(
+            *line,
+            card.channel,
+            selected_annotation.map_or(
+                session.focus == Focus::Diff && session.diff_cursor == *owner,
+                |selected| selected == &card.source,
+            ),
+            session.diff_row_in_active_range(*owner),
+            theme,
+        ),
     }
 }
 
 impl DiffVisualSource {
     fn width(&self) -> usize {
         match self {
-            Self::Plain { width, .. } | Self::Comment { width, .. } => *width,
+            Self::Plain { width, .. } | Self::Annotation { width, .. } => *width,
             Self::Diff(cell) => cell.width,
             Self::Split {
                 left_width,
@@ -1522,6 +1708,18 @@ pub(super) fn diff_row_at_point(
     tui_state
         .diff_viewport
         .row_at_point(session, inner, x, visible_row)
+}
+
+pub(super) fn diff_hit_at_point(
+    session: &ReviewSession,
+    inner: Rect,
+    x: u16,
+    visible_row: usize,
+    tui_state: &TuiState,
+) -> Option<DiffPointHit> {
+    tui_state
+        .diff_viewport
+        .hit_at_point(session, inner, x, visible_row)
 }
 
 pub(super) fn scroll_diff_visual(
@@ -1822,17 +2020,6 @@ fn diff_pane_title(session: &ReviewSession, file_pane_visible: bool) -> String {
         ),
         None => "diff".to_owned(),
     }
-}
-
-/// First non-empty line of the comment body, trimmed.
-fn comment_summary_headline(comment: &Comment) -> String {
-    comment
-        .body
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("(empty comment)")
-        .trim()
-        .to_owned()
 }
 
 fn comment_badge_spans(comment: &Comment, theme: &AppTheme) -> Vec<Span<'static>> {
@@ -2688,6 +2875,10 @@ fn draw_help_popup(
         ),
         entry(&[Action::SymbolOutline], "changed symbol outline"),
         entry(&[Action::ToggleContextFold], "fold/unfold context lines"),
+        entry(
+            &[Action::ToggleAnnotationArtifacts],
+            "expand/collapse inline card artifacts",
+        ),
         entry(
             &[
                 Action::ExpandContext,
@@ -3697,21 +3888,13 @@ fn derived_summary(lines: &[String]) -> String {
     format!("{churn}{symbols}")
 }
 
-fn zen_stop_comment_lines(
+fn zen_stop_comment_cards(
     session: &ReviewSession,
     stop: &super::chunks::WalkthroughRow,
-) -> Vec<(String, Channel)> {
+) -> Vec<AnnotationCard> {
     super::zen::comments_for_stop(&session.comments, stop)
         .into_iter()
-        .map(|comment| {
-            let state = comment.state.label();
-            let id = truncate_tail(&comment.id, 8);
-            let first_line = comment.body.lines().next().unwrap_or_default().trim();
-            (
-                format!("comment [{state}] {id}: {first_line}"),
-                comment.channel,
-            )
-        })
+        .map(AnnotationCard::from_comment)
         .collect()
 }
 
@@ -3751,114 +3934,39 @@ fn draw_zen_stop(
     let content_width = measured_content_width(area.width, probe_width);
     let inner = slide_column(area, content_width);
 
-    let (mut explanation, explanation_title) = if zen.source == super::zen::ZenSource::Files {
-        (
-            stop.rationale
-                .clone()
-                .unwrap_or_else(|| "largest changed hunk selected for review".to_owned()),
-            " why this matters ",
-        )
-    } else {
-        (
-            stop.explanation
-                .clone()
-                .or_else(|| stop.rationale.clone())
-                .unwrap_or_else(|| {
-                    "(the agent gave no explanation for this stop — @ summons one)".to_owned()
-                }),
-            " why this matters ",
-        )
-    };
-    if let Some((part, total)) = stop.part_position
-        && part > 1
-        && total > 1
-    {
-        explanation = format!("explanation with part 1/{total}");
-    }
-
     let text_width = inner.width.max(20) as usize;
-    let comment_lines = zen_stop_comment_lines(session, stop);
-    let sibling_line = sibling_parts_line(zen, stop, inner.width.saturating_sub(2) as usize);
-    let position = stop
-        .part_position
-        .map(|(part, total)| format!(" (part {part}/{total})"))
-        .unwrap_or_default();
-    let mut prose_lines = vec![
-        Line::from(vec![Span::styled(
-            format!(
-                "stop {stop_number}/{stop_total} · {} · {}",
-                chunk_row_location_width(stop, text_width / 2),
-                zen_progress_label(zen)
-            ),
-            Style::default().fg(theme.muted),
-        )]),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("{}{position}", stop.title),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-    ];
-    let abbreviated_part = stop
-        .part_position
-        .is_some_and(|(part, total)| part > 1 && total > 1);
-    let mut explanation_lines = Vec::new();
-    if abbreviated_part {
-        if let Some((part, total)) = stop.part_position {
-            let sibling = sibling_line
-                .clone()
-                .unwrap_or_else(|| "other parts: part 1".to_owned());
-            explanation_lines.push(Line::from(Span::styled(
-                format!("prose on part 1 · part {part}/{total} · {sibling}"),
-                Style::default().fg(theme.muted),
-            )));
-        }
-    } else if let Some(why) = stop.rationale.as_ref().filter(|s| !s.trim().is_empty()) {
-        explanation_lines.push(Line::from(Span::styled(
-            explanation_title.trim(),
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::ITALIC),
-        )));
-        explanation_lines.push(Line::from(Span::styled(
-            why.clone(),
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::ITALIC),
-        )));
-    }
-    if !abbreviated_part
-        && let Some(body_text) = stop.explanation.as_ref().filter(|s| !s.trim().is_empty())
-    {
-        if !explanation_lines.is_empty() {
-            explanation_lines.push(Line::from(""));
-        }
-        push_text_lines(
-            &mut explanation_lines,
-            body_text,
-            Style::default().fg(theme.subtle),
+    let mut prose_lines = vec![Line::from(vec![Span::styled(
+        format!(
+            "stop {stop_number}/{stop_total} · {} · {}",
+            chunk_row_location_width(stop, text_width / 2),
+            zen_progress_label(zen)
+        ),
+        Style::default().fg(theme.muted),
+    )])];
+    prose_lines.push(Line::from(""));
+    let narration = AnnotationCard::from_walkthrough_row(stop);
+    let narration_layout = narration.layout(
+        text_width,
+        AnnotationCardDensity::Expanded,
+        false,
+        keymap.hint(Action::ZenArtifact),
+    );
+    prose_lines.extend(
+        (0..narration_layout.len())
+            .map(|line| narration_layout.line(line, narration.channel, false, false, theme)),
+    );
+    for comment in zen_stop_comment_cards(session, stop) {
+        prose_lines.push(Line::from(""));
+        let layout = comment.layout(
+            text_width,
+            AnnotationCardDensity::Compact,
+            false,
+            keymap.hint(Action::ZenArtifact),
         );
-    } else if explanation_lines.is_empty() {
-        explanation_lines.push(Line::from(Span::styled(
-            explanation,
-            Style::default().fg(theme.muted),
-        )));
+        prose_lines.extend(
+            (0..layout.len()).map(|line| layout.line(line, comment.channel, false, false, theme)),
+        );
     }
-    if !abbreviated_part && let Some(sibling) = sibling_line {
-        explanation_lines.push(Line::from(Span::styled(
-            sibling,
-            Style::default().fg(theme.muted),
-        )));
-    }
-    for (comment, channel) in comment_lines {
-        explanation_lines.push(Line::from(Span::styled(
-            comment,
-            Style::default().fg(theme.channel_color(channel)),
-        )));
-    }
-    prose_lines.extend(explanation_lines);
     let prose_height: usize = prose_lines
         .iter()
         .map(|line| wrapped_line_height(line, text_width))
@@ -3918,20 +4026,6 @@ fn draw_zen_stop(
         "─".repeat(text_width),
         Style::default().fg(theme.muted),
     )));
-    if !stop.artifacts.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "e exhibits: {}",
-                stop.artifacts
-                    .iter()
-                    .map(|artifact| artifact.title.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Style::default().fg(theme.muted),
-        )));
-    }
     if wandered {
         lines.push(Line::from(Span::styled(
             "off the stop — . refocuses",
@@ -3968,31 +4062,6 @@ fn zen_focus_header_lines(
         ]),
         Line::from(""),
     ]
-}
-
-fn sibling_parts_line(
-    zen: &ZenState,
-    stop: &super::chunks::WalkthroughRow,
-    max_width: usize,
-) -> Option<String> {
-    let parts = zen
-        .stops
-        .iter()
-        .filter_map(|candidate| match candidate {
-            ZenStop::Chunk(row) if row.source_id == stop.source_id && row.part != stop.part => {
-                Some(format!(
-                    "{}{}",
-                    chunk_row_location_width(row, 40),
-                    row.part_position
-                        .map(|(part, total)| format!(" ({part}/{total})"))
-                        .unwrap_or_default()
-                ))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    (!parts.is_empty())
-        .then(|| truncate_tail(&format!("other parts: {}", parts.join(" · ")), max_width))
 }
 
 /// The walkthrough progress strip: a dot per spotlight stop, grouped by
@@ -4510,38 +4579,13 @@ fn draw_draft_list_popup(
                 .map(|(index, draft)| {
                     let selected = index == list.selected;
                     let marker = if selected { "›" } else { " " };
-                    let style = if selected {
-                        Style::default()
-                            .fg(theme.channel_color(draft.channel))
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.channel_color(draft.channel))
-                    };
-                    let path = draft.path.as_deref().unwrap_or("<general>");
-                    let location = match draft.line {
-                        Some(line) => format!("{path}:{line}"),
-                        None => path.to_owned(),
-                    };
-                    let summary = draft
-                        .body
-                        .lines()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("(empty draft)")
-                        .trim()
-                        .to_owned();
-                    Line::from(vec![
-                        Span::styled(format!("{marker} "), style),
-                        Span::styled(
-                            format!("[{:^8}] ", draft.state.label()),
-                            Style::default().fg(theme.channel_color(draft.channel)),
-                        ),
-                        Span::styled(
-                            format!("[→ {}] ", draft.channel.audience_label()),
-                            Style::default().fg(theme.channel_color(draft.channel)),
-                        ),
-                        Span::styled(format!("{location} "), Style::default().fg(theme.detail)),
-                        Span::styled(summary, style),
-                    ])
+                    let card = AnnotationCard::from_comment(draft);
+                    let mut spans = vec![Span::styled(
+                        format!("{marker} "),
+                        Style::default().fg(theme.channel_color(draft.channel)),
+                    )];
+                    spans.extend(card.compact_line(selected, theme).spans);
+                    Line::from(spans)
                 }),
         );
         if visible_window.hidden_below > 0 {
@@ -4915,37 +4959,12 @@ fn draw_comment_list_popup(
                 .map(|(index, comment)| {
                     let selected = index == list.selected;
                     let marker = if selected { "›" } else { " " };
-                    let style = if selected {
-                        Style::default()
-                            .fg(theme.channel_color(comment.channel))
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.channel_color(comment.channel))
-                    };
-                    let location = comment_list_location(comment);
-                    let summary = comment
-                        .body
-                        .lines()
-                        .find(|line| !line.trim().is_empty())
-                        .unwrap_or("(empty comment)")
-                        .trim()
-                        .to_owned();
-                    let mut spans = vec![
-                        Span::styled(format!("{marker} "), style),
-                        Span::styled(
-                            format!("[→ {}] ", comment.channel.audience_label()),
-                            Style::default().fg(theme.channel_color(comment.channel)),
-                        ),
-                        Span::styled(
-                            format!("[{:^8}] ", comment.state.label()),
-                            comment_state_style(comment.state, theme),
-                        ),
-                    ];
-                    spans.extend(comment_badge_spans(comment, theme));
-                    spans.extend([
-                        Span::styled(format!("{location} "), Style::default().fg(theme.detail)),
-                        Span::styled(summary, style),
-                    ]);
+                    let card = AnnotationCard::from_comment(comment);
+                    let mut spans = vec![Span::styled(
+                        format!("{marker} "),
+                        Style::default().fg(theme.channel_color(comment.channel)),
+                    )];
+                    spans.extend(card.compact_line(selected, theme).spans);
                     Line::from(spans)
                 }),
         );
@@ -5587,7 +5606,11 @@ mod tests {
 
     use crate::{
         config::KeybindingsConfig,
-        state::{ActionIntent, Comment, CommentKind, CommentReply, CommentState},
+        state::{
+            ActionIntent, AttentionRegion, AuthorKind, Channel, Comment, CommentKind, CommentReply,
+            CommentState, Identity, Salience, SalienceSource, StepArtifact, StepArtifactKind,
+            Walkthrough, WalkthroughStep,
+        },
         syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
         tui::test_support::snapshot_session,
     };
@@ -5762,6 +5785,22 @@ mod tests {
     ) -> String {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         render_tui_text_with_state_and_keymap(session, mode, tui_state, &keymap, width, height)
+    }
+
+    fn render_tui_buffer_with_state(
+        session: &ReviewSession,
+        mode: &Mode,
+        tui_state: &TuiState,
+        width: u16,
+        height: u16,
+    ) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        terminal
+            .draw(|frame| draw(frame, session, mode, &keymap, tui_state, None, None))
+            .unwrap();
+        terminal.backend().buffer().clone()
     }
 
     fn render_tui_text_with_state_and_keymap(
@@ -6518,7 +6557,7 @@ diff --git a/README.md b/README.md
             "annotation_channel_gutter_rows",
             format!(
                 "gutter styles: {colors}\n{}",
-                render_tui_text(&session, &Mode::Normal, 100, 22)
+                render_tui_text(&session, &Mode::Normal, 100, 36)
             )
         );
     }
@@ -6527,7 +6566,7 @@ diff --git a/README.md b/README.md
     fn tui_snapshot_channel_colored_inline_card_style_runs() {
         let session = session_with_all_channel_comments();
         let mode = Mode::Normal;
-        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 100, 22);
+        let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 100, 36);
 
         insta::assert_snapshot!(
             "annotation_channel_inline_card_style_runs",
@@ -6568,12 +6607,55 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn tui_snapshot_all_channel_draft_rows() {
-        let session = session_with_all_channel_comments();
-        let mode = Mode::DraftList(DraftListState {
-            drafts: session.comments.clone(),
-            selected: 1,
-        });
+    fn tui_snapshot_production_agent_draft_rows() {
+        let mut session = session_with_all_channel_comments();
+        session.agent_identity = Identity {
+            kind: AuthorKind::Agent,
+            name: "configured-review-agent".into(),
+        };
+        let accepted = session
+            .add_agent_draft(
+                "a.txt".into(),
+                Some(1),
+                "accepted collaboration is filtered".into(),
+            )
+            .unwrap();
+        let accepted_id = session
+            .accept_agent_draft(&accepted, accepted.body.clone(), Channel::Collaboration)
+            .unwrap();
+        let accepted = session
+            .comments
+            .iter()
+            .find(|comment| comment.id == accepted_id)
+            .unwrap();
+        assert_eq!(accepted.author, session.agent_identity);
+        assert_eq!(accepted.channel, Channel::Collaboration);
+        assert_eq!(accepted.state, CommentState::Todo);
+        session
+            .add_agent_draft(
+                "a.txt".into(),
+                Some(1),
+                "agent onboarding line draft".into(),
+            )
+            .unwrap();
+        session
+            .add_agent_draft("a.txt".into(), None, "agent onboarding file draft".into())
+            .unwrap();
+        let mut drafts = DraftListState::new(&session);
+        assert_eq!(drafts.drafts.len(), 2);
+        assert!(drafts.drafts.iter().all(|draft| {
+            draft.author == session.agent_identity
+                && draft.channel == Channel::Onboarding
+                && draft.state == CommentState::Draft
+        }));
+        assert!(drafts.drafts.iter().all(|draft| {
+            !matches!(
+                draft.body.as_str(),
+                "onboard comment" | "delegate comment" | "collab comment" | "private comment"
+            )
+        }));
+        drafts.move_selection(1);
+        let mode = Mode::DraftList(drafts);
         let (buffer, _) = render_tui_buffer_and_cursor(&session, &mode, 110, 24);
 
         insta::assert_snapshot!(
@@ -6583,12 +6665,7 @@ diff --git a/README.md b/README.md
                 render_tui_text(&session, &mode, 110, 24),
                 style_runs_for_rows(
                     &buffer,
-                    &[
-                        "onboard comment",
-                        "delegate comment",
-                        "collab comment",
-                        "private comment",
-                    ],
+                    &["agent onboarding line draft", "agent onboarding file draft",],
                 )
             )
         );
@@ -6848,16 +6925,16 @@ diff --git a/README.md b/README.md
         session.comments[0].id = "pinned".to_owned();
         session.diff_scroll = 2;
 
-        let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
-        assert!(unscrolled.contains("▎ pinned"));
+        let unscrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        assert!(unscrolled.contains("note on new"));
 
         // Scrolling past the commented row must not shift or duplicate the
         // remaining lines: line 4 of the full render becomes the first
         // diff line after scrolling by 4.
         session.diff_scroll = 4;
-        let scrolled = render_tui_text(&session, &Mode::Normal, 100, 8);
-        assert!(scrolled.contains("▎ pinned"));
-        assert!(!scrolled.contains("a.txt  +1 -1"));
+        let scrolled = render_tui_text(&session, &Mode::Normal, 100, 16);
+        assert!(scrolled.contains("note on new"));
+        assert_eq!(scrolled.matches("note on new").count(), 1);
     }
 
     #[test]
@@ -7218,6 +7295,7 @@ diff --git a/Cargo.toml b/Cargo.toml
     fn chunk_row_location_names_the_anchored_change() {
         let mut row = crate::tui::chunks::WalkthroughRow {
             source_id: "c1".to_owned(),
+            author: None,
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
@@ -7252,6 +7330,7 @@ diff --git a/Cargo.toml b/Cargo.toml
     fn glance_rows_group_multi_part_chunks() {
         let row = |path: &str, pos| crate::tui::chunks::WalkthroughRow {
             source_id: "c1".to_owned(),
+            author: None,
             title: "shared".to_owned(),
             importance: crate::agent::ChunkImportance::Glance,
             change_id: None,
@@ -7286,6 +7365,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         let rows = session.diff_rows_for_selected_file().to_vec();
         let stop = crate::tui::chunks::WalkthroughRow {
             source_id: "c1".to_owned(),
+            author: None,
             title: "stop".to_owned(),
             importance: crate::agent::ChunkImportance::Spotlight,
             change_id: None,
@@ -7448,34 +7528,14 @@ diff --git a/Cargo.toml b/Cargo.toml
 +new
 "#,
         );
-        let session_id = session
-            .add_agent_draft("a.txt".into(), Some(1), "seed".into())
-            .unwrap()
-            .session_id;
-        session.comments = vec![
-            crate::state::Comment {
-                id: "draft-1".to_owned(),
-                session_id: session_id.clone(),
-                path: Some("a.txt".to_owned()),
-                line: Some(1),
-                body: "consider a clearer name".to_owned(),
-                state: crate::state::CommentState::Draft,
-                author: crate::state::Identity::agent(),
-                channel: crate::state::Channel::Onboarding,
-                ..Default::default()
-            },
-            crate::state::Comment {
-                id: "draft-2".to_owned(),
-                session_id,
-                path: Some("a.txt".to_owned()),
-                line: None,
-                body: "file-level: needs tests".to_owned(),
-                state: crate::state::CommentState::Draft,
-                author: crate::state::Identity::agent(),
-                channel: crate::state::Channel::Onboarding,
-                ..Default::default()
-            },
-        ];
+        session
+            .add_agent_draft("a.txt".into(), Some(1), "consider a clearer name".into())
+            .unwrap();
+        session.comments.last_mut().unwrap().id = "draft-1".into();
+        session
+            .add_agent_draft("a.txt".into(), None, "file-level: needs tests".into())
+            .unwrap();
+        session.comments.last_mut().unwrap().id = "draft-2".into();
         let mode = Mode::DraftList(DraftListState::new(&session));
 
         insta::assert_snapshot!(render_tui_text(&session, &mode, 100, 20));
@@ -8352,6 +8412,7 @@ diff --git a/Cargo.toml b/Cargo.toml
             0,
             5,
             0,
+            None,
             &AppTheme::default(),
         );
         assert_eq!(window.len(), 5);
@@ -8411,6 +8472,14 @@ diff --git a/Cargo.toml b/Cargo.toml
         assert!(!Rc::ptr_eq(&previous, &kind));
         previous = kind;
 
+        session.comments[0].replies.push(CommentReply {
+            body: "visible reply".to_owned(),
+            ..Default::default()
+        });
+        let reply = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(!Rc::ptr_eq(&previous, &reply));
+        previous = reply;
+
         let new_anchor = rows[new].anchor.clone().unwrap();
         session.comments[0].path = Some(new_anchor.path().to_owned());
         session.comments[0].line = new_anchor.line();
@@ -8428,7 +8497,7 @@ diff --git a/Cargo.toml b/Cargo.toml
         session.files[0].changed_hunks.insert(0);
         let changed_hunk = cached_diff_layout(&session, rows, inner, false, &tui_state);
         assert!(!Rc::ptr_eq(&previous, &changed_hunk));
-        assert_eq!(tui_state.diff_viewport.cache_builds(), 9);
+        assert_eq!(tui_state.diff_viewport.cache_builds(), 10);
     }
 
     #[test]
@@ -8467,8 +8536,8 @@ diff --git a/Cargo.toml b/Cargo.toml
         let rendered_comment = first
             .lines
             .iter()
-            .find_map(|line| match &line.source {
-                DiffVisualSource::Comment { .. } => Some(spans_text(
+            .filter_map(|line| match &line.source {
+                DiffVisualSource::Annotation { .. } => Some(spans_text(
                     &materialize_diff_source(
                         &session,
                         &rows,
@@ -8480,7 +8549,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                 )),
                 _ => None,
             })
-            .unwrap();
+            .collect::<String>();
         assert!(rendered_comment.contains("selected summary"));
         assert!(!rendered_comment.contains("unrelated summary"));
 
@@ -8507,8 +8576,6 @@ diff --git a/Cargo.toml b/Cargo.toml
         });
         session.comments[2].body = "mutated general summary".to_owned();
         session.comments[3].body = "mutated file-only summary".to_owned();
-        session.comments[1].body = "selected summary\nchanged detail only".to_owned();
-        session.comments[1].replies.push(CommentReply::default());
         session.comments[1].updated_at = Some(chrono::Utc::now());
         session.move_diff_cursor(1);
         session.toggle_focus();
@@ -8517,6 +8584,37 @@ diff --git a/Cargo.toml b/Cargo.toml
         let detail_and_style = cached_diff_layout(&session, rows, inner, false, &tui_state);
         assert!(Rc::ptr_eq(&first, &detail_and_style));
         assert_eq!(tui_state.diff_viewport.cache_builds(), 1);
+    }
+
+    #[test]
+    fn cache_hit_uses_signature_without_reprojecting_payloads() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.toggle_focus();
+        session.add_comment("headline\nlarge body that should not clone again".repeat(100));
+        session.comments[0].replies.push(CommentReply {
+            body: "reply payload".repeat(100),
+            ..Default::default()
+        });
+        let rows = session.diff_rows_for_selected_file();
+        let state = TuiState::default();
+        super::super::annotation_card::reset_projection_count();
+        let first = cached_diff_layout(
+            &session,
+            rows.clone(),
+            Rect::new(0, 0, 72, 20),
+            false,
+            &state,
+        );
+        let projections = super::super::annotation_card::projection_count();
+        assert!(projections > 0);
+        let second = cached_diff_layout(&session, rows, Rect::new(0, 0, 72, 20), false, &state);
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(
+            super::super::annotation_card::projection_count(),
+            projections
+        );
     }
 
     #[test]
@@ -8594,9 +8692,52 @@ diff --git a/Cargo.toml b/Cargo.toml
         });
 
         let input = selected_file_annotations(&session, &rows).input;
-        let owners: Vec<_> = input.comments.iter().map(|comment| comment.owner).collect();
-        assert!(owners.len() >= 2);
-        assert!(owners.windows(2).all(|pair| pair[0] < pair[1]));
+        let owners: Vec<_> = input.cards.iter().map(|card| card.owner).collect();
+        assert_eq!(owners, [new]);
+    }
+
+    #[test]
+    fn right_side_range_owner_is_shared_by_navigation_unified_and_split() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1,2 @@\n-old\n+new one\n+new two\n",
+        );
+        session.toggle_focus();
+        let rows = session.diff_rows_for_selected_file();
+        let first = rows.iter().position(|row| row.text == "new one").unwrap();
+        let second = rows.iter().position(|row| row.text == "new two").unwrap();
+        session.set_diff_range_selection(first, second);
+        session.add_comment("right-side range\nsecond card line in side-by-side view".into());
+        session.comments[0].id = "range".into();
+        assert_eq!(
+            session.selected_comment_card_owner(&session.comments[0]),
+            Some(second)
+        );
+
+        session.select_comment_by_id("range");
+        assert_eq!(session.diff_cursor, second);
+        let rows = session.diff_rows_for_selected_file();
+        for split in [false, true] {
+            let layout = measured_diff_layout(
+                &session,
+                &rows,
+                Rect::new(0, 0, if split { 120 } else { 72 }, 30),
+                split,
+            );
+            let cards = layout
+                .lines
+                .iter()
+                .filter(|line| line.is_comment)
+                .collect::<Vec<_>>();
+            assert!(!cards.is_empty());
+            assert!(cards.iter().all(|line| line.block_anchor == second));
+            assert!(cards.iter().all(|line| line.hit.row_at(0) == Some(second)));
+        }
+        session.file_pane_visible = false;
+        session.toggle_diff_view();
+        insta::assert_snapshot!(
+            "inline_annotation_card_side_by_side_range",
+            render_tui_text(&session, &Mode::Normal, 130, 24)
+        );
     }
 
     #[test]
@@ -8652,7 +8793,8 @@ diff --git a/Cargo.toml b/Cargo.toml
             .lines
             .iter()
             .filter(|line| {
-                line.hit.contains(owner) && matches!(line.source, DiffVisualSource::Comment { .. })
+                line.hit.contains(owner)
+                    && matches!(line.source, DiffVisualSource::Annotation { .. })
             })
             .collect();
         assert!(!comment_lines.is_empty());
@@ -8748,10 +8890,10 @@ diff --git a/Cargo.toml b/Cargo.toml
     }
 
     #[test]
-    fn comment_summary_text_matches_rendered_line() {
-        // Measurement consumes CommentSummary::text while drawing renders
-        // CommentSummary::line with the active theme: the two must stay
-        // textually identical or comment wrap geometry drifts.
+    fn annotation_card_text_matches_rendered_lines() {
+        // Measurement consumes the card's plain lines while drawing renders
+        // the same semantic segments with a theme. They must remain textually
+        // identical or viewport geometry and hit ownership drift.
         let comment = Comment {
             id: "abcdef1234567890".to_owned(),
             body: "\n  headline text  \nrest of the body".to_owned(),
@@ -8761,22 +8903,18 @@ diff --git a/Cargo.toml b/Cargo.toml
             channel: Channel::Delegation,
             ..Default::default()
         };
-        let summary = CommentSummary::from_comment(&comment);
-        assert_eq!(
-            summary.text(),
-            spans_text(&summary.line(&AppTheme::default()).spans)
-        );
-
-        let bare = Comment {
-            id: "short".to_owned(),
-            body: String::new(),
-            ..Default::default()
-        };
-        let summary = CommentSummary::from_comment(&bare);
-        assert_eq!(
-            summary.text(),
-            spans_text(&summary.line(&AppTheme::default()).spans)
-        );
+        let card = AnnotationCard::from_comment(&comment);
+        let layout = card.layout(54, AnnotationCardDensity::Expanded, false, "E");
+        for index in 0..layout.len() {
+            assert_eq!(
+                layout.plain_line(index),
+                spans_text(
+                    &layout
+                        .line(index, card.channel, false, false, &AppTheme::default())
+                        .spans
+                )
+            );
+        }
     }
 
     #[test]
@@ -8822,8 +8960,388 @@ diff --git a/Cargo.toml b/Cargo.toml
         let rendered = render_tui_text(&session, &Mode::Normal, 100, 16);
 
         assert!(rendered.contains("2   1 - old"));
-        assert!(rendered.contains("▎ c1 [draft] first note"));
-        assert!(rendered.contains("▎ c2 [draft] second note"));
+        assert!(rendered.contains("human:local  [→ note]  [draft]"));
+        assert!(rendered.contains("first note"));
+        assert!(rendered.contains("second note"));
+    }
+
+    #[test]
+    fn colocated_card_hits_keep_exact_comment_identity() {
+        let mut session = snapshot_session(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.toggle_focus();
+        session.add_comment("first".into());
+        session.add_comment("second".into());
+        session.comments[0].id = "first".into();
+        session.comments[1].id = "second".into();
+        let rows = session.diff_rows_for_selected_file();
+        let layout = measured_diff_layout(&session, &rows, Rect::new(0, 0, 72, 30), false);
+        let hits = layout
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(line, visual)| match &visual.hit {
+                DiffVisualHit::Annotation { source, .. } => Some((line, source.clone())),
+                _ => None,
+            })
+            .fold(
+                Vec::<(usize, AnnotationSource)>::new(),
+                |mut found, value| {
+                    if !found.iter().any(|(_, source)| source == &value.1) {
+                        found.push(value);
+                    }
+                    found
+                },
+            );
+        assert_eq!(hits.len(), 2);
+        for (line, source) in hits {
+            assert_eq!(
+                layout.hit_at(line, 20),
+                Some(DiffPointHit::Annotation {
+                    owner: session.diff_cursor,
+                    source,
+                })
+            );
+        }
+        session.file_pane_visible = false;
+        let state = TuiState::default();
+        state.diff_viewport.select_annotation(
+            &session,
+            AnnotationSource::Comment {
+                id: "second".into(),
+            },
+        );
+        let buffer = render_tui_buffer_with_state(&session, &Mode::Normal, &state, 84, 24);
+        insta::assert_snapshot!(
+            "inline_annotation_colocated_exact_selection",
+            format!(
+                "{}\nstyle runs:\n{}",
+                render_tui_text_with_state(&session, &Mode::Normal, &state, 84, 24),
+                style_runs_for_rows(&buffer, &["first", "second"])
+            )
+        );
+    }
+
+    #[test]
+    fn tui_snapshot_selected_and_range_inline_annotation_cards() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+        );
+        session.file_pane_visible = false;
+        session.toggle_focus();
+        let rows = session.diff_rows_for_selected_file();
+        let first = rows.iter().position(|row| row.text == "new one").unwrap();
+        let second = rows.iter().position(|row| row.text == "new two").unwrap();
+        session.select_diff_row(first);
+        session
+            .add_comment("Selected agent draft\nThe detailed explanation remains inline.".into());
+        session.comments[0].author = Identity {
+            kind: AuthorKind::Agent,
+            name: "review-agent".into(),
+        };
+        session.comments[0].channel = Channel::Onboarding;
+        session.set_diff_range_selection(first, second);
+        session.add_comment("Range todo\nOwn the card at the range endpoint.".into());
+        session.comments[1].state = CommentState::Todo;
+        session.comments[1].channel = Channel::Delegation;
+        session.comments[1].kind = Some(CommentKind::Issue);
+        session.comments[1].action = Some(ActionIntent::Fix);
+        session.set_diff_range_selection(first, second);
+
+        insta::assert_snapshot!(
+            "inline_annotation_cards_selected_and_range",
+            render_tui_text(&session, &Mode::Normal, 88, 28)
+        );
+    }
+
+    #[test]
+    fn spotlight_card_artifacts_expand_ephemerally_and_keep_hit_ownership() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new parser entry\n",
+        );
+        session.file_pane_visible = false;
+        session.toggle_focus();
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let step = WalkthroughStep {
+            id: "spotlight".into(),
+            author: Some(Identity::agent()),
+            target: target.clone(),
+            title: Some("Start at the parser boundary".into()),
+            why: Some("It controls every downstream error.".into()),
+            body: Some("The parser validates before committing state.".into()),
+            artifacts: vec![
+                StepArtifact {
+                    title: "usage".into(),
+                    kind: StepArtifactKind::Example,
+                    body: "parse(input)?.commit()".into(),
+                },
+                StepArtifact {
+                    title: "flow".into(),
+                    kind: StepArtifactKind::Diagram,
+                    body: "input -> validate -> commit".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let durable = super::super::ensure_tui_review_session(&mut session);
+        durable.walkthroughs.push(Walkthrough {
+            id: "walkthrough".into(),
+            steps: vec![step],
+            ..Default::default()
+        });
+        durable.attention_regions.push(AttentionRegion {
+            target,
+            salience: Salience::Spotlight,
+            rationale: Some("effective rationale".into()),
+            source: SalienceSource::Agent,
+        });
+        let owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.text == "new parser entry")
+            .unwrap();
+        session.select_diff_row(owner);
+        let tui_state = TuiState::default();
+        let rows = session.diff_rows_for_selected_file();
+        let inner = Rect::new(0, 0, 72, 30);
+        let collapsed = cached_diff_layout(&session, rows.clone(), inner, false, &tui_state);
+        assert!(
+            collapsed
+                .lines
+                .iter()
+                .filter(|line| line.is_comment)
+                .all(|line| {
+                    line.hit.row_at(0) == Some(owner) && line.hit.row_at(71) == Some(owner)
+                })
+        );
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+        let expanded = cached_diff_layout(&session, rows, inner, false, &tui_state);
+        assert!(expanded.line_count() > collapsed.line_count());
+        assert!(
+            expanded
+                .lines
+                .iter()
+                .filter(|line| line.is_comment)
+                .all(|line| {
+                    line.hit.row_at(0) == Some(owner) && line.hit.row_at(71) == Some(owner)
+                })
+        );
+
+        insta::assert_snapshot!(
+            "inline_spotlight_card_expanded_artifacts",
+            render_tui_text_with_state(&session, &Mode::Normal, &tui_state, 76, 30)
+        );
+    }
+
+    #[test]
+    fn colocated_artifact_cards_expand_independently_and_use_live_hint() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        session.file_pane_visible = false;
+        session.toggle_focus();
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let steps = [
+            ("first", "first artifact", "FIRST BODY"),
+            ("second", "second artifact", "SECOND BODY"),
+        ]
+        .into_iter()
+        .map(|(id, artifact_title, artifact_body)| WalkthroughStep {
+            id: id.into(),
+            author: Some(Identity::agent()),
+            target: target.clone(),
+            title: Some(format!("{id} narration")),
+            artifacts: vec![StepArtifact {
+                title: artifact_title.into(),
+                kind: StepArtifactKind::Example,
+                body: artifact_body.into(),
+            }],
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+        let durable = super::super::ensure_tui_review_session(&mut session);
+        durable.walkthroughs.push(Walkthrough {
+            id: "walk".into(),
+            steps,
+            ..Default::default()
+        });
+        durable.attention_regions.push(AttentionRegion {
+            target,
+            salience: Salience::Spotlight,
+            rationale: None,
+            source: SalienceSource::Agent,
+        });
+        let owner = session
+            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .unwrap();
+        session.select_diff_row(owner);
+        let state = TuiState::default();
+        let second = AnnotationSource::Walkthrough {
+            step_id: "second".into(),
+            part: 0,
+        };
+        state.diff_viewport.select_annotation(&session, second);
+        assert_eq!(
+            state.diff_viewport.toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+
+        let config = KeybindingsConfig {
+            toggle_annotation_artifacts: vec!["alt-e".into()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+        let second_only =
+            render_tui_text_with_state_and_keymap(&session, &Mode::Normal, &state, &keymap, 90, 34);
+        assert!(second_only.contains("SECOND BODY"));
+        assert!(!second_only.contains("FIRST BODY"));
+        assert!(second_only.contains("alt-e collapse artifacts"));
+
+        let first = AnnotationSource::Walkthrough {
+            step_id: "first".into(),
+            part: 0,
+        };
+        state.diff_viewport.select_annotation(&session, first);
+        assert_eq!(
+            state.diff_viewport.toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+        let both =
+            render_tui_text_with_state_and_keymap(&session, &Mode::Normal, &state, &keymap, 90, 34);
+        assert!(both.contains("FIRST BODY"));
+        assert!(both.contains("SECOND BODY"));
+    }
+
+    #[test]
+    fn expansion_is_pruned_across_target_reset_even_when_card_id_is_reused() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let durable = super::super::ensure_tui_review_session(&mut session);
+        durable.walkthroughs.push(Walkthrough {
+            id: "walk".into(),
+            steps: vec![WalkthroughStep {
+                id: "reused".into(),
+                author: Some(Identity::agent()),
+                target: target.clone(),
+                artifacts: vec![StepArtifact {
+                    title: "artifact".into(),
+                    kind: StepArtifactKind::Diagram,
+                    body: "EXPANDED PAYLOAD".into(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        durable.attention_regions.push(AttentionRegion {
+            target,
+            salience: Salience::Spotlight,
+            rationale: None,
+            source: SalienceSource::Agent,
+        });
+        let owner = session
+            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .unwrap();
+        session.select_diff_row(owner);
+        let state = TuiState::default();
+        assert_eq!(
+            state.diff_viewport.toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+        assert!(
+            render_tui_text_with_state(&session, &Mode::Normal, &state, 80, 24)
+                .contains("EXPANDED PAYLOAD")
+        );
+
+        session.target.rev = "other-target".into();
+        state.diff_viewport.reset(&session);
+        session.target.rev = "@".into();
+        let collapsed = render_tui_text_with_state(&session, &Mode::Normal, &state, 80, 24);
+        assert!(!collapsed.contains("EXPANDED PAYLOAD"));
+        assert!(collapsed.contains("expand 1 artifact"));
+
+        assert_eq!(
+            state.diff_viewport.toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+        let inner = Rect::new(0, 0, 78, 20);
+        let refresh = state.diff_viewport.refresh_snapshot(&session, inner);
+        state.diff_viewport.refreshed(refresh, &mut session, inner);
+        assert!(
+            !render_tui_text_with_state(&session, &Mode::Normal, &state, 80, 24)
+                .contains("EXPANDED PAYLOAD")
+        );
+    }
+
+    #[test]
+    fn fingerprint_drift_suppresses_stale_walkthrough_narration() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        let durable = super::super::ensure_tui_review_session(&mut session);
+        durable.walkthroughs.push(Walkthrough {
+            id: "walk".into(),
+            steps: vec![WalkthroughStep {
+                id: "step".into(),
+                author: Some(Identity::agent()),
+                target: target.clone(),
+                title: Some("Current narration".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        durable.attention_regions.push(AttentionRegion {
+            target,
+            salience: Salience::Spotlight,
+            rationale: Some("stale rationale must disappear".into()),
+            source: SalienceSource::Agent,
+        });
+        assert_eq!(
+            selected_file_annotation_input(&session, &BTreeSet::new(), "E")
+                .cards
+                .len(),
+            1
+        );
+
+        session.files[0].diff.fingerprint = "drifted".into();
+        session.files[0].fingerprint = "drifted".into();
+        assert!(
+            selected_file_annotation_input(&session, &BTreeSet::new(), "E")
+                .cards
+                .is_empty()
+        );
+        assert!(
+            !render_tui_text(&session, &Mode::Normal, 80, 20)
+                .contains("stale rationale must disappear")
+        );
     }
 
     #[test]

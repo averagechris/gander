@@ -294,6 +294,9 @@ why/body/artifacts, an optional change id, and an optional stable target. `--lin
 and `--end-line` are 1-indexed diff line anchors: new side (post-image)
 preferred, with old-side fallback for removed-only lines in the current jj diff.
 Chapters introduce stack changes and use `summary` as their narrative.
+CLI-created/replaced steps are stamped with the configured human identity.
+MCP-created steps are stamped with the configured agent identity; legacy steps
+without `author` remain neutral and are never inferred to be agent-authored.
 Walkthrough JSON targets accept the optional existing `anchor` object; its
 path/line/range must agree with the target coordinates. A supplied valid anchor
 is preserved rather than silently refreshed.

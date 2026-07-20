@@ -157,6 +157,15 @@ pub fn target_for_diff(
         .iter()
         .find(|file| file.path == path)
         .ok_or_else(|| eyre!("`{path}` is not a file in the current diff"))?;
+    target_for_file_diff(file, path, line, end_line)
+}
+
+fn target_for_file_diff(
+    file: &FileDiff,
+    path: &str,
+    line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<ReviewTarget> {
     let mut target = ReviewTarget {
         file: Some(path.to_owned()),
         line,
@@ -176,6 +185,28 @@ pub fn target_for_diff(
     Ok(target)
 }
 
+/// Whether a durable target still names the same fingerprint-valid current
+/// diff region. Anchorless legacy walkthrough steps are intentionally not
+/// guessed current.
+pub fn target_is_current(target: &ReviewTarget, files: &[&FileDiff]) -> bool {
+    let Some(path) = target.file.as_deref() else {
+        return false;
+    };
+    let Some(anchor) = target.anchor.as_ref() else {
+        return false;
+    };
+    let Some(file) = files.iter().copied().find(|file| file.path == path) else {
+        return false;
+    };
+    let Ok(current) = target_for_file_diff(file, path, target.line, target.end_line) else {
+        return false;
+    };
+    current.anchor.as_ref().is_some_and(|current_anchor| {
+        anchor.path() == current_anchor.path()
+            && anchor_diff_fingerprint(anchor) == anchor_diff_fingerprint(current_anchor)
+    })
+}
+
 fn anchor_diff_fingerprint(anchor: &CommentAnchor) -> &str {
     match anchor {
         CommentAnchor::File {
@@ -191,6 +222,11 @@ fn anchor_diff_fingerprint(anchor: &CommentAnchor) -> &str {
 }
 
 pub fn region_is_stale(region: &AttentionRegion, files: &[FileDiff]) -> bool {
+    let refs = files.iter().collect::<Vec<_>>();
+    region_is_stale_refs(region, &refs)
+}
+
+fn region_is_stale_refs(region: &AttentionRegion, files: &[&FileDiff]) -> bool {
     if validate_persisted_region(region).is_err() {
         return true;
     }
@@ -200,12 +236,12 @@ pub fn region_is_stale(region: &AttentionRegion, files: &[FileDiff]) -> bool {
     let Some(anchor) = region.target.anchor.as_ref() else {
         return true;
     };
-    let Some(file) = files.iter().find(|file| file.path == path) else {
+    let Some(file) = files.iter().copied().find(|file| file.path == path) else {
         return true;
     };
     anchor.path() != path
         || anchor_diff_fingerprint(anchor) != file.fingerprint
-        || target_for_diff(files, path, region.target.line, region.target.end_line).is_err()
+        || target_for_file_diff(file, path, region.target.line, region.target.end_line).is_err()
 }
 
 fn source_rank(source: SalienceSource) -> u8 {
@@ -265,10 +301,21 @@ pub fn resolve_effective_attention(
     query: &ReviewTarget,
     files: &[FileDiff],
 ) -> EffectiveAttentionRegion {
+    let refs = files.iter().collect::<Vec<_>>();
+    resolve_effective_attention_refs(session, query, &refs)
+}
+
+/// Borrowed-file resolver for render paths; avoids cloning full diffs merely
+/// to evaluate current attention.
+pub fn resolve_effective_attention_refs(
+    session: &ReviewSession,
+    query: &ReviewTarget,
+    files: &[&FileDiff],
+) -> EffectiveAttentionRegion {
     let winner = session
         .attention_regions
         .iter()
-        .filter(|region| !region_is_stale(region, files))
+        .filter(|region| !region_is_stale_refs(region, files))
         .filter(|region| covers(&region.target, query))
         .max_by(|left, right| compare_candidates(left, right));
     EffectiveAttentionRegion {
@@ -512,6 +559,7 @@ fn existing_human_rationale(session: &ReviewSession, target: &ReviewTarget) -> O
 
 pub fn sync_agent_attention(session: &mut ReviewSession, files: &[FileDiff]) -> Result<usize> {
     let before = session.attention_regions.clone();
+    let file_refs = files.iter().collect::<Vec<_>>();
     let mut source_keys = BTreeSet::new();
     let mut desired = Vec::<AttentionRegion>::new();
     for step in session
@@ -581,7 +629,7 @@ pub fn sync_agent_attention(session: &mut ReviewSession, files: &[FileDiff]) -> 
         }) {
             // Fingerprint drift stays stale until a future re-anchor operation;
             // changing walkthrough prose/importance must not acknowledge drift.
-            if existing.target.anchor.is_some() {
+            if existing.target.anchor.is_some() && !target_is_current(&region.target, &file_refs) {
                 region.target = existing.target.clone();
             }
             if validate_persisted_region(&region).is_ok() {
@@ -1275,6 +1323,12 @@ mod tests {
         .files;
         sync_agent_attention(&mut session, &only_line_one).unwrap();
         assert_eq!(session.attention_regions, [assigned]);
+
+        let reanchored = target_for_diff(&files, "src/lib.rs", Some(2), None).unwrap();
+        session.walkthroughs[0].steps[0].target = reanchored.clone();
+        sync_agent_attention(&mut session, &files).unwrap();
+        assert_eq!(session.attention_regions[0].target, reanchored);
+        assert!(!region_is_stale(&session.attention_regions[0], &files));
 
         session.walkthroughs[0].steps.clear();
         sync_agent_attention(&mut session, &only_line_one).unwrap();

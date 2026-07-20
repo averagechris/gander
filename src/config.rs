@@ -367,6 +367,7 @@ pub struct KeybindingsConfig {
     pub toggle_line_background: Vec<String>,
     pub toggle_gutter_bar: Vec<String>,
     pub toggle_diff_wrap: Vec<String>,
+    pub toggle_annotation_artifacts: Vec<String>,
     pub toggle_file_pane: Vec<String>,
     pub toggle_diff_view: Vec<String>,
     pub widen_file_pane: Vec<String>,
@@ -628,6 +629,7 @@ struct KeybindingsConfigPatch {
     toggle_line_background: Option<Vec<String>>,
     toggle_gutter_bar: Option<Vec<String>>,
     toggle_diff_wrap: Option<Vec<String>>,
+    toggle_annotation_artifacts: Option<Vec<String>>,
     toggle_file_pane: Option<Vec<String>>,
     toggle_diff_view: Option<Vec<String>>,
     widen_file_pane: Option<Vec<String>>,
@@ -773,6 +775,7 @@ impl KeybindingsConfig {
             toggle_line_background: keys([]),
             toggle_gutter_bar: keys([]),
             toggle_diff_wrap: keys([]),
+            toggle_annotation_artifacts: keys(["E"]),
             toggle_file_pane: keys(["w"]),
             toggle_diff_view: keys(["|"]),
             widen_file_pane: keys(["alt-right"]),
@@ -1107,6 +1110,10 @@ impl KeybindingsConfig {
         );
         apply_optional(&mut self.toggle_gutter_bar, patch.toggle_gutter_bar);
         apply_optional(&mut self.toggle_diff_wrap, patch.toggle_diff_wrap);
+        apply_optional(
+            &mut self.toggle_annotation_artifacts,
+            patch.toggle_annotation_artifacts,
+        );
         apply_optional(&mut self.toggle_file_pane, patch.toggle_file_pane);
         apply_optional(&mut self.toggle_diff_view, patch.toggle_diff_view);
         apply_optional(&mut self.widen_file_pane, patch.widen_file_pane);
@@ -1395,6 +1402,10 @@ prompt = "review {repo} at {base}..{rev}"
         assert_eq!(Config::default().keybindings.expand_context_all, ["="]);
         assert_eq!(Config::default().keybindings.collapse_context, ["-"]);
         assert!(Config::default().keybindings.toggle_diff_wrap.is_empty());
+        assert_eq!(
+            Config::default().keybindings.toggle_annotation_artifacts,
+            ["E"]
+        );
 
         let repo = tempfile::tempdir().unwrap();
         let config_path = repo.path().join("config.toml");

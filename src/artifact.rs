@@ -11,8 +11,8 @@ use crate::{
     ids::shortest_unique_prefix,
     state::{
         ActionIntent, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
-        CommentState, ExternalTicket, ReviewState, ReviewTarget, StepArtifact, StepImportance,
-        StepKind,
+        CommentState, ExternalTicket, Identity, ReviewState, ReviewTarget, StepArtifact,
+        StepImportance, StepKind,
     },
 };
 
@@ -41,7 +41,7 @@ pub struct TeamProjection<'a> {
 }
 
 const EXCERPT_CONTEXT_LINES: usize = 3;
-pub const ARTIFACT_SCHEMA_VERSION: u8 = 11;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 12;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -149,6 +149,8 @@ pub struct WalkthroughArtifact<'a> {
 #[derive(Debug, Serialize)]
 pub struct WalkthroughStepArtifact<'a> {
     pub id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<&'a Identity>,
     pub kind: StepKind,
     pub importance: StepImportance,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,6 +370,7 @@ impl<'a> ReviewArtifact<'a> {
                             .iter()
                             .map(|step| WalkthroughStepArtifact {
                                 id: &step.id,
+                                author: step.author.as_ref(),
                                 kind: step.kind,
                                 importance: step.importance,
                                 change_id: step.change_id.as_deref(),
@@ -1713,6 +1716,7 @@ mod tests {
                     id: "walk".into(),
                     steps: vec![crate::state::WalkthroughStep {
                         id: "step".into(),
+                        author: Some(Identity::agent()),
                         title: Some("Read parser".into()),
                         target: ReviewTarget {
                             file: Some("a.txt".into()),

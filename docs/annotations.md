@@ -86,6 +86,17 @@ prompt, no separate mode.
 mark, and comment-list rows use the same four theme colors: onboarding =
 accent, delegation = warning, collaboration = info, note = muted.
 
+Inline presentation uses one annotation-card view model for durable comments
+(including agent-authored drafts) and walkthrough narration. Cards project the
+existing durable types; they do not add another persisted annotation schema.
+Walkthrough steps carry an optional author identity: new TUI/CLI steps stamp the
+configured human, MCP/agent-authored steps stamp the configured agent, and
+legacy missing authors stay visibly neutral (`walkthrough`) rather than being
+guessed as agent-authored.
+Walkthrough artifacts expand in place with `E` while the cursor owns the card.
+That expansion is ephemeral TUI state, so it does not require a CLI command or
+change exported review state.
+
 ## Unification effects
 
 - **Agent drafts stop being a separate type.** A draft is a comment with

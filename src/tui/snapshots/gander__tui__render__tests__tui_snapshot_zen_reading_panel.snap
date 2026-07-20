@@ -9,9 +9,9 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
 │    2 -     old();                                                                                │
 │    2 +     new();                                                                                │
 │    3 +     extra();                                                                              │
-│    4   }                                                                                         │
-│                                                                                                  │
-│                                                                                                  │
+│╭────────────────────────────────────────────────────────────────────────────────────────────────╮│
+││agent:agent  [→ reviewer]  [walkthrough]  [spotlight]                                           ││
+││core change                                                                                     ││
 ┌zen spotlight 1/1 · 1 glance──────────────────────────────────────────────────────────────────────┐
 │core change  src/app.rs:2-3                                                                       │
 │start here                                                                                        │

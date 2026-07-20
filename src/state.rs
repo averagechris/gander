@@ -14,7 +14,7 @@ use crate::{
 
 /// Current on-disk review-state schema. Version 6 adds durable attention
 /// regions and optional anchor evidence on review targets.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 6;
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 7;
 
 /// Deterministic identity used only when reading pre-v4 local review state.
 /// Configured identities are stamped by adapters when creating new comments;
@@ -549,6 +549,10 @@ pub struct Walkthrough {
 #[serde(default)]
 pub struct WalkthroughStep {
     pub id: String,
+    /// Author of this narration. Legacy steps deliberately remain neutral;
+    /// callers stamp new steps at their human/agent creation boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Identity>,
     pub target: ReviewTarget,
     #[serde(default)]
     pub importance: StepImportance,
@@ -1267,6 +1271,39 @@ mod tests {
 
         assert!(state.sessions[0].attention_regions.is_empty());
         assert!(state.sessions[0].target.anchor.is_none());
+    }
+
+    #[test]
+    fn legacy_walkthrough_step_author_remains_neutral_and_new_author_round_trips() {
+        let legacy: WalkthroughStep = serde_json::from_value(serde_json::json!({
+            "id": "legacy",
+            "title": "Old narration"
+        }))
+        .unwrap();
+        assert_eq!(legacy.author, None);
+        assert!(
+            serde_json::to_value(&legacy)
+                .unwrap()
+                .get("author")
+                .is_none()
+        );
+
+        let attributed = WalkthroughStep {
+            author: Some(Identity {
+                kind: AuthorKind::Agent,
+                name: "review-agent".into(),
+            }),
+            ..legacy
+        };
+        let value = serde_json::to_value(&attributed).unwrap();
+        assert_eq!(value["author"]["kind"], "agent");
+        assert_eq!(value["author"]["name"], "review-agent");
+        assert_eq!(
+            serde_json::from_value::<WalkthroughStep>(value)
+                .unwrap()
+                .author,
+            attributed.author
+        );
     }
 
     #[test]

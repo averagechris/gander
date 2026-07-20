@@ -1125,10 +1125,12 @@ pub fn add_chapter(
     change_id: String,
     summary: String,
     title: Option<String>,
+    author: Identity,
 ) -> WalkthroughStep {
     add_walkthrough_step(
         session,
         WalkthroughStep {
+            author: Some(author),
             change_id: Some(change_id.clone()),
             title: title.or(Some(change_id)),
             body: Some(summary),

@@ -1,0 +1,34 @@
+---
+source: src/tui/render.rs
+expression: "render_tui_text_with_state(&session, &Mode::Normal, &tui_state, 76, 30)"
+---
+┌diff · a.rs───────────────────────────────────────────────────────────────┐
+│a.rs  +1 -1                                                               │
+│@@ -1 +1 @@                                                               │
+│    1 - old                                                               │
+│    1 + new parser entry                                                  │
+│╭────────────────────────────────────────────────────────────────────────╮│
+││agent:agent  [→ reviewer]  [walkthrough]  [spotlight]                   ││
+││Start at the parser boundary                                            ││
+││@ a.rs:1                                                                ││
+││why: It controls every downstream error.                                ││
+││rationale: effective rationale                                          ││
+││body: The parser validates before committing state.                     ││
+││E collapse artifacts                                                    ││
+││example · usage: parse(input)?.commit()                                 ││
+││diagram · flow: input -> validate -> commit                             ││
+│╰────────────────────────────────────────────────────────────────────────╯│
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
+trunk()..@ · focus diff (wrap) · j/k line · d/u scroll · V view/wrap · r ran

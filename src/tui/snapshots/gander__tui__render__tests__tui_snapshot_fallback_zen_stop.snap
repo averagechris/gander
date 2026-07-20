@@ -1,18 +1,18 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5135
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
          stop 1/1 · src/app.rs:1-6 · ch 1/1
 
-         src/app.rs · source
-
-         why this matters
-         largest hunk +3 −1 · symbols: none detected
-
-         Showing the largest of 1 hunk(s); file total +3 −1. tab opens the full
-         diff.
+         ╭──────────────────────────────────────────────────────────────────────╮
+         │walkthrough  [→ reviewer]  [walkthrough]  [spotlight]                 │
+         │src/app.rs · source                                                   │
+         │@ src/app.rs:1-6                                                      │
+         │why: largest hunk +3 −1 · symbols: none detected                      │
+         │body: Showing the largest of 1 hunk(s); file total +3 −1. tab opens th│
+         │e full diff.                                                          │
+         ╰──────────────────────────────────────────────────────────────────────╯
 
              1   fn main() {
              2 -     old();
@@ -22,7 +22,6 @@ expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 
              5 + fn helper() {}
            … 1 more lines through 6 — j/k
          ────────────────────────────────────────────────────────────────────────
-
 
 
 3 files (0/3 viewed, 0 generated/noisy), +5/-2, 0 comments · following @

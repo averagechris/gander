@@ -1,28 +1,27 @@
 ---
 source: src/tui/render.rs
-assertion_line: 5097
 expression: "render_tui_text_with_zen(&session, &Mode::Normal, Some(&zen), 100, 24)"
 ---
 
          stop 1/1 · src/app.rs:2-3 · ch 1/2
 
-         core change
-
-         why this matters
-         start here
-
-         main() now calls new(╭ startup output · output ─────────────╮ contract
-         is gone, so every cal│ $ cargo run                          │t be
-         re-checked.          │ new: ready                           │
-                              │ extra: ready                         │
-             1   fn main() {  │                                      │
-             2 -     old();   ╰ j/k scroll · esc/q close ────────────╯
+         ╭──────────────────────────────────────────────────────────────────────╮
+         │agent:agent  [→ reviewer]  [walkthrough]  [spotlight]                 │
+         │core change                                                           │
+         │@ src/app.rs:2-3                                                      │
+         │why: start here                                                       │
+         │body: main() now cal╭ startup output · output ─────────────╮le-call co│
+         │ntract is gone, so e│ $ cargo run                          │once must │
+         │be re-checked.      │ new: ready                           │          │
+         │e expand 1 artifact(│ extra: ready                         │          │
+         ╰────────────────────│                                      │──────────╯
+                              ╰ j/k scroll · esc/q close ────────────╯
+             2 -     old();
              2 +     new();
-             3 +     extra();
-             4   }
+           … 2 more lines through 3 — j/k
          ────────────────────────────────────────────────────────────────────────
 
-         e exhibits: startup output
+
 
 
 2 files (0/2 viewed, 0 generated/noisy), +3/-2, 0 comments · following @

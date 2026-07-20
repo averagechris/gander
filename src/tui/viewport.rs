@@ -6,7 +6,11 @@
 //! an `Rc` before viewport state is borrowed, so draw-time interior mutation
 //! cannot create nested-borrow hazards.
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 use ratatui::layout::Rect;
 
@@ -15,11 +19,13 @@ use crate::{
     diff::FileStatus,
 };
 
+use super::annotation_card::AnnotationSource;
 #[cfg(test)]
 use super::render::MIN_SPLIT_WIDTH;
 use super::render::{
-    AnnotationLayoutInput, MeasuredDiffLayout, diff_split_is_active,
-    measured_diff_layout_with_annotations, selected_file_annotations,
+    AnnotationLayoutInput, DiffPointHit, MeasuredDiffLayout, annotation_artifact_card_at_owner,
+    diff_split_is_active, measured_diff_layout_with_annotations, selected_file_annotation_input,
+    selected_file_annotations_for_input,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +51,7 @@ pub(super) struct DiffMeasurement {
     identity: LayoutIdentity,
     rows: Rc<Vec<DiffRow>>,
     layout: Rc<MeasuredDiffLayout>,
+    selected_annotation: Option<AnnotationSource>,
 }
 
 impl DiffMeasurement {
@@ -63,6 +70,7 @@ impl DiffMeasurement {
             start,
             height,
             horizontal,
+            self.selected_annotation.as_ref(),
             theme,
         )
     }
@@ -84,6 +92,9 @@ impl DiffMeasurement {
     }
     fn row_at(&self, line: usize, column: usize) -> Option<usize> {
         self.layout.row_at(line, column)
+    }
+    fn hit_at(&self, line: usize, column: usize) -> Option<DiffPointHit> {
+        self.layout.hit_at(line, column)
     }
     fn horizontal_limit(&self) -> usize {
         self.layout.horizontal_limit
@@ -166,29 +177,61 @@ pub(super) struct DiffWindow {
 }
 
 /// TUI-owned visual viewport and measured-layout cache.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ScopedCardId {
+    scope: String,
+    source: AnnotationSource,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct DiffViewportController {
     state: RefCell<State>,
     cache: RefCell<LayoutCache>,
+    expanded_cards: RefCell<BTreeSet<ScopedCardId>>,
+    selected_annotation: RefCell<Option<ScopedCardId>>,
+    artifact_hint: RefCell<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct ControllerTransactionSnapshot {
     state: State,
     cache: LayoutCache,
+    expanded_cards: BTreeSet<ScopedCardId>,
+    selected_annotation: Option<ScopedCardId>,
+    artifact_hint: String,
 }
 
 impl DiffViewportController {
+    #[cfg(test)]
+    pub(super) fn annotation_visible_row(
+        &self,
+        session: &ReviewSession,
+        inner: Rect,
+        source: &AnnotationSource,
+    ) -> Option<usize> {
+        let measurement = self.measure(session, inner, diff_split_is_active(session, inner));
+        let window = self.window(session, &measurement, inner.height.max(1) as usize);
+        measurement
+            .layout
+            .annotation_line(source)
+            .and_then(|line| line.checked_sub(window.start))
+    }
     pub(super) fn transaction_snapshot(&self) -> ControllerTransactionSnapshot {
         ControllerTransactionSnapshot {
             state: self.state.borrow().clone(),
             cache: self.cache.borrow().clone(),
+            expanded_cards: self.expanded_cards.borrow().clone(),
+            selected_annotation: self.selected_annotation.borrow().clone(),
+            artifact_hint: self.artifact_hint.borrow().clone(),
         }
     }
 
     pub(super) fn restore_transaction(&self, snapshot: ControllerTransactionSnapshot) {
         *self.state.borrow_mut() = snapshot.state;
         *self.cache.borrow_mut() = snapshot.cache;
+        *self.expanded_cards.borrow_mut() = snapshot.expanded_cards;
+        *self.selected_annotation.borrow_mut() = snapshot.selected_annotation;
+        *self.artifact_hint.borrow_mut() = snapshot.artifact_hint;
     }
     pub(super) fn measure(
         &self,
@@ -211,13 +254,28 @@ impl DiffViewportController {
         {
             self.cache.borrow_mut().measurement_requests += 1;
         }
-        let annotations = selected_file_annotations(session, &rows);
+        let scope = annotation_scope(session);
+        self.prune_annotation_scope(&scope);
+        let expanded = self
+            .expanded_cards
+            .borrow()
+            .iter()
+            .filter(|card| card.scope == scope)
+            .map(|card| card.source.stable_id())
+            .collect::<BTreeSet<_>>();
+        let hint = self.artifact_hint.borrow().clone();
+        let annotation_input = selected_file_annotation_input(session, &expanded, &hint);
+        self.expanded_cards
+            .borrow_mut()
+            .retain(|card| card.scope == scope && annotation_input.contains_source(&card.source));
+        let selected_annotation =
+            self.revalidate_selected_annotation_with_input(session, &scope, &annotation_input);
         let identity = LayoutIdentity {
             rows_ptr: Rc::as_ptr(&rows) as usize,
             width: inner.width,
             split_active,
             soft_wrap: session.diff_cues.soft_wrap,
-            annotations: annotations.input.clone(),
+            annotations: annotation_input.clone(),
         };
         if let Some(cached) = self.cache.borrow().entry.as_ref()
             && cached.identity == identity
@@ -226,9 +284,11 @@ impl DiffViewportController {
                 identity,
                 rows: Rc::clone(&cached._rows),
                 layout: Rc::clone(&cached.layout),
+                selected_annotation,
             };
         }
 
+        let annotations = selected_file_annotations_for_input(session, annotation_input, &expanded);
         let layout = Rc::new(measured_diff_layout_with_annotations(
             session,
             &rows,
@@ -240,6 +300,7 @@ impl DiffViewportController {
             identity: identity.clone(),
             rows: Rc::clone(&rows),
             layout: Rc::clone(&layout),
+            selected_annotation,
         };
         let mut cache = self.cache.borrow_mut();
         cache.entry = Some(CachedDiffLayout {
@@ -252,6 +313,100 @@ impl DiffViewportController {
             cache.builds += 1;
         }
         measurement
+    }
+
+    /// Toggle the first artifact-bearing card owned by the current logical
+    /// diff row. Expansion is presentation-only and intentionally never enters
+    /// persisted review state.
+    pub(super) fn toggle_annotation_artifacts(&self, session: &ReviewSession) -> Option<bool> {
+        let scope = annotation_scope(session);
+        self.prune_annotation_scope(&scope);
+        let preferred = self.revalidate_selected_annotation(session);
+        let source =
+            annotation_artifact_card_at_owner(session, session.diff_cursor, preferred.as_ref())?;
+        let id = ScopedCardId { scope, source };
+        let mut expanded = self.expanded_cards.borrow_mut();
+        let now_expanded = if expanded.remove(&id) {
+            false
+        } else {
+            expanded.insert(id);
+            true
+        };
+        self.cache.borrow_mut().entry = None;
+        Some(now_expanded)
+    }
+
+    pub(super) fn set_annotation_artifact_hint(&self, hint: &str) {
+        let hint = hint.to_owned();
+        if *self.artifact_hint.borrow() != hint {
+            *self.artifact_hint.borrow_mut() = hint;
+            self.invalidate_layout();
+        }
+    }
+
+    pub(super) fn select_annotation(&self, session: &ReviewSession, source: AnnotationSource) {
+        *self.selected_annotation.borrow_mut() = Some(ScopedCardId {
+            scope: annotation_scope(session),
+            source,
+        });
+    }
+
+    pub(super) fn clear_selected_annotation(&self) {
+        self.selected_annotation.borrow_mut().take();
+    }
+
+    pub(super) fn selected_annotation_source(
+        &self,
+        session: &ReviewSession,
+    ) -> Option<AnnotationSource> {
+        self.revalidate_selected_annotation(session)
+    }
+
+    fn revalidate_selected_annotation(&self, session: &ReviewSession) -> Option<AnnotationSource> {
+        let scope = annotation_scope(session);
+        self.prune_annotation_scope(&scope);
+        let expanded = self
+            .expanded_cards
+            .borrow()
+            .iter()
+            .filter(|card| card.scope == scope)
+            .map(|card| card.source.stable_id())
+            .collect::<BTreeSet<_>>();
+        let hint = self.artifact_hint.borrow().clone();
+        let input = selected_file_annotation_input(session, &expanded, &hint);
+        self.revalidate_selected_annotation_with_input(session, &scope, &input)
+    }
+
+    fn revalidate_selected_annotation_with_input(
+        &self,
+        session: &ReviewSession,
+        scope: &str,
+        input: &AnnotationLayoutInput,
+    ) -> Option<AnnotationSource> {
+        let selected = self.selected_annotation.borrow().clone();
+        let valid = selected.as_ref().is_some_and(|selected| {
+            selected.scope == scope
+                && input.owner_for_source(&selected.source) == Some(session.diff_cursor)
+        });
+        if !valid {
+            self.selected_annotation.borrow_mut().take();
+            return None;
+        }
+        selected.map(|selected| selected.source)
+    }
+
+    fn prune_annotation_scope(&self, scope: &str) {
+        self.expanded_cards
+            .borrow_mut()
+            .retain(|card| card.scope == scope);
+        if self
+            .selected_annotation
+            .borrow()
+            .as_ref()
+            .is_some_and(|selected| selected.scope != scope)
+        {
+            self.selected_annotation.borrow_mut().take();
+        }
     }
 
     /// Acquire a normalized visual window.  Draw calls this through `&TuiState`;
@@ -352,6 +507,7 @@ impl DiffViewportController {
     /// Logical selection transition: bind any new logical top and then place
     /// the cursor according to measured geometry.
     pub(super) fn logical_selection(&self, session: &mut ReviewSession, inner: Rect) {
+        self.revalidate_selected_annotation(session);
         self.mark_cursor_placement(session);
         if !usable_geometry(session, inner) {
             self.set_pending(session, PendingPlacement::Cursor { margin: None });
@@ -498,9 +654,28 @@ impl DiffViewportController {
         )
     }
 
+    pub(super) fn hit_at_point(
+        &self,
+        session: &ReviewSession,
+        inner: Rect,
+        x: u16,
+        visible_row: usize,
+    ) -> Option<DiffPointHit> {
+        if !usable_geometry(session, inner) {
+            return None;
+        }
+        let layout = self.layout_for(session, inner);
+        let window = self.window(session, &layout, inner.height.max(1) as usize);
+        layout.hit_at(
+            window.start + visible_row,
+            x.saturating_sub(inner.x) as usize,
+        )
+    }
+
     /// File switch/restore transition. Per-file visual state is restored only
     /// when it is still paired with the session's logical top.
     pub(super) fn file_restored(&self, session: &ReviewSession) {
+        self.revalidate_selected_annotation(session);
         let Some(path) = selected_path(session) else {
             return;
         };
@@ -728,8 +903,10 @@ impl DiffViewportController {
             visual.layout_identity = None;
         }
         drop(state);
+        self.expanded_cards.borrow_mut().clear();
         self.invalidate_layout();
         self.finish_transition(snapshot.transition, session, inner);
+        self.revalidate_selected_annotation(session);
     }
 
     /// Fresh target/reset transition. No terminal geometry leaks between
@@ -737,6 +914,8 @@ impl DiffViewportController {
     pub(super) fn reset(&self, session: &ReviewSession) {
         self.mark_explicit_transition();
         self.state.borrow_mut().by_file.clear();
+        self.expanded_cards.borrow_mut().clear();
+        self.selected_annotation.borrow_mut().take();
         self.invalidate_layout();
         self.file_restored(session);
     }
@@ -883,6 +1062,24 @@ impl DiffViewportController {
 
 fn selected_path(session: &ReviewSession) -> Option<String> {
     session.selected_file().map(|file| file.path.clone())
+}
+
+fn annotation_scope(session: &ReviewSession) -> String {
+    let durable = crate::review::active_session_for_loaded_review(
+        &session.sessions,
+        &session.repo,
+        &session.target.base,
+        &session.target.rev,
+    )
+    .map(|review| review.id.as_str())
+    .unwrap_or("legacy");
+    format!(
+        "{}|{}|{}|{}",
+        durable,
+        session.repo.display(),
+        session.target.base,
+        session.target.rev
+    )
 }
 
 fn usable_geometry(session: &ReviewSession, inner: Rect) -> bool {

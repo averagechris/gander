@@ -1,0 +1,37 @@
+---
+source: src/tui/annotation_card.rs
+expression: output
+---
+
+-- Onboarding --
+╭──────────────────────────────────────────────────────────────╮
+│agent:agent  [→ reviewer]  [draft]  [question]  [fix]         │
+│Agent draft explains the entry point                          │
+│@ src/retry.rs:1                                              │
+│body: Second line with context.                               │
+╰──────────────────────────────────────────────────────────────╯
+
+-- Delegation --
+╭──────────────────────────────────────────────────────────────╮
+│human:Ada  [→ agent]  [todo]  [question]  [fix]  [1 replies]  │
+│Please fix the retry boundary                                 │
+│@ src/retry.rs:2                                              │
+│body: Second line with context.                               │
+│reply · agent:agent: Fixed and covered by the boundary test.  │
+╰──────────────────────────────────────────────────────────────╯
+
+-- Collaboration --
+╭──────────────────────────────────────────────────────────────╮
+│human:Grace  [→ team]  [resolved]  [question]  [fix]          │
+│Team review thread is resolved                                │
+│@ src/retry.rs:3                                              │
+│body: Second line with context.                               │
+╰──────────────────────────────────────────────────────────────╯
+
+-- Note --
+╭──────────────────────────────────────────────────────────────╮
+│human:Lin  [→ note]  [draft]  [question]  [fix]               │
+│Private note for later                                        │
+│@ src/retry.rs:4                                              │
+│body: Second line with context.                               │
+╰──────────────────────────────────────────────────────────────╯

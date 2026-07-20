@@ -7,11 +7,11 @@ expression: "render_tui_text(&session, &mode, 100, 20)"
 │                            ││@@ -1 +1 @@                                                         │
 │                            ││    1 - old                                                         │
 │        ┌agent drafts────────────────────────────────────────────────────────────────────┐        │
-│        │Agent-drafted comments awaiting your decision                                   │        │
-│        │› [ draft  ] [→ reviewer] a.txt:1 consider a clearer name                       │        │
-│        │  [ draft  ] [→ reviewer] a.txt file-level: needs tests                         │        │
-│        │                                                                                │        │
-│        │j/k move · enter accept · e edit then accept · x discard · esc close            │        │
+│        │Agent-drafted comments awaiting your decision                                   │───────╮│
+│        │› [→ reviewer] agent:agent [draft] a.txt:1 consider a clearer name              │       ││
+│        │  [→ reviewer] agent:agent [draft] a.txt file-level: needs tests                │       ││
+│        │                                                                                │       ││
+│        │j/k move · enter accept · e edit then accept · x discard · esc close            │───────╯│
 │        │                                                                                │        │
 │        │                                                                                │        │
 │        │                                                                                │        │

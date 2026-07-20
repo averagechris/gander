@@ -108,6 +108,7 @@ pub(super) enum Action {
     ToggleLineBackground,
     ToggleGutterBar,
     ToggleDiffWrap,
+    ToggleAnnotationArtifacts,
     ToggleFilePane,
     ToggleDiffView,
     WidenFilePane,
@@ -345,6 +346,11 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             &mut bindings,
             Action::ToggleDiffWrap,
             &config.toggle_diff_wrap,
+        )?;
+        add_bindings(
+            &mut bindings,
+            Action::ToggleAnnotationArtifacts,
+            &config.toggle_annotation_artifacts,
         )?;
         add_bindings(
             &mut bindings,
@@ -625,12 +631,32 @@ impl Action {
                 KeyContext::NormalDiff,
                 KeyContext::Help,
             ],
-            DiffTop | DiffBottom | SymbolOutline | NextSymbol | PreviousSymbol
-            | NextChangedHunk | PreviousChangedHunk | ScrollDown | ScrollUp | ScrollDiffLeft
-            | ScrollDiffRight | ToggleContextFold | ExpandContext | ExpandContextAll
-            | CollapseContext | ToggleWordHighlight | ToggleLineBackground | ToggleGutterBar
-            | ToggleDiffWrap | ToggleDiffView | ToggleLargeDiff | RangeComment
-            | MarkWalkthrough | WidenFilePane | NarrowFilePane => DIFF,
+            DiffTop
+            | DiffBottom
+            | SymbolOutline
+            | NextSymbol
+            | PreviousSymbol
+            | NextChangedHunk
+            | PreviousChangedHunk
+            | ScrollDown
+            | ScrollUp
+            | ScrollDiffLeft
+            | ScrollDiffRight
+            | ToggleContextFold
+            | ExpandContext
+            | ExpandContextAll
+            | CollapseContext
+            | ToggleWordHighlight
+            | ToggleLineBackground
+            | ToggleGutterBar
+            | ToggleDiffWrap
+            | ToggleAnnotationArtifacts
+            | ToggleDiffView
+            | ToggleLargeDiff
+            | RangeComment
+            | MarkWalkthrough
+            | WidenFilePane
+            | NarrowFilePane => DIFF,
             MarkViewed | ToggleViewed | MarkAllViewed | ToggleGenerated | CycleViewedFilter => {
                 NORMAL
             }
@@ -1208,6 +1234,10 @@ mod tests {
         assert_eq!(
             keymap.action_for(&KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)),
             Some(Action::ScrollDiffRight)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            Some(Action::ToggleAnnotationArtifacts)
         );
         // Direct cue toggles ship unbound but stay bindable via config.
         let config = KeybindingsConfig {

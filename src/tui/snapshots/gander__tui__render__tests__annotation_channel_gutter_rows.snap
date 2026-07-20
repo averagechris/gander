@@ -1,6 +1,6 @@
 ---
 source: src/tui/render.rs
-expression: "format!(\"gutter styles: {colors}\\n{}\",\nrender_tui_text(&session, &Mode::Normal, 100, 22))"
+expression: "format!(\"gutter styles: {colors}\\n{}\",\nrender_tui_text(&session, &Mode::Normal, 100, 36))"
 ---
 gutter styles: onboarding=Some(Rgb(210, 153, 34)) · delegation=Some(Rgb(231, 113, 55)) · collaboration=Some(Rgb(88, 166, 255)) · note=Some(Rgb(122, 127, 133))
 ┌files───────────────────────┐┌diff────────────────────────────────────────────────────────────────┐
@@ -8,15 +8,29 @@ gutter styles: onboarding=Some(Rgb(210, 153, 34)) · delegation=Some(Rgb(231, 11
 │                            ││@@ -1 +1,4 @@                                                       │
 │                            ││    1 - old                                                         │
 │                            ││1   1 + onboarding                                                  │
-│                            ││      ▎ onboard [draft] onboard comment                             │
+│                            ││╭──────────────────────────────────────────────────────────────────╮│
+│                            │││human:local  [→ reviewer]  [draft]                                ││
+│                            │││onboard comment                                                   ││
+│                            │││@ a.txt:1                                                         ││
+│                            ││╰──────────────────────────────────────────────────────────────────╯│
 │                            ││1   2 + delegation                                                  │
-│                            ││      ▎ delegate [draft] delegate comment                           │
+│                            ││╭──────────────────────────────────────────────────────────────────╮│
+│                            │││human:local  [→ agent]  [draft]                                   ││
+│                            │││delegate comment                                                  ││
+│                            │││@ a.txt:2                                                         ││
+│                            ││╰──────────────────────────────────────────────────────────────────╯│
 │                            ││1   3 + collaboration                                               │
-│                            ││      ▎ collab [draft] collab comment                               │
+│                            ││╭──────────────────────────────────────────────────────────────────╮│
+│                            │││human:local  [→ team]  [draft]                                    ││
+│                            │││collab comment                                                    ││
+│                            │││@ a.txt:3                                                         ││
+│                            ││╰──────────────────────────────────────────────────────────────────╯│
 │                            ││1   4 + note                                                        │
-│                            ││      ▎ private [draft] private comment                             │
-│                            ││                                                                    │
-│                            ││                                                                    │
+│                            ││╭──────────────────────────────────────────────────────────────────╮│
+│                            │││human:local  [→ note]  [draft]                                    ││
+│                            │││private comment                                                   ││
+│                            │││@ a.txt:4                                                         ││
+│                            ││╰──────────────────────────────────────────────────────────────────╯│
 │                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │
