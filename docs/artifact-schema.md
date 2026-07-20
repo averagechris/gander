@@ -1,6 +1,6 @@
 # Review artifact schema
 
-Current schema version: `10`.
+Current schema version: `11`.
 
 Artifacts are intentionally simple and serializable. JSON is the canonical tool
 format; Markdown is rendered for humans. The schema is evolving toward the
@@ -36,7 +36,7 @@ or `"team"` in config.
 
 ```json
 {
-  "version": 10,
+  "version": 11,
   "generated_at": "2026-06-30T00:00:00Z",
   "repo": "/path/to/repo",
   "base": "trunk()",
@@ -234,6 +234,25 @@ or `"team"` in config.
         }
       ]
     }
+  ],
+  "attention_regions": [
+    {
+      "target": {
+        "file": "src/main.rs",
+        "line": 42,
+        "anchor": {
+          "type": "line",
+          "path": "src/main.rs",
+          "side": "new",
+          "line": 42,
+          "diff_fingerprint": "sha256..."
+        }
+      },
+      "salience": "spotlight",
+      "rationale": "The new state transition controls all callers.",
+      "source": "human",
+      "stale": false
+    }
   ]
 }
 ```
@@ -244,6 +263,13 @@ Notes:
   in the `human` profile. The `team` profile sets `"profile": "team"`, includes
   hunks/excerpts for forge mapping, omits action items and walkthroughs, and
   filters comments to collaboration `todo`/`resolved` only.
+- `attention_regions` contains durable assigned regions (not implicit
+  `supporting` content) in human and agent profiles. It includes the existing
+  anchor/fingerprint evidence and a derived `stale` flag. Team exports omit the
+  field because attention is private review state, not collaboration data.
+  Staleness is evaluated against the unfiltered attention diff, so current
+  ignore-policy heuristic regions do not become stale merely because the normal
+  file view filters them out.
 - `session` is present when the exported change matches an open durable review
   session; it includes the session `id` and optional `title`.
 - `comments[].session_id` identifies the durable session that owns a newly
@@ -266,8 +292,8 @@ Notes:
   target match, restores duplicate-safe comments into the active local session
   while preserving foreign authors/channels/replies, restores viewed files whose
   diff fingerprints still match, and applies an incoming session disposition only
-  when one is present. It does not restore `action_items` or `walkthroughs` from
-  the artifact yet.
+  when one is present. It does not restore `action_items`, `walkthroughs`, or
+  private `attention_regions` from the artifact yet.
 - Line anchors are 1-indexed diff lines. New-side/post-image anchors are
   preferred; old-side coordinates are used only as a fallback for removed-only
   lines that have no new-side line.
@@ -331,6 +357,8 @@ Notes:
 
 ## Version history
 
+- `11`: human/agent artifacts include durable attention assignments and stale
+  status; team artifacts exclude the private attention map.
 - `10`: team JSON exports collaboration `todo`/`resolved` threads only,
   including disposition, author attribution, full hunk/excerpt data, and
   forge-mappable anchor/fingerprint metadata. Team Markdown/HTML are filtered
@@ -352,7 +380,8 @@ Notes:
   `excerpt` blocks.
 - `3`: stable anchors (side, hunk header, line/diff fingerprints).
 
-Review-state schema `5` adds session disposition and permits collaboration todo
+Review-state schema `6` adds durable attention regions and optional existing
+anchor/fingerprint evidence on `ReviewTarget`. Review-state schema `5` adds session disposition and permits collaboration todo
 comments for team feedback. Review-state schema `4` adds durable comment
 author/channel and reply author fields. Delegation schema `5` carries author/channel on comment evidence and
 reply authors. Delegation's existing top-level `fingerprints.diff` retains its v3

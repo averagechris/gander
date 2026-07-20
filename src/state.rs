@@ -12,9 +12,9 @@ use crate::{
     provenance::{CommentObservation, CommentReplyResult},
 };
 
-/// Current on-disk review-state schema. Version 5 adds session disposition and
-/// permits collaboration todo comments for team-facing review feedback.
-pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 5;
+/// Current on-disk review-state schema. Version 6 adds durable attention
+/// regions and optional anchor evidence on review targets.
+pub const REVIEW_STATE_SCHEMA_VERSION: u8 = 6;
 
 /// Deterministic identity used only when reading pre-v4 local review state.
 /// Configured identities are stamped by adapters when creating new comments;
@@ -446,6 +446,8 @@ pub struct ReviewSession {
     pub status: ReviewSessionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disposition: Option<ReviewDisposition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention_regions: Vec<AttentionRegion>,
     pub walkthroughs: Vec<Walkthrough>,
     pub action_items: Vec<ActionItem>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -472,6 +474,56 @@ pub struct ReviewTarget {
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub symbol: Option<String>,
+    /// Existing diff anchor/fingerprint evidence for durable located targets.
+    ///
+    /// This reuses the comment anchoring system rather than introducing a
+    /// second region-anchor representation. Older state simply omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<CommentAnchor>,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Salience {
+    Spotlight,
+    #[default]
+    Supporting,
+    Skim,
+}
+
+impl Salience {
+    pub fn promote(self) -> Self {
+        match self {
+            Self::Skim => Self::Supporting,
+            Self::Supporting | Self::Spotlight => Self::Spotlight,
+        }
+    }
+
+    pub fn demote(self) -> Self {
+        match self {
+            Self::Spotlight => Self::Supporting,
+            Self::Supporting | Self::Skim => Self::Skim,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SalienceSource {
+    Human,
+    Agent,
+    Heuristic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AttentionRegion {
+    pub target: ReviewTarget,
+    pub salience: Salience,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    pub source: SalienceSource,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -687,6 +739,7 @@ struct CompatibleReviewSession {
     target: ReviewTarget,
     status: ReviewSessionStatus,
     disposition: Option<ReviewDisposition>,
+    attention_regions: Vec<AttentionRegion>,
     walkthroughs: Vec<Walkthrough>,
     action_items: Vec<ActionItem>,
     tasks: Vec<ActionItem>,
@@ -715,6 +768,7 @@ impl<'de> Deserialize<'de> for ReviewSession {
             target: compatible.target,
             status: compatible.status,
             disposition: compatible.disposition,
+            attention_regions: compatible.attention_regions,
             walkthroughs: compatible.walkthroughs,
             action_items,
             created_at: compatible.created_at,
@@ -1119,6 +1173,7 @@ impl ReviewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::DiffSet;
 
     #[test]
     fn save_round_trips_and_leaves_no_temp_file() {
@@ -1192,6 +1247,99 @@ mod tests {
                 .caught_up_fingerprints
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pre_attention_session_migrates_with_empty_regions_and_anchorless_targets() {
+        let state: ReviewState = serde_json::from_str(
+            r#"{
+  "meta": { "version": 5 },
+  "sessions": [{
+    "id": "legacy",
+    "target": { "file": "src/lib.rs", "line": 7 },
+    "status": "open",
+    "walkthroughs": [],
+    "action_items": []
+  }]
+}"#,
+        )
+        .unwrap();
+
+        assert!(state.sessions[0].attention_regions.is_empty());
+        assert!(state.sessions[0].target.anchor.is_none());
+    }
+
+    #[test]
+    fn attention_region_anchor_round_trips_and_invalid_loaded_state_can_be_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let anchor = CommentAnchor::File {
+            path: "src/lib.rs".into(),
+            old_path: None,
+            diff_fingerprint: "fingerprint".into(),
+        };
+        let valid = AttentionRegion {
+            target: ReviewTarget {
+                file: Some("src/lib.rs".into()),
+                anchor: Some(anchor.clone()),
+                ..Default::default()
+            },
+            salience: Salience::Spotlight,
+            rationale: Some("important".into()),
+            source: SalienceSource::Human,
+        };
+        let invalid = AttentionRegion {
+            target: ReviewTarget {
+                file: Some("src/lib.rs".into()),
+                line: Some(2),
+                anchor: Some(anchor),
+                ..Default::default()
+            },
+            salience: Salience::Skim,
+            rationale: None,
+            source: SalienceSource::Agent,
+        };
+        let files = DiffSet::parse(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n one\n-old\n+new\n three\n",
+        )
+        .unwrap()
+        .files;
+        let line = AttentionRegion {
+            target: crate::attention::target_for_diff(&files, "src/lib.rs", Some(2), None).unwrap(),
+            salience: Salience::Spotlight,
+            rationale: Some("line".into()),
+            source: SalienceSource::Human,
+        };
+        let range = AttentionRegion {
+            target: crate::attention::target_for_diff(&files, "src/lib.rs", Some(1), Some(3))
+                .unwrap(),
+            salience: Salience::Skim,
+            rationale: Some("range".into()),
+            source: SalienceSource::Agent,
+        };
+        let expected = vec![valid, line, range, invalid];
+        ReviewState {
+            sessions: vec![ReviewSession {
+                id: "session".into(),
+                attention_regions: expected.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let loaded = ReviewState::load_or_default(&path).unwrap();
+        assert_eq!(loaded.sessions[0].attention_regions, expected);
+        assert!(matches!(
+            loaded.sessions[0].attention_regions[1].target.anchor,
+            Some(CommentAnchor::Line { .. })
+        ));
+        assert!(matches!(
+            loaded.sessions[0].attention_regions[2].target.anchor,
+            Some(CommentAnchor::Range { .. })
+        ));
+        assert_eq!(loaded.meta.version, REVIEW_STATE_SCHEMA_VERSION);
     }
 
     fn comment(id: &str, body: &str) -> Comment {
@@ -1302,6 +1450,96 @@ mod tests {
         local.merge_external(external, &ReviewStateTombstones::default());
 
         assert_eq!(local.sessions[0].action_items[0].title, "new");
+    }
+
+    #[test]
+    fn merge_external_uses_newer_session_attention_map() {
+        let older = chrono::Utc::now();
+        let newer = older + chrono::TimeDelta::seconds(5);
+        let region = |salience| AttentionRegion {
+            target: ReviewTarget {
+                file: Some("src/lib.rs".into()),
+                anchor: Some(CommentAnchor::File {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    diff_fingerprint: "fingerprint".into(),
+                }),
+                ..Default::default()
+            },
+            salience,
+            rationale: None,
+            source: SalienceSource::Human,
+        };
+        let mut local = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "session".into(),
+                attention_regions: vec![region(Salience::Spotlight)],
+                updated_at: Some(older),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let external = ReviewState {
+            sessions: vec![ReviewSession {
+                id: "session".into(),
+                attention_regions: vec![region(Salience::Skim)],
+                updated_at: Some(newer),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        local.merge_external(external, &ReviewStateTombstones::default());
+
+        assert_eq!(
+            local.sessions[0].attention_regions[0].salience,
+            Salience::Skim
+        );
+    }
+
+    #[test]
+    fn merge_external_keeps_local_attention_when_local_is_newer_or_timestamps_equal() {
+        let base = chrono::Utc::now();
+        let region = |salience| AttentionRegion {
+            target: ReviewTarget {
+                file: Some("src/lib.rs".into()),
+                anchor: Some(CommentAnchor::File {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    diff_fingerprint: "fingerprint".into(),
+                }),
+                ..Default::default()
+            },
+            salience,
+            rationale: None,
+            source: SalienceSource::Human,
+        };
+        for (local_at, external_at) in [(base + chrono::TimeDelta::seconds(1), base), (base, base)]
+        {
+            let mut local = ReviewState {
+                sessions: vec![ReviewSession {
+                    id: "session".into(),
+                    attention_regions: vec![region(Salience::Spotlight)],
+                    updated_at: Some(local_at),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let external = ReviewState {
+                sessions: vec![ReviewSession {
+                    id: "session".into(),
+                    attention_regions: vec![region(Salience::Skim)],
+                    updated_at: Some(external_at),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            local.merge_external(external, &ReviewStateTombstones::default());
+            assert_eq!(
+                local.sessions[0].attention_regions[0].salience,
+                Salience::Spotlight
+            );
+        }
     }
 
     #[test]

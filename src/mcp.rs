@@ -27,11 +27,12 @@ use crate::{
     app::ReviewSession,
     config::InitialCommentState,
     diff::FileDiff,
+    generated::GeneratedPolicy,
     jj::{JjBackend, ReviewTarget as JjReviewTarget},
     registry, review,
     state::{
         ActionIntent, Channel, CommentKind, CommentState, Identity, ReviewDisposition, ReviewState,
-        ReviewTarget as StateReviewTarget, WalkthroughStep,
+        ReviewTarget as StateReviewTarget, Salience, WalkthroughStep,
     },
 };
 
@@ -46,6 +47,9 @@ pub struct GanderMcp {
     state_path: PathBuf,
     target: review::SessionTargetSpec,
     diff_files: Vec<String>,
+    attention_files: Vec<FileDiff>,
+    generated_policy: GeneratedPolicy,
+    ignore_globs: Vec<String>,
     initial_comment_state: CommentState,
     agent_identity: Identity,
     snapshot: mpsc::Sender<SnapshotRequest>,
@@ -59,6 +63,9 @@ pub struct GanderMcpParams {
     pub workspace_root: PathBuf,
     pub target: JjReviewTarget,
     pub diff_files: Vec<String>,
+    pub attention_files: Vec<FileDiff>,
+    pub generated_policy: GeneratedPolicy,
+    pub ignore_globs: Vec<String>,
     pub initial_comment_state: CommentState,
     pub agent_identity: Identity,
 }
@@ -379,6 +386,36 @@ pub struct WalkthroughMoveStepParams {
     pub to: usize,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttentionListParams {
+    /// When true, list raw durable assignments; otherwise list effective current regions.
+    pub assigned: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttentionMutationParams {
+    pub path: String,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub salience: Salience,
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttentionTargetParams {
+    pub path: String,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub rationale: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AttentionClearParams {
+    pub path: String,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+}
+
 #[tool_router]
 impl GanderMcp {
     pub fn new(
@@ -419,6 +456,9 @@ impl GanderMcp {
             state_path: params.state_path,
             target: target_spec,
             diff_files: params.diff_files,
+            attention_files: params.attention_files,
+            generated_policy: params.generated_policy,
+            ignore_globs: params.ignore_globs,
             initial_comment_state: params.initial_comment_state,
             agent_identity: params.agent_identity,
             snapshot: sender,
@@ -1129,25 +1169,37 @@ impl GanderMcp {
         if let Some(file) = params.file.as_deref() {
             self.ensure_diff_file(file)?;
         }
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
-            Ok(review::add_walkthrough_step(
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let mut target = params
+                .file
+                .as_deref()
+                .and_then(|file| {
+                    crate::attention::target_for_diff(&files, file, params.line, params.end_line)
+                        .ok()
+                })
+                .unwrap_or_else(|| StateReviewTarget {
+                    file: params.file.clone(),
+                    line: params.line,
+                    end_line: params.end_line,
+                    ..StateReviewTarget::default()
+                });
+            target.symbol = params.symbol;
+            let step = review::add_walkthrough_step(
                 &mut state.sessions[idx],
                 WalkthroughStep {
                     id: String::new(),
                     title: Some(params.title),
                     body: params.body,
                     why: params.why,
-                    target: StateReviewTarget {
-                        file: params.file,
-                        line: params.line,
-                        end_line: params.end_line,
-                        symbol: params.symbol,
-                        ..StateReviewTarget::default()
-                    },
+                    target,
                     ..WalkthroughStep::default()
                 },
-            ))
+            );
+            crate::attention::sync_agent_attention(&mut state.sessions[idx], &files)?;
+            Ok(step)
         })
     }
 
@@ -1158,9 +1210,13 @@ impl GanderMcp {
         &self,
         Parameters(params): Parameters<IdParams>,
     ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
         self.with_state_mut(|state, this| {
-            let idx = this.ensure_session_index(state);
-            review::remove_walkthrough_step(&mut state.sessions[idx], &params.id)
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let step = review::remove_walkthrough_step(&mut state.sessions[idx], &params.id)?;
+            crate::attention::sync_agent_attention(&mut state.sessions[idx], &files)?;
+            Ok(step)
         })
     }
 
@@ -1182,6 +1238,115 @@ impl GanderMcp {
         let mut state = self.load_state()?;
         let session = review::ensure_session(&mut state, &self.target, None).clone();
         json_result(json!({ "walkthroughs": session.walkthroughs }))
+    }
+
+    #[tool(
+        description = "List effective attention regions or raw durable assignments. Equivalent to `gander attention list [--mode effective|assigned]`."
+    )]
+    fn attention_list(
+        &self,
+        Parameters(params): Parameters<AttentionListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let state = self.load_state()?;
+        let target = Self::target_for_context(&context);
+        let session = review::find_session_for_target(&state, &target)
+            .cloned()
+            .unwrap_or_default();
+        if params.assigned.unwrap_or(false) {
+            json_result(json!({
+                "mode": "assigned",
+                "default_salience": "supporting",
+                "regions": crate::attention::list_assigned_attention(&session, &files),
+            }))
+        } else {
+            json_result(json!({
+                "mode": "effective",
+                "default_salience": "supporting",
+                "regions": crate::attention::list_effective_attention(&session, &files),
+            }))
+        }
+    }
+
+    #[tool(
+        description = "Set an explicit durable human attention override. Equivalent to `gander attention set`."
+    )]
+    fn attention_set(
+        &self,
+        Parameters(params): Parameters<AttentionMutationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let target =
+            crate::attention::target_for_diff(&files, &params.path, params.line, params.end_line)
+                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let region = crate::attention::set_human_attention(
+                &mut state.sessions[idx],
+                target,
+                params.salience,
+                params.rationale,
+            )?;
+            Ok(crate::attention::assigned_attention_region(&region, &files))
+        })
+    }
+
+    #[tool(
+        description = "Clear the exact durable human attention override. Equivalent to `gander attention clear`."
+    )]
+    fn attention_clear(
+        &self,
+        Parameters(params): Parameters<AttentionClearParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let target = crate::attention::identity_target(&params.path, params.line, params.end_line)
+            .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            Ok(json!({
+                "cleared": crate::attention::clear_human_attention(
+                    &mut state.sessions[idx],
+                    &target,
+                ),
+                "target": target,
+            }))
+        })
+    }
+
+    #[tool(
+        description = "Promote effective attention one step as a durable human override. Equivalent to `gander attention promote`."
+    )]
+    fn attention_promote(
+        &self,
+        Parameters(params): Parameters<AttentionTargetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.mutate_attention_step(params, true)
+    }
+
+    #[tool(
+        description = "Demote effective attention one step as a durable human override. Equivalent to `gander attention demote`."
+    )]
+    fn attention_demote(
+        &self,
+        Parameters(params): Parameters<AttentionTargetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.mutate_attention_step(params, false)
+    }
+
+    #[tool(
+        description = "Seed missing lockfile/generated/ignore-policy Skim assignments. Equivalent to `gander attention seed-heuristics`."
+    )]
+    fn attention_seed_heuristics(&self) -> Result<CallToolResult, McpError> {
+        self.update_attention_heuristics(false)
+    }
+
+    #[tool(
+        description = "Recompute heuristics while preserving fingerprint-drifted stale regions. Equivalent to `gander attention recompute-heuristics`."
+    )]
+    fn attention_recompute_heuristics(&self) -> Result<CallToolResult, McpError> {
+        self.update_attention_heuristics(true)
     }
 
     /// Dispatch one ACP request: through the live instance socket when this
@@ -1299,6 +1464,96 @@ impl GanderMcp {
     fn load_state(&self) -> Result<ReviewState, McpError> {
         ReviewState::load_or_default(&self.state_path)
             .map_err(|error| McpError::internal_error(error.to_string(), None))
+    }
+
+    fn target_for_context(context: &SelectedReviewContext) -> review::SessionTargetSpec {
+        review::SessionTargetSpec {
+            repo: Some(context.repo.display().to_string()),
+            base: Some(context.base.clone()),
+            revision: Some(context.revision.clone()),
+            revset: Some(format!("{}..{}", context.base, context.revision)),
+        }
+    }
+
+    fn attention_files_for_context(&self, context: &SelectedReviewContext) -> Vec<FileDiff> {
+        let startup_target = self.target.base.as_deref() == Some(context.base.as_str())
+            && self.target.revision.as_deref() == Some(context.revision.as_str());
+        let mut files = context.files.clone();
+        if startup_target {
+            // The live/snapshot provenance context is authoritative for visible
+            // files. Add only startup files removed by ignore policy so those
+            // can still seed Skim; never replace a current live fingerprint.
+            let current_paths = files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let ignored = self
+                .attention_files
+                .iter()
+                .filter(|file| {
+                    !self.diff_files.contains(&file.path)
+                        && !current_paths.contains(file.path.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            files.extend(ignored);
+        }
+        files
+    }
+
+    fn mutate_attention_step(
+        &self,
+        params: AttentionTargetParams,
+        promote: bool,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let target =
+            crate::attention::target_for_diff(&files, &params.path, params.line, params.end_line)
+                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let region = if promote {
+                crate::attention::promote_human_attention(
+                    &mut state.sessions[idx],
+                    target,
+                    params.rationale,
+                    &files,
+                )
+            } else {
+                crate::attention::demote_human_attention(
+                    &mut state.sessions[idx],
+                    target,
+                    params.rationale,
+                    &files,
+                )
+            }?;
+            Ok(crate::attention::assigned_attention_region(&region, &files))
+        })
+    }
+
+    fn update_attention_heuristics(&self, recompute: bool) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            crate::attention::sync_agent_attention(&mut state.sessions[idx], &files)?;
+            let update = crate::attention::update_heuristic_attention(
+                &mut state.sessions[idx],
+                &files,
+                &this.generated_policy,
+                &this.ignore_globs,
+                recompute,
+            )?;
+            Ok(json!({
+                "mode": if recompute { "recompute" } else { "seed" },
+                "update": update,
+                "regions": crate::attention::list_assigned_attention(
+                    &state.sessions[idx],
+                    &files,
+                ),
+            }))
+        })
     }
 
     fn with_state_mut<T: Serialize>(
@@ -1473,6 +1728,14 @@ mod tests {
         )
     }
 
+    fn attention_files() -> Vec<FileDiff> {
+        DiffSet::parse(
+            "diff --git a/src/app.rs b/src/app.rs\n--- a/src/app.rs\n+++ b/src/app.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap()
+        .files
+    }
+
     fn server(dir: &Path) -> GanderMcp {
         let root = dir.to_path_buf();
         GanderMcp::new(
@@ -1485,6 +1748,9 @@ mod tests {
                 workspace_root: dir.to_path_buf(),
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
                 agent_identity: Identity::agent(),
             },
@@ -1948,6 +2214,9 @@ mod tests {
                 workspace_root: dir.path().to_path_buf(),
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
                 agent_identity: Identity {
                     kind: crate::state::AuthorKind::Agent,
@@ -2020,6 +2289,9 @@ mod tests {
                 workspace_root: dir.path().to_path_buf(),
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
                 agent_identity: Identity::agent(),
             },
@@ -2224,6 +2496,194 @@ mod tests {
 
         assert_eq!(shown["walkthroughs"][0]["steps"][0]["id"], step["id"]);
         assert_eq!(shown["walkthroughs"][0]["steps"][0]["title"], "Read app");
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.sessions[0].attention_regions.len(), 1);
+        assert_eq!(
+            state.sessions[0].attention_regions[0].source,
+            crate::state::SalienceSource::Agent
+        );
+        assert!(
+            state.sessions[0].attention_regions[0]
+                .target
+                .anchor
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn attention_tools_share_set_promote_list_and_clear_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let set = result_json(
+            &server
+                .attention_set(Parameters(AttentionMutationParams {
+                    path: "src/app.rs".into(),
+                    line: Some(1),
+                    end_line: None,
+                    salience: Salience::Skim,
+                    rationale: Some("routine".into()),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(set["source"], "human");
+        assert_eq!(set["salience"], "skim");
+        assert_eq!(set["stale"], false);
+
+        let promoted = result_json(
+            &server
+                .attention_promote(Parameters(AttentionTargetParams {
+                    path: "src/app.rs".into(),
+                    line: Some(1),
+                    end_line: None,
+                    rationale: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(promoted["salience"], "supporting");
+        assert_eq!(promoted["stale"], false);
+        let listed = result_json(
+            &server
+                .attention_list(Parameters(AttentionListParams {
+                    assigned: Some(true),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(listed["regions"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["regions"][0]["stale"], false);
+
+        let cleared = result_json(
+            &server
+                .attention_clear(Parameters(AttentionClearParams {
+                    path: "src/app.rs".into(),
+                    line: Some(1),
+                    end_line: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(cleared["cleared"], true);
+    }
+
+    #[test]
+    fn attention_clear_handles_missing_and_out_of_range_stale_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        server
+            .attention_set(Parameters(AttentionMutationParams {
+                path: "src/app.rs".into(),
+                line: None,
+                end_line: None,
+                salience: Salience::Skim,
+                rationale: None,
+            }))
+            .unwrap();
+        let mut state = ReviewState::load_or_default(&server.state_path).unwrap();
+        let target = &mut state.sessions[0].attention_regions[0].target;
+        target.file = Some("missing.rs".into());
+        if let Some(crate::anchor::CommentAnchor::File { path, .. }) = &mut target.anchor {
+            *path = "missing.rs".into();
+        }
+        state.save(&server.state_path).unwrap();
+        let cleared = result_json(
+            &server
+                .attention_clear(Parameters(AttentionClearParams {
+                    path: "missing.rs".into(),
+                    line: None,
+                    end_line: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(cleared["cleared"], true);
+
+        server
+            .attention_set(Parameters(AttentionMutationParams {
+                path: "src/app.rs".into(),
+                line: Some(1),
+                end_line: None,
+                salience: Salience::Skim,
+                rationale: None,
+            }))
+            .unwrap();
+        let mut state = ReviewState::load_or_default(&server.state_path).unwrap();
+        state.sessions[0].attention_regions[0].target.line = Some(99);
+        state.save(&server.state_path).unwrap();
+        let cleared = result_json(
+            &server
+                .attention_clear(Parameters(AttentionClearParams {
+                    path: "src/app.rs".into(),
+                    line: Some(99),
+                    end_line: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(cleared["cleared"], true);
+
+        assert!(
+            server
+                .attention_set(Parameters(AttentionMutationParams {
+                    path: "missing.rs".into(),
+                    line: None,
+                    end_line: None,
+                    salience: Salience::Skim,
+                    rationale: None,
+                }))
+                .is_err()
+        );
+        assert!(
+            server
+                .attention_promote(Parameters(AttentionTargetParams {
+                    path: "src/app.rs".into(),
+                    line: Some(99),
+                    end_line: None,
+                    rationale: None,
+                }))
+                .is_err()
+        );
+        assert!(
+            server
+                .attention_demote(Parameters(AttentionTargetParams {
+                    path: "missing.rs".into(),
+                    line: None,
+                    end_line: None,
+                    rationale: None,
+                }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn attention_heuristics_honor_mcp_custom_generated_and_ignore_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = server(dir.path());
+        server.attention_files = DiffSet::parse(
+            "diff --git a/gen/client.ts b/gen/client.ts\n--- a/gen/client.ts\n+++ b/gen/client.ts\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/ignored/snapshot.txt b/ignored/snapshot.txt\n--- a/ignored/snapshot.txt\n+++ b/ignored/snapshot.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap()
+        .files;
+        server.diff_files.clear();
+        server.generated_policy = GeneratedPolicy {
+            presets: Vec::new(),
+            globs: vec!["gen/**".into()],
+        };
+        server.ignore_globs = vec!["ignored/**".into()];
+
+        let seeded = result_json(&server.attention_seed_heuristics().unwrap());
+        let regions = seeded["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 2);
+        assert!(regions.iter().any(|region| {
+            region["target"]["file"] == "gen/client.ts"
+                && region["rationale"]
+                    .as_str()
+                    .unwrap()
+                    .contains("generated path policy")
+        }));
+        assert!(regions.iter().any(|region| {
+            region["target"]["file"] == "ignored/snapshot.txt"
+                && region["rationale"]
+                    .as_str()
+                    .unwrap()
+                    .contains("ignore policy")
+        }));
+        assert!(regions.iter().all(|region| region["stale"] == false));
     }
 
     #[cfg(unix)]
@@ -2285,6 +2745,9 @@ mod tests {
                 workspace_root: workspace,
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
                 agent_identity: Identity::agent(),
             },
@@ -2369,6 +2832,9 @@ mod tests {
                 workspace_root: workspace.clone(),
                 target: ReviewTarget::trunk_to_current(),
                 diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
                 agent_identity: Identity::agent(),
             },

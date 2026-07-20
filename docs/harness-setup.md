@@ -39,10 +39,12 @@ gander handoff --copy
 gander hunks show <hunk-id>
 ```
 
-Review state schema 5 records optional comment `session_id`, `path`, immutable
+Review state schema 6 records durable fingerprint-anchored attention regions in
+addition to optional comment `session_id`, `path`, immutable
 observations, reply results, annotation authors/channels, and session
 disposition, plus normalized `action_items` when legacy `tasks` state is read.
-Artifact schema 10 and delegation schema 5 expose action-item shape, team-profile
+Artifact schema 11 and delegation schema 5 expose action-item shape, private
+human/agent attention assignments, team-profile
 collaboration exports, plus portable comment-observation and reply-result evidence. A snapshot label or an
 unchanged portable patch is context, not proof that the requested outcome was
 implemented or tested; report actual verification separately.
@@ -132,6 +134,12 @@ scriptable surface.
 | `walkthrough_remove_step` | `gander walkthrough remove-step <id>` |
 | `walkthrough_move_step` | `gander walkthrough move-step <id> --to <zero-based-index>` |
 | `walkthrough_show` | `gander walkthrough show` |
+| `attention_list` | `gander attention list [--mode effective|assigned]` |
+| `attention_set` | `gander attention set --path <path> ... --salience <value>` |
+| `attention_clear` | `gander attention clear --path <path> ...` |
+| `attention_promote` / `attention_demote` | `gander attention promote|demote --path <path> ...` |
+| `attention_seed_heuristics` | `gander attention seed-heuristics` |
+| `attention_recompute_heuristics` | `gander attention recompute-heuristics` |
 
 `gander paths` prints every resolved location (state dir, overlay, socket
 pattern, registry) when you need to debug a connection.

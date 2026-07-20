@@ -4,6 +4,10 @@
 
 ### Added
 
+- Added the first M18 attention-map package: durable fingerprint-anchored
+  spotlight/supporting/skim regions, human > agent > heuristic precedence,
+  walkthrough and generated/lockfile/ignore-policy curation, conservative stale
+  handling, CLI/MCP automation parity, and private human/agent artifact export.
 - Added durable annotation authors and onboarding/delegation/collaboration/note
   channels to comments, plus reply authors and a one-release migration that
   derives legacy channels and identities and folds pending agent-overlay drafts

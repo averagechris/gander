@@ -27,6 +27,40 @@ Sources, by precedence: human override > agent curation (today's
 `StepImportance::{Spotlight, Glance}`, generalized) > heuristics (generated
 and lockfile detection, ignore presets). Unassigned regions are `Supporting`.
 
+The effective resolver applies source precedence before specificity, so a human
+file override outranks an agent hunk. Within one source, hunk/range beats file,
+overlapping ranges prefer the narrowest range, and malformed duplicate ties use
+a stable higher-salience/canonical-target ordering. Durable identity is
+`(source, file, normalized inclusive line range)`; setting the same identity is
+an upsert. Regions reuse the existing `CommentAnchor` evidence through
+`ReviewTarget.anchor`. A changed/missing file fingerprint leaves the assignment
+durable but stale and excludes it from effective attention, conservatively
+falling back to the next current assignment or implicit `Supporting`.
+Effective list output partitions overlapping ranges into deterministic disjoint
+spans at every assignment boundary, so a narrow assignment is never reported as
+covering an entire broader range. Invalid legacy/merged regions are likewise
+retained but treated as stale. Clearing a human override uses normalized
+file/range identity and therefore works after a file disappears or its range
+drifts outside the current diff; set/promote/demote still require a current
+fingerprint anchor.
+
+Walkthrough synchronization retains an existing Agent assignment unchanged and
+stale while its source step target still exists but cannot currently re-anchor;
+only removing that source target removes the assignment. Agent rationales use
+the first trimmed non-empty `why`, `body`, or `title`.
+
+Effective spans are formed only from actual anchorable diff rows. Sparse hunk
+gaps are never synthesized into a region, singleton/final endpoints are
+inclusive without `end + 1`, and adjacent assignment boundaries remain
+explicit. TUI on-quit exports reload the final target's unfiltered diff through
+jj's read-only `--ignore-working-copy` path, so a retarget or refresh cannot use
+startup fingerprints for attention staleness.
+
+Current automation (the first ordered M18 package) is available through
+`gander attention list|set|clear|promote|demote|seed-heuristics|recompute-heuristics`
+and matching MCP tools. TUI folding/cards/focus and zen removal remain later
+packages.
+
 ## The review stream
 
 One diff view. Salience changes rendering, never data:

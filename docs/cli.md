@@ -68,6 +68,39 @@ These are read-only queries over the current jj diff. `hunks list` returns
 hunk ids suitable for `hunks show` and accepts the file as a positional or
 `--path` (`--file` remains a hidden compatibility alias). `hunks show --format diff` (alias `text`) prints a unified diff.
 
+## Attention map
+
+```sh
+gander attention list [--mode effective|assigned] [--format json|text]
+gander attention set --path <path> [--line <n> [--end-line <n>]] \
+  --salience spotlight|supporting|skim [--rationale <text>] [--format json|text]
+gander attention clear --path <path> [--line <n> [--end-line <n>]] [--format json|text]
+gander attention promote|demote --path <path> [--line <n> [--end-line <n>]] \
+  [--rationale <text>] [--format json|text]
+gander attention seed-heuristics [--format json|text]
+gander attention recompute-heuristics [--format json|text]
+```
+
+Attention assignments are durable file or inclusive diff-line regions. Human
+set/promote/demote assignments outrank agent curation, which outranks generated,
+lockfile, custom-generated, and ignore-policy heuristics; ordinary content stays
+implicit `supporting` and is not persisted. Agent `spotlight` walkthrough steps
+map to `spotlight`, while `glance` maps to `skim`. `list --mode assigned` returns
+raw durable records with a `stale` flag. The default effective list returns one
+entry for each current file plus deterministic disjoint spans partitioned at
+every current assignment boundary, and an envelope with
+`"default_salience": "supporting"`.
+
+Targets reuse the existing diff anchor and fingerprint representation. A
+fingerprint mismatch retains the assignment for later re-anchoring, marks it
+stale, and excludes it from effective attention so stale `skim` never hides
+changed code. `recompute-heuristics` may remove current assignments no longer
+matched by policy, but never deletes fingerprint-drifted records. All mutations
+write only Gander review state.
+`clear` resolves only normalized file/range identity, so it can remove a stale
+human assignment for a missing file or out-of-range line. `set`, `promote`, and
+`demote` require a target in the current unfiltered attention diff.
+
 ## Comments
 
 ```sh
@@ -261,6 +294,9 @@ why/body/artifacts, an optional change id, and an optional stable target. `--lin
 and `--end-line` are 1-indexed diff line anchors: new side (post-image)
 preferred, with old-side fallback for removed-only lines in the current jj diff.
 Chapters introduce stack changes and use `summary` as their narrative.
+Walkthrough JSON targets accept the optional existing `anchor` object; its
+path/line/range must agree with the target coordinates. A supplied valid anchor
+is preserved rather than silently refreshed.
 `walkthrough set` replaces the current walkthrough from `{ "title", "steps" }`
 JSON using the same step fields as state.json. Pass `--dry-run` to validate the
 spec, print diagnostics plus the would-be replacement summary, and echo the
@@ -345,7 +381,9 @@ made in the TUI are not resurrected by merges. Same-id comments use the newer
 reply id, enriching a missing same-ID reply result with deterministic conflict
 handling, so an external reply or resolution is not overwritten by a later TUI
 save. Action items, walkthroughs, walkthrough steps, and sessions likewise use newer
-`updated_at` values for same-id conflicts.
+`updated_at` values for same-id conflicts. The attention map is session-level
+last-writer-wins during external-state merge; region identity and effective
+resolution are deterministic within the winning map.
 
 ## Export/import and state utilities
 
@@ -383,7 +421,8 @@ cross-reference each other). `export --profile team` includes only collaboration
 Import requires the artifact's base/revision to exactly match the currently
 loaded target; on match it remaps imported comments into the active local session
 while preserving foreign authors, channels, replies, and identities. Exported
-action items and walkthroughs are not restored by `gander import`.
+action items, walkthroughs, and private attention assignments are not restored
+by `gander import`.
 
 Humans read the durable review session directly in the TUI (and future web UI).
 Prompt handoff and delegate mode are outbound adapters for transferring work to

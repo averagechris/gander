@@ -3,6 +3,7 @@ mod agent;
 mod anchor;
 mod app;
 mod artifact;
+mod attention;
 mod clipboard;
 mod config;
 mod delegation;
@@ -42,7 +43,7 @@ use crate::{
     artifact::{
         ArtifactBuildOptions, ArtifactFormat, ArtifactProfile, OwnedReviewArtifact,
         import_json_artifact_into_state, render_handoff_json, render_handoff_markdown,
-        write_artifact, write_artifact_to,
+        write_artifact_to_with_attention_files, write_artifact_with_attention_files,
     },
     clipboard::copy_to_clipboard,
     config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
@@ -54,8 +55,8 @@ use crate::{
     review::SessionTargetSpec,
     state::{
         ActionIntent, ActionItemStatus, Channel, ClosedDisposition, CommentKind, CommentState,
-        ReviewState, ReviewTarget as StateReviewTarget, StepArtifact, StepImportance, StepKind,
-        WalkthroughStep,
+        ReviewState, ReviewTarget as StateReviewTarget, Salience, StepArtifact, StepImportance,
+        StepKind, WalkthroughStep,
     },
 };
 
@@ -301,6 +302,11 @@ enum Command {
     Walkthrough {
         #[command(subcommand)]
         command: WalkthroughCommand,
+    },
+    /// Manage the durable attention map for the current review session.
+    Attention {
+        #[command(subcommand)]
+        command: AttentionCommand,
     },
     /// Author durable agent draft comments from JSON specs.
     #[command(
@@ -836,6 +842,85 @@ enum WalkthroughCommand {
     Show,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum AttentionListMode {
+    Effective,
+    Assigned,
+}
+
+#[derive(Debug, Subcommand)]
+enum AttentionCommand {
+    /// List effective regions (including implicit Supporting files) or only durable assignments.
+    List {
+        #[arg(long, value_enum, default_value_t = AttentionListMode::Effective)]
+        mode: AttentionListMode,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Set a durable human override for a file or line range.
+    Set {
+        #[arg(long, alias = "file")]
+        path: String,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line", requires = "line")]
+        end_line: Option<usize>,
+        #[arg(long, value_enum)]
+        salience: SalienceArg,
+        #[arg(long)]
+        rationale: Option<String>,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Clear the exact durable human override for a file or line range.
+    Clear {
+        #[arg(long, alias = "file")]
+        path: String,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line", requires = "line")]
+        end_line: Option<usize>,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Promote effective salience one step and persist the result as a human override.
+    Promote {
+        #[arg(long, alias = "file")]
+        path: String,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line", requires = "line")]
+        end_line: Option<usize>,
+        #[arg(long)]
+        rationale: Option<String>,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Demote effective salience one step and persist the result as a human override.
+    Demote {
+        #[arg(long, alias = "file")]
+        path: String,
+        #[arg(long)]
+        line: Option<usize>,
+        #[arg(long = "end-line", requires = "line")]
+        end_line: Option<usize>,
+        #[arg(long)]
+        rationale: Option<String>,
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Add missing generated, lockfile, and ignore-policy Skim assignments.
+    SeedHeuristics {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+    /// Re-evaluate current heuristics while retaining fingerprint-drifted regions as stale.
+    RecomputeHeuristics {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CommentKindArg {
     Note,
@@ -884,6 +969,24 @@ impl From<StepImportanceArg> for StepImportance {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SalienceArg {
+    Spotlight,
+    Supporting,
+    Skim,
+}
+
+impl From<SalienceArg> for Salience {
+    fn from(value: SalienceArg) -> Self {
+        match value {
+            SalienceArg::Spotlight => Self::Spotlight,
+            SalienceArg::Supporting => Self::Supporting,
+            SalienceArg::Skim => Self::Skim,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum CommentStateArg {
     Draft,
@@ -1126,6 +1229,9 @@ fn run() -> color_eyre::Result<()> {
         .diff(&repo, &target)
         .map_err(|error| user_error(format!("failed to read jj diff for {target}: {error}")))?;
     let mut diff = DiffSet::parse(&diff_text).wrap_err("failed to parse jj git diff")?;
+    // Ignore policy is an attention heuristic as well as the legacy visibility
+    // filter, so retain the complete parsed diff for durable attention work.
+    let attention_diff = diff.clone();
     let ignore_globs = merge_ignores(&config, cli.ignore);
     if !matches!(command, Command::MarkGeneratedViewed) {
         diff.apply_ignores(&ignore_globs)?;
@@ -1133,6 +1239,19 @@ fn run() -> color_eyre::Result<()> {
 
     let state_path = cli.state.unwrap_or_else(|| workspace_paths.state_file());
     let mut state = ReviewState::load_or_default(&state_path)?;
+    let target_spec = session_target_spec(&repo, &target);
+    if let Some(index) = state.sessions.iter().position(|review_session| {
+        review_session.status == state::ReviewSessionStatus::Open
+            && review_session.target.repo == target_spec.repo
+            && review_session.target.base == target_spec.base
+            && review_session.target.revision == target_spec.revision
+    }) {
+        let before = state.sessions[index].attention_regions.clone();
+        attention::sync_agent_attention(&mut state.sessions[index], &attention_diff.files)?;
+        if state.sessions[index].attention_regions != before {
+            state.save(&state_path)?;
+        }
+    }
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff.clone(), state.clone(), &config);
     session.set_target_author_name(jj.target_author(&repo, &session.target).unwrap_or(None));
@@ -1158,6 +1277,9 @@ fn run() -> color_eyre::Result<()> {
             session.to_state(),
             config.clone(),
             generated_matcher.clone(),
+            attention_diff.clone(),
+            generated_policy.clone(),
+            ignore_globs.clone(),
         )
     });
 
@@ -1203,11 +1325,18 @@ fn run() -> color_eyre::Result<()> {
             state = session.clone().into_state();
             state.save(&state_path)?;
             if let Some(request) = artifact_request {
+                // The TUI may have retargeted or refreshed after startup. Read
+                // the final target again with jj's --ignore-working-copy path
+                // so ignored attention regions are evaluated against current
+                // unfiltered fingerprints without snapshotting or mutation.
+                let final_attention_diff =
+                    load_unfiltered_attention_diff(&jj, &repo, &session.target)?;
                 if request.format == OutputFormat::Html {
-                    let html = web_export::render_html_with_profile(
+                    let html = web_export::render_html_with_profile_and_attention_files(
                         &session,
                         &state,
                         ArtifactProfile::from(request.profile),
+                        &final_attention_diff.files,
                     );
                     match request.destination {
                         TuiArtifactDestination::File(path) => std::fs::write(&path, html)
@@ -1224,12 +1353,22 @@ fn run() -> color_eyre::Result<()> {
                     };
                     let profile = ArtifactProfile::from(request.profile);
                     match request.destination {
-                        TuiArtifactDestination::File(path) => {
-                            write_artifact(&session, format, profile, &path)?
-                        }
+                        TuiArtifactDestination::File(path) => write_artifact_with_attention_files(
+                            &session,
+                            format,
+                            profile,
+                            &final_attention_diff.files,
+                            &path,
+                        )?,
                         TuiArtifactDestination::Stdout => {
                             let stdout = std::io::stdout();
-                            write_artifact_to(&session, format, profile, stdout.lock())?;
+                            write_artifact_to_with_attention_files(
+                                &session,
+                                format,
+                                profile,
+                                &final_attention_diff.files,
+                                stdout.lock(),
+                            )?;
                         }
                     }
                 }
@@ -1268,10 +1407,11 @@ fn run() -> color_eyre::Result<()> {
             warn_session_target_mismatch(&state, &spec);
             note_if_no_session_for_artifact(&state, &spec);
             if format == OutputFormat::Html {
-                let html = web_export::render_html_with_profile(
+                let html = web_export::render_html_with_profile_and_attention_files(
                     &session,
                     &state,
                     ArtifactProfile::from(profile),
+                    &attention_diff.files,
                 );
                 match destination {
                     TuiArtifactDestination::File(path) => std::fs::write(&path, html)
@@ -1286,12 +1426,22 @@ fn run() -> color_eyre::Result<()> {
                 };
                 let profile = ArtifactProfile::from(profile);
                 match destination {
-                    TuiArtifactDestination::File(path) => {
-                        write_artifact(&session, format, profile, &path)?
-                    }
+                    TuiArtifactDestination::File(path) => write_artifact_with_attention_files(
+                        &session,
+                        format,
+                        profile,
+                        &attention_diff.files,
+                        &path,
+                    )?,
                     TuiArtifactDestination::Stdout => {
                         let stdout = std::io::stdout();
-                        write_artifact_to(&session, format, profile, stdout.lock())?;
+                        write_artifact_to_with_attention_files(
+                            &session,
+                            format,
+                            profile,
+                            &attention_diff.files,
+                            stdout.lock(),
+                        )?;
                     }
                 }
             }
@@ -1483,8 +1633,16 @@ fn run() -> color_eyre::Result<()> {
             }
         }
         Command::Mcp => {
-            let (target, diff, state, config, generated_matcher) =
-                mcp_ingredients.expect("captured above for the mcp command");
+            let (
+                target,
+                diff,
+                state,
+                config,
+                generated_matcher,
+                attention_diff,
+                generated_policy,
+                ignore_globs,
+            ) = mcp_ingredients.expect("captured above for the mcp command");
             let session_repo = repo.clone();
             let initial_comment_state = config.comments.initial_state.into();
             let agent_identity = config.agent_identity();
@@ -1512,6 +1670,9 @@ fn run() -> color_eyre::Result<()> {
                     workspace_root: workspace_paths.workspace_root.clone(),
                     target: session.target.clone(),
                     diff_files: session.files.iter().map(|file| file.path.clone()).collect(),
+                    attention_files: attention_diff.files,
+                    generated_policy,
+                    ignore_globs,
                     initial_comment_state,
                     agent_identity,
                 },
@@ -2210,6 +2371,195 @@ fn run() -> color_eyre::Result<()> {
                 print_listed_action_item(listed, format)?;
             }
         },
+        Command::Attention { command } => {
+            let target_spec = session_target_spec(&repo, &session.target);
+            match command {
+                AttentionCommand::List { mode, format } => {
+                    warn_session_target_mismatch(&state, &target_spec);
+                    let durable = review::find_session_for_target(&state, &target_spec)
+                        .cloned()
+                        .unwrap_or_default();
+                    match mode {
+                        AttentionListMode::Assigned => {
+                            let regions =
+                                attention::list_assigned_attention(&durable, &attention_diff.files);
+                            match format {
+                                ListFormat::Json => print_json(&serde_json::json!({
+                                    "mode": "assigned",
+                                    "default_salience": "supporting",
+                                    "regions": regions,
+                                }))?,
+                                ListFormat::Text => {
+                                    print!("{}", attention_assigned_text(&regions))
+                                }
+                            }
+                        }
+                        AttentionListMode::Effective => {
+                            let regions = attention::list_effective_attention(
+                                &durable,
+                                &attention_diff.files,
+                            );
+                            match format {
+                                ListFormat::Json => print_json(&serde_json::json!({
+                                    "mode": "effective",
+                                    "default_salience": "supporting",
+                                    "regions": regions,
+                                }))?,
+                                ListFormat::Text => {
+                                    print!("{}", attention_effective_text(&regions))
+                                }
+                            }
+                        }
+                    }
+                }
+                AttentionCommand::Set {
+                    path,
+                    line,
+                    end_line,
+                    salience,
+                    rationale,
+                    format,
+                } => {
+                    let target =
+                        attention_target_from_cli(&attention_diff.files, &path, line, end_line)?;
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    let region =
+                        attention::set_human_attention(durable, target, salience.into(), rationale)
+                            .map_err(into_user_error)?;
+                    state.save(&state_path)?;
+                    print_attention_region(region, &attention_diff.files, format)?;
+                }
+                AttentionCommand::Clear {
+                    path,
+                    line,
+                    end_line,
+                    format,
+                } => {
+                    let target = attention::identity_target(&path, line, end_line)
+                        .map_err(into_user_error)?;
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    let cleared = attention::clear_human_attention(durable, &target);
+                    state.save(&state_path)?;
+                    match format {
+                        ListFormat::Json => print_json(&serde_json::json!({
+                            "cleared": cleared,
+                            "target": target,
+                        }))?,
+                        ListFormat::Text => println!(
+                            "cleared: {} ({})",
+                            if cleared { "yes" } else { "no" },
+                            attention_target_label(&target)
+                        ),
+                    }
+                }
+                AttentionCommand::Promote {
+                    path,
+                    line,
+                    end_line,
+                    rationale,
+                    format,
+                } => {
+                    let target =
+                        attention_target_from_cli(&attention_diff.files, &path, line, end_line)?;
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    let region = attention::promote_human_attention(
+                        durable,
+                        target,
+                        rationale,
+                        &attention_diff.files,
+                    )
+                    .map_err(into_user_error)?;
+                    state.save(&state_path)?;
+                    print_attention_region(region, &attention_diff.files, format)?;
+                }
+                AttentionCommand::Demote {
+                    path,
+                    line,
+                    end_line,
+                    rationale,
+                    format,
+                } => {
+                    let target =
+                        attention_target_from_cli(&attention_diff.files, &path, line, end_line)?;
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    let region = attention::demote_human_attention(
+                        durable,
+                        target,
+                        rationale,
+                        &attention_diff.files,
+                    )
+                    .map_err(into_user_error)?;
+                    state.save(&state_path)?;
+                    print_attention_region(region, &attention_diff.files, format)?;
+                }
+                AttentionCommand::SeedHeuristics { format } => {
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    attention::sync_agent_attention(durable, &attention_diff.files)
+                        .map_err(into_user_error)?;
+                    let update = attention::update_heuristic_attention(
+                        durable,
+                        &attention_diff.files,
+                        &generated_policy,
+                        &ignore_globs,
+                        false,
+                    )
+                    .map_err(into_user_error)?;
+                    let regions =
+                        attention::list_assigned_attention(durable, &attention_diff.files);
+                    state.save(&state_path)?;
+                    match format {
+                        ListFormat::Json => print_json(&serde_json::json!({
+                            "mode": "seed",
+                            "update": update,
+                            "regions": regions,
+                        }))?,
+                        ListFormat::Text => {
+                            println!(
+                                "added: {} updated: {} removed: {} preserved-stale: {}",
+                                update.added,
+                                update.updated,
+                                update.removed,
+                                update.preserved_stale
+                            );
+                            print!("{}", attention_assigned_text(&regions));
+                        }
+                    }
+                }
+                AttentionCommand::RecomputeHeuristics { format } => {
+                    let durable = review::ensure_session(&mut state, &target_spec, None);
+                    attention::sync_agent_attention(durable, &attention_diff.files)
+                        .map_err(into_user_error)?;
+                    let update = attention::update_heuristic_attention(
+                        durable,
+                        &attention_diff.files,
+                        &generated_policy,
+                        &ignore_globs,
+                        true,
+                    )
+                    .map_err(into_user_error)?;
+                    let regions =
+                        attention::list_assigned_attention(durable, &attention_diff.files);
+                    state.save(&state_path)?;
+                    match format {
+                        ListFormat::Json => print_json(&serde_json::json!({
+                            "mode": "recompute",
+                            "update": update,
+                            "regions": regions,
+                        }))?,
+                        ListFormat::Text => {
+                            println!(
+                                "added: {} updated: {} removed: {} preserved-stale: {}",
+                                update.added,
+                                update.updated,
+                                update.removed,
+                                update.preserved_stale
+                            );
+                            print!("{}", attention_assigned_text(&regions));
+                        }
+                    }
+                }
+            }
+        }
         Command::Walkthrough { command } => match command {
             WalkthroughCommand::Export => {
                 let spec = session_target_spec(&repo, &session.target);
@@ -2247,6 +2597,26 @@ fn run() -> color_eyre::Result<()> {
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
+                let target = file.as_deref().map_or_else(
+                    || StateReviewTarget {
+                        symbol: symbol.clone(),
+                        ..StateReviewTarget::default()
+                    },
+                    |path| {
+                        attention::target_for_diff(&attention_diff.files, path, line, end_line)
+                            .map(|mut target| {
+                                target.symbol = symbol.clone();
+                                target
+                            })
+                            .unwrap_or_else(|_| StateReviewTarget {
+                                file: file.clone(),
+                                line,
+                                end_line,
+                                symbol: symbol.clone(),
+                                ..StateReviewTarget::default()
+                            })
+                    },
+                );
                 let step = review::add_walkthrough_step(
                     rs,
                     WalkthroughStep {
@@ -2257,16 +2627,12 @@ fn run() -> color_eyre::Result<()> {
                         importance: importance.into(),
                         change_id,
                         artifacts: parse_step_artifacts(&artifacts)?,
-                        target: StateReviewTarget {
-                            file,
-                            line,
-                            end_line,
-                            symbol,
-                            ..StateReviewTarget::default()
-                        },
+                        target,
                         ..WalkthroughStep::default()
                     },
                 );
+                attention::sync_agent_attention(rs, &attention_diff.files)
+                    .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
@@ -2295,6 +2661,7 @@ fn run() -> color_eyre::Result<()> {
                     .map(|walkthrough| walkthrough.steps.as_slice())
                     .unwrap_or(&[]);
                 spec.steps = review::preserve_walkthrough_step_ids(prior, spec.steps);
+                anchor_walkthrough_steps(&mut spec.steps, &attention_diff.files);
                 warn_walkthrough_set_issues(&session, &jj, &spec)?;
                 let new_count = spec.steps.len();
                 if dry_run {
@@ -2305,6 +2672,8 @@ fn run() -> color_eyre::Result<()> {
                     return Ok(());
                 }
                 let walkthrough = review::set_walkthrough(rs, spec.title, spec.steps);
+                attention::sync_agent_attention(rs, &attention_diff.files)
+                    .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 eprintln!("replaced walkthrough ({replaced} steps) with {new_count} steps");
                 print_json(&walkthrough)?;
@@ -2314,6 +2683,8 @@ fn run() -> color_eyre::Result<()> {
                 note_if_creating_mismatched_session(&state, &spec);
                 let rs = review::ensure_session(&mut state, &spec, None);
                 let step = review::remove_walkthrough_step(rs, &id).map_err(into_user_error)?;
+                attention::sync_agent_attention(rs, &attention_diff.files)
+                    .map_err(into_user_error)?;
                 state.save(&state_path)?;
                 print_json(&step)?;
             }
@@ -2529,7 +2900,7 @@ const WALKTHROUGH_STEP_KEYS: &[&str] = &[
     "updated_at",
 ];
 const WALKTHROUGH_TARGET_KEYS: &[&str] = &[
-    "repo", "base", "revision", "revset", "file", "line", "end_line", "symbol",
+    "repo", "base", "revision", "revset", "file", "line", "end_line", "symbol", "anchor",
 ];
 
 fn push_unknown_field_warnings(
@@ -2881,6 +3252,12 @@ fn warn_walkthrough_set_issues(
     );
     for step in &spec.steps {
         for target in std::iter::once(&step.target).chain(step.extra_targets.iter()) {
+            attention::validate_target_anchor(target).map_err(|error| {
+                user_error(format!(
+                    "walkthrough step {} has invalid target anchor: {error}",
+                    step_label(step)
+                ))
+            })?;
             if let Some(file) = target.file.as_deref()
                 && !session.files.iter().any(|f| f.path == file)
             {
@@ -2928,6 +3305,24 @@ fn step_label(step: &WalkthroughStep) -> &str {
         &step.id
     } else {
         step.title.as_deref().unwrap_or("<untitled>")
+    }
+}
+
+fn anchor_walkthrough_steps(steps: &mut [WalkthroughStep], files: &[crate::diff::FileDiff]) {
+    for step in steps {
+        for target in std::iter::once(&mut step.target).chain(step.extra_targets.iter_mut()) {
+            if target.anchor.is_some() {
+                continue;
+            }
+            let Some(path) = target.file.clone() else {
+                continue;
+            };
+            if let Ok(anchored) =
+                attention::target_for_diff(files, &path, target.line, target.end_line)
+            {
+                target.anchor = anchored.anchor;
+            }
+        }
     }
 }
 
@@ -2989,6 +3384,19 @@ fn session_target_spec(repo: &std::path::Path, target: &ReviewTarget) -> Session
         revision: Some(target.rev.clone()),
         revset: Some(target.to_string()),
     }
+}
+
+fn load_unfiltered_attention_diff(
+    jj: &dyn JjBackend,
+    repo: &Path,
+    target: &ReviewTarget,
+) -> color_eyre::Result<DiffSet> {
+    let diff_text = jj.diff(repo, target).map_err(|error| {
+        user_error(format!(
+            "failed to reload final unfiltered attention diff for {target}: {error}"
+        ))
+    })?;
+    DiffSet::parse(&diff_text).wrap_err("failed to parse final unfiltered attention diff")
 }
 
 fn provenance_snapshot(
@@ -3119,6 +3527,83 @@ fn loc(path: &str, line: Option<usize>, end_line: Option<usize>) -> String {
         (Some(a), Some(b)) if b != a => format!("{path}:{a}-{b}"),
         (Some(a), _) => format!("{path}:{a}"),
         _ => path.to_owned(),
+    }
+}
+
+fn attention_target_from_cli(
+    files: &[crate::diff::FileDiff],
+    path: &str,
+    line: Option<usize>,
+    end_line: Option<usize>,
+) -> color_eyre::Result<StateReviewTarget> {
+    attention::target_for_diff(files, path, line, end_line).map_err(into_user_error)
+}
+
+fn attention_target_label(target: &StateReviewTarget) -> String {
+    target.file.as_deref().map_or_else(
+        || "(invalid target)".to_owned(),
+        |path| loc(path, target.line, target.end_line),
+    )
+}
+
+fn salience_label(salience: Salience) -> &'static str {
+    match salience {
+        Salience::Spotlight => "spotlight",
+        Salience::Supporting => "supporting",
+        Salience::Skim => "skim",
+    }
+}
+
+fn salience_source_label(source: Option<state::SalienceSource>) -> &'static str {
+    match source {
+        Some(state::SalienceSource::Human) => "human",
+        Some(state::SalienceSource::Agent) => "agent",
+        Some(state::SalienceSource::Heuristic) => "heuristic",
+        None => "implicit",
+    }
+}
+
+fn attention_assigned_text(regions: &[attention::AssignedAttentionRegion]) -> String {
+    let mut out = String::new();
+    for region in regions {
+        out.push_str(&format!(
+            "{:<11} {:<10} {:<7} {:<48} {}\n",
+            salience_label(region.salience),
+            salience_source_label(Some(region.source)),
+            if region.stale { "stale" } else { "current" },
+            ellipsize(&attention_target_label(&region.target), 48),
+            ellipsize(region.rationale.as_deref().unwrap_or(""), 80),
+        ));
+    }
+    out
+}
+
+fn attention_effective_text(regions: &[attention::EffectiveAttentionRegion]) -> String {
+    let mut out = String::new();
+    for region in regions {
+        out.push_str(&format!(
+            "{:<11} {:<10} {:<48} {}\n",
+            salience_label(region.salience),
+            salience_source_label(region.source),
+            ellipsize(&attention_target_label(&region.target), 48),
+            ellipsize(region.rationale.as_deref().unwrap_or(""), 80),
+        ));
+    }
+    out
+}
+
+fn print_attention_region(
+    region: state::AttentionRegion,
+    files: &[crate::diff::FileDiff],
+    format: ListFormat,
+) -> color_eyre::Result<()> {
+    let listed = attention::assigned_attention_region(&region, files);
+    match format {
+        ListFormat::Json => print_json(&listed),
+        ListFormat::Text => {
+            print!("{}", attention_assigned_text(&[listed]));
+            Ok(())
+        }
     }
 }
 
@@ -3743,6 +4228,75 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use clap::CommandFactory;
+    use std::cell::RefCell;
+
+    struct FinalAttentionDiffBackend {
+        diff: String,
+        targets: RefCell<Vec<ReviewTarget>>,
+    }
+
+    impl JjBackend for FinalAttentionDiffBackend {
+        fn diff(&self, _repo: &Path, target: &ReviewTarget) -> color_eyre::Result<String> {
+            self.targets.borrow_mut().push(target.clone());
+            Ok(self.diff.clone())
+        }
+
+        fn change_summaries(
+            &self,
+            _repo: &Path,
+        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn stack_changes(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+        ) -> color_eyre::Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn snapshot_working_copy(&self, _repo: &Path) -> color_eyre::Result<()> {
+            panic!("final artifact reload must stay read-only")
+        }
+
+        fn change_fingerprint(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn operations(
+            &self,
+            _repo: &Path,
+        ) -> color_eyre::Result<Vec<crate::jj::JjOperationSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn diff_at_operation(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+            _operation_id: &str,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn file_contents(
+            &self,
+            _repo: &Path,
+            _rev: &str,
+            _path: &str,
+        ) -> color_eyre::Result<String> {
+            Ok(String::new())
+        }
+
+        fn run_command(&self, _repo: &Path, _args: &[String]) -> color_eyre::Result<String> {
+            panic!("final artifact reload must not mutate jj state")
+        }
+    }
 
     #[test]
     fn draft_spec_unknown_fields_are_warned() {
@@ -3753,6 +4307,86 @@ mod tests {
         let warnings = drafts_spec_unknown_fields(&draft_value);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("unknown field 'severity' at drafts[0]"));
+    }
+
+    #[test]
+    fn walkthrough_target_anchor_is_accepted_and_validated() {
+        let value = serde_json::json!({
+            "steps": [{
+                "target": {
+                    "file": "src/lib.rs",
+                    "anchor": {
+                        "type": "file",
+                        "path": "src/lib.rs",
+                        "old_path": null,
+                        "diff_fingerprint": "fingerprint"
+                    }
+                }
+            }]
+        });
+        assert!(walkthrough_spec_unknown_fields(&value).is_empty());
+        let spec: WalkthroughSetSpec = serde_json::from_value(value).unwrap();
+        assert!(attention::validate_target_anchor(&spec.steps[0].target).is_ok());
+
+        let mut malformed = spec.steps[0].target.clone();
+        if let Some(crate::anchor::CommentAnchor::File { path, .. }) = &mut malformed.anchor {
+            *path = "other.rs".into();
+        }
+        assert!(attention::validate_target_anchor(&malformed).is_err());
+    }
+
+    #[test]
+    fn tui_on_quit_attention_reload_uses_final_retarget_for_ignored_heuristic() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap();
+        let final_target = ReviewTarget::new("final-base", "final-revision");
+        let raw = "diff --git a/ignored/generated.txt b/ignored/generated.txt\n--- a/ignored/generated.txt\n+++ b/ignored/generated.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let backend = FinalAttentionDiffBackend {
+            diff: raw.into(),
+            targets: RefCell::new(Vec::new()),
+        };
+
+        let final_diff = load_unfiltered_attention_diff(&backend, &repo, &final_target).unwrap();
+        assert_eq!(
+            backend.targets.borrow().as_slice(),
+            std::slice::from_ref(&final_target)
+        );
+        let heuristic = state::AttentionRegion {
+            target: attention::target_for_diff(
+                &final_diff.files,
+                "ignored/generated.txt",
+                None,
+                None,
+            )
+            .unwrap(),
+            salience: Salience::Skim,
+            rationale: Some("ignore policy".into()),
+            source: state::SalienceSource::Heuristic,
+        };
+        let state = ReviewState {
+            sessions: vec![state::ReviewSession {
+                id: "session".into(),
+                target: StateReviewTarget {
+                    repo: Some(repo.display().to_string()),
+                    base: Some(final_target.base.clone()),
+                    revision: Some(final_target.rev.clone()),
+                    ..Default::default()
+                },
+                attention_regions: vec![heuristic],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // The normal TUI diff may omit the ignored file entirely.
+        let session = ReviewSession::new(repo, final_target, DiffSet::parse("").unwrap(), state);
+        let artifact = crate::artifact::ReviewArtifact::build_with_options_and_attention_files(
+            &session,
+            ArtifactProfile::Human,
+            ArtifactBuildOptions::default(),
+            &final_diff.files,
+        );
+        assert_eq!(artifact.attention_regions.len(), 1);
+        assert!(!artifact.attention_regions[0].stale);
     }
 
     #[test]

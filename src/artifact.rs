@@ -41,7 +41,7 @@ pub struct TeamProjection<'a> {
 }
 
 const EXCERPT_CONTEXT_LINES: usize = 3;
-pub const ARTIFACT_SCHEMA_VERSION: u8 = 10;
+pub const ARTIFACT_SCHEMA_VERSION: u8 = 11;
 
 #[derive(Debug, Serialize)]
 pub struct ReviewArtifact<'a> {
@@ -59,6 +59,10 @@ pub struct ReviewArtifact<'a> {
     pub comments: Vec<CommentArtifact<'a>>,
     pub action_items: Vec<ActionItemArtifact<'a>>,
     pub walkthroughs: Vec<WalkthroughArtifact<'a>>,
+    /// Private/local attention assignments. Team exports intentionally omit
+    /// this field to preserve the collaboration-only publication boundary.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attention_regions: Vec<crate::attention::AssignedAttentionRegion>,
 }
 
 #[derive(Debug, Serialize)]
@@ -235,6 +239,20 @@ impl<'a> ReviewArtifact<'a> {
         profile: ArtifactProfile,
         options: ArtifactBuildOptions,
     ) -> Self {
+        let attention_files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        Self::build_with_options_and_attention_files(session, profile, options, &attention_files)
+    }
+
+    pub fn build_with_options_and_attention_files(
+        session: &'a ReviewSession,
+        profile: ArtifactProfile,
+        options: ArtifactBuildOptions,
+        attention_files: &[crate::diff::FileDiff],
+    ) -> Self {
         let agent = profile == ArtifactProfile::Agent;
         let team = profile == ArtifactProfile::Team;
         let durable = active_durable_session(session);
@@ -362,6 +380,15 @@ impl<'a> ReviewArtifact<'a> {
                             .collect(),
                     })
                     .collect()
+            },
+            attention_regions: if team {
+                Vec::new()
+            } else {
+                durable
+                    .map(|active| {
+                        crate::attention::list_assigned_attention(active, attention_files)
+                    })
+                    .unwrap_or_default()
             },
         }
     }
@@ -667,10 +694,11 @@ fn excerpt_for_file(file: &ReviewFile) -> Option<Vec<ExcerptLine<'_>>> {
     Some(hunk.lines[..end].iter().map(excerpt_line).collect())
 }
 
-pub fn write_artifact(
+pub fn write_artifact_with_attention_files(
     session: &ReviewSession,
     format: ArtifactFormat,
     profile: ArtifactProfile,
+    attention_files: &[crate::diff::FileDiff],
     path: &Path,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -678,7 +706,7 @@ pub fn write_artifact(
     }
     fs::write(
         path,
-        render_artifact_with_profile(session, format, profile)?,
+        render_artifact_with_attention_files(session, format, profile, attention_files)?,
     )?;
     Ok(())
 }
@@ -765,6 +793,7 @@ pub fn render_artifact(session: &ReviewSession, format: ArtifactFormat) -> Resul
     render_artifact_with_profile(session, format, ArtifactProfile::Human)
 }
 
+#[cfg(test)]
 pub fn render_artifact_with_profile(
     session: &ReviewSession,
     format: ArtifactFormat,
@@ -773,6 +802,7 @@ pub fn render_artifact_with_profile(
     render_artifact_with_options(session, format, profile, ArtifactBuildOptions::default())
 }
 
+#[cfg(test)]
 pub fn render_artifact_with_options(
     session: &ReviewSession,
     format: ArtifactFormat,
@@ -786,10 +816,29 @@ pub fn render_artifact_with_options(
     }
 }
 
+pub fn render_artifact_with_attention_files(
+    session: &ReviewSession,
+    format: ArtifactFormat,
+    profile: ArtifactProfile,
+    attention_files: &[crate::diff::FileDiff],
+) -> Result<String> {
+    let artifact = ReviewArtifact::build_with_options_and_attention_files(
+        session,
+        profile,
+        ArtifactBuildOptions::default(),
+        attention_files,
+    );
+    match format {
+        ArtifactFormat::Json => Ok(serde_json::to_string_pretty(&artifact)?),
+        ArtifactFormat::Markdown => Ok(to_markdown(&artifact)),
+    }
+}
+
 pub fn action_item_count(artifact: &ReviewArtifact<'_>) -> usize {
     ordered_open_work(artifact).len()
 }
 
+#[cfg(test)]
 pub fn write_artifact_to(
     session: &ReviewSession,
     format: ArtifactFormat,
@@ -797,6 +846,21 @@ pub fn write_artifact_to(
     mut writer: impl Write,
 ) -> Result<()> {
     let body = render_artifact_with_profile(session, format, profile)?;
+    writer.write_all(body.as_bytes())?;
+    if !body.ends_with('\n') {
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+pub fn write_artifact_to_with_attention_files(
+    session: &ReviewSession,
+    format: ArtifactFormat,
+    profile: ArtifactProfile,
+    attention_files: &[crate::diff::FileDiff],
+    mut writer: impl Write,
+) -> Result<()> {
+    let body = render_artifact_with_attention_files(session, format, profile, attention_files)?;
     writer.write_all(body.as_bytes())?;
     if !body.ends_with('\n') {
         writer.write_all(b"\n")?;
@@ -876,6 +940,7 @@ fn to_human_markdown(artifact: &ReviewArtifact<'_>) -> String {
     write_all_durable_items(artifact, &mut out);
     out.push_str("\n## Walkthrough\n\n");
     write_walkthroughs(&mut out, artifact);
+    write_attention_regions(&mut out, artifact);
     out
 }
 
@@ -952,11 +1017,48 @@ fn to_agent_markdown(artifact: &ReviewArtifact<'_>) -> String {
     }
     out.push_str("\n## Walkthrough\n\n");
     write_walkthroughs(&mut out, artifact);
+    write_attention_regions(&mut out, artifact);
     out.push_str("\n## Other comments\n\n");
     write_other_comments(artifact, &mut out);
     out.push_str("\n## Reference: full hunks\n\n");
     write_full_hunks(artifact, &mut out);
     out
+}
+
+fn write_attention_regions(out: &mut String, artifact: &ReviewArtifact<'_>) {
+    out.push_str("\n## Attention assignments\n\n");
+    if artifact.attention_regions.is_empty() {
+        out.push_str("No explicit attention assignments. Ordinary content is supporting.\n");
+        return;
+    }
+    for region in &artifact.attention_regions {
+        let target = target_location(&region.target);
+        let salience = serde_json::to_string(&region.salience).unwrap();
+        let source = serde_json::to_string(&region.source).unwrap();
+        out.push_str(&format!(
+            "- `{}` — {} ({}){}{}\n",
+            target,
+            salience.trim_matches('"'),
+            source.trim_matches('"'),
+            if region.stale { " [stale]" } else { "" },
+            region
+                .rationale
+                .as_deref()
+                .map(|rationale| format!(": {rationale}"))
+                .unwrap_or_default(),
+        ));
+    }
+}
+
+fn target_location(target: &ReviewTarget) -> String {
+    let Some(path) = target.file.as_deref() else {
+        return "(invalid target)".to_owned();
+    };
+    match (target.line, target.end_line) {
+        (Some(start), Some(end)) if end != start => format!("{path}:{start}-{end}"),
+        (Some(line), _) => format!("{path}:{line}"),
+        _ => path.to_owned(),
+    }
 }
 
 fn to_handoff_markdown(artifact: &ReviewArtifact<'_>) -> String {

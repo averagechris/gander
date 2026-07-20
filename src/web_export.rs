@@ -19,6 +19,20 @@ pub fn render_html_with_profile(
     state: &ReviewState,
     profile: ArtifactProfile,
 ) -> String {
+    let attention_files = session
+        .files
+        .iter()
+        .map(|file| file.diff.clone())
+        .collect::<Vec<_>>();
+    render_html_with_profile_and_attention_files(session, state, profile, &attention_files)
+}
+
+pub fn render_html_with_profile_and_attention_files(
+    session: &ReviewSession,
+    state: &ReviewState,
+    profile: ArtifactProfile,
+    attention_files: &[crate::diff::FileDiff],
+) -> String {
     let generated_at = Utc::now().to_rfc3339();
     let team = profile == ArtifactProfile::Team;
     let projected_team_session = team.then(|| {
@@ -107,6 +121,7 @@ pub fn render_html_with_profile(
         }
     } else {
         render_walkthroughs(&mut out, active_session);
+        render_attention_regions(&mut out, active_session, attention_files);
         render_action_items(&mut out, active_session, &state.comments);
     }
     let team_comments = team_artifact.as_ref().map(|artifact| {
@@ -263,6 +278,39 @@ fn render_walkthroughs(out: &mut String, session: Option<&crate::state::ReviewSe
         out.push_str("</li>");
     }
     out.push_str("</ol></section>");
+}
+
+fn render_attention_regions(
+    out: &mut String,
+    durable: Option<&crate::state::ReviewSession>,
+    files: &[crate::diff::FileDiff],
+) {
+    let Some(durable) = durable else {
+        return;
+    };
+    let regions = crate::attention::list_assigned_attention(durable, files);
+    if regions.is_empty() {
+        return;
+    }
+    out.push_str("<section class=\"card attention\"><h2>Attention assignments</h2><ul>");
+    for region in regions {
+        out.push_str("<li><strong>");
+        esc_to(out, &format!("{:?}", region.salience).to_lowercase());
+        out.push_str("</strong> <span class=\"pill\">");
+        esc_to(out, &format!("{:?}", region.source).to_lowercase());
+        out.push_str("</span>");
+        if region.stale {
+            out.push_str(" <span class=\"pill\">stale</span>");
+        }
+        render_target_link(out, &region.target);
+        if let Some(rationale) = region.rationale {
+            out.push_str("<p>");
+            esc_to(out, &rationale);
+            out.push_str("</p>");
+        }
+        out.push_str("</li>");
+    }
+    out.push_str("</ul></section>");
 }
 
 fn render_action_items(
@@ -627,6 +675,20 @@ mod tests {
                 revision: Some("@".into()),
                 ..Default::default()
             },
+            attention_regions: vec![crate::state::AttentionRegion {
+                target: ReviewTarget {
+                    file: Some("src/lib.rs".into()),
+                    anchor: Some(crate::anchor::CommentAnchor::File {
+                        path: "src/lib.rs".into(),
+                        old_path: None,
+                        diff_fingerprint: "fp".into(),
+                    }),
+                    ..Default::default()
+                },
+                salience: crate::state::Salience::Spotlight,
+                rationale: Some("private attention".into()),
+                source: crate::state::SalienceSource::Human,
+            }],
             action_items: vec![crate::state::ActionItem {
                 id: "action-1".into(),
                 title: "Address comment".into(),
@@ -676,6 +738,8 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("comment body"));
         assert!(html.contains("Step title"));
+        assert!(html.contains("Attention assignments"));
+        assert!(html.contains("private attention"));
         assert!(html.contains("Address comment"));
         assert!(html.contains("snapshot unavailable (legacy; target label is not proof)"));
         assert_eq!(html.matches("comment body").count(), 1);
@@ -933,6 +997,8 @@ mod tests {
         assert!(!html.contains("diff_fingerprint"));
         assert!(!html.contains("hunk_index"));
         assert!(!html.contains("private draft"));
+        assert!(!html.contains("private attention"));
+        assert!(!html.contains("Attention assignments"));
         assert!(!html.contains("Address comment"));
     }
 

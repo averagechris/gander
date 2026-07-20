@@ -355,9 +355,9 @@ confidence — in one diff view, not a separate mode. Design:
 [docs/attention.md](attention.md). Supersedes backlog item 5 and the
 remaining M13 zen item.
 
-Status: designed.
+Status: domain and automation foundation in progress.
 
-- [ ] durable per-region salience (spotlight/supporting/skim) on the session;
+- [x] durable per-region salience (spotlight/supporting/skim) on the session;
   sources: human override > agent curation > generated/lockfile heuristics
 - [ ] skim regions render as one-line folds, expandable in place; one key
   acknowledges a fold and marks contained files viewed
