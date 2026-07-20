@@ -36,12 +36,12 @@ Sleep 500ms
 Enter
 Sleep 2.5s
 
-# Start with zen mode: a focused walkthrough of the change.
-Type "T"
+# Apply Focus in the normal review stream; all review keys remain available.
+Type "Z"
 Sleep 3s
-Enter
+Type "jj"
 Sleep 2s
-Escape
+Type "Z"
 Sleep 1s
 
 # Jump straight to the parser change, then use the changed-symbol outline.

@@ -69,7 +69,7 @@ working-copy root.
 (`gander mcp`, stdio), implemented as a thin adapter over the same
 `AcpHandler`/live-socket plumbing that exists today. Tools: `review_summary`,
 `review_files`, `file_diff`, `comments`, `set_ordering`, `flag_section`,
-`set_chunks` (now a compatibility path behind walkthrough curation),
+durable walkthrough/attention tools,
 `draft_comment`, plus `current_focus` (what the human is
 looking at: instance, file, line, hunk) and `list_reviews` (instance
 registry). Prefer the official Rust MCP SDK (`rmcp`) over hand-rolling;
@@ -94,8 +94,7 @@ later, but as a *client* role (see D4).
 conversation lives in the user's harness (opencode/claude/... in a split
 pane), which does chat UX (history, modes, permissions, streaming) far
 better than a ratatui side panel would. Gander's inbound channel from agents
-is structured suggestions (walkthroughs, ordering, flags, compatibility chunks,
-drafts) plus footer
+is structured suggestions (walkthroughs, attention, ordering, flags, drafts) plus footer
 status.
 
 **Kept open.** Two smaller affordances may earn their place later:
@@ -105,13 +104,11 @@ status.
   *this* line" gap without making gander a chat app. Likely built on the
   harness's API or MCP sampling; requires gander to act as a spec-ACP
   *client* or harness-API client — deliberately deferred.
-- **zen mode** (`T`, formerly tour mode): a legacy focused-walkthrough layer
-  stepping through durable walkthrough steps/chapters (or files when no
-  walkthrough exists) with their rationale displayed; gander-native, reads
-  local review state, needs no live agent.
+- **focused presentation**: delivered at M18 as `Z` Focus plus Alt-N/Alt-P
+  durable Spotlight navigation in the normal stream; no separate modal layer.
 
 **Why.** The chat panel is where TUIs go to get complicated (focus
-management, scrollback, streaming layout). Zen mode + drafts + `current_focus`
+management, scrollback, streaming layout). Focus + drafts + `current_focus`
 in the harness chat cover most of the value at a fraction of the complexity.
 
 ## D3 (2026-07): one gander instance per workstream; cwd routing plus an instance registry
@@ -153,7 +150,7 @@ artifacts on stdout; `gander acp`/`gander mcp` own their own stdio.
 External agents may drive what a human sees in a live TUI with ACP
 `present/*` methods, the CLI-first `gander present` commands, and MCP tools
 that route to the same per-instance Unix socket. These commands are ephemeral
-UI commands: they move the active view/tour and may reload local review state,
+UI commands: they move the active stream Spotlight/Focus view and may reload local review state,
 but they do not fetch from forges or mutate the user's code workspace.
 
 The TUI event loop, not the immutable ACP snapshot handler, applies these

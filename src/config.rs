@@ -319,7 +319,6 @@ pub struct KeybindingsConfig {
     pub open_work: Vec<String>,
     pub activity: Vec<String>,
     pub walkthrough_list: Vec<String>,
-    pub zen: Vec<String>,
     pub draft_list: Vec<String>,
     /// Movement in text-filter popups. Literal `j`/`k` remain text input;
     /// arrows and Ctrl-J/Ctrl-K are permanent safety bindings.
@@ -331,7 +330,7 @@ pub struct KeybindingsConfig {
     pub popup_select: Vec<String>,
     pub popup_toggle: Vec<String>,
     pub popup_close: Vec<String>,
-    /// Secondary close key only for help, View Options, and zen artifacts,
+    /// Secondary close key only for help and View Options,
     /// where `q` was already established before popup bindings were unified.
     pub popup_close_q: Vec<String>,
     pub next_unviewed: Vec<String>,
@@ -399,16 +398,6 @@ pub struct KeybindingsConfig {
     pub walkthrough_delete: Vec<String>,
     pub walkthrough_move_down: Vec<String>,
     pub walkthrough_move_up: Vec<String>,
-    pub zen_next: Vec<String>,
-    pub zen_previous: Vec<String>,
-    pub zen_toggle_view: Vec<String>,
-    pub zen_glance: Vec<String>,
-    pub zen_artifact: Vec<String>,
-    pub zen_toggle_details: Vec<String>,
-    pub zen_refocus: Vec<String>,
-    pub zen_acknowledge: Vec<String>,
-    pub zen_artifact_next: Vec<String>,
-    pub zen_artifact_previous: Vec<String>,
     pub submit_comment: Vec<String>,
     pub cancel_comment: Vec<String>,
     pub insert_newline: Vec<String>,
@@ -593,9 +582,6 @@ struct KeybindingsConfigPatch {
     open_work: Option<Vec<String>>,
     activity: Option<Vec<String>>,
     walkthrough_list: Option<Vec<String>>,
-    /// Accepts the pre-0.4 name `tour` so existing configs keep working.
-    #[serde(alias = "tour")]
-    zen: Option<Vec<String>>,
     draft_list: Option<Vec<String>>,
     target_picker_down: Option<Vec<String>>,
     target_picker_up: Option<Vec<String>>,
@@ -670,16 +656,6 @@ struct KeybindingsConfigPatch {
     walkthrough_delete: Option<Vec<String>>,
     walkthrough_move_down: Option<Vec<String>>,
     walkthrough_move_up: Option<Vec<String>>,
-    zen_next: Option<Vec<String>>,
-    zen_previous: Option<Vec<String>>,
-    zen_toggle_view: Option<Vec<String>>,
-    zen_glance: Option<Vec<String>>,
-    zen_artifact: Option<Vec<String>>,
-    zen_toggle_details: Option<Vec<String>>,
-    zen_refocus: Option<Vec<String>>,
-    zen_acknowledge: Option<Vec<String>>,
-    zen_artifact_next: Option<Vec<String>>,
-    zen_artifact_previous: Option<Vec<String>>,
     submit_comment: Option<Vec<String>>,
     cancel_comment: Option<Vec<String>>,
     insert_newline: Option<Vec<String>>,
@@ -748,7 +724,6 @@ impl KeybindingsConfig {
             open_work: keys(["X"]),
             activity: keys(["ctrl-a"]),
             walkthrough_list: keys(["W"]),
-            zen: keys(["T"]),
             draft_list: keys(["D"]),
             target_picker_down: keys(["down", "ctrl-j"]),
             target_picker_up: keys(["up", "ctrl-k"]),
@@ -825,16 +800,6 @@ impl KeybindingsConfig {
             walkthrough_delete: keys(["d"]),
             walkthrough_move_down: keys(["J"]),
             walkthrough_move_up: keys(["K"]),
-            zen_next: keys(["n", "enter", "right", "space"]),
-            zen_previous: keys(["p", "left"]),
-            zen_toggle_view: keys(["tab"]),
-            zen_glance: keys(["g"]),
-            zen_artifact: keys(["e"]),
-            zen_toggle_details: keys(["d"]),
-            zen_refocus: keys(["."]),
-            zen_acknowledge: keys(["a"]),
-            zen_artifact_next: keys(["l", "right", "tab"]),
-            zen_artifact_previous: keys(["h", "left"]),
             submit_comment: keys(["ctrl-s"]),
             cancel_comment: keys(["esc"]),
             insert_newline: keys(["enter"]),
@@ -1091,7 +1056,6 @@ impl KeybindingsConfig {
         apply_optional(&mut self.open_work, patch.open_work);
         apply_optional(&mut self.activity, patch.activity);
         apply_optional(&mut self.walkthrough_list, patch.walkthrough_list);
-        apply_optional(&mut self.zen, patch.zen);
         apply_optional(&mut self.draft_list, patch.draft_list);
         apply_optional(&mut self.target_picker_down, patch.target_picker_down);
         apply_optional(&mut self.target_picker_up, patch.target_picker_up);
@@ -1184,16 +1148,6 @@ impl KeybindingsConfig {
         apply_optional(&mut self.walkthrough_delete, patch.walkthrough_delete);
         apply_optional(&mut self.walkthrough_move_down, patch.walkthrough_move_down);
         apply_optional(&mut self.walkthrough_move_up, patch.walkthrough_move_up);
-        apply_optional(&mut self.zen_next, patch.zen_next);
-        apply_optional(&mut self.zen_previous, patch.zen_previous);
-        apply_optional(&mut self.zen_toggle_view, patch.zen_toggle_view);
-        apply_optional(&mut self.zen_glance, patch.zen_glance);
-        apply_optional(&mut self.zen_artifact, patch.zen_artifact);
-        apply_optional(&mut self.zen_toggle_details, patch.zen_toggle_details);
-        apply_optional(&mut self.zen_refocus, patch.zen_refocus);
-        apply_optional(&mut self.zen_acknowledge, patch.zen_acknowledge);
-        apply_optional(&mut self.zen_artifact_next, patch.zen_artifact_next);
-        apply_optional(&mut self.zen_artifact_previous, patch.zen_artifact_previous);
         apply_optional(&mut self.submit_comment, patch.submit_comment);
         apply_optional(&mut self.cancel_comment, patch.cancel_comment);
         apply_optional(&mut self.insert_newline, patch.insert_newline);
@@ -1765,21 +1719,17 @@ transparent = false
     }
 
     #[test]
-    fn legacy_tour_and_task_list_keybinding_aliases_still_load() {
+    fn removed_zen_and_tour_keybinding_names_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("aliases.toml");
-        fs::write(
-            &path,
-            "[keybindings]\ntour = [\"alt-z\"]\ntask-list = [\"alt-x\"]\n",
-        )
-        .unwrap();
-
-        let config = Config::load_layers(&[ConfigSource {
-            path,
-            required: true,
-        }])
-        .unwrap();
-        assert_eq!(config.keybindings.zen, ["alt-z"]);
-        assert_eq!(config.keybindings.open_work, ["alt-x"]);
+        for field in ["zen", "tour", "zen-next", "zen-artifact"] {
+            let path = dir.path().join(format!("{field}.toml"));
+            fs::write(&path, format!("[keybindings]\n{field} = [\"T\"]\n")).unwrap();
+            let error = Config::load_layers(&[ConfigSource {
+                path,
+                required: true,
+            }])
+            .unwrap_err();
+            assert!(format!("{error:?}").contains("unknown field"));
+        }
     }
 }

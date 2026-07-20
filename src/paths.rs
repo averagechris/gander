@@ -100,7 +100,7 @@ impl WorkspacePaths {
         self.state_dir.join("state.json")
     }
 
-    /// The shared agent overlay (ordering, flags, chunks, drafts).
+    /// The shared agent overlay (ordering and flags, plus read-only legacy drafts).
     pub fn overlay_file(&self) -> PathBuf {
         self.state_dir.join("agent.json")
     }

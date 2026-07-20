@@ -24,19 +24,15 @@ fn record_projection() {
     CARD_PROJECTIONS.with(|count| count.set(count.get() + 1));
 }
 
-use crate::{
-    agent::{Artifact, ArtifactKind},
-    state::{
-        ActionIntent, AuthorKind, Channel, Comment, CommentKind, CommentState, Identity,
-        StepArtifact, StepArtifactKind, WalkthroughStep,
-    },
+use crate::state::{
+    ActionIntent, AuthorKind, Channel, Comment, CommentKind, CommentState, Identity, StepArtifact,
+    StepArtifactKind, WalkthroughStep,
 };
 
-use super::{chunks::WalkthroughRow, text_layout::VisualTextLayout, theme::AppTheme};
+use super::{text_layout::VisualTextLayout, theme::AppTheme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AnnotationCardDensity {
-    Compact,
     Expanded,
 }
 
@@ -253,47 +249,6 @@ impl AnnotationCard {
                 .artifacts
                 .iter()
                 .map(|artifact| AnnotationArtifact::from_step(artifact, load_artifact_bodies))
-                .collect(),
-        }
-    }
-
-    /// Projection used by the existing zen focus/reading surfaces. Zen keeps
-    /// its phase and artifact viewer semantics; only narration presentation is
-    /// shared with the normal diff stream.
-    pub(super) fn from_walkthrough_row(row: &WalkthroughRow) -> Self {
-        Self {
-            source: AnnotationSource::Walkthrough {
-                step_id: row.source_id.clone(),
-                part: row
-                    .part_position
-                    .map_or(0, |(part, _)| part.saturating_sub(1)),
-            },
-            channel: Channel::Onboarding,
-            author: row.author.clone(),
-            badges: vec![
-                CardBadge {
-                    label: "walkthrough".to_owned(),
-                    tone: BadgeTone::Channel,
-                },
-                CardBadge {
-                    label: "spotlight".to_owned(),
-                    tone: BadgeTone::Secondary,
-                },
-            ],
-            title: if row.title.trim().is_empty() {
-                "Walkthrough step".to_owned()
-            } else {
-                row.title.trim().to_owned()
-            },
-            body: nonempty(row.explanation.clone()),
-            why: nonempty(row.rationale.clone()),
-            rationale: None,
-            target: walkthrough_row_location(row),
-            replies: Vec::new(),
-            artifacts: row
-                .artifacts
-                .iter()
-                .map(AnnotationArtifact::from_agent)
                 .collect(),
         }
     }
@@ -579,20 +534,6 @@ impl AnnotationArtifact {
             body: load_body.then(|| artifact.body.clone()),
         }
     }
-
-    fn from_agent(artifact: &Artifact) -> Self {
-        Self {
-            title: artifact.title.clone(),
-            kind: match artifact.kind {
-                ArtifactKind::Example => "example",
-                ArtifactKind::Output => "output",
-                ArtifactKind::Diagram => "diagram",
-                ArtifactKind::Note => "note",
-            }
-            .to_owned(),
-            body: None,
-        }
-    }
 }
 
 fn split_headline(body: &str, empty: &str) -> (String, Option<String>) {
@@ -642,22 +583,6 @@ pub(super) fn review_target_location(target: &crate::state::ReviewTarget) -> Str
         (Some(line), _) => format!("{path}:{line}"),
         _ => path.to_owned(),
     }
-}
-
-fn walkthrough_row_location(row: &WalkthroughRow) -> String {
-    let location = row.part.as_ref().map_or_else(
-        || "review target".to_owned(),
-        |part| match (part.start_line, part.end_line) {
-            (Some(start), Some(end)) if end != start => {
-                format!("{}:{start}-{end}", part.path)
-            }
-            (Some(line), _) => format!("{}:{line}", part.path),
-            _ => part.path.clone(),
-        },
-    );
-    row.change_id
-        .as_ref()
-        .map_or(location.clone(), |change| format!("[{change}] {location}"))
 }
 
 fn push_field(
@@ -1086,7 +1011,7 @@ mod tests {
             output.push_str(&format!("-- {label} --\n"));
             output.push_str(&plain_layout(&card.layout(
                 58,
-                AnnotationCardDensity::Compact,
+                AnnotationCardDensity::Expanded,
                 false,
                 "E",
             )));

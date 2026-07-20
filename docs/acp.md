@@ -10,10 +10,13 @@
 (the transport style used by the Agent Client Protocol). Normal automation
 should prefer the CLI or optional MCP adapter; ACP remains available for the
 TUI live bridge and compatibility. Agents can read the diff, comments, and
-viewed state. Non-comment suggestions (ordering, flags, chunks, and briefs) go
+viewed state. Ordering and flag suggestions go
 to the shared **agent overlay** (`agent.json` in the per-workspace state
 directory; run `gander paths` to see where), while agent draft comments are
-durable review-state comments. The running TUI surfaces both live.
+durable review-state comments. Walkthrough and attention curation is durable;
+ACP-driven agents should invoke the scriptable `gander walkthrough ...` and
+`gander attention ...` commands (or use the equivalent MCP tools). The running
+TUI surfaces all of these live.
 
 ```sh
 gander --base 'trunk()' --rev '@' acp
@@ -89,9 +92,9 @@ prompt and run a subprocess works.
 | `review/comments` | – | array of comments with `id`, optional `session_id`, optional target fields/anchor, optional immutable `observation`, `body`, `kind`, `action`, `state`, `author`, `channel`, replies (each with an author and optional result snapshot), `created_at`, and `updated_at`; legacy comments may omit snapshots, and general comments have no path/line/excerpt |
 | `review/provenance_context` | – | internal MCP bridge context containing the selected live/snapshot session's repo, base, revision, and already-loaded parsed file diffs; used for comment capture without another jj query |
 | `review/current_focus` | – | what the human is looking at: `{repo, base, revision, pane, path, line?}` where `line` is `{side, old_line, new_line, hunk_header}` when the diff cursor sits on an anchorable row (live through the TUI socket; a snapshot server reports its initial selection) |
-| `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; the human often reviews these like stacked PRs, so prefer organizing chunks change-by-change when several exist |
-| `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers here are what compatibility chunk parts anchored to this change must reference |
-| `review/overlay` | – | the current overlay object (`version`, `ordering`, `flags`, `chunks`, and `briefs`). Durable comments are returned only by `review/comments`; the one-release legacy `drafts` input is consumed during startup and is never returned |
+| `review/stack_changes` | – | the jj stack (`trunk()..@`, oldest first): `{base, revision, changes: [{change_id, bookmarks, description, current}]}` — `description` is the full multiline message; use change ids for durable walkthrough chapters |
+| `review/change_diff` | `{change_id}` | one change against its parent (`change_id-..change_id`): `{change_id, base, revision, files: [{path, status, additions, deletions}], raw}`; line numbers can anchor durable walkthrough and attention targets |
+| `review/overlay` | – | the current overlay object (`version`, `ordering`, `flags`). Durable comments are returned only by `review/comments`; the one-release legacy `drafts` input is consumed during startup and is never returned |
 
 ## Write methods
 
@@ -104,10 +107,6 @@ state. The TUI picks external durable changes up within one poll tick.
 | --- | --- | --- |
 | `review/set_ordering` | `{paths: [string]}` | suggested review order, highest priority first; unknown paths are rejected |
 | `review/flag_section` | `{path, line?, reason, priority?}` | flag a critical section (`priority`: `critical`/`high`/`medium`/`low`, default `high`) |
-| `review/set_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | replace internal live-curation units that adapt into walkthrough/zen stops. `importance` is `spotlight` (zen walkthrough stop; give it a teaching `explanation`) or `glance`. `change_id` anchors the chunk to one jj change of the stack: the walkthrough retargets to that change's diff for the stop, and part line numbers must come from `review/change_diff` for that change. `artifacts` attaches exhibits (see below) |
-| `review/update_chunks` | `{chunks: [{id?, title, importance?, change_id?, rationale?, explanation?, artifacts?, parts: [{path, start_line?, end_line?}]}]}` | upsert reviewable units. Chunks whose `id` matches an existing overlay chunk replace it in place; chunks with new/generated ids append. Response: `{chunks, updated, added}` |
-| `review/remove_chunks` | `{ids: ["..."]}` | strictly remove chunks by id. If any id is unknown the request is rejected and nothing is removed. Response: `{chunks, removed}` |
-| `review/set_change_briefs` | `{briefs: [{change_id, summary, artifacts?}]}` | replace the per-change briefings: a few sentences of high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). Zen renders each brief on the chapter intro card shown before that change's spotlight stops. Response: `{briefs, warnings}`; warnings are advisory |
 | `review/draft_comment` | `{path, line?, body}` | add a draft comment for human triage; `line` is a 1-indexed diff line for the current session diff, preferring new-side/post-image coordinates with old-side fallback for removed-only lines; returns `{id}` |
 
 Durable comment state semantics match the CLI/MCP review-state tools: `draft`
@@ -119,26 +118,24 @@ states. `review/draft_comment` creates a durable agent-authored onboarding
 comment in draft state for triage; use CLI/MCP `comment_add` with an explicit
 state for ready comments or general comments.
 
-`artifacts` (on chunks and briefs) is `[{title, kind?, body}]` with `kind`
-one of `example` (default), `output`, `diagram`, or `note`: exhibits that
-*show* the change — a usage example of the changed API, output captured by
-running the code, a small ASCII diagram. The human opens them from the zen
-focus or chapter card with `e` (scrollable, `h`/`l` cycles).
+### Durable curation
 
-### Chunk validation
+Use `gander walkthrough set|add-step|show` and
+`gander attention set|seed-heuristics|list` from ACP harnesses. MCP exposes the
+same operations as typed tools, including `walkthrough_set`, `attention_set`,
+`attention_list`, and `attention_seed_heuristics`. Walkthrough artifacts use
+`{title, kind, body}` with `kind` `example`, `output`, `diagram`, or `note` and
+render inside normal-stream narration cards. `walkthrough_set` returns
+`{walkthrough, warnings}`; omitted step ids deterministically preserve matching
+existing identities one-to-one after explicit ids reserve their prior slots.
+Duplicate explicit or final ids reject atomically with the same error as CLI;
+supplied/current targets are normalized by the shared service, and chapter
+change ids must exactly match the current jj stack.
 
-`review/set_chunks` and `review/update_chunks` validate every incoming chunk
-part before mutating the overlay. A single invalid part rejects the whole
-request with all per-part reasons and leaves the previous chunk list intact.
-`review/remove_chunks` is similarly all-or-nothing for unknown ids. There is no
-public `gander chunks` CLI; script durable tours with `gander walkthrough ...`.
-Parts must reference a file in the anchored change diff (or the current session
-diff when `change_id` is omitted), and any supplied line range must intersect
-that file's 1-indexed diff line space. New-side/post-image coordinates are
-preferred; old-side coordinates are accepted only for removed-only lines with no
-new-side line. Unknown or unresolvable `change_id`s are invalid.
-If any part is invalid the entire request is rejected with a JSON-RPC error
-listing the invalid parts; no valid subset is applied.
+Legacy overlay curation is an explicit breaking deletion: existing `agent.json`
+`chunks` and `briefs` fields are ignored rather than migrated and disappear on
+the next overlay save. Ordering, flags, and pending legacy draft ingestion are
+unaffected.
 
 The public spec-file authoring path is available for drafts. Use `gander drafts list`,
 `add --file spec.json`, or `remove --id <id>...` with the ACP
@@ -184,17 +181,23 @@ live TUI` error. The TUI applies these as typed UI commands between frames and
 rejects them while the human is in a modal/editor (`user is busy: <mode>`).
 
 - `present/status` → `{ "active": false }` or `{ "active": true,
-  "slide_index": 0, "slide_count": 5, "phase": "focus", "current":
-  { "title": "...", "path": "src/lib.rs", "line": 42 } }`.
-- `present/start` starts the tour, equivalent to pressing `T`, and returns
-  status.
-- `present/end` ends the tour and returns status.
-- `present/next`, `present/prev` move between slides and return status.
+  "slide_index": 0, "slide_count": 5, "view": "focus", "current":
+  { "step_id": "...", "part": 0, "path": "src/lib.rs", "line": 42,
+  "end_line": 60, "stale": false } }`.
+- `present/start` applies Focus and lands on the first current durable Spotlight
+  in the normal stream.
+- `present/end` ends presentation and restores the prior view if presentation
+  applied Focus.
+- `present/next`, `present/prev` move between durable Spotlights and return status.
 - `present/goto` accepts `{ "index": 3 }` or `{ "step_id": "..." }` and
   returns status. Indexes are zero-based.
 - `present/focus` accepts `{ "path": "src/foo.rs", "line": 42,
   "end_line": 60, "note": "look here" }`, validates that `path` is in the
   current diff, jumps the review view there, and surfaces `note` as a TUI
   notice.
-- `present/reload` re-reads local review/agent state and rebuilds the active
-  tour from durable walkthrough steps, then returns status.
+- `present/reload` re-reads local review/agent state and re-anchors the active
+  Spotlight, then returns status. Retarget/refresh preserve Focus and presenter
+  state. Presenter identity is `(step_id, part)`, so insertions/reordering update
+  `slide_index` without changing the current target. Removed or fingerprint-stale
+  identities return `current.stale=true` with that identity and no path rather
+  than silently selecting the same numeric slot.

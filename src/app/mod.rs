@@ -23,6 +23,8 @@ pub use stream::{
 };
 
 #[cfg(test)]
+use crate::state::ReviewSessionStatus;
+#[cfg(test)]
 use std::cell::Cell;
 use std::{
     cell::RefCell,
@@ -35,12 +37,11 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentFlag, AgentOverlay, ChangeBrief, ChunkPart, LegacyDraftState, ReviewChunk},
+    agent::{AgentFlag, AgentOverlay, LegacyDraftState},
     anchor::{
         CommentAnchor, DiffSide, RangeLineAnchor, comment_anchor_for_file_lines,
         comment_anchor_for_sided_lines, fingerprint_range, line_anchor_for_side_line,
     },
-    attention,
     config::{Config, DiffConfig, DiffViewModeConfig, LimitsConfig},
     diff::{DiffSet, FileDiff, FileStatus},
     file_tree::{FileTreeInput, FileTreeView, FlatTreeRowKind, TreeRowId},
@@ -48,9 +49,8 @@ use crate::{
     review,
     state::{
         AuthorKind, Channel, Comment, CommentState, FileState, Identity,
-        REVIEW_STATE_SCHEMA_VERSION, ReviewSessionStatus, ReviewState, ReviewStateMeta,
-        ReviewTarget as StateReviewTarget, StepArtifact, StepArtifactKind, StepImportance,
-        StepKind, Walkthrough, WalkthroughStep,
+        REVIEW_STATE_SCHEMA_VERSION, ReviewState, ReviewStateMeta,
+        ReviewTarget as StateReviewTarget,
     },
     syntax::SyntaxConfig,
 };
@@ -68,67 +68,6 @@ const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
 /// Rough number of diff rows kept visible below the cursor when auto-scrolling.
 const DIFF_CURSOR_SCROLL_MARGIN: usize = 15;
-
-fn chunk_to_step(chunk: &ReviewChunk, author: &Identity, files: &[FileDiff]) -> WalkthroughStep {
-    let mut targets = chunk
-        .parts
-        .iter()
-        .map(|part| chunk_part_to_target(part, files));
-    WalkthroughStep {
-        id: chunk.id.clone(),
-        author: Some(author.clone()),
-        title: Some(chunk.title.clone()),
-        importance: match chunk.importance {
-            crate::agent::ChunkImportance::Spotlight => StepImportance::Spotlight,
-            crate::agent::ChunkImportance::Glance => StepImportance::Glance,
-        },
-        kind: StepKind::Step,
-        change_id: chunk.change_id.clone(),
-        why: chunk.rationale.clone(),
-        body: chunk.explanation.clone(),
-        artifacts: chunk.artifacts.iter().map(agent_artifact_to_step).collect(),
-        target: targets.next().unwrap_or_default(),
-        extra_targets: targets.collect(),
-        ..Default::default()
-    }
-}
-
-fn brief_to_step(brief: &ChangeBrief, author: &Identity) -> WalkthroughStep {
-    WalkthroughStep {
-        id: format!("chapter-{}", brief.change_id),
-        author: Some(author.clone()),
-        title: Some(brief.change_id.clone()),
-        kind: StepKind::Chapter,
-        change_id: Some(brief.change_id.clone()),
-        body: Some(brief.summary.clone()),
-        artifacts: brief.artifacts.iter().map(agent_artifact_to_step).collect(),
-        ..Default::default()
-    }
-}
-
-fn chunk_part_to_target(part: &ChunkPart, files: &[FileDiff]) -> StateReviewTarget {
-    attention::target_for_diff(files, &part.path, part.start_line, part.end_line).unwrap_or_else(
-        |_| StateReviewTarget {
-            file: Some(part.path.clone()),
-            line: part.start_line,
-            end_line: part.end_line,
-            ..Default::default()
-        },
-    )
-}
-
-fn agent_artifact_to_step(artifact: &crate::agent::Artifact) -> StepArtifact {
-    StepArtifact {
-        title: artifact.title.clone(),
-        kind: match artifact.kind {
-            crate::agent::ArtifactKind::Example => StepArtifactKind::Example,
-            crate::agent::ArtifactKind::Output => StepArtifactKind::Output,
-            crate::agent::ArtifactKind::Diagram => StepArtifactKind::Diagram,
-            crate::agent::ArtifactKind::Note => StepArtifactKind::Note,
-        },
-        body: artifact.body.clone(),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ReviewSession {
@@ -154,12 +93,11 @@ pub struct ReviewSession {
     pub diff_cursor: usize,
     /// Cursor and logical top in the continuous cross-file review stream.
     /// `diff_cursor` remains the selected file's local coordinate for stable
-    /// comments/ranges and legacy zen code.
+    /// comments and range anchors.
     pub stream_cursor: usize,
     pub stream_scroll: u16,
-    /// Enabled by the TUI runtime after construction. Keeping the legacy
-    /// selected-file viewport available lets zen and non-TUI domain consumers
-    /// retain their established coordinate system.
+    /// Enabled by the TUI runtime after construction. Non-TUI domain consumers
+    /// retain the selected-file coordinate system.
     pub stream_mode: bool,
     pub focus: Focus,
     pub syntax: SyntaxConfig,
@@ -174,11 +112,6 @@ pub struct ReviewSession {
     /// Whether the files pane is shown. Session-only; hiding it gives the
     /// diff the full width for focused reading (docs/focused-diff-ux.md §2).
     pub file_pane_visible: bool,
-    /// The zen-mode focus frame: the current stop's file and optional line
-    /// range. Diff rows outside it render dimmed so the stop visually pops.
-    /// Session-only view state owned by the TUI zen layer
-    /// (docs/focused-diff-ux.md §6); reset on retarget like all view state.
-    pub zen_focus: Option<ZenFocus>,
     pub collapsed_dirs: BTreeSet<String>,
     pub diff_range_selection: Option<DiffRangeSelection>,
     /// Diffs with more lines than this render as a placeholder until the
@@ -198,13 +131,8 @@ pub struct ReviewSession {
     /// Sections agents flagged as critical, surfaced in the diff gutter and
     /// the flag list popup.
     pub agent_flags: Vec<AgentFlag>,
-    /// Agent-defined reviewable units that can span or subdivide files.
-    pub review_chunks: Vec<ReviewChunk>,
-    /// Agent-written per-change briefings for stacked walkthroughs.
-    pub change_briefs: Vec<ChangeBrief>,
     /// Lazily populated jj diffs for each stack change, keyed by change id.
-    /// Zen fallback uses these so per-change chapter facts come from that
-    /// change's own parent diff instead of the whole reviewed range.
+    /// Stream chapter headers use these for per-change diff statistics.
     pub change_diffs: Vec<(String, DiffSet)>,
     /// Read-only jj metadata used by change-scoped stream chapter headers.
     pub stack_changes: Vec<JjChangeSummary>,
@@ -693,14 +621,7 @@ impl ViewedFilter {
     }
 }
 
-/// What zen mode is currently framing: a file, optionally narrowed to a
-/// line range (new-side line numbers, matching [`crate::agent::ChunkPart`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZenFocus {
-    pub path: String,
-    pub lines: Option<(usize, usize)>,
-}
-
+/// Active single-file range selection in the normal review stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffRangeSelection {
     pub file_path: String,
@@ -974,7 +895,6 @@ impl ReviewSession {
             fold_context: false,
             diff_cues,
             file_pane_visible: true,
-            zen_focus: None,
             collapsed_dirs: BTreeSet::new(),
             diff_range_selection: None,
             max_diff_lines: limits.max_diff_lines,
@@ -984,8 +904,6 @@ impl ReviewSession {
             agent_ordering: Vec::new(),
             use_agent_order: true,
             agent_flags: Vec::new(),
-            review_chunks: Vec::new(),
-            change_briefs: Vec::new(),
             change_diffs: Vec::new(),
             stack_changes: Vec::new(),
             expanded_skim_folds: BTreeSet::new(),
@@ -1061,7 +979,7 @@ impl ReviewSession {
 
     /// Like [`Self::replace_diff`], but for background refreshes of the
     /// *same* review: view state (pane visibility, focus, filters, folds,
-    /// per-file viewports, the selected file, and the zen focus frame)
+    /// per-file viewports, and the selected file)
     /// carries over so the reload does not yank the reviewer around.
     pub fn replace_diff_preserving_view(&mut self, target: ReviewTarget, diff: DiffSet) {
         // The active file lives in the public viewport fields until we leave
@@ -1087,7 +1005,6 @@ impl ReviewSession {
         let collapsed_dirs = std::mem::take(&mut self.collapsed_dirs);
         let force_rendered = std::mem::take(&mut self.force_rendered);
         let mut viewports = std::mem::take(&mut self.viewport_by_path);
-        let zen_focus = self.zen_focus.take();
         let selected_index = self.selected;
         let selected_path = self.selected_file().map(|file| file.path.clone());
         let previous_lineage = self
@@ -1278,17 +1195,6 @@ impl ReviewSession {
             }
             self.ensure_diff_cursor_commentable();
         }
-        // The zen frame only survives when its file is still in the diff.
-        self.zen_focus = zen_focus.and_then(|mut focus| {
-            let path = self.files.iter().find_map(|file| {
-                path_mapping
-                    .get(&file.path)
-                    .is_some_and(|prior| prior == &focus.path)
-                    .then(|| file.path.clone())
-            })?;
-            focus.path = path;
-            Some(focus)
-        });
         if self.stream_mode {
             self.materialize_stream_file_reanchored(self.selected);
         }
@@ -1650,22 +1556,6 @@ impl ReviewSession {
         }
     }
 
-    /// Visible file paths in display order (agent order when active,
-    /// tree order otherwise), ignoring directory fold state. Used by the
-    /// zen walkthrough's chunkless fallback (docs/focused-diff-ux.md §6).
-    pub fn ordered_visible_file_paths(&self) -> Vec<String> {
-        self.full_file_tree()
-            .rows
-            .iter()
-            .filter_map(|row| match row.kind {
-                FlatTreeRowKind::Directory { .. } => None,
-                FlatTreeRowKind::File { file_index } => {
-                    self.files.get(file_index).map(|file| file.path.clone())
-                }
-            })
-            .collect()
-    }
-
     fn next_unviewed_index(&self, delta: isize, exclude: Option<usize>) -> Option<usize> {
         if self.files.is_empty() {
             return None;
@@ -1847,9 +1737,6 @@ impl ReviewSession {
     pub fn apply_agent_overlay(&mut self, overlay: &AgentOverlay) {
         self.agent_ordering = overlay.ordering.clone();
         self.agent_flags = overlay.flags.clone();
-        self.review_chunks = overlay.chunks.clone();
-        self.change_briefs = overlay.briefs.clone();
-        self.apply_overlay_as_walkthrough(overlay);
     }
 
     /// Fold one-release legacy overlay drafts into durable comments. Pending
@@ -1908,62 +1795,6 @@ impl ReviewSession {
             self.sessions[session_index].updated_at = Some(now);
         }
         folded
-    }
-
-    fn apply_overlay_as_walkthrough(&mut self, overlay: &AgentOverlay) {
-        if overlay.chunks.is_empty() && overlay.briefs.is_empty() {
-            return;
-        }
-        let target = StateReviewTarget {
-            repo: Some(review::canonical_repo_identity(&self.repo)),
-            base: Some(self.target.base.clone()),
-            revision: Some(self.target.rev.clone()),
-            ..Default::default()
-        };
-        let agent_identity = self.agent_identity.clone();
-        let files = self
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        let session = if let Some(index) = self.sessions.iter().position(|session| {
-            session.status == ReviewSessionStatus::Open && session.target == target
-        }) {
-            &mut self.sessions[index]
-        } else {
-            self.sessions.push(crate::state::ReviewSession {
-                id: uuid::Uuid::new_v4().to_string(),
-                target,
-                status: ReviewSessionStatus::Open,
-                ..Default::default()
-            });
-            self.sessions.last_mut().unwrap()
-        };
-        let mut steps: Vec<WalkthroughStep> = overlay
-            .briefs
-            .iter()
-            .map(|brief| brief_to_step(brief, &agent_identity))
-            .chain(
-                overlay
-                    .chunks
-                    .iter()
-                    .map(|chunk| chunk_to_step(chunk, &agent_identity, &files)),
-            )
-            .collect();
-        if steps.is_empty() {
-            return;
-        }
-        if session.walkthroughs.is_empty() {
-            session.walkthroughs.push(Walkthrough {
-                id: uuid::Uuid::new_v4().to_string(),
-                title: Some("Walkthrough".to_owned()),
-                ..Default::default()
-            });
-        }
-        session.walkthroughs[0].steps.clear();
-        session.walkthroughs[0].steps.append(&mut steps);
-        attention::sync_agent_attention(session, &files)
-            .expect("overlay-derived attention targets are normalized from the loaded diff");
     }
 
     /// Durable agent-authored comments still awaiting human triage.
@@ -2043,41 +1874,54 @@ impl ReviewSession {
         self.delete_comment(draft_id)
     }
 
-    /// Jump to a chunk part: select its file and move the diff cursor to
-    /// the part's first line (or the top of the file without line info).
-    pub fn jump_to_chunk_part(&mut self, part: &ChunkPart) -> Option<NavigationPlacement> {
-        let file_index = self.files.iter().position(|file| file.path == part.path)?;
-        let row_index = part.start_line.and_then(|start_line| {
+    /// Jump to a durable review target in the loaded diff. File-only targets
+    /// land at the top; line/range targets use the normal projected-row index.
+    pub fn jump_to_review_target(
+        &mut self,
+        target: &StateReviewTarget,
+    ) -> Option<NavigationPlacement> {
+        let path = target.file.as_deref()?;
+        let file_index = self.files.iter().position(|file| file.path == path)?;
+        let row_index = target.line.and_then(|start_line| {
             self.projected_row_for_range(
                 file_index,
                 start_line,
-                part.end_line.unwrap_or(start_line),
+                target.end_line.unwrap_or(start_line),
             )
         });
-        if part.start_line.is_some() && row_index.is_none() {
+        if target.line.is_some() && row_index.is_none() {
             return None;
         }
         self.reveal_filtered_file(file_index);
         self.select_file_revealed(file_index);
-        let Some(_start_line) = part.start_line else {
+        let Some(_) = target.line else {
             self.focus = Focus::Files;
             self.diff_scroll = 0;
             return Some(NavigationPlacement::Top);
         };
-        if let Some(row_index) = row_index {
-            self.jump_to_diff_row(row_index);
-            Some(NavigationPlacement::Cursor)
-        } else {
-            None
-        }
+        self.jump_to_diff_row(row_index?);
+        Some(NavigationPlacement::Cursor)
     }
 
     /// A nudge for large changes: when the diff exceeds the size thresholds
-    /// and no agent has organized the review yet (no chunks or ordering in
+    /// and no agent has organized the review yet (no durable walkthrough or
+    /// overlay ordering),
     /// the overlay), suggest summoning one. `None` when the change is small,
     /// nudging is disabled, or an agent already structured the review.
     pub fn large_change_nudge(&self) -> Option<String> {
-        if !self.review_chunks.is_empty() || !self.agent_ordering.is_empty() {
+        let has_walkthrough = review::active_session_for_loaded_review(
+            &self.sessions,
+            &self.repo,
+            &self.target.base,
+            &self.target.rev,
+        )
+        .is_some_and(|session| {
+            session
+                .walkthroughs
+                .iter()
+                .any(|walkthrough| !walkthrough.steps.is_empty())
+        });
+        if has_walkthrough || !self.agent_ordering.is_empty() {
             return None;
         }
         let files = self.files.len();
@@ -2092,7 +1936,7 @@ impl ReviewSession {
             return None;
         }
         Some(format!(
-            "large change ({files} files, {lines} changed lines) — @ summons an agent to organize it, T starts a zen walkthrough"
+            "large change ({files} files, {lines} changed lines) — @ summons an agent; author a durable walkthrough and attention map"
         ))
     }
 
@@ -4020,81 +3864,6 @@ diff --git a/a/before.rs b/a/before.rs
     }
 
     #[test]
-    fn replace_diff_preserving_view_keeps_the_reviewers_place() {
-        let mut session = session();
-        session.toggle_focus();
-        session.file_pane_visible = false;
-        session.hide_generated = true;
-        session.viewed_filter = ViewedFilter::Unviewed;
-        // Select the second file and mark the first viewed.
-        let index = session
-            .files
-            .iter()
-            .position(|file| file.path == "README.md")
-            .unwrap();
-        session.select_file_index(index);
-        session.diff_scroll = 2;
-        session.diff_cursor = 3;
-        session.zen_focus = Some(ZenFocus {
-            path: "README.md".to_owned(),
-            lines: Some((1, 1)),
-        });
-        session.files[0].viewed = true;
-
-        // The same review grew a third file (new work landed).
-        let refreshed = DiffSet::parse(
-            r#"diff --git a/src/tui.rs b/src/tui.rs
---- a/src/tui.rs
-+++ b/src/tui.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/new.rs b/src/new.rs
---- a/src/new.rs
-+++ b/src/new.rs
-@@ -1 +1 @@
--old
-+new
-"#,
-        )
-        .unwrap();
-        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
-
-        assert!(!session.file_pane_visible);
-        assert_eq!(session.focus, Focus::Diff);
-        assert!(session.hide_generated);
-        assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
-        assert_eq!(session.selected_file().unwrap().path, "README.md");
-        assert_eq!(session.diff_scroll, 2);
-        assert_eq!(session.diff_cursor, 3);
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "README.md");
-        // Viewed marks still carry over by fingerprint, and the new file
-        // arrived unviewed.
-        assert!(
-            session
-                .files
-                .iter()
-                .find(|file| file.path == "src/tui.rs")
-                .unwrap()
-                .viewed
-        );
-        assert!(
-            !session
-                .files
-                .iter()
-                .find(|file| file.path == "src/new.rs")
-                .unwrap()
-                .viewed
-        );
-    }
-
-    #[test]
     fn refresh_remaps_active_viewport_by_logical_row_identity() {
         let original = DiffSet::parse(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -10,2 +10,2 @@\n keep\n-old\n+target\n",
@@ -4789,29 +4558,6 @@ diff --git a/README.md b/README.md
         assert!(session.files[0].changed_hunks.contains(&1));
     }
 
-    #[test]
-    fn replace_diff_preserving_view_drops_a_zen_frame_for_a_vanished_file() {
-        let mut session = session();
-        session.zen_focus = Some(ZenFocus {
-            path: "src/tui.rs".to_owned(),
-            lines: None,
-        });
-
-        let refreshed = DiffSet::parse(
-            r#"diff --git a/README.md b/README.md
---- a/README.md
-+++ b/README.md
-@@ -1 +1 @@
--old
-+new
-"#,
-        )
-        .unwrap();
-        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
-
-        assert!(session.zen_focus.is_none());
-    }
-
     fn three_file_diff() -> DiffSet {
         DiffSet::parse(
             r#"diff --git a/src/a.rs b/src/a.rs
@@ -5279,75 +5025,6 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn jump_to_chunk_part_moves_cursor_to_start_line() {
-        let mut session = multi_line_session();
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "core".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                explanation: None,
-                rationale: None,
-                artifacts: Vec::new(),
-                parts: vec![crate::agent::ChunkPart {
-                    path: "src/app.rs".to_owned(),
-                    start_line: Some(3),
-                    end_line: Some(4),
-                }],
-            }],
-            ..Default::default()
-        });
-
-        let part = session.review_chunks[0].parts[0].clone();
-        session.jump_to_chunk_part(&part);
-
-        assert_eq!(session.focus, Focus::Diff);
-        let rows = session.diff_rows_for_selected_file();
-        assert!(rows[session.diff_cursor].new_lineno.unwrap() >= 3);
-    }
-
-    #[test]
-    fn chunk_range_requires_inclusive_old_or_new_intersection() {
-        let mut session = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -100 +100 @@\n-removed\n+added\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let before = (session.selected, session.diff_cursor, session.diff_scroll);
-        assert!(
-            session
-                .jump_to_chunk_part(&ChunkPart {
-                    path: "a.txt".into(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                })
-                .is_none()
-        );
-        assert_eq!(
-            (session.selected, session.diff_cursor, session.diff_scroll),
-            before
-        );
-        assert!(
-            session
-                .jump_to_chunk_part(&ChunkPart {
-                    path: "a.txt".into(),
-                    start_line: Some(100),
-                    end_line: Some(100),
-                })
-                .is_some()
-        );
-        assert_eq!(
-            session.diff_rows_for_selected_file()[session.diff_cursor].text,
-            "added"
-        );
-    }
-
-    #[test]
     fn changed_hunk_navigation_targets_large_diff_placeholder() {
         let mut session = session();
         session.max_diff_lines = 1;
@@ -5378,29 +5055,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(session.large_change_nudge().is_none());
         session.nudge_files = 1;
         assert!(session.large_change_nudge().is_some());
-    }
-
-    #[test]
-    fn large_change_nudge_suppressed_once_an_agent_organized_the_review() {
-        let mut session = session();
-        session.nudge_files = 1;
-        assert!(session.large_change_nudge().is_some());
-
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "core".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                explanation: None,
-                rationale: None,
-                artifacts: Vec::new(),
-                parts: Vec::new(),
-            }],
-            ..Default::default()
-        });
-
-        assert!(session.large_change_nudge().is_none());
     }
 
     #[test]
@@ -6062,6 +5716,53 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
+    fn clamped_cursor_movement_does_not_rewrite_detached_scroll() {
+        let mut session = session();
+        session.focus = Focus::Diff;
+        let rows = session.diff_rows_for_selected_file();
+        session.diff_cursor = rows.iter().rposition(|row| row.anchor.is_some()).unwrap();
+        session.diff_scroll = 0;
+        assert!(!session.move_diff_cursor(1));
+        assert_eq!(session.diff_scroll, 0);
+
+        session.diff_cursor = rows.iter().position(|row| row.anchor.is_some()).unwrap();
+        session.diff_scroll = 3;
+        assert!(!session.move_diff_cursor(-1));
+        assert_eq!(session.diff_scroll, 3);
+    }
+
+    #[test]
+    fn comment_navigation_survives_large_diff_projection() {
+        let mut session = multi_line_session();
+        let anchor = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .find(|row| row.new_lineno == Some(2))
+            .and_then(|row| row.anchor.clone())
+            .unwrap();
+        session.comments.push(Comment {
+            id: "hidden-line".into(),
+            path: Some(anchor.path().into()),
+            line: anchor.line(),
+            anchor: Some(anchor),
+            body: "remember this line".into(),
+            ..Comment::default()
+        });
+        session.max_diff_lines = 1;
+        session.rows_cache.borrow_mut().clear();
+
+        assert_eq!(
+            session.select_comment_by_id("hidden-line"),
+            Some(CommentSelection::Diff)
+        );
+        let rows = session.diff_rows_for_selected_file();
+        assert!(matches!(
+            rows[session.diff_cursor].kind,
+            DiffRowKind::Placeholder
+        ));
+    }
+
+    #[test]
     fn context_folding_collapses_long_context_runs_with_symbol_labels() {
         let diff = DiffSet::parse(
             r#"diff --git a/src/lib.rs b/src/lib.rs
@@ -6113,203 +5814,41 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn short_context_runs_do_not_fold() {
-        let mut session = multi_line_session();
-        let unfolded_len = session.diff_rows_for_selected_file().len();
-
-        session.toggle_context_fold();
-
-        assert_eq!(session.diff_rows_for_selected_file().len(), unfolded_len);
-    }
-
-    #[test]
-    fn summary_counts_generated_files() {
-        let mut session = session();
-        session.annotate_generated_where(|file| file.path == "README.md");
-
-        assert!(session.summary_line().contains("1 generated/noisy"));
-    }
-
-    #[test]
-    fn logical_line_navigation_survives_large_diff_projection() {
-        let mut session = multi_line_session();
-        session.max_diff_lines = 1;
-        let part = ChunkPart {
-            path: session.selected_file().unwrap().path.clone(),
-            start_line: Some(2),
-            end_line: None,
-        };
-
-        assert!(session.jump_to_chunk_part(&part).is_some());
-        let rows = session.diff_rows_for_selected_file();
-        assert!(matches!(
-            rows[session.diff_cursor].kind,
-            DiffRowKind::Placeholder
-        ));
-    }
-
-    #[test]
-    fn comment_navigation_survives_large_diff_projection() {
-        let mut session = multi_line_session();
-        let anchor = session
-            .diff_rows_for_selected_file()
-            .iter()
-            .find(|row| row.new_lineno == Some(2))
-            .and_then(|row| row.anchor.clone())
-            .unwrap();
-        session.comments.push(Comment {
-            id: "hidden-line".into(),
-            path: Some(anchor.path().into()),
-            line: anchor.line(),
-            anchor: Some(anchor),
-            body: "remember this line".into(),
-            ..Comment::default()
-        });
-        session.max_diff_lines = 1;
-        session.rows_cache.borrow_mut().clear();
-
-        assert_eq!(
-            session.select_comment_by_id("hidden-line"),
-            Some(CommentSelection::Diff)
-        );
-        let rows = session.diff_rows_for_selected_file();
-        assert!(matches!(
-            rows[session.diff_cursor].kind,
-            DiffRowKind::Placeholder
-        ));
-    }
-
-    #[test]
-    fn later_hunk_header_identity_does_not_fall_back_to_first_hunk() {
+    fn duplicate_diff_line_identity_follows_containing_hunk_across_reorder() {
         let original = ReviewSession::new(
             ".".into(),
             ReviewTarget::trunk_to_current(),
             DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\n",
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n",
             )
             .unwrap(),
             ReviewState::default(),
         );
-        let rows = original.diff_rows_for_selected_file();
-        let headers = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
-            .collect::<Vec<_>>();
-        let identity = DiffRowIdentity::from(headers[1].1);
+        let original_rows = original.diff_rows_for_selected_file();
+        let identity = DiffRowIdentity::from(
+            original_rows
+                .iter()
+                .filter(|row| row.text == "shared")
+                .nth(1)
+                .unwrap(),
+        );
 
-        let refreshed = ReviewSession::new(
+        let reordered = ReviewSession::new(
             ".".into(),
             ReviewTarget::trunk_to_current(),
             DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-new-before\n+new-after\n@@ -2 +2 @@\n-a\n+b\n@@ -11 +11 @@\n-x\n+y\n",
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n",
             )
             .unwrap(),
             ReviewState::default(),
         );
-        let refreshed_rows = refreshed.diff_rows_for_selected_file();
-        let (resolved, recovered) =
-            resolve_diff_row_identity(&refreshed_rows, Some(&identity), headers[1].0);
+        let reordered_rows = reordered.diff_rows_for_selected_file();
+        let (resolved, recovered) = resolve_diff_row_identity(&reordered_rows, Some(&identity), 0);
 
         assert!(recovered);
-        assert_eq!(refreshed_rows[resolved].hunk_index, Some(2));
-    }
-
-    #[test]
-    fn synthetic_identity_tracks_shifted_gap_and_line_into_containing_fold() {
-        let original = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-x\n+y\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let rows = original.diff_rows_for_selected_file();
-        let gap = rows
-            .iter()
-            .find(|row| matches!(row.kind, DiffRowKind::ExpandGap { gap_id: 1, .. }))
-            .unwrap();
-        let gap_identity = DiffRowIdentity::from(gap);
-
-        let shifted = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -0,0 +1 @@\n+before\n@@ -2 +2 @@\n-a\n+b\n@@ -21 +21 @@\n-x\n+y\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let shifted_rows = shifted.diff_rows_for_selected_file();
-        let (resolved, recovered) =
-            resolve_diff_row_identity(&shifted_rows, Some(&gap_identity), 0);
-        assert!(recovered);
-        assert!(matches!(
-            shifted_rows[resolved].kind,
-            DiffRowKind::ExpandGap { gap_id: 2, .. }
-        ));
-
-        let mut folded = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,10 @@\n one\n two\n three\n four\n five\n six\n seven\n eight\n-nine\n+changed\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let unfolded = folded.diff_rows_for_selected_file();
-        let line_identity =
-            DiffRowIdentity::from(unfolded.iter().find(|row| row.text == "five").unwrap());
-        folded.toggle_context_fold();
-        let folded_rows = folded.diff_rows_for_selected_file();
-        let (resolved, recovered) =
-            resolve_diff_row_identity(&folded_rows, Some(&line_identity), 0);
-        assert!(recovered);
-        assert!(matches!(
-            folded_rows[resolved].kind,
-            DiffRowKind::ContextFold
-        ));
-    }
-
-    #[test]
-    fn vanished_interior_hunk_header_maps_to_first_hunk_row() {
-        let mut session = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old one\n+new one\n@@ -10 +10 @@\n-old ten\n+new ten\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let rows = session.diff_rows_for_selected_file();
-        let second_header = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
-            .nth(1)
-            .unwrap();
-        let identity = DiffRowIdentity::from(second_header.1);
-        let fallback = second_header.0;
-        session.diff_scroll = fallback as u16;
-        session.diff_cursor = fallback;
-        session.store_file_contents(
-            "a.txt",
-            Some((1..=10).map(|line| format!("line {line}\n")).collect()),
-        );
-        assert!(session.expand_nearest_gap(None));
-        let expanded = session.diff_rows_for_selected_file();
-        assert!(!expanded.iter().any(|row| {
-            matches!(row.kind, DiffRowKind::HunkHeader) && row.hunk_index == Some(1)
-        }));
-        let (resolved, recovered) = resolve_diff_row_identity(&expanded, Some(&identity), fallback);
-        assert!(recovered);
-        assert_eq!(expanded[resolved].new_lineno, Some(10));
-        assert!(session.restore_diff_top_identity(Some(&identity), fallback as u16));
-        assert_eq!(session.diff_scroll as usize, resolved);
+        assert_eq!(reordered_rows[resolved].text, "shared");
+        assert_eq!(reordered_rows[resolved].hunk_index, Some(0));
+        assert_eq!(reordered_rows[resolved + 1].text, "context beta");
     }
 
     #[test]
@@ -6445,66 +5984,6 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn duplicate_diff_line_identity_follows_containing_hunk_across_reorder() {
-        let original = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let original_rows = original.diff_rows_for_selected_file();
-        let identity = DiffRowIdentity::from(
-            original_rows
-                .iter()
-                .filter(|row| row.text == "shared")
-                .nth(1)
-                .unwrap(),
-        );
-
-        let reordered = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-beta\n+shared\n context beta\n@@ -1,2 +1,2 @@\n-alpha\n+shared\n context alpha\n",
-            )
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let reordered_rows = reordered.diff_rows_for_selected_file();
-        let (resolved, recovered) = resolve_diff_row_identity(&reordered_rows, Some(&identity), 0);
-
-        assert!(recovered);
-        assert_eq!(reordered_rows[resolved].text, "shared");
-        assert_eq!(reordered_rows[resolved].hunk_index, Some(0));
-        assert_eq!(reordered_rows[resolved + 1].text, "context beta");
-    }
-
-    #[test]
-    fn semantic_identity_does_not_retain_large_row_text() {
-        let long = "x".repeat(100_000);
-        let session = ReviewSession::new(
-            ".".into(),
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(&format!(
-                "diff --git a/a.bin b/a.bin\nold mode 100644\nnew mode 100755\n{long}\n"
-            ))
-            .unwrap(),
-            ReviewState::default(),
-        );
-        let rows = session.diff_rows_for_selected_file();
-        let raw = rows
-            .iter()
-            .find(|row| matches!(row.kind, DiffRowKind::Raw))
-            .unwrap();
-        let identity = DiffRowIdentity::from(raw);
-        assert!(identity.text.is_empty());
-        assert!(identity.semantic_key.unwrap().len() < 80);
-    }
-
-    #[test]
     fn explicit_navigation_reveals_filtered_destination() {
         let mut session = session();
         session.files[1].generated = true;
@@ -6525,22 +6004,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!session.hide_generated);
         assert_eq!(session.viewed_filter, ViewedFilter::All);
         assert!(session.selected_visible_file().is_some());
-    }
-
-    #[test]
-    fn clamped_cursor_movement_does_not_rewrite_detached_scroll() {
-        let mut session = session();
-        session.focus = Focus::Diff;
-        let rows = session.diff_rows_for_selected_file();
-        session.diff_cursor = rows.iter().rposition(|row| row.anchor.is_some()).unwrap();
-        session.diff_scroll = 0;
-        assert!(!session.move_diff_cursor(1));
-        assert_eq!(session.diff_scroll, 0);
-
-        session.diff_cursor = rows.iter().position(|row| row.anchor.is_some()).unwrap();
-        session.diff_scroll = 3;
-        assert!(!session.move_diff_cursor(-1));
-        assert_eq!(session.diff_scroll, 3);
     }
 
     #[test]
@@ -6594,19 +6057,6 @@ diff --git a/src/c.rs b/src/c.rs
 
         assert_eq!(session.diff_scroll, target as u16);
         assert_eq!(session.diff_cursor, target);
-    }
-
-    #[test]
-    fn into_state_records_session_metadata() {
-        let session = session();
-
-        let state = session.into_state();
-
-        assert_eq!(state.meta.version, REVIEW_STATE_SCHEMA_VERSION);
-        assert_eq!(state.meta.base.as_deref(), Some("trunk()"));
-        assert_eq!(state.meta.revision.as_deref(), Some("@"));
-        assert!(state.meta.repo.is_some());
-        assert!(state.meta.saved_at.is_some());
     }
 
     #[test]
@@ -6664,6 +6114,289 @@ diff --git a/src/c.rs b/src/c.rs
                 .iter()
                 .any(|comment| comment.id == "discarded")
         );
+    }
+
+    #[test]
+    fn into_state_records_session_metadata() {
+        let session = session();
+
+        let state = session.into_state();
+
+        assert_eq!(state.meta.version, REVIEW_STATE_SCHEMA_VERSION);
+        assert_eq!(state.meta.base.as_deref(), Some("trunk()"));
+        assert_eq!(state.meta.revision.as_deref(), Some("@"));
+        assert!(state.meta.repo.is_some());
+        assert!(state.meta.saved_at.is_some());
+    }
+    #[test]
+    fn large_change_nudge_suppressed_once_an_agent_organized_the_review() {
+        let mut session = session();
+        session.nudge_files = 1;
+        assert!(session.large_change_nudge().is_some());
+
+        let index = session.ensure_active_review_session_index();
+        crate::review::add_walkthrough_step(
+            &mut session.sessions[index],
+            crate::state::WalkthroughStep {
+                title: Some("core".into()),
+                ..Default::default()
+            },
+        );
+
+        assert!(session.large_change_nudge().is_none());
+    }
+    #[test]
+    fn later_hunk_header_identity_does_not_fall_back_to_first_hunk() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -10 +10 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = original.diff_rows_for_selected_file();
+        let headers = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
+            .collect::<Vec<_>>();
+        let identity = DiffRowIdentity::from(headers[1].1);
+
+        let refreshed = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-new-before\n+new-after\n@@ -2 +2 @@\n-a\n+b\n@@ -11 +11 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let refreshed_rows = refreshed.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&refreshed_rows, Some(&identity), headers[1].0);
+
+        assert!(recovered);
+        assert_eq!(refreshed_rows[resolved].hunk_index, Some(2));
+    }
+    #[test]
+    fn logical_line_navigation_survives_large_diff_projection() {
+        let mut session = multi_line_session();
+        session.max_diff_lines = 1;
+        let target = StateReviewTarget {
+            file: Some(session.selected_file().unwrap().path.clone()),
+            line: Some(2),
+            ..Default::default()
+        };
+
+        assert!(session.jump_to_review_target(&target).is_some());
+        let rows = session.diff_rows_for_selected_file();
+        assert!(matches!(
+            rows[session.diff_cursor].kind,
+            DiffRowKind::Placeholder
+        ));
+    }
+    #[test]
+    fn replace_diff_preserving_view_keeps_the_reviewers_place() {
+        let mut session = session();
+        session.toggle_focus();
+        session.file_pane_visible = false;
+        session.hide_generated = true;
+        session.viewed_filter = ViewedFilter::Unviewed;
+        // Select the second file and mark the first viewed.
+        let index = session
+            .files
+            .iter()
+            .position(|file| file.path == "README.md")
+            .unwrap();
+        session.select_file_index(index);
+        session.diff_scroll = 2;
+        session.diff_cursor = 3;
+        session.files[0].viewed = true;
+
+        // The same review grew a third file (new work landed).
+        let refreshed = DiffSet::parse(
+            r#"diff --git a/src/tui.rs b/src/tui.rs
+--- a/src/tui.rs
++++ b/src/tui.rs
+@@ -1 +1 @@
+-old
++new
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/new.rs b/src/new.rs
+--- a/src/new.rs
++++ b/src/new.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        )
+        .unwrap();
+        session.replace_diff_preserving_view(ReviewTarget::trunk_to_current(), refreshed);
+
+        assert!(!session.file_pane_visible);
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(session.hide_generated);
+        assert_eq!(session.viewed_filter, ViewedFilter::Unviewed);
+        assert_eq!(session.selected_file().unwrap().path, "README.md");
+        assert_eq!(session.diff_scroll, 2);
+        assert_eq!(session.diff_cursor, 3);
+        // Viewed marks still carry over by fingerprint, and the new file
+        // arrived unviewed.
+        assert!(
+            session
+                .files
+                .iter()
+                .find(|file| file.path == "src/tui.rs")
+                .unwrap()
+                .viewed
+        );
+        assert!(
+            !session
+                .files
+                .iter()
+                .find(|file| file.path == "src/new.rs")
+                .unwrap()
+                .viewed
+        );
+    }
+    #[test]
+    fn semantic_identity_does_not_retain_large_row_text() {
+        let long = "x".repeat(100_000);
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(&format!(
+                "diff --git a/a.bin b/a.bin\nold mode 100644\nnew mode 100755\n{long}\n"
+            ))
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let raw = rows
+            .iter()
+            .find(|row| matches!(row.kind, DiffRowKind::Raw))
+            .unwrap();
+        let identity = DiffRowIdentity::from(raw);
+        assert!(identity.text.is_empty());
+        assert!(identity.semantic_key.unwrap().len() < 80);
+    }
+    #[test]
+    fn short_context_runs_do_not_fold() {
+        let mut session = multi_line_session();
+        let unfolded_len = session.diff_rows_for_selected_file().len();
+
+        session.toggle_context_fold();
+
+        assert_eq!(session.diff_rows_for_selected_file().len(), unfolded_len);
+    }
+    #[test]
+    fn summary_counts_generated_files() {
+        let mut session = session();
+        session.annotate_generated_where(|file| file.path == "README.md");
+
+        assert!(session.summary_line().contains("1 generated/noisy"));
+    }
+    #[test]
+    fn synthetic_identity_tracks_shifted_gap_and_line_into_containing_fold() {
+        let original = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n@@ -20 +20 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = original.diff_rows_for_selected_file();
+        let gap = rows
+            .iter()
+            .find(|row| matches!(row.kind, DiffRowKind::ExpandGap { gap_id: 1, .. }))
+            .unwrap();
+        let gap_identity = DiffRowIdentity::from(gap);
+
+        let shifted = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -0,0 +1 @@\n+before\n@@ -2 +2 @@\n-a\n+b\n@@ -21 +21 @@\n-x\n+y\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let shifted_rows = shifted.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&shifted_rows, Some(&gap_identity), 0);
+        assert!(recovered);
+        assert!(matches!(
+            shifted_rows[resolved].kind,
+            DiffRowKind::ExpandGap { gap_id: 2, .. }
+        ));
+
+        let mut folded = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,10 +1,10 @@\n one\n two\n three\n four\n five\n six\n seven\n eight\n-nine\n+changed\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let unfolded = folded.diff_rows_for_selected_file();
+        let line_identity =
+            DiffRowIdentity::from(unfolded.iter().find(|row| row.text == "five").unwrap());
+        folded.toggle_context_fold();
+        let folded_rows = folded.diff_rows_for_selected_file();
+        let (resolved, recovered) =
+            resolve_diff_row_identity(&folded_rows, Some(&line_identity), 0);
+        assert!(recovered);
+        assert!(matches!(
+            folded_rows[resolved].kind,
+            DiffRowKind::ContextFold
+        ));
+    }
+    #[test]
+    fn vanished_interior_hunk_header_maps_to_first_hunk_row() {
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(
+                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old one\n+new one\n@@ -10 +10 @@\n-old ten\n+new ten\n",
+            )
+            .unwrap(),
+            ReviewState::default(),
+        );
+        let rows = session.diff_rows_for_selected_file();
+        let second_header = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row.kind, DiffRowKind::HunkHeader))
+            .nth(1)
+            .unwrap();
+        let identity = DiffRowIdentity::from(second_header.1);
+        let fallback = second_header.0;
+        session.diff_scroll = fallback as u16;
+        session.diff_cursor = fallback;
+        session.store_file_contents(
+            "a.txt",
+            Some((1..=10).map(|line| format!("line {line}\n")).collect()),
+        );
+        assert!(session.expand_nearest_gap(None));
+        let expanded = session.diff_rows_for_selected_file();
+        assert!(!expanded.iter().any(|row| {
+            matches!(row.kind, DiffRowKind::HunkHeader) && row.hunk_index == Some(1)
+        }));
+        let (resolved, recovered) = resolve_diff_row_identity(&expanded, Some(&identity), fallback);
+        assert!(recovered);
+        assert_eq!(expanded[resolved].new_lineno, Some(10));
+        assert!(session.restore_diff_top_identity(Some(&identity), fallback as u16));
+        assert_eq!(session.diff_scroll as usize, resolved);
     }
 }
 

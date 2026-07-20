@@ -32,7 +32,8 @@ use crate::{
     registry, review,
     state::{
         ActionIntent, Channel, CommentKind, CommentState, Identity, ReviewDisposition, ReviewState,
-        ReviewTarget as StateReviewTarget, Salience, WalkthroughStep,
+        ReviewTarget as StateReviewTarget, Salience, StepArtifact, StepArtifactKind,
+        StepImportance, StepKind, WalkthroughStep,
     },
 };
 
@@ -118,93 +119,6 @@ pub struct FlagSectionParams {
     pub reason: String,
     /// critical | high | medium | low (default high).
     pub priority: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct ChunkPartParams {
-    pub path: String,
-    pub start_line: Option<u64>,
-    pub end_line: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct ArtifactParams {
-    /// Short title for the exhibit.
-    pub title: String,
-    /// example | output | diagram | note (default example).
-    pub kind: Option<String>,
-    /// Plain text body (code, captured output, ASCII diagram, prose),
-    /// rendered verbatim in a scrollable viewer.
-    pub body: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct ChunkParams {
-    /// Stable chunk id. Omit to generate a new id.
-    pub id: Option<String>,
-    /// Short human-readable title for the reviewable unit.
-    pub title: String,
-    /// spotlight for the few stops worth touring; glance for routine/context
-    /// hunks that should stay in the at-a-glance rail instead of interrupting
-    /// the walkthrough.
-    pub importance: Option<String>,
-    /// The jj change this chunk belongs to (a change_id from
-    /// `stack_changes`). The zen walkthrough retargets the review to that
-    /// change's own diff for this stop, so part line numbers must come from
-    /// `change_diff` for the same change. Anchor chunks this way whenever the
-    /// review target spans a stack of changes; omit for chunks over the
-    /// loaded target as a whole.
-    pub change_id: Option<String>,
-    /// Why these parts belong together.
-    pub rationale: Option<String>,
-    /// For spotlight chunks: 2-5 sentences that teach the change (what the
-    /// code does, why it changed, what could break). Shown full-screen on
-    /// the zen focus card.
-    pub explanation: Option<String>,
-    /// Optional exhibits that show the change rather than describe it — a
-    /// usage example, output captured by exercising the code, a small
-    /// diagram. The human opens them from the stop's card with `e`.
-    pub artifacts: Option<Vec<ArtifactParams>>,
-    pub parts: Vec<ChunkPartParams>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SetChunksParams {
-    /// Reviewable units that can span or subdivide files; replaces the
-    /// previous set.
-    pub chunks: Vec<ChunkParams>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct UpdateChunksParams {
-    /// Reviewable units to upsert: matching ids replace in place, new ids append.
-    pub chunks: Vec<ChunkParams>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RemoveChunksParams {
-    /// Chunk ids to remove. Unknown ids are rejected without applying changes.
-    pub ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct ChangeBriefParams {
-    /// The jj change this brief describes (a change_id from `stack_changes`).
-    pub change_id: String,
-    /// 2-4 sentences of prose that teach the change at a high level: what it
-    /// accomplishes, why it exists, and how it builds on the changes before
-    /// it. Shown on the chapter intro card before that change's walkthrough
-    /// stops.
-    pub summary: String,
-    /// Optional exhibits for the chapter card: examples, captured output,
-    /// diagrams. The human opens them with `e`.
-    pub artifacts: Option<Vec<ArtifactParams>>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SetChangeBriefsParams {
-    /// One brief per change in the reviewed range; replaces the previous set.
-    pub briefs: Vec<ChangeBriefParams>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -386,6 +300,47 @@ pub struct WalkthroughMoveStepParams {
     pub to: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughTargetParams {
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughArtifactParams {
+    pub title: String,
+    /// example | output | diagram | note
+    pub kind: Option<String>,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughSetStepParams {
+    pub id: Option<String>,
+    /// step (default) | chapter
+    pub kind: Option<String>,
+    /// spotlight (default) | glance
+    pub importance: Option<String>,
+    pub change_id: Option<String>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub why: Option<String>,
+    pub target: Option<WalkthroughTargetParams>,
+    #[serde(default)]
+    pub extra_targets: Vec<WalkthroughTargetParams>,
+    #[serde(default)]
+    pub artifacts: Vec<WalkthroughArtifactParams>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct WalkthroughSetParams {
+    pub title: Option<String>,
+    /// Complete replacement ordered in normal-stream Spotlight order.
+    pub steps: Vec<WalkthroughSetStepParams>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AttentionListParams {
     /// When true, list raw durable assignments; otherwise list effective current regions.
@@ -526,33 +481,37 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Live TUI presentation status: active tour, slide index/count, phase, and current slide target"
+        description = "Live TUI presentation status: active Spotlight index/count, Focus view, and current durable target"
     )]
     fn present_status(&self) -> Result<CallToolResult, McpError> {
         self.call("present/status", Value::Null)
     }
 
-    #[tool(description = "Start the live TUI tour, like pressing T")]
+    #[tool(description = "Start Focus at the first durable Spotlight in the normal review stream")]
     fn present_start(&self) -> Result<CallToolResult, McpError> {
         self.call("present/start", Value::Null)
     }
 
-    #[tool(description = "End the live TUI tour")]
+    #[tool(
+        description = "End live stream presentation and restore Focus when presentation owned it"
+    )]
     fn present_end(&self) -> Result<CallToolResult, McpError> {
         self.call("present/end", Value::Null)
     }
 
-    #[tool(description = "Advance the live TUI tour to the next slide")]
+    #[tool(description = "Advance to the next durable Spotlight in the normal stream")]
     fn present_next(&self) -> Result<CallToolResult, McpError> {
         self.call("present/next", Value::Null)
     }
 
-    #[tool(description = "Move the live TUI tour to the previous slide")]
+    #[tool(description = "Move to the previous durable Spotlight in the normal stream")]
     fn present_prev(&self) -> Result<CallToolResult, McpError> {
         self.call("present/prev", Value::Null)
     }
 
-    #[tool(description = "Jump the live TUI tour to a zero-based slide index or durable step id")]
+    #[tool(
+        description = "Jump stream presentation to a zero-based Spotlight index or durable step id"
+    )]
     fn present_goto(
         &self,
         Parameters(params): Parameters<PresentGotoParams>,
@@ -573,7 +532,9 @@ impl GanderMcp {
         self.call("present/focus", json!({ "path": params.path, "line": params.line, "end_line": params.end_line, "note": params.note }))
     }
 
-    #[tool(description = "Reload review/walkthrough state from disk and rebuild the live TUI tour")]
+    #[tool(
+        description = "Reload durable review/walkthrough state and re-anchor live stream presentation"
+    )]
     fn present_reload(&self) -> Result<CallToolResult, McpError> {
         self.call("present/reload", Value::Null)
     }
@@ -586,7 +547,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Git-style diff of one jj change against its parent (change_id- .. change_id). Line numbers in this diff are what chunk parts anchored to this change_id must reference"
+        description = "Git-style diff of one jj change against its parent (change_id- .. change_id), useful for durable walkthrough and attention targets"
     )]
     fn change_diff(
         &self,
@@ -624,52 +585,6 @@ impl GanderMcp {
                 "priority": params.priority,
             }),
         )
-    }
-
-    #[tool(
-        description = "Group the change into logical reviewable units that can span or subdivide files; anchor each unit to its jj change with change_id when reviewing a stack"
-    )]
-    fn set_chunks(
-        &self,
-        Parameters(params): Parameters<SetChunksParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let chunks = serde_json::to_value(&params.chunks)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        self.call("review/set_chunks", json!({ "chunks": chunks }))
-    }
-
-    #[tool(
-        description = "Incrementally upsert review chunks: matching ids replace in place; new ids append"
-    )]
-    fn update_chunks(
-        &self,
-        Parameters(params): Parameters<UpdateChunksParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let chunks = serde_json::to_value(&params.chunks)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        self.call("review/update_chunks", json!({ "chunks": chunks }))
-    }
-
-    #[tool(
-        description = "Remove review chunks by id; unknown ids are rejected without applying changes"
-    )]
-    fn remove_chunks(
-        &self,
-        Parameters(params): Parameters<RemoveChunksParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.call("review/remove_chunks", json!({ "ids": params.ids }))
-    }
-
-    #[tool(
-        description = "Brief the human on each jj change in the reviewed range: a short high-level narrative per change (what it accomplishes, why it exists, how it builds on the previous changes). The zen walkthrough shows each brief as a chapter intro card before that change's stops"
-    )]
-    fn set_change_briefs(
-        &self,
-        Parameters(params): Parameters<SetChangeBriefsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let briefs = serde_json::to_value(&params.briefs)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        self.call("review/set_change_briefs", json!({ "briefs": briefs }))
     }
 
     #[tool(
@@ -1171,6 +1086,55 @@ impl GanderMcp {
     }
 
     #[tool(
+        description = "Replace the durable walkthrough used for normal-stream Spotlight ordering, chapter headers, narration cards, and agent attention. Equivalent to `gander walkthrough set`."
+    )]
+    fn walkthrough_set(
+        &self,
+        Parameters(params): Parameters<WalkthroughSetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        let files = self.attention_files_for_context(&context);
+        let stack_change_ids = if params
+            .steps
+            .iter()
+            .any(|step| step.kind.as_deref() == Some("chapter"))
+        {
+            self.selected_stack_change_ids()?
+        } else {
+            Vec::new()
+        };
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            let steps = params
+                .steps
+                .into_iter()
+                .map(|params| walkthrough_step_from_params(params, &this.agent_identity))
+                .collect::<Result<Vec<_>>>()?;
+            let prior = state.sessions[idx]
+                .walkthroughs
+                .first()
+                .map(|walkthrough| walkthrough.steps.as_slice())
+                .unwrap_or(&[]);
+            let normalized = review::normalize_walkthrough_replacement(
+                prior,
+                params.title,
+                steps,
+                &this.agent_identity,
+                &files,
+                &stack_change_ids,
+            )?;
+            let warnings = normalized.warnings;
+            let walkthrough = review::set_walkthrough(
+                &mut state.sessions[idx],
+                normalized.title,
+                normalized.steps,
+            );
+            crate::attention::sync_agent_attention(&mut state.sessions[idx], &files)?;
+            Ok(json!({ "walkthrough": walkthrough, "warnings": warnings }))
+        })
+    }
+
+    #[tool(
         description = "Add a durable walkthrough step. Equivalent to `gander walkthrough add-step`; external additions merge into a running TUI."
     )]
     fn walkthrough_add_step(
@@ -1534,6 +1498,33 @@ impl GanderMcp {
         Ok(context)
     }
 
+    fn selected_stack_change_ids(&self) -> Result<Vec<String>, McpError> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "review/stack_changes",
+            "params": Value::Null,
+        })
+        .to_string();
+        let response = self.dispatch_selected(&request)?;
+        if let Some(error) = response.get("error") {
+            return Err(McpError::internal_error(
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed to read current stack")
+                    .to_owned(),
+                None,
+            ));
+        }
+        Ok(response["result"]["changes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|change| change["change_id"].as_str().map(str::to_owned))
+            .collect())
+    }
+
     /// `None` when no live instance serves this workspace; the caller then
     /// falls back to the snapshot.
     #[cfg(unix)]
@@ -1764,6 +1755,92 @@ impl GanderMcp {
     }
 }
 
+fn walkthrough_step_from_params(
+    params: WalkthroughSetStepParams,
+    author: &Identity,
+) -> Result<WalkthroughStep> {
+    let kind = match params.kind.as_deref().unwrap_or("step") {
+        "step" => StepKind::Step,
+        "chapter" => StepKind::Chapter,
+        value => color_eyre::eyre::bail!("invalid walkthrough kind `{value}`"),
+    };
+    let importance = match params.importance.as_deref().unwrap_or("spotlight") {
+        "spotlight" => StepImportance::Spotlight,
+        "glance" => StepImportance::Glance,
+        value => color_eyre::eyre::bail!("invalid walkthrough importance `{value}`"),
+    };
+    if kind == StepKind::Chapter
+        && params
+            .change_id
+            .as_deref()
+            .is_none_or(|change_id| change_id.trim().is_empty())
+    {
+        color_eyre::eyre::bail!("chapter walkthrough steps require change_id");
+    }
+    let target = walkthrough_target_from_params(params.target)?;
+    let extra_targets = params
+        .extra_targets
+        .into_iter()
+        .map(|target| walkthrough_target_from_params(Some(target)))
+        .collect::<Result<Vec<_>>>()?;
+    let artifacts = params
+        .artifacts
+        .into_iter()
+        .map(|artifact| {
+            let kind = match artifact.kind.as_deref().unwrap_or("example") {
+                "example" => StepArtifactKind::Example,
+                "output" => StepArtifactKind::Output,
+                "diagram" => StepArtifactKind::Diagram,
+                "note" => StepArtifactKind::Note,
+                value => color_eyre::eyre::bail!("invalid walkthrough artifact kind `{value}`"),
+            };
+            if artifact.title.trim().is_empty() || artifact.body.trim().is_empty() {
+                color_eyre::eyre::bail!("walkthrough artifacts require non-empty title and body");
+            }
+            Ok(StepArtifact {
+                title: artifact.title,
+                kind,
+                body: artifact.body,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(WalkthroughStep {
+        id: params.id.unwrap_or_default(),
+        author: Some(author.clone()),
+        target,
+        importance,
+        kind,
+        change_id: params.change_id,
+        title: params.title,
+        body: params.body,
+        why: params.why,
+        artifacts,
+        extra_targets,
+        updated_at: None,
+    })
+}
+
+fn walkthrough_target_from_params(
+    params: Option<WalkthroughTargetParams>,
+) -> Result<StateReviewTarget> {
+    let Some(params) = params else {
+        return Ok(StateReviewTarget::default());
+    };
+    if let (Some(start), Some(end)) = (params.line, params.end_line)
+        && end < start
+    {
+        color_eyre::eyre::bail!("walkthrough end_line must be greater than or equal to line");
+    }
+    let mut target = StateReviewTarget {
+        file: params.path,
+        line: params.line,
+        end_line: params.end_line,
+        ..StateReviewTarget::default()
+    };
+    target.symbol = params.symbol;
+    Ok(target)
+}
+
 fn to_value(value: impl Serialize) -> Result<Value, McpError> {
     serde_json::to_value(value).map_err(|error| McpError::internal_error(error.to_string(), None))
 }
@@ -1786,19 +1863,14 @@ impl ServerHandler for GanderMcp {
                  changes like stacked PRs, and change_diff reads one change \
                  against its parent. See what the human is looking at with \
                  current_focus; then help organize the review with set_ordering, \
-                 flag_section, set_change_briefs (one short high-level brief \
-                 per change in the stack — shown as a chapter intro before that \
-                 change's walkthrough stops), set_chunks/update_chunks/remove_chunks (3-7 \
-                 importance=spotlight chunks with a \
-                 teaching `explanation` each; importance=glance for the routine \
-                 rest — spotlight narration appears inline in the review stream, \
-                 while routine skim folds are summarized and acknowledged from \
-                 the attention glance board; on a stack, give each chunk the change_id it \
-                 belongs to with line numbers from that change_diff, in stack \
-                 order, so the walkthrough flows through the stack change by \
-                 change; spotlight chunks and briefs may attach artifacts — \
-                 examples, captured output, diagrams the human opens with `e`), \
-                 and draft_comment — suggestions appear live in the \
+                 flag_section, durable walkthrough_set/walkthrough_add_step/walkthrough_show, \
+                 attention_set/attention_list, and attention_seed_heuristics. \
+                 Use 3-7 precise Spotlight steps with teaching `why`/`body` \
+                 narration for the mental-model delta; use Skim attention for \
+                 generated, lockfile, and routine churn. Durable targets \
+                 re-anchor or become stale by fingerprint and render in the \
+                 normal review stream. Use draft_comment for concrete issues — \
+                 suggestions appear live in the \
                  reviewer's terminal, and drafted comments are triaged by the \
                  human. The review refreshes automatically as new changes land. \
                  list_reviews shows every running review instance. Do not modify \
@@ -1835,6 +1907,33 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_schema_exposes_durable_curation_and_no_removed_chunk_tools() {
+        let names = GanderMcp::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect::<Vec<_>>();
+        for current in [
+            "walkthrough_add_step",
+            "walkthrough_set",
+            "walkthrough_show",
+            "attention_set",
+            "attention_list",
+            "attention_seed_heuristics",
+        ] {
+            assert!(names.iter().any(|name| name == current), "{current}");
+        }
+        for removed in [
+            "set_chunks",
+            "update_chunks",
+            "remove_chunks",
+            "set_change_briefs",
+        ] {
+            assert!(!names.iter().any(|name| name == removed), "{removed}");
+        }
+    }
     use std::path::Path;
 
     use crate::{diff::DiffSet, jj::ReviewTarget, state::ReviewState};
@@ -1871,6 +1970,81 @@ mod tests {
         GanderMcp::new(
             move || session(&root),
             None,
+            GanderMcpParams {
+                overlay_path: dir.join("agent.json"),
+                state_path: dir.join("state.json"),
+                registry_dir: dir.join("registry"),
+                workspace_root: dir.to_path_buf(),
+                target: ReviewTarget::trunk_to_current(),
+                diff_files: vec!["src/app.rs".into()],
+                attention_files: attention_files(),
+                generated_policy: GeneratedPolicy::default(),
+                ignore_globs: Vec::new(),
+                initial_comment_state: CommentState::Todo,
+                agent_identity: Identity::agent(),
+            },
+        )
+        .unwrap()
+    }
+
+    struct StackBackend;
+
+    impl JjBackend for StackBackend {
+        fn diff(&self, _repo: &Path, _target: &ReviewTarget) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn change_summaries(&self, _repo: &Path) -> Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn stack_changes(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+        ) -> Result<Vec<crate::jj::JjChangeSummary>> {
+            Ok(vec![crate::jj::JjChangeSummary {
+                change_id: "abcdef".into(),
+                bookmarks: String::new(),
+                description: "chapter".into(),
+            }])
+        }
+
+        fn snapshot_working_copy(&self, _repo: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        fn change_fingerprint(&self, _repo: &Path, _target: &ReviewTarget) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn operations(&self, _repo: &Path) -> Result<Vec<crate::jj::JjOperationSummary>> {
+            Ok(Vec::new())
+        }
+
+        fn diff_at_operation(
+            &self,
+            _repo: &Path,
+            _target: &ReviewTarget,
+            _operation_id: &str,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn file_contents(&self, _repo: &Path, _rev: &str, _path: &str) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn run_command(&self, _repo: &Path, _args: &[String]) -> Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    fn server_with_stack(dir: &Path) -> GanderMcp {
+        let root = dir.to_path_buf();
+        GanderMcp::new(
+            move || session(&root),
+            Some(Box::new(StackBackend)),
             GanderMcpParams {
                 overlay_path: dir.join("agent.json"),
                 state_path: dir.join("state.json"),
@@ -1939,70 +2113,6 @@ mod tests {
 
         let focus = result_json(&server.current_focus().unwrap());
         assert_eq!(focus["path"], "src/app.rs");
-    }
-
-    #[test]
-    fn write_tools_persist_the_shared_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let server = server(dir.path());
-
-        let draft = result_json(
-            &server
-                .draft_comment(Parameters(DraftCommentParams {
-                    path: "src/app.rs".to_owned(),
-                    line: Some(1),
-                    body: "handle the None case".to_owned(),
-                }))
-                .unwrap(),
-        );
-        assert!(draft["id"].as_str().is_some());
-
-        server
-            .set_chunks(Parameters(SetChunksParams {
-                chunks: vec![ChunkParams {
-                    id: None,
-                    title: "core change".to_owned(),
-                    importance: Some("spotlight".to_owned()),
-                    change_id: None,
-                    rationale: None,
-                    explanation: Some("Explains the core change.".to_owned()),
-                    artifacts: None,
-                    parts: vec![ChunkPartParams {
-                        path: "src/app.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    }],
-                }],
-            }))
-            .unwrap();
-
-        server
-            .set_change_briefs(Parameters(SetChangeBriefsParams {
-                briefs: vec![ChangeBriefParams {
-                    change_id: "abc".to_owned(),
-                    summary: "Reworks the core loop before the follow-ups build on it.".to_owned(),
-                    artifacts: None,
-                }],
-            }))
-            .unwrap();
-
-        let overlay =
-            crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert!(!overlay.has_legacy_drafts());
-        let state = ReviewState::load_or_default(&server.state_path).unwrap();
-        assert!(state.comments.iter().any(|comment| {
-            comment.id == draft["id"].as_str().unwrap()
-                && comment.author.kind == crate::state::AuthorKind::Agent
-                && comment.channel == Channel::Onboarding
-        }));
-        assert_eq!(overlay.chunks[0].title, "core change");
-        assert_eq!(overlay.chunks[0].change_id, None);
-        assert_eq!(
-            overlay.chunks[0].explanation.as_deref(),
-            Some("Explains the core change.")
-        );
-        assert_eq!(overlay.briefs.len(), 1);
-        assert_eq!(overlay.briefs[0].change_id, "abc");
     }
 
     #[test]
@@ -2216,6 +2326,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn removed_curation_method_invocations_become_mcp_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        for method in [
+            "review/set_chunks",
+            "review/update_chunks",
+            "review/remove_chunks",
+            "review/set_change_briefs",
+        ] {
+            let result = server.call(method, json!({})).unwrap();
+            assert_eq!(result.is_error, Some(true), "{method}");
+            let ContentBlock::Text(text) = &result.content[0] else {
+                panic!("expected text error");
+            };
+            assert!(
+                text.text.contains("unknown method"),
+                "{method}: {}",
+                text.text
+            );
+        }
+    }
+
+    #[test]
+    fn ordering_and_flag_tools_persist_the_reduced_shared_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        server
+            .set_ordering(Parameters(SetOrderingParams {
+                paths: vec!["src/app.rs".into()],
+            }))
+            .unwrap();
+        server
+            .flag_section(Parameters(FlagSectionParams {
+                path: "src/app.rs".into(),
+                line: Some(1),
+                reason: "risky".into(),
+                priority: Some("critical".into()),
+            }))
+            .unwrap();
+
+        let overlay =
+            crate::agent::AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.ordering, ["src/app.rs"]);
+        assert_eq!(overlay.flags.len(), 1);
+        assert_eq!(
+            overlay.flags[0].priority,
+            crate::agent::FlagPriority::Critical
+        );
     }
 
     #[test]
@@ -2644,6 +2805,133 @@ mod tests {
                 .anchor
                 .is_some()
         );
+    }
+
+    #[test]
+    fn walkthrough_set_replaces_durable_curation_and_syncs_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let spec = WalkthroughSetParams {
+            title: Some("Review path".into()),
+            steps: vec![WalkthroughSetStepParams {
+                id: None,
+                kind: Some("step".into()),
+                importance: Some("spotlight".into()),
+                change_id: None,
+                title: Some("Core invariant".into()),
+                body: Some("Follow the new value through the entry point.".into()),
+                why: Some("This is the mental-model delta.".into()),
+                target: Some(WalkthroughTargetParams {
+                    path: Some("src/app.rs".into()),
+                    line: Some(1),
+                    end_line: None,
+                    symbol: None,
+                }),
+                extra_targets: Vec::new(),
+                artifacts: vec![WalkthroughArtifactParams {
+                    title: "flow".into(),
+                    kind: Some("diagram".into()),
+                    body: "input -> app".into(),
+                }],
+            }],
+        };
+        let result = result_json(&server.walkthrough_set(Parameters(spec.clone())).unwrap());
+        let first_id = result["walkthrough"]["steps"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(result["walkthrough"]["title"], "Review path");
+        assert_eq!(
+            result["walkthrough"]["steps"][0]["artifacts"][0]["kind"],
+            "diagram"
+        );
+        let repeated = result_json(&server.walkthrough_set(Parameters(spec)).unwrap());
+        assert_eq!(
+            repeated["walkthrough"]["steps"][0]["id"], first_id,
+            "repeated omitted-id replacements must be idempotent"
+        );
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.sessions[0].attention_regions.len(), 1);
+        assert_eq!(
+            state.sessions[0].attention_regions[0].salience,
+            Salience::Spotlight
+        );
+    }
+
+    #[test]
+    fn walkthrough_set_duplicate_id_error_matches_cli_and_does_not_mutate_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+        let step = |id: &str, title: &str| WalkthroughSetStepParams {
+            id: Some(id.into()),
+            kind: Some("step".into()),
+            importance: Some("spotlight".into()),
+            change_id: None,
+            title: Some(title.into()),
+            body: None,
+            why: None,
+            target: Some(WalkthroughTargetParams {
+                path: Some("src/app.rs".into()),
+                line: Some(1),
+                end_line: None,
+                symbol: None,
+            }),
+            extra_targets: Vec::new(),
+            artifacts: Vec::new(),
+        };
+        server
+            .walkthrough_set(Parameters(WalkthroughSetParams {
+                title: Some("Prior".into()),
+                steps: vec![step("prior", "Prior")],
+            }))
+            .unwrap();
+        let before = std::fs::read(&server.state_path).unwrap();
+
+        let error = server
+            .walkthrough_set(Parameters(WalkthroughSetParams {
+                title: Some("Rejected".into()),
+                steps: vec![step("duplicate", "First"), step("duplicate", "Second")],
+            }))
+            .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "duplicate explicit walkthrough step id(s): duplicate"
+        );
+        assert_eq!(std::fs::read(&server.state_path).unwrap(), before);
+    }
+
+    #[test]
+    fn walkthrough_set_validates_chapter_ids_against_current_stack_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server_with_stack(dir.path());
+        let chapter = |change_id: &str| WalkthroughSetParams {
+            title: Some("Stack".into()),
+            steps: vec![WalkthroughSetStepParams {
+                id: None,
+                kind: Some("chapter".into()),
+                importance: None,
+                change_id: Some(change_id.into()),
+                title: Some("Chapter".into()),
+                body: Some("Narrative".into()),
+                why: None,
+                target: None,
+                extra_targets: Vec::new(),
+                artifacts: Vec::new(),
+            }],
+        };
+
+        let error = server
+            .walkthrough_set(Parameters(chapter("abc")))
+            .unwrap_err();
+        assert!(error.message.contains("unknown change id"), "{error:?}");
+
+        let result = result_json(
+            &server
+                .walkthrough_set(Parameters(chapter("abcdef")))
+                .unwrap(),
+        );
+        assert_eq!(result["walkthrough"]["steps"][0]["change_id"], "abcdef");
     }
 
     #[test]

@@ -738,10 +738,6 @@ impl ReviewSession {
                 file.fingerprint.hash(&mut hash);
             }
         }
-        for brief in &self.change_briefs {
-            brief.change_id.hash(&mut hash);
-            brief.summary.hash(&mut hash);
-        }
         hash.finish()
     }
 
@@ -1246,7 +1242,16 @@ impl ReviewSession {
             (None, false) => 0,
             (None, true) => stream.spotlights.len() - 1,
         };
-        let spotlight = &stream.spotlights[next];
+        drop(stream);
+        self.jump_to_spotlight_index(next)
+    }
+
+    /// Jump to one zero-based durable/effective Spotlight in stream order.
+    /// Presenter and static tour adapters use the same normal-stream landing
+    /// path as Alt-N/Alt-P; no separate presentation coordinate system exists.
+    pub(crate) fn jump_to_spotlight_index(&mut self, index: usize) -> Option<(String, usize)> {
+        let stream = self.review_stream();
+        let spotlight = stream.spotlights.get(index)?.clone();
         let identity = (spotlight.step_id.clone(), spotlight.part);
         let target = &spotlight.target;
         let (row_index, row) = stream.rows.iter().enumerate().find(|(_, row)| {
@@ -1261,6 +1266,24 @@ impl ReviewSession {
         // structural index.
         self.stream_scroll = resolved.saturating_sub(5).min(u16::MAX as usize) as u16;
         Some(identity)
+    }
+
+    pub(crate) fn spotlight_count(&self) -> usize {
+        self.review_stream().spotlights.len()
+    }
+
+    pub(crate) fn spotlight_index_for_step(&self, step_id: &str) -> Option<usize> {
+        self.review_stream()
+            .spotlights
+            .iter()
+            .position(|spotlight| spotlight.step_id == step_id)
+    }
+
+    pub(crate) fn spotlight_index_for_identity(&self, step_id: &str, part: usize) -> Option<usize> {
+        self.review_stream()
+            .spotlights
+            .iter()
+            .position(|spotlight| spotlight.step_id == step_id && spotlight.part == part)
     }
 
     pub fn change_selected_salience(&mut self, promote: bool) -> bool {
@@ -1781,16 +1804,11 @@ fn chapter_header(session: &ReviewSession, change_id: &str) -> ChapterHeader {
             diff.files.iter().map(|file| file.deletions).sum(),
         )
     });
-    let briefing = session
-        .change_briefs
-        .iter()
-        .find(|brief| ids_match(&brief.change_id, change_id));
     ChapterHeader {
         change_id: change_id.to_owned(),
         description: metadata
             .map(|change| change.description.clone())
             .filter(|description| !description.trim().is_empty())
-            .or_else(|| briefing.map(|brief| brief.summary.clone()))
             .unwrap_or_else(|| "(no description)".to_owned()),
         bookmarks: metadata
             .map(|change| change.bookmarks.clone())

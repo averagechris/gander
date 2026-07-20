@@ -2,11 +2,12 @@
 
 Design for the next round of diff-pane UX work: stronger visual change cues,
 a collapsible file pane, per-hunk context expansion, a side-by-side view, and
-the longer-term "zen mode" focused walkthrough these all feed into.
+the salience-driven Focus and review stream these all feed into.
 
-Status: implemented through §6 (zen mode shipped 2026-07). Suggested
-sequencing was bottom-up by risk: cues → file pane → side-by-side →
-context expansion → zen.
+Status: sections 1–5 remain implemented. The former section 6 full-screen
+presentation experiment was removed when the M18 attention stream shipped.
+The resulting sequence is cues → file pane → side-by-side → context expansion →
+Focus/Spotlight/Glance in the normal stream.
 
 ## Motivation
 
@@ -15,7 +16,7 @@ colors make it hard to see at a glance what changed, the file tree is visual
 noise once attention moves to the code, hunks cannot grow beyond the context
 jj emitted, and some changes read much better side-by-side. The long-term
 goal is a UI that focuses the reviewer on what matters, eventually with an
-agent conducting a "zen mode" walkthrough of the most important changes.
+durable walkthrough and attention curation guiding the most important changes in the normal stream.
 
 ## Guiding constraints
 
@@ -259,82 +260,30 @@ Interaction with `z` folding: folding applies to diff-emitted context only;
 expanded rows collapse back via `-` rather than participating in symbol
 folds. Keeps the two features orthogonal.
 
-## 6. Zen mode (designed and shipped, 2026-07; refocused as a briefing)
+## 6. Attention Focus and stream presentation (M18 replacement)
 
-Everything above composed into a focused briefing. The organizing idea:
-a reviewer's attention is the scarce resource, so the agent budgets it —
-a handful of full-screen *focus stops* that teach the critical lines,
-then everything mechanical acknowledged in bulk. Design decisions:
+The old full-screen focus/chapter/glance/artifact state machine was deleted. Its
+proven replacements compose with sections 1–5 without taking over the UI:
 
-- **Zen subsumes tour mode.** The old modal `Mode::Tour` is gone; `T`
-  enters legacy zen. `Z` is now reserved for the M18 attention Focus preset.
-- **Three surfaces, one state machine** (`ZenPhase`):
-  - *Spotlight slide* (default): a full-screen, full-bleed slide per spotlight
-    stop — dim breadcrumb, progress dots, a bold title, syntax-highlighted
-    excerpt from the existing diff-row pipeline, one subtle rule, then generous
-    prose. No backdrop border, floating card, shadow, or nested panels.
-  - *Reading view* (`tab`/`o` toggles): the normal review UI with
-    out-of-range rows dimmed (`Modifier::DIM`, render-time only) and a
-    bottom orientation panel. The full normal-mode vocabulary —
-    comments, flags, context expansion, split view, search — works here;
-    only stop-navigation keys are intercepted.
-  - *At a glance slide* (`g`, or automatically after the last stop): every
-    glance walkthrough step plus every file no walkthrough/chunk part covers, one clean line each
-    (`path:line — title/why`, viewed check). `enter` jumps
-    into the diff and ends zen; `a` bulk-marks all glance files viewed
-    and finishes. The board is modal — other keys are swallowed so
-    normal actions cannot fire invisibly.
-- **Attention budget is agent-enforced.** The summon prompt instructs
-  agents: at most 3–7 `importance=spotlight` walkthrough steps, each with precise
-  line ranges and a 2–5 sentence `explanation` that teaches the change;
-  ALL remaining hunks grouped into `importance=glance` steps. Uncovered
-  files still land on the glance board, so the briefing always covers
-  the whole change even with a sloppy agent.
-- **Walkthroughless fallback.** With no authored walkthrough steps, stops are
-  one-per-file in display order (agent `set_ordering` respected). Zen is useful
-  standalone; agents upgrade it from "flip through files" to "be taught the
-  change".
-- **Framing.** The file pane hides on entry (visibility restored on
-  exit). In the reading view, rows outside the stop's range dim; the
-  cursor row never dims. Whole-file stops dim nothing.
-- **Stacked walkthroughs.** Steps anchored to a jj change (`change_id`)
-  make zen retarget the review to that change's own diff
-  (`change-..change`) for the stop — the tour flows through the stack
-  like stacked PRs, and ending zen returns to the home target. Zen-driven
-  retargets update the staleness key, so they never end the walkthrough.
-- **Chapters** (2026-07 follow-up). A bare retarget taught nothing: the
-  human landed on a change id they knew nothing about. The stop list is
-  now organized into chapters — every run of stops anchored to the same
-  change opens with a full-screen *chapter card* carrying that change's
-  jj metadata (description, bookmarks, live diff stats) plus the agent's
-  high-level *change brief* (`review/set_change_briefs`: one `{change_id,
-  summary}` per change — what it accomplishes, why it exists, how it
-  builds on the previous changes). Every walkthrough gets an opening
-  chapter for its home target (single-change targets resolve their
-  description; multi-change ranges stay generic rather than showing the
-  tip's description), so even the walkthroughless fallback starts with the big
-  picture. Chapter cards mark nothing viewed; the progress strip renders
-  chapters as `▎` bars grouping the stop dots; human-facing stop numbers
-  count spotlight stops only. Cards show the change's *full* description
-  (headline bold, body beneath, `d` collapses to the headline) — the
-  change's own words come first, the agent's brief second. Chapter rendering is
-  now a hero slide: breadcrumb, title, narrative, compact stats, and an
-  “enter to begin” line; derived facts are folded into one dim line.
-- **Artifacts** (2026-07 follow-up). Agents can *show* instead of only
-  telling: spotlight chunks and change briefs may carry `artifacts`
-  (`{title, kind: example|output|diagram|note, body}`) — a usage example
-  of the changed API, output the agent captured by running the code, an
-  ASCII diagram of the new flow. Cards with exhibits show an `e` hint;
-  `e` opens a modal scrollable viewer over the focus card (`j`/`k`
-  scroll, `h`/`l` cycle, `esc` closes). Bodies render verbatim.
-- **Safety.** *User* retargeting (t/p/b/R, stack step, operation picker)
-  invalidates the stops; the walkthrough ends with a notice rather than
-  touring a stale map. A live refresh of the same target (new changes
-  landing) instead rebuilds the stops in place. Runtime state is
-  session-only, consistent with §3.
+- `Z` toggles Focus: maximum folding, file pane hidden, narration pinned, with
+  exact restoration of the prior view.
+- Alt-N/Alt-P follows durable walkthrough-ordered Spotlight regions in the
+  normal stream.
+- Alt-G opens the attention glance popup over current and stale Skim regions.
+- Chapter metadata is a change-scoped stream header; artifacts stay inside the
+  shared inline annotation card.
+- `gander tui --tour`, `gander tour render`, and `gander present` retain their
+  automation contracts by applying Focus and driving normal-stream Spotlights.
+- Retarget and refresh retain Focus/presenter state. Fingerprint drift marks
+  durable targets stale rather than ending presentation.
 
-Config: the `tour` keybinding is renamed `zen` (serde alias keeps old
-  configs working); the remaining default is `T` (`Z` toggles attention Focus).
+There is no file-order fallback and no dedicated key layer. Comments, search,
+folds, context expansion, view toggles, and retargeting always use normal review
+dispatch. The old `T` binding and its config names were removed.
+
+Legacy `agent.json` chunk and change-brief fields are intentionally ignored, not
+migrated, and are dropped on the next overlay save. Durable walkthrough steps
+and attention regions are the only curation model.
 
 ## Sequencing
 
@@ -344,7 +293,7 @@ Config: the `tour` keybinding is renamed `zen` (serde alias keeps old
 3. **Side-by-side** (§4) — render-side projection over unchanged model.
 4. **Context expansion** (§5) — the only piece needing new jj plumbing and
    the most cache/anchor care.
-5. **Zen mode** — separate design after 1–4 are in use (done; see §6).
+5. **Attention stream** — Focus, Spotlight ordering, and Glance over the normal stream (done; see §6).
 
 Each step lands with unit tests (word-diff LCS via proptest, pairing,
 gap/expansion math) and insta snapshot coverage, and passes `jj lint`.

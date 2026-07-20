@@ -133,7 +133,7 @@ struct VisualViewport {
 enum PendingPlacement {
     Top,
     Bottom,
-    Cursor { margin: Option<usize> },
+    Cursor,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -500,7 +500,7 @@ impl DiffViewportController {
     ) {
         if !usable_geometry(session, inner) {
             if keep_cursor_visible {
-                self.set_pending_if_empty(session, PendingPlacement::Cursor { margin: None });
+                self.set_pending_if_empty(session, PendingPlacement::Cursor);
             }
             return;
         }
@@ -515,16 +515,8 @@ impl DiffViewportController {
                 self.scroll_to_bottom_ready(session, inner);
                 return;
             }
-            Some(PendingPlacement::Cursor { margin }) => {
+            Some(PendingPlacement::Cursor) => {
                 self.mark_cursor_placement(session);
-                if let Some(margin) = margin {
-                    set_viewport_scroll(
-                        session,
-                        viewport_cursor(session)
-                            .saturating_sub(margin)
-                            .min(u16::MAX as usize) as u16,
-                    );
-                }
                 self.clear_selected_continuation(session);
                 self.ensure_cursor_visible_inner(session, inner);
                 return;
@@ -545,7 +537,7 @@ impl DiffViewportController {
         self.revalidate_selected_annotation(session);
         self.mark_cursor_placement(session);
         if !usable_geometry(session, inner) {
-            self.set_pending(session, PendingPlacement::Cursor { margin: None });
+            self.set_pending(session, PendingPlacement::Cursor);
             return;
         }
         self.take_pending(session);
@@ -734,40 +726,13 @@ impl DiffViewportController {
         self.reflow(session, inner, false);
     }
 
-    /// Placement transition used by jumps (including zen): the logical top is
+    /// Placement transition used by jumps: the logical top is
     /// chosen by the caller, while stale continuation is discarded here.
     pub(super) fn place_cursor(&self, session: &mut ReviewSession, inner: Rect) {
         self.mark_cursor_placement(session);
         self.clear_selected_continuation(session);
         if !usable_geometry(session, inner) {
-            self.set_pending(session, PendingPlacement::Cursor { margin: None });
-            return;
-        }
-        self.take_pending(session);
-        self.ensure_cursor_visible_inner(session, inner);
-    }
-
-    pub(super) fn place_cursor_with_margin(
-        &self,
-        session: &mut ReviewSession,
-        margin: usize,
-        inner: Rect,
-    ) {
-        self.mark_cursor_placement(session);
-        set_viewport_scroll(
-            session,
-            viewport_cursor(session)
-                .saturating_sub(margin)
-                .min(u16::MAX as usize) as u16,
-        );
-        self.clear_selected_continuation(session);
-        if !usable_geometry(session, inner) {
-            self.set_pending(
-                session,
-                PendingPlacement::Cursor {
-                    margin: Some(margin),
-                },
-            );
+            self.set_pending(session, PendingPlacement::Cursor);
             return;
         }
         self.take_pending(session);
@@ -1593,7 +1558,7 @@ mod tests {
         controller.place_top(&mut session, inner);
         assert_eq!(controller.visual_state(&session).1, 9);
         session.diff_cursor = long_row(&session);
-        controller.place_cursor_with_margin(&mut session, 2, inner);
+        controller.place_cursor(&mut session, inner);
         assert_eq!(controller.visual_state(&session).1, 9);
         controller.place_cursor(&mut session, inner);
         assert_eq!(controller.visual_state(&session).1, 9);
@@ -1997,37 +1962,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_placements_are_atomic_for_margin_short_and_tall_panes() {
-        let mut body = String::from(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,20 +1,20 @@\n",
-        );
-        for line in 1..=20 {
-            body.push_str(&format!(" line {line}\n"));
-        }
-        let mut session = session(&body);
-        session.diff_cues.soft_wrap = false;
-        let controller = DiffViewportController::default();
-        let inner = Rect::new(0, 0, 30, 6);
-        session.diff_cursor = 12;
-        controller.place_cursor_with_margin(&mut session, 3, inner);
-        assert_eq!(session.diff_scroll as usize, session.diff_cursor - 3);
-        assert!(controller.cursor_is_visible(&session, inner));
-
-        session.diff_scroll = 0;
-        controller.place_cursor(&mut session, Rect::new(0, 0, 30, 1));
-        assert!(controller.cursor_is_visible(&session, Rect::new(0, 0, 30, 1)));
-
-        let mut tall = long_session();
-        let owner = long_row(&tall);
-        tall.diff_cursor = owner;
-        tall.diff_scroll = 0;
-        controller.place_cursor_with_margin(&mut tall, 8, Rect::new(0, 0, 20, 2));
-        assert_eq!(tall.diff_scroll as usize, owner);
-        assert_eq!(controller.visual_state(&tall).0, 0);
-        assert!(controller.cursor_is_visible(&tall, Rect::new(0, 0, 20, 2)));
-    }
-
-    #[test]
     fn hiding_every_file_does_not_destroy_its_visual_viewport() {
         let mut session = long_session();
         let controller = DiffViewportController::default();
@@ -2081,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_geometry_defers_top_bottom_and_margin_placement() {
+    fn zero_geometry_defers_top_bottom_and_cursor_placement() {
         let mut body = String::from(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,20 +1,20 @@\n",
         );
@@ -2115,16 +2049,6 @@ mod tests {
         assert_eq!(top.diff_scroll, 0);
         top_controller.reflow(&mut top, usable, false);
         assert_eq!(top.diff_scroll, 0);
-
-        let mut margin = session(&body);
-        let margin_controller = DiffViewportController::default();
-        margin.diff_cursor = 12;
-        margin.diff_scroll = 0;
-        margin_controller.place_cursor_with_margin(&mut margin, 3, zero);
-        assert_eq!(margin.diff_scroll, 9);
-        margin_controller.reflow(&mut margin, usable, false);
-        assert!(margin.diff_scroll >= 9);
-        assert!(margin_controller.cursor_is_visible(&margin, usable));
     }
 
     #[test]
@@ -2145,7 +2069,7 @@ mod tests {
         );
 
         controller.place_top(&mut session, zero);
-        controller.place_cursor_with_margin(&mut session, 2, zero);
+        controller.place_cursor(&mut session, zero);
         controller.reflow(&mut session, usable, false);
         assert!(controller.cursor_is_visible(&session, usable));
         let after_cursor = session.diff_scroll;

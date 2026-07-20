@@ -77,14 +77,14 @@ Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`
 `current_focus` (file/line/hunk the human is looking at right now),
 `stack_changes` (the `trunk()..@` stack, oldest first — treat it like
 stacked PRs), `change_diff` (one change against its parent),
-`set_ordering`, `flag_section`, `set_chunks` (deprecated compatibility input;
-prefer `walkthrough_*` for new curation, with optional stack `change_id`),
+`set_ordering`, `flag_section`, `walkthrough_set`/`walkthrough_add_step`,
+`attention_set`/`attention_list`/`attention_seed_heuristics`,
 `draft_comment`, `review_disposition`, `review_disposition_set`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
 `comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
-live in the reviewer's terminal (ordering via `A`, flags via `F`, legacy zen via
-`T`, attention Focus via `Z`, glance via `Alt-G`, comments via `C`, and open work
-via `X`). MCP must preserve CLI
+live in the reviewer's terminal (ordering via `A`, flags via `F`, Focus via `Z`,
+Spotlights via `Alt-N`/`Alt-P`, glance via `Alt-G`, comments via `C`, and open
+work via `X`). MCP must preserve CLI
 semantics: new comments honor the configured initial state unless an explicit
 state is supplied; draft comments are durable/private/withheld, delegation todos
 are agent-directed work, collaboration todos are open team feedback, resolved comments are history,
@@ -132,6 +132,7 @@ scriptable surface.
 | `action_item_close` | `gander action-items close <id> --disposition completed|dismissed|deferred [--outcome <text>]` (use `add-ticket` before a deferred close) |
 | `action_item_reopen` | `gander action-items reopen <id>` |
 | `action_item_delete` | `gander action-items delete <id>` |
+| `walkthrough_set` | `gander walkthrough set --file <spec.json>` |
 | `walkthrough_add_step` | `gander walkthrough add-step --title <title> [--file <path>] [--line <n>] [--end-line <n>] [--symbol <name>] [--why <text>] [--body <text>]` |
 | `walkthrough_remove_step` | `gander walkthrough remove-step <id>` |
 | `walkthrough_move_step` | `gander walkthrough move-step <id> --to <zero-based-index>` |
@@ -224,9 +225,9 @@ D4). The recommended setup is two panes in the same directory:
 2. start your harness in the other pane, same cwd, with the gander MCP
    server registered;
 3. talk to the harness about the review. Useful prompts:
-   - *"Use gander's review_summary and walkthrough tools to break this change
-     into reviewable steps and chapters, ordered by risk."* — then press `T` in
-     gander for a zen walkthrough;
+   - *"Use gander's walkthrough and attention tools to break this change into
+     durable Spotlight steps, chapters, and Skim regions ordered by risk."* —
+     then press `Z` for Focus and use Alt-N/Alt-P to follow the normal stream;
    - *"Flag anything security-sensitive with flag_section."* — flags show
      as red `!` pins, `F` lists them;
    - *"What am I looking at?"* / *"Explain this function."* — the harness

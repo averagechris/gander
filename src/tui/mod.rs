@@ -11,7 +11,6 @@
 mod action_items;
 mod annotation_card;
 mod chooser;
-mod chunks;
 mod comments;
 mod drafts;
 mod editor;
@@ -32,7 +31,6 @@ pub(crate) mod theme;
 mod view_options;
 mod viewport;
 mod walkthroughs;
-mod zen;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -57,7 +55,7 @@ use ratatui::{
 };
 
 use crate::{
-    agent::{AgentProcess, ChunkPart},
+    agent::AgentProcess,
     app::{CommentSelection, Focus, NavigationPlacement, ReviewSession, SkimAcknowledgeResult},
     artifact::{
         ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
@@ -98,7 +96,6 @@ use search::FileSearchState;
 use theme::{AppTheme, BackgroundDetection};
 use view_options::{ViewOption, ViewOptionsState};
 use walkthroughs::WalkthroughListState;
-use zen::ZenState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ActivityListState {
@@ -204,7 +201,6 @@ struct TuiState {
     overlay_mtime: Option<std::time::SystemTime>,
     state_mtime: Option<std::time::SystemTime>,
     state_tombstones: ReviewStateTombstones,
-    invalid_chunk_parts: Vec<crate::agent::InvalidChunkPart>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
     /// Where a summoned agent's output is logged.
@@ -218,9 +214,9 @@ struct TuiState {
     agent_contacted: bool,
     /// This instance's registry entry; heartbeats on input, removed on drop.
     instance_registration: Option<crate::registry::InstanceRegistration>,
-    /// The zen walkthrough layer, when active. A layer, not a mode: normal
-    /// review actions keep working underneath it (docs/focused-diff-ux.md §6).
-    zen: Option<ZenState>,
+    /// Live presenter cursor over durable Spotlight ordering. Presentation
+    /// drives the normal stream and Focus preset; it never owns a modal view.
+    presentation: Option<PresentationState>,
     /// Last repo poll for live refresh, throttled to [`REPO_POLL_INTERVAL`].
     last_repo_poll: Option<std::time::Instant>,
     /// `(target, fingerprint)` of the reviewed range at the last poll; a
@@ -261,14 +257,13 @@ impl Default for TuiState {
             overlay_mtime: None,
             state_mtime: None,
             state_tombstones: ReviewStateTombstones::default(),
-            invalid_chunk_parts: Vec::new(),
             agent_overlay_path: None,
             agent_log_path: None,
             agent_config: AgentConfig::default(),
             agent_process: None,
             agent_contacted: false,
             instance_registration: None,
-            zen: None,
+            presentation: None,
             last_repo_poll: None,
             repo_fingerprint: None,
             current_identity_chip: None,
@@ -278,7 +273,6 @@ impl Default for TuiState {
             osc_guard: OscTailGuard::default(),
             file_pane: FilePaneState {
                 explicit_override: None,
-                presentation_scope: None,
                 split_percent: layout_config.file_pane_split_percent,
             },
             attention_focus: None,
@@ -296,11 +290,20 @@ struct AttentionFocusState {
     prior_viewport: viewport::ControllerTransactionSnapshot,
 }
 
-struct AttentionFocusZenRollback {
-    session: ReviewSession,
-    focus: AttentionFocusState,
-    file_pane: FilePaneState,
-    viewport: viewport::ControllerTransactionSnapshot,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentationState {
+    identity: SpotlightIdentity,
+    index: usize,
+    stale: bool,
+    /// Whether presentation entered Focus and therefore owns restoring it on
+    /// explicit end. A pre-existing user Focus remains active after end.
+    owns_focus: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpotlightIdentity {
+    step_id: String,
+    part: usize,
 }
 
 struct ActiveAttentionFocusRefresh {
@@ -312,20 +315,13 @@ struct ActiveAttentionFocusRefresh {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FilePaneState {
     explicit_override: Option<bool>,
-    presentation_scope: Option<PresentationFilePaneScope>,
     split_percent: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PresentationFilePaneScope {
-    prior_explicit_override: Option<bool>,
 }
 
 impl Default for FilePaneState {
     fn default() -> Self {
         Self {
             explicit_override: None,
-            presentation_scope: None,
             split_percent: UiConfig::default().file_pane_split_percent,
         }
     }
@@ -339,9 +335,8 @@ struct EffectiveFilePane {
 
 impl TuiState {
     /// Resolve the one effective file-pane state used by every geometry,
-    /// rendering, focus, and input path. A scoped zen/presenter hide wins over
-    /// the explicit user override; outside presentation, the explicit override
-    /// wins and the persisted preference is otherwise subject to the
+    /// rendering, focus, and input path. Focus hides the pane; otherwise the
+    /// explicit user override wins and the persisted preference is subject to the
     /// configured responsive breakpoint at the actual terminal width.
     fn effective_file_pane(
         &self,
@@ -351,9 +346,7 @@ impl TuiState {
         let responsive_preference = session.file_pane_visible
             && terminal_width >= self.layout_config.file_pane_auto_hide_width;
         EffectiveFilePane {
-            visible: if self.file_pane.presentation_scope.is_some()
-                || self.attention_focus.is_some()
-            {
+            visible: if self.attention_focus.is_some() {
                 false
             } else {
                 self.file_pane
@@ -382,21 +375,6 @@ impl TuiState {
         self.file_pane.explicit_override = Some(next);
         session.file_pane_visible = next;
         self.correct_file_pane_focus(session, terminal_width);
-    }
-
-    fn enter_presentation_file_pane_scope(&mut self, session: &mut ReviewSession) {
-        debug_assert!(self.file_pane.presentation_scope.is_none());
-        self.file_pane.presentation_scope = Some(PresentationFilePaneScope {
-            prior_explicit_override: self.file_pane.explicit_override,
-        });
-        self.correct_file_pane_focus(session, self.terminal_size.width);
-    }
-
-    fn restore_presentation_file_pane_scope(&mut self, session: &mut ReviewSession) {
-        if let Some(scope) = self.file_pane.presentation_scope.take() {
-            self.file_pane.explicit_override = scope.prior_explicit_override;
-        }
-        self.correct_file_pane_focus(session, self.terminal_size.width);
     }
 
     fn enter_attention_focus(&mut self, session: &mut ReviewSession) {
@@ -456,6 +434,32 @@ impl TuiState {
         }
     }
 
+    fn suspend_attention_focus_for_load(
+        &mut self,
+        session: &mut ReviewSession,
+    ) -> Option<AttentionFocusState> {
+        let state = self.attention_focus.take()?;
+        self.file_pane = state.prior_file_pane;
+        session.file_pane_visible = state.prior_file_pane_visible;
+        session.restore_focus_folding_from_view(state.prior_app_view.clone());
+        Some(state)
+    }
+
+    fn resume_attention_focus_after_load(
+        &mut self,
+        session: &mut ReviewSession,
+        state: AttentionFocusState,
+    ) {
+        let _ = session.apply_maximum_attention_folding();
+        self.attention_focus = Some(state);
+        session.stream_mode = true;
+        session.focus = Focus::Diff;
+        self.correct_file_pane_focus(session, self.terminal_size.width);
+        let _ = self.diff_viewport.pin_current_spotlight(session);
+        self.diff_viewport
+            .place_cursor(session, current_diff_inner(session, self));
+    }
+
     fn suspend_attention_focus_for_refresh(
         &mut self,
         session: &mut ReviewSession,
@@ -500,33 +504,6 @@ impl TuiState {
             self.diff_viewport
                 .reflow(session, current_diff_inner(session, self), false);
         }
-    }
-
-    fn suspend_attention_focus_for_zen(
-        &mut self,
-        session: &mut ReviewSession,
-    ) -> Option<AttentionFocusZenRollback> {
-        let focus = self.attention_focus.clone()?;
-        let rollback = AttentionFocusZenRollback {
-            session: session.clone(),
-            focus,
-            file_pane: self.file_pane,
-            viewport: self.diff_viewport.transaction_snapshot(),
-        };
-        self.leave_attention_focus(session);
-        Some(rollback)
-    }
-
-    fn rollback_attention_focus_zen_start(
-        &mut self,
-        session: &mut ReviewSession,
-        rollback: AttentionFocusZenRollback,
-    ) {
-        *session = rollback.session;
-        self.file_pane = rollback.file_pane;
-        self.attention_focus = Some(rollback.focus);
-        self.diff_viewport.restore_transaction(rollback.viewport);
-        self.zen = None;
     }
 }
 
@@ -860,15 +837,13 @@ where
 
 fn start_startup_tour_or_notice(
     session: &mut ReviewSession,
-    review_loader: &ReviewLoader<'_>,
+    _review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) {
-    seed_zen_tour(session, review_loader, tui_state);
-    if tui_state.zen.is_none() {
+    if let Err((_, message)) = start_stream_presentation(session, tui_state) {
         tui_state.notice = Some(UiNotice {
             level: UiNoticeLevel::Info,
-            message: "selected target is empty — no changed files or walkthrough stops; normal review and target-selection controls remain available"
-                .to_owned(),
+            message,
         });
     }
 }
@@ -882,79 +857,42 @@ pub fn render_tour_text(
     slide: Option<usize>,
 ) -> Result<String> {
     let keymap = KeyMap::try_from(keybindings)?;
-    let matcher = GeneratedMatcher::new(&Default::default())?;
-    let loader = ReviewLoader {
-        ignore_globs: Vec::new(),
-        generated_matcher: matcher,
-        jj,
-    };
+    let _ = jj;
     let mut tui_state = TuiState {
         terminal_size: ratatui::prelude::Size::new(width, height),
         ..TuiState::default()
     };
-    seed_zen_tour(session, &loader, &mut tui_state);
-    let Some(mut zen) = tui_state.zen.clone() else {
-        return Ok(
-            "nothing to tour — no walkthrough steps or changed files in this target\n".to_owned(),
-        );
-    };
-    let total = zen.stops.len() + usize::from(zen.has_glance());
+    session.stream_mode = true;
+    let total = session.spotlight_count();
+    if total == 0 {
+        return Ok("nothing to tour — no current Spotlight regions; author a durable walkthrough and attention map\n".to_owned());
+    }
+    tui_state.enter_attention_focus(session);
     let indices: Vec<usize> = match slide {
         Some(n) => vec![n.saturating_sub(1).min(total.saturating_sub(1))],
         None => (0..total).collect(),
     };
     let mut out = String::new();
     for idx in indices {
-        if idx < zen.stops.len() {
-            zen.index = idx;
-            zen.phase = zen::ZenPhase::Focus;
-            if let Some(stop) = zen.current().cloned() {
-                let _ = zen_goto_stop(&loader, session, &mut zen, &stop, &mut tui_state);
-            }
-        } else {
-            zen.phase = zen::ZenPhase::Glance;
-        }
+        let _ = session.jump_to_spotlight_index(idx);
+        let _ = tui_state.diff_viewport.pin_current_spotlight(session);
+        tui_state
+            .diff_viewport
+            .place_cursor(session, current_diff_inner(session, &tui_state));
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend)?;
-        terminal.draw(|frame| {
-            render::draw(
-                frame,
-                session,
-                &Mode::Normal,
-                &keymap,
-                &tui_state,
-                None,
-                Some(&zen),
-            )
-        })?;
-        let breadcrumb = if idx < zen.stops.len() {
-            zen.current().map(tour_breadcrumb).unwrap_or_default()
-        } else {
-            "at a glance".to_owned()
-        };
+        terminal
+            .draw(|frame| render::draw(frame, session, &Mode::Normal, &keymap, &tui_state, None))?;
+        let breadcrumb = session
+            .selected_stream_row()
+            .and_then(|row| row.path)
+            .unwrap_or_else(|| "spotlight".to_owned());
         out.push_str(&format!("──── slide {}/{} ────\n", idx + 1, total));
-        let mut slide_text = tour_buffer_text(
+        let slide_text = tour_buffer_text(
             terminal.backend().buffer(),
             &format!("slide {}/{} · {breadcrumb}", idx + 1, total),
         );
-        slide_text = slide_text
-            .replace(" — j/k", "")
-            .replace("j/k select · enter dives to location · esc ends tour", "")
-            .replace(
-                "j/k move · enter jump · a mark all viewed & finish · p back · esc end",
-                "",
-            );
         out.push_str(&slide_text);
-        if let Some(stop) = zen.current() {
-            for artifact in zen::stop_artifacts(stop) {
-                out.push_str(&format!("\n  exhibit: {}\n", artifact.title));
-                for line in artifact.body.lines() {
-                    out.push_str("  ");
-                    out.push_str(line);
-                    out.push('\n');
-                }
-            }
-        }
         if !out.ends_with('\n') {
             out.push('\n');
         }
@@ -979,157 +917,59 @@ fn tour_buffer_text(buffer: &ratatui::buffer::Buffer, footer: &str) -> String {
     out
 }
 
-fn tour_breadcrumb(stop: &zen::ZenStop) -> String {
-    match stop {
-        zen::ZenStop::Chapter(chapter) => chapter
-            .change_id
-            .as_ref()
-            .map(|id| format!("change {id}"))
-            .unwrap_or_else(|| "chapter".to_owned()),
-        zen::ZenStop::Chunk(row) => row
-            .part
-            .as_ref()
-            .map(|part| match (part.start_line, part.end_line) {
-                (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
-                (Some(start), None) => format!("{}:{start}", part.path),
-                _ => part.path.clone(),
-            })
-            .unwrap_or_else(|| row.title.clone()),
-    }
-}
-
-/// End the zen/presenter layer and restore both session-owned view state and
-/// the exact explicit file-pane override captured when presentation began.
-/// Every successful teardown funnels through this helper.
-fn finish_zen_presentation(session: &mut ReviewSession, tui_state: &mut TuiState, zen: &ZenState) {
-    zen::end(session, zen);
-    session.stream_mode = true;
-    tui_state.restore_presentation_file_pane_scope(session);
-}
-
 fn finish_ephemeral_views_on_quit(session: &mut ReviewSession, tui_state: &mut TuiState) {
-    if let Some(zen) = tui_state.zen.take() {
-        finish_zen_presentation(session, tui_state, &zen);
-    }
+    tui_state.presentation = None;
     if tui_state.attention_focus.is_some() {
         tui_state.leave_attention_focus(session);
     }
 }
 
-fn seed_zen_tour(
+fn start_stream_presentation(
     session: &mut ReviewSession,
-    review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
-) {
-    // Legacy zen and attention Focus own different scoped presentation state.
-    // Never stack them: starting zen first restores the exact pre-Focus view.
-    let focus_rollback = tui_state.suspend_attention_focus_for_zen(session);
-    let mut stack = review_loader
-        .jj
-        .stack_changes(&session.repo, &session.target)
-        .unwrap_or_default();
-    stack.retain(|change| !change.matches_rev(&session.target.base));
-    load_change_diffs_for_stack(review_loader, session, &stack);
-    if let Some(change_id) = session
-        .review_chunks
-        .iter()
-        .find_map(|chunk| chunk.change_id.as_ref())
-    {
-        let desired = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
-        let mut probe = session.clone();
-        if review_loader.load(&mut probe, desired).is_err() {
-            if let Some(rollback) = focus_rollback {
-                tui_state.rollback_attention_focus_zen_start(session, rollback);
-            } else {
-                tui_state.zen = None;
-            }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Error,
-                message: "zen could not start — initial stop is unavailable".into(),
-            });
-            return;
-        }
+) -> Result<(), (i64, String)> {
+    if tui_state.presentation.is_some() {
+        return Ok(());
     }
-    match ZenState::new(session, &stack) {
-        Some(mut zen) => {
-            let prior_session = session.clone();
-            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
-            if let Some(stop) = zen
-                .stops
-                .iter()
-                .find(|stop| matches!(stop, zen::ZenStop::Chunk(_)))
-                .cloned()
-            {
-                let desired = zen::stop_target(&stop, &zen.home_target);
-                let mut probe = session.clone();
-                let available = (probe.target == desired
-                    || review_loader.load(&mut probe, desired).is_ok())
-                    && zen::jump_to_stop(&mut probe, &stop)
-                        != zen::ZenViewportPlacement::Unavailable;
-                if !available {
-                    *session = prior_session.clone();
-                    tui_state
-                        .diff_viewport
-                        .restore_transaction(prior_viewport.clone());
-                    if let Some(rollback) = focus_rollback {
-                        tui_state.rollback_attention_focus_zen_start(session, rollback);
-                    } else {
-                        tui_state.zen = None;
-                    }
-                    tui_state.notice = Some(UiNotice {
-                        level: UiNoticeLevel::Error,
-                        message: "zen could not start — initial stop is unavailable".into(),
-                    });
-                    return;
-                }
-            }
-            tui_state.enter_presentation_file_pane_scope(session);
-            session.file_pane_visible = false;
-            if let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-            {
-                *session = prior_session;
-                tui_state.diff_viewport.restore_transaction(prior_viewport);
-                tui_state.restore_presentation_file_pane_scope(session);
-                if let Some(rollback) = focus_rollback {
-                    tui_state.rollback_attention_focus_zen_start(session, rollback);
-                } else {
-                    tui_state.zen = None;
-                }
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: "zen could not start — initial stop is unavailable".into(),
-                });
-                return;
-            }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: match zen.source {
-                    zen::ZenSource::Curated => format!(
-                        "zen: {} chapter(s), {} focus stop(s), {} at a glance",
-                        zen.chapter_count(),
-                        zen.chunk_stop_count(),
-                        zen.glance_rows.len()
-                    ),
-                    zen::ZenSource::Files => format!(
-                        "zen: touring {} file(s) — summon an agent (@) to curate focus stops",
-                        zen.chunk_stop_count()
-                    ),
-                },
-            });
-            session.stream_mode = false;
-            tui_state.zen = Some(zen);
-        }
+    session.stream_mode = true;
+    if session.spotlight_count() == 0 {
+        return Err((
+            -32002,
+            "nothing to present — no current Spotlight regions; author a durable walkthrough and attention map"
+                .to_owned(),
+        ));
+    }
+    let owns_focus = tui_state.attention_focus.is_none();
+    if owns_focus {
+        tui_state.enter_attention_focus(session);
+    }
+    let (step_id, part) = match session.jump_to_spotlight_index(0) {
+        Some(identity) => identity,
         None => {
-            if let Some(rollback) = focus_rollback {
-                tui_state.rollback_attention_focus_zen_start(session, rollback);
+            if owns_focus {
+                tui_state.leave_attention_focus(session);
             }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "nothing to review — no changed files in this target".to_owned(),
-            })
+            return Err((-32002, "first Spotlight is unavailable".to_owned()));
         }
-    }
+    };
+    let _ = tui_state.diff_viewport.pin_current_spotlight(session);
+    tui_state
+        .diff_viewport
+        .place_cursor(session, current_diff_inner(session, tui_state));
+    tui_state.presentation = Some(PresentationState {
+        identity: SpotlightIdentity { step_id, part },
+        index: 0,
+        stale: false,
+        owns_focus,
+    });
+    tui_state.notice = Some(UiNotice {
+        level: UiNoticeLevel::Info,
+        message: format!(
+            "presenting {} Spotlight(s) in the normal stream with Focus",
+            session.spotlight_count()
+        ),
+    });
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1208,29 +1048,6 @@ fn run_loop(
             }
         }
 
-        // A retarget (t/p/b/R, stack step, operation picker) invalidates the
-        // walkthrough stops; end zen rather than touring a stale map.
-        if tui_state
-            .zen
-            .as_ref()
-            .is_some_and(|zen| zen.is_stale(session))
-        {
-            let transition = tui_state
-                .diff_viewport
-                .transition_snapshot(session, current_diff_inner(session, tui_state));
-            let zen = tui_state.zen.take().expect("checked above");
-            finish_zen_presentation(session, tui_state, &zen);
-            tui_state.diff_viewport.finish_transition(
-                transition,
-                session,
-                current_diff_inner(session, tui_state),
-            );
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "zen ended — review target changed".to_owned(),
-            });
-        }
-
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -1239,7 +1056,6 @@ fn run_loop(
                 keymap,
                 tui_state,
                 tui_state.notice.as_ref(),
-                tui_state.zen.as_ref(),
             )
         })?;
 
@@ -1381,7 +1197,7 @@ fn observe_terminal_size(
         );
     } else {
         // Session preference can change independently of terminal dimensions
-        // (zen, retarget, or focus commands), so enforce this before every draw.
+        // (retarget or Focus commands), so enforce this before every draw.
         tui_state.correct_file_pane_focus(session, observed.width);
         resize_comment_editor(mode, observed);
     }
@@ -1514,7 +1330,7 @@ fn maybe_reload_agent_overlay(
     session: &mut ReviewSession,
     overlay_path: &Path,
     tui_state: &mut TuiState,
-    review_loader: &ReviewLoader<'_>,
+    _review_loader: &ReviewLoader<'_>,
     notify: bool,
 ) {
     let mtime = std::fs::metadata(overlay_path)
@@ -1529,27 +1345,16 @@ fn maybe_reload_agent_overlay(
             let transition = tui_state
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
-            let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
             session.apply_agent_overlay(&overlay);
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
                 current_diff_inner(session, tui_state),
             );
-            tui_state.invalid_chunk_parts = invalid.clone();
             if notify {
-                let message = if let Some(first) = invalid.first() {
-                    format!(
-                        "agent overlay: {} invalid chunk part(s) ignored — {}",
-                        invalid.len(),
-                        first.reason
-                    )
-                } else {
-                    "agent suggestions updated".to_owned()
-                };
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message,
+                    message: "agent ordering/flags updated".to_owned(),
                 });
             }
         }
@@ -1601,6 +1406,7 @@ fn maybe_reload_review_state(
                 session,
                 current_diff_inner(session, tui_state),
             );
+            reconcile_present_spotlight(session, tui_state);
             tui_state.state_mtime = mtime;
             tui_state.last_autosave = Some(state_fingerprint(session));
             if notify && added_comments > 0 {
@@ -1620,55 +1426,6 @@ fn maybe_reload_review_state(
             });
         }
     }
-}
-
-fn validated_overlay_for_tui(
-    session: &ReviewSession,
-    review_loader: &ReviewLoader<'_>,
-    overlay: crate::agent::AgentOverlay,
-) -> (
-    crate::agent::AgentOverlay,
-    Vec<crate::agent::InvalidChunkPart>,
-) {
-    let session_files = session
-        .files
-        .iter()
-        .map(|file| file.diff.clone())
-        .collect::<Vec<_>>();
-    let mut parsed_changes = Vec::new();
-    for change_id in overlay
-        .chunks
-        .iter()
-        .filter_map(|chunk| chunk.change_id.as_ref())
-    {
-        if parsed_changes
-            .iter()
-            .any(|(existing, _): &(String, crate::diff::DiffSet)| existing == change_id)
-        {
-            continue;
-        }
-        let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
-        if let Ok(raw) = review_loader.jj.diff(&session.repo, &target)
-            && let Ok(diff) = DiffSet::parse(&raw)
-        {
-            parsed_changes.push((change_id.clone(), diff));
-        }
-    }
-    let change_diffs = parsed_changes
-        .iter()
-        .map(|(change_id, diff)| crate::agent::ChangeDiffContext {
-            change_id: change_id.clone(),
-            files: &diff.files,
-        })
-        .collect::<Vec<_>>();
-    let invalid = crate::agent::validate_review_chunks(
-        &overlay.chunks,
-        &crate::agent::ChunkValidationContext {
-            session_files: &session_files,
-            change_diffs,
-        },
-    );
-    (overlay, invalid)
 }
 
 /// How often the idle loop polls jj for new work in the reviewed range.
@@ -1815,124 +1572,72 @@ fn apply_present_command(
     match command {
         PresentCommand::Status => Ok(present_status(session, tui_state)),
         PresentCommand::Start => {
-            start_present_tour(review_loader, session, tui_state)?;
+            start_stream_presentation(session, tui_state)?;
             Ok(present_status(session, tui_state))
         }
         PresentCommand::End => {
-            if let Some(zen) = tui_state.zen.take() {
-                let prior_session = session.clone();
-                let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
-                if session.target != zen.home_target {
-                    if let Err(error) = review_loader.load(session, zen.home_target.clone()) {
-                        *session = prior_session;
-                        tui_state.diff_viewport.restore_transaction(prior_viewport);
-                        tui_state.zen = Some(zen);
-                        return Err((-32002, format!("failed to restore zen home: {error:?}")));
-                    }
-                    tui_state.diff_viewport.reset(session);
-                    reapply_agent_overlay(session, review_loader, tui_state);
+            if let Some(presentation) = tui_state.presentation.take() {
+                if presentation.owns_focus && tui_state.attention_focus.is_some() {
+                    tui_state.leave_attention_focus(session);
                 }
-                let transition = tui_state
-                    .diff_viewport
-                    .transition_snapshot(session, current_diff_inner(session, tui_state));
-                finish_zen_presentation(session, tui_state, &zen);
-                tui_state.diff_viewport.finish_transition(
-                    transition,
-                    session,
-                    current_diff_inner(session, tui_state),
-                );
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: "zen ended by presenter".to_owned(),
+                    message: "stream presentation ended".to_owned(),
                 });
             }
             Ok(present_status(session, tui_state))
         }
         PresentCommand::Next => {
-            let Some(mut zen) = tui_state.zen.take() else {
-                return Err((-32002, "tour is not active".to_owned()));
-            };
-            let previous = zen.index;
-            let mut failed = false;
-            if zen.advance()
-                && let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-            {
-                zen.index = previous;
-                failed = true;
+            let count = session.spotlight_count();
+            let presentation = tui_state
+                .presentation
+                .as_ref()
+                .ok_or_else(|| (-32002, "presentation is not active".to_owned()))?;
+            if presentation.stale {
+                return Err((
+                    -32002,
+                    "current Spotlight is stale; use present/goto to choose a current target"
+                        .to_owned(),
+                ));
             }
-            tui_state.zen = Some(zen);
-            if failed {
-                return Err((-32002, "zen stop is unavailable".into()));
-            }
+            let index = presentation.index;
+            goto_present_spotlight(session, tui_state, (index + 1).min(count.saturating_sub(1)))?;
             Ok(present_status(session, tui_state))
         }
         PresentCommand::Prev => {
-            let Some(mut zen) = tui_state.zen.take() else {
-                return Err((-32002, "tour is not active".to_owned()));
-            };
-            let previous = zen.index;
-            let mut failed = false;
-            if zen.back()
-                && let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-            {
-                zen.index = previous;
-                failed = true;
+            let presentation = tui_state
+                .presentation
+                .as_ref()
+                .ok_or_else(|| (-32002, "presentation is not active".to_owned()))?;
+            if presentation.stale {
+                return Err((
+                    -32002,
+                    "current Spotlight is stale; use present/goto to choose a current target"
+                        .to_owned(),
+                ));
             }
-            tui_state.zen = Some(zen);
-            if failed {
-                return Err((-32002, "zen stop is unavailable".into()));
-            }
+            let index = presentation.index;
+            goto_present_spotlight(session, tui_state, index.saturating_sub(1))?;
             Ok(present_status(session, tui_state))
         }
         PresentCommand::GotoIndex(index) => {
-            let Some(mut zen) = tui_state.zen.take() else {
-                return Err((-32002, "tour is not active".to_owned()));
-            };
-            if index >= zen.stops.len() {
-                tui_state.zen = Some(zen);
+            if tui_state.presentation.is_none() {
+                return Err((-32002, "presentation is not active".to_owned()));
+            }
+            if index >= session.spotlight_count() {
                 return Err((-32602, format!("slide index {index} out of range")));
             }
-            let previous = zen.index;
-            zen.index = index;
-            let mut failed = false;
-            if let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-            {
-                zen.index = previous;
-                failed = true;
-            }
-            tui_state.zen = Some(zen);
-            if failed {
-                return Err((-32002, "zen stop is unavailable".into()));
-            }
+            goto_present_spotlight(session, tui_state, index)?;
             Ok(present_status(session, tui_state))
         }
         PresentCommand::GotoStep(step_id) => {
-            let Some(mut zen) = tui_state.zen.take() else {
-                return Err((-32002, "tour is not active".to_owned()));
-            };
-            let Some(index) = zen.stops.iter().position(|stop| match stop {
-                zen::ZenStop::Chunk(row) => row.source_id == step_id,
-                zen::ZenStop::Chapter(_) => false,
-            }) else {
-                tui_state.zen = Some(zen);
+            if tui_state.presentation.is_none() {
+                return Err((-32002, "presentation is not active".to_owned()));
+            }
+            let Some(index) = session.spotlight_index_for_step(&step_id) else {
                 return Err((-32602, format!("unknown step_id: {step_id}")));
             };
-            let previous = zen.index;
-            zen.index = index;
-            let mut failed = false;
-            if let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-            {
-                zen.index = previous;
-                failed = true;
-            }
-            tui_state.zen = Some(zen);
-            if failed {
-                return Err((-32002, "zen stop is unavailable".into()));
-            }
+            goto_present_spotlight(session, tui_state, index)?;
             Ok(present_status(session, tui_state))
         }
         PresentCommand::Focus {
@@ -1944,19 +1649,26 @@ fn apply_present_command(
             if !session.files.iter().any(|file| file.path == path) {
                 return Err((-32602, format!("path is not in the diff: {path}")));
             }
-            if session
-                .jump_to_chunk_part(&ChunkPart {
-                    path: path.clone(),
-                    start_line: Some(line),
-                    end_line,
-                })
-                .is_none()
-            {
+            let stream = session.review_stream();
+            let row = stream.rows.iter().enumerate().find_map(|(index, row)| {
+                if row.path.as_deref() != Some(path.as_str()) {
+                    return None;
+                }
+                let anchor_line = row
+                    .anchor
+                    .as_ref()
+                    .and_then(crate::anchor::CommentAnchor::line)?;
+                let requested_end = end_line.unwrap_or(line);
+                (line <= anchor_line && anchor_line <= requested_end).then_some(index)
+            });
+            drop(stream);
+            let Some(row) = row else {
                 return Err((
                     -32602,
                     format!("location is not in the diff: {path}:{line}"),
                 ));
-            }
+            };
+            session.select_stream_row(row, true);
             session.focus = Focus::Diff;
             transition_to_logical_selection(session, tui_state);
             if let Some(note) = note {
@@ -1980,128 +1692,86 @@ fn apply_present_command(
                     false,
                 );
             }
-            if tui_state.zen.is_some() {
-                reload_present_tour(review_loader, session, tui_state)?;
-            }
+            reconcile_present_spotlight(session, tui_state);
             Ok(present_status(session, tui_state))
         }
     }
 }
 
 fn present_status(session: &ReviewSession, tui_state: &TuiState) -> Value {
-    let Some(zen) = tui_state.zen.as_ref() else {
+    let Some(presentation) = tui_state.presentation.as_ref() else {
         return json!({ "active": false });
     };
+    let stream = session.review_stream();
+    let current = (!presentation.stale)
+        .then(|| stream.spotlights.get(presentation.index))
+        .flatten()
+        .filter(|spotlight| {
+            spotlight.step_id == presentation.identity.step_id
+                && spotlight.part == presentation.identity.part
+        });
     json!({
         "active": true,
-        "slide_index": zen.index,
-        "slide_count": zen.stops.len(),
-        "phase": format!("{:?}", zen.phase).to_lowercase(),
-        "current": current_present_stop(session, zen),
+        "slide_index": presentation.index,
+        "slide_count": stream.spotlights.len(),
+        "view": "focus",
+        "current": current.map(|spotlight| json!({
+            "step_id": spotlight.step_id,
+            "part": spotlight.part,
+            "path": spotlight.target.file,
+            "line": spotlight.target.line,
+            "end_line": spotlight.target.end_line,
+            "stale": false,
+        })).unwrap_or_else(|| json!({
+            "step_id": presentation.identity.step_id,
+            "part": presentation.identity.part,
+            "path": null,
+            "line": null,
+            "end_line": null,
+            "stale": true,
+        })),
     })
 }
 
-fn current_present_stop(session: &ReviewSession, zen: &ZenState) -> Value {
-    match zen.current() {
-        Some(zen::ZenStop::Chapter(chapter)) => {
-            json!({ "title": chapter.title(), "path": null, "line": null })
-        }
-        Some(zen::ZenStop::Chunk(row)) => {
-            let (path, line) = row
-                .part
-                .as_ref()
-                .map(|p| (Some(p.path.as_str()), p.start_line))
-                .unwrap_or((None, None));
-            json!({ "title": row.title, "path": path, "line": line })
-        }
-        None => json!({ "title": session.summary_line(), "path": null, "line": null }),
-    }
-}
-
-fn start_present_tour(
-    review_loader: &ReviewLoader<'_>,
+fn goto_present_spotlight(
     session: &mut ReviewSession,
     tui_state: &mut TuiState,
+    index: usize,
 ) -> Result<(), (i64, String)> {
-    if tui_state.zen.is_some() {
-        return Ok(());
+    let (step_id, part) = session
+        .jump_to_spotlight_index(index)
+        .ok_or_else(|| (-32002, format!("Spotlight {index} is unavailable")))?;
+    if let Some(presentation) = tui_state.presentation.as_mut() {
+        presentation.identity = SpotlightIdentity { step_id, part };
+        presentation.index = index;
+        presentation.stale = false;
     }
-    let focus_rollback = tui_state.suspend_attention_focus_for_zen(session);
-    let mut stack = review_loader
-        .jj
-        .stack_changes(&session.repo, &session.target)
-        .unwrap_or_default();
-    stack.retain(|change| !change.matches_rev(&session.target.base));
-    load_change_diffs_for_stack(review_loader, session, &stack);
-    let Some(mut zen) = ZenState::new(session, &stack) else {
-        if let Some(rollback) = focus_rollback {
-            tui_state.rollback_attention_focus_zen_start(session, rollback);
-        }
-        return Err((
-            -32002,
-            "nothing to review — no changed files in this target".to_owned(),
-        ));
-    };
-    let prior_session = session.clone();
-    tui_state.enter_presentation_file_pane_scope(session);
-    session.file_pane_visible = false;
-    if let Some(stop) = zen.current().cloned()
-        && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-    {
-        *session = prior_session;
-        tui_state.restore_presentation_file_pane_scope(session);
-        if let Some(rollback) = focus_rollback {
-            tui_state.rollback_attention_focus_zen_start(session, rollback);
-        }
-        return Err((-32002, "initial zen stop is unavailable".into()));
-    }
-    tui_state.zen = Some(zen);
+    let _ = tui_state.diff_viewport.pin_current_spotlight(session);
+    tui_state
+        .diff_viewport
+        .place_cursor(session, current_diff_inner(session, tui_state));
     Ok(())
 }
 
-fn reload_present_tour(
-    review_loader: &ReviewLoader<'_>,
-    session: &mut ReviewSession,
-    tui_state: &mut TuiState,
-) -> Result<(), (i64, String)> {
-    let prior_zen = tui_state.zen.clone();
-    let mut stack = review_loader
-        .jj
-        .stack_changes(&session.repo, &session.target)
-        .unwrap_or_default();
-    stack.retain(|change| !change.matches_rev(&session.target.base));
-    load_change_diffs_for_stack(review_loader, session, &stack);
-    let Some(zen) = tui_state.zen.as_mut() else {
-        return start_present_tour(review_loader, session, tui_state);
+fn reconcile_present_spotlight(session: &mut ReviewSession, tui_state: &mut TuiState) -> bool {
+    let Some(identity) = tui_state
+        .presentation
+        .as_ref()
+        .map(|presentation| presentation.identity.clone())
+    else {
+        return false;
     };
-    if !zen.refresh(session, &stack) {
-        let transition = tui_state
-            .diff_viewport
-            .transition_snapshot(session, current_diff_inner(session, tui_state));
-        let zen = tui_state.zen.take().expect("checked above");
-        finish_zen_presentation(session, tui_state, &zen);
-        tui_state.diff_viewport.finish_transition(
-            transition,
-            session,
-            current_diff_inner(session, tui_state),
-        );
-        return Err((-32002, "tour has no slides after reload".to_owned()));
-    }
-    if let Some(mut zen) = tui_state.zen.take() {
-        if let Some(stop) = zen.current().cloned()
-            && !zen_goto_stop(review_loader, session, &mut zen, &stop, tui_state)
-        {
-            tui_state.zen = prior_zen;
-            return Err((-32002, "current zen stop is unavailable".into()));
+    let Some(index) = session.spotlight_index_for_identity(&identity.step_id, identity.part) else {
+        if let Some(presentation) = tui_state.presentation.as_mut() {
+            presentation.stale = true;
         }
-        tui_state.zen = Some(zen);
-    }
-    Ok(())
+        return false;
+    };
+    goto_present_spotlight(session, tui_state, index).is_ok()
 }
 
-/// Reload the current target in place: view state survives, agent
-/// suggestions are reapplied, and an active zen walkthrough rebuilds its
-/// stops instead of going stale.
+/// Reload the current target in place: view state, durable attention, Focus,
+/// and the presenter cursor survive and re-anchor conservatively.
 fn refresh_current_target(
     review_loader: &ReviewLoader<'_>,
     session: &mut ReviewSession,
@@ -2154,34 +1824,6 @@ fn refresh_current_target(
     } else {
         format!("repository changed — {}", events.join(" · "))
     };
-    if let Some(mut zen) = tui_state.zen.take() {
-        let mut stack = review_loader
-            .jj
-            .stack_changes(&session.repo, &session.target)
-            .unwrap_or_default();
-        stack.retain(|change| !change.matches_rev(&session.target.base));
-        load_change_diffs_for_stack(review_loader, session, &stack);
-        if zen.refresh(session, &stack) {
-            if zen.phase != zen::ZenPhase::Glance
-                && let Some(stop) = zen.current().cloned()
-            {
-                let placement = zen::jump_to_stop(session, &stop);
-                apply_zen_viewport_placement(session, placement, tui_state);
-            }
-            tui_state.zen = Some(zen);
-        } else {
-            let transition = tui_state
-                .diff_viewport
-                .transition_snapshot(session, current_diff_inner(session, tui_state));
-            finish_zen_presentation(session, tui_state, &zen);
-            tui_state.diff_viewport.finish_transition(
-                transition,
-                session,
-                current_diff_inner(session, tui_state),
-            );
-            message.push_str(" · zen ended (nothing left to walk through)");
-        }
-    }
     if reviewed_changed > 0 {
         let file_word = if reviewed_changed == 1 {
             "file"
@@ -2205,6 +1847,7 @@ fn refresh_current_target(
     if let Some(active) = active_attention_focus {
         tui_state.resume_attention_focus_after_refresh(session, review_loader, active, true);
     }
+    reconcile_present_spotlight(session, tui_state);
 }
 
 fn refresh_identity_chip(
@@ -2383,11 +2026,10 @@ fn fingerprint_events(previous: &str, current: &str) -> Vec<String> {
 }
 
 /// Re-apply the on-disk agent overlay to the session. Reloads (`replace_diff`)
-/// reset overlay-derived state (ordering, flags, chunks, drafts); refreshes
-/// and zen-driven retargets restore it so suggestions survive.
+/// reset overlay-derived ordering and flags; refreshes restore them.
 fn reapply_agent_overlay(
     session: &mut ReviewSession,
-    review_loader: &ReviewLoader<'_>,
+    _review_loader: &ReviewLoader<'_>,
     tui_state: &mut TuiState,
 ) {
     let Some(overlay_path) = tui_state.agent_overlay_path.clone() else {
@@ -2397,16 +2039,6 @@ fn reapply_agent_overlay(
         let transition = tui_state
             .diff_viewport
             .transition_snapshot(session, current_diff_inner(session, tui_state));
-        let (overlay, invalid) = validated_overlay_for_tui(session, review_loader, overlay);
-        if !invalid.is_empty() {
-            let message = invalid_chunk_notice(invalid.len());
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: message.clone(),
-            });
-            push_activity(tui_state, "agent-overlay-invalid".to_owned(), message);
-        }
-        tui_state.invalid_chunk_parts = invalid;
         session.apply_agent_overlay(&overlay);
         tui_state.diff_viewport.finish_transition(
             transition,
@@ -2418,12 +2050,6 @@ fn reapply_agent_overlay(
     tui_state.overlay_mtime = std::fs::metadata(&overlay_path)
         .and_then(|metadata| metadata.modified())
         .ok();
-}
-
-fn invalid_chunk_notice(count: usize) -> String {
-    format!(
-        "{count} curated walkthrough part(s) no longer match the diff; update the agent overlay or durable walkthrough targets"
-    )
 }
 
 /// Cheap change-detection payload for every durable TUI mutation, excluding
@@ -2542,58 +2168,6 @@ fn handle_key_event(
 
     match mode {
         Mode::Normal => {
-            // The zen layer intercepts stop-navigation keys and lets
-            // everything else fall through to the normal vocabulary, so
-            // commenting/flagging/view toggles keep working mid-walkthrough.
-            if let Some(mut zen) = tui_state.zen.take() {
-                match handle_zen_key(key, &mut zen, session, keymap, review_loader, tui_state) {
-                    ZenKeyOutcome::Consumed => {
-                        if !matches!(zen.phase, zen::ZenPhase::Reading) {
-                            tui_state.diff_drag = None;
-                        }
-                        tui_state.zen = Some(zen);
-                        return Ok(false);
-                    }
-                    ZenKeyOutcome::End { restore_target } => {
-                        // A change-anchored walkthrough may have wandered
-                        // through the stack; ending it returns to the target
-                        // it started from (unless the human jumped somewhere
-                        // on purpose).
-                        if restore_target && session.target != zen.home_target {
-                            match review_loader.load(session, zen.home_target.clone()) {
-                                Ok(()) => {
-                                    tui_state.diff_viewport.reset(session);
-                                    reapply_agent_overlay(session, review_loader, tui_state);
-                                    zen::mark_glance_viewed(session, &zen);
-                                }
-                                Err(error) => {
-                                    tui_state.notice = Some(UiNotice {
-                                        level: UiNoticeLevel::Error,
-                                        message: format!(
-                                            "zen ended but failed to restore {}: {error:?}",
-                                            zen.home_target
-                                        ),
-                                    });
-                                }
-                            }
-                        }
-                        let transition = tui_state
-                            .diff_viewport
-                            .transition_snapshot(session, current_diff_inner(session, tui_state));
-                        finish_zen_presentation(session, tui_state, &zen);
-                        tui_state.diff_viewport.finish_transition(
-                            transition,
-                            session,
-                            current_diff_inner(session, tui_state),
-                        );
-                        tui_state.diff_drag = None;
-                        return Ok(false);
-                    }
-                    ZenKeyOutcome::Fallthrough => {
-                        tui_state.zen = Some(zen);
-                    }
-                }
-            }
             if let Some(action) = keymap.normal_action_for(&key, session.focus == Focus::Diff)
                 && handle_normal_action(action, session, mode, review_loader, tui_state)?
             {
@@ -2720,12 +2294,7 @@ fn handle_key_event(
             }
         }
     }
-    if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal
-        || tui_state
-            .zen
-            .as_ref()
-            .is_some_and(|zen| !matches!(zen.phase, zen::ZenPhase::Reading))
-    {
+    if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal {
         tui_state.diff_drag = None;
     }
     Ok(false)
@@ -2977,9 +2546,6 @@ fn handle_normal_action(
                 *mode = Mode::WalkthroughList(walkthroughs);
             }
         }
-        Action::Zen => {
-            seed_zen_tour(session, review_loader, tui_state);
-        }
         Action::DraftList => {
             let drafts = DraftListState::new(session);
             if drafts.drafts.is_empty() {
@@ -3038,23 +2604,16 @@ fn handle_normal_action(
             });
         }
         Action::AttentionFocus => {
-            if tui_state.zen.is_some() {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "finish the legacy zen presentation before applying Focus".to_owned(),
-                });
-            } else {
-                let active = tui_state.toggle_attention_focus(session);
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: if active {
-                        "Focus applied — pane hidden, context maximally folded, narration pinned"
-                            .to_owned()
-                    } else {
-                        "Focus restored the prior review view".to_owned()
-                    },
-                });
-            }
+            let active = tui_state.toggle_attention_focus(session);
+            tui_state.notice = Some(UiNotice {
+                level: UiNoticeLevel::Info,
+                message: if active {
+                    "Focus applied — pane hidden, context maximally folded, narration pinned"
+                        .to_owned()
+                } else {
+                    "Focus restored the prior review view".to_owned()
+                },
+            });
         }
         Action::AttentionGlance => {
             let board = GlanceBoardState::new(session);
@@ -3440,17 +2999,6 @@ fn handle_normal_action(
         | Action::WalkthroughDelete
         | Action::WalkthroughMoveDown
         | Action::WalkthroughMoveUp
-        | Action::ZenNext
-        | Action::ZenPrevious
-        | Action::ZenToggleView
-        | Action::ZenGlance
-        | Action::ZenArtifact
-        | Action::ZenToggleDetails
-        | Action::ZenRefocus
-        | Action::ZenAcknowledge
-        | Action::ZenArtifactNext
-        | Action::ZenArtifactPrevious
-        | Action::ZenClose
         | Action::GlancePeek
         | Action::GlanceAcknowledge
         | Action::GlanceAcknowledgeAll => {}
@@ -3753,16 +3301,14 @@ fn step_stack(
 
     let change = &stack[next];
     let target = ReviewTarget::new(format!("{}-", change.change_id), change.change_id.clone());
-    let reapply_attention_focus = tui_state.attention_focus.is_some();
-    if reapply_attention_focus {
-        tui_state.leave_attention_focus(session);
-    }
+    let attention_focus = tui_state.suspend_attention_focus_for_load(session);
     match review_loader.load(session, target) {
         Ok(()) => {
             tui_state.diff_viewport.reset(session);
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus.clone() {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
+            reconcile_present_spotlight(session, tui_state);
             let description = if change.description.is_empty() {
                 "(no description)"
             } else {
@@ -3774,9 +3320,10 @@ fn step_stack(
             });
         }
         Err(error) => {
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
+            reconcile_present_spotlight(session, tui_state);
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: format!("failed to load stack change: {error:?}"),
@@ -4006,10 +3553,7 @@ fn apply_incremental_review(
     operation: &crate::jj::JjOperationSummary,
     tui_state: &mut TuiState,
 ) {
-    let reapply_attention_focus = tui_state.attention_focus.is_some();
-    if reapply_attention_focus {
-        tui_state.leave_attention_focus(session);
-    }
+    let attention_focus = tui_state.suspend_attention_focus_for_load(session);
     let target = session.target.clone();
     let viewport_snapshot = tui_state
         .diff_viewport
@@ -4021,8 +3565,8 @@ fn apply_incremental_review(
                 "failed to refresh {target} before prior-operation compare: {error:?}"
             ),
         });
-        if reapply_attention_focus {
-            tui_state.enter_attention_focus(session);
+        if let Some(state) = attention_focus.clone() {
+            tui_state.resume_attention_focus_after_load(session, state);
         }
         return;
     }
@@ -4041,8 +3585,8 @@ fn apply_incremental_review(
                     operation.operation_id
                 ),
             });
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus.clone() {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
             return;
         }
@@ -4064,8 +3608,8 @@ fn apply_incremental_review(
             operation.operation_id
         ),
     });
-    if reapply_attention_focus {
-        tui_state.enter_attention_focus(session);
+    if let Some(state) = attention_focus {
+        tui_state.resume_attention_focus_after_load(session, state);
     }
 }
 
@@ -4117,16 +3661,13 @@ fn run_jj_helper(
 ) {
     match review_loader.jj.run_command(&session.repo, &option.args) {
         Ok(_) => {
-            let reapply_attention_focus = tui_state.attention_focus.is_some();
-            if reapply_attention_focus {
-                tui_state.leave_attention_focus(session);
-            }
+            let attention_focus = tui_state.suspend_attention_focus_for_load(session);
             let reload = review_loader.load(session, session.target.clone());
             if reload.is_ok() {
                 tui_state.diff_viewport.reset(session);
             }
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
             tui_state.notice = Some(match reload {
                 Ok(()) => UiNotice {
@@ -4230,450 +3771,6 @@ fn handle_flag_list_key(
         return false;
     }
     false
-}
-
-/// What the zen layer decided about a key press.
-enum ZenKeyOutcome {
-    /// The key was a zen navigation key and has been handled.
-    Consumed,
-    /// The walkthrough is over; the caller clears the layer.
-    /// `restore_target` asks the caller to return to the walkthrough's home
-    /// target when change-anchored stops wandered through the stack; it is
-    /// `false` when the human deliberately jumped somewhere instead.
-    End { restore_target: bool },
-    /// Not a zen key: let the normal-mode vocabulary handle it.
-    Fallthrough,
-}
-
-/// Bring the session to a zen stop, retargeting the review when the stop is
-/// anchored to a different jj change than the one loaded (the stacked-PR
-/// walkthrough). Returns `false` when the retarget failed: a notice
-/// explains, and the caller should stay on its current stop.
-fn zen_goto_stop(
-    review_loader: &ReviewLoader<'_>,
-    session: &mut ReviewSession,
-    zen: &mut ZenState,
-    stop: &zen::ZenStop,
-    tui_state: &mut TuiState,
-) -> bool {
-    let previous_target = session.target.clone();
-    let previous_session = session.clone();
-    let previous_target_key = zen.target_key.clone();
-    let viewport_transaction = tui_state.diff_viewport.transaction_snapshot();
-    let desired = zen::stop_target(stop, &zen.home_target);
-    if session.target != desired {
-        let mut probe = session.clone();
-        let probe_result = review_loader.load(&mut probe, desired.clone());
-        if probe_result.is_err()
-            || zen::jump_to_stop(&mut probe, stop) == zen::ZenViewportPlacement::Unavailable
-        {
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Error,
-                message: format!("zen stop no longer resolves in {desired}"),
-            });
-            return false;
-        }
-        // The probe is already the fully loaded, validated destination. Move
-        // it into place rather than querying the backend a second time (and
-        // risking a different diff between validation and navigation).
-        *session = probe;
-        tui_state.diff_viewport.reset(session);
-        // A zen-driven load is not a user retarget: keep the walkthrough
-        // alive (staleness key), its chrome (hidden file pane), and the
-        // agent's suggestions (the loader reset all three).
-        zen.target_key = session.target.to_string();
-        session.file_pane_visible = false;
-        reapply_agent_overlay(session, review_loader, tui_state);
-    }
-    let placement = zen::jump_to_stop(session, stop);
-    if placement == zen::ZenViewportPlacement::Unavailable {
-        if session.target != previous_target
-            && review_loader.load(session, previous_target.clone()).is_ok()
-        {
-            tui_state.diff_viewport.reset(session);
-            session.file_pane_visible = false;
-            reapply_agent_overlay(session, review_loader, tui_state);
-        }
-        *session = previous_session;
-        zen.target_key = previous_target_key;
-        tui_state
-            .diff_viewport
-            .restore_transaction(viewport_transaction);
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Error,
-            message: "zen stop no longer resolves in the loaded diff".into(),
-        });
-        return false;
-    }
-    apply_zen_viewport_placement(session, placement, tui_state);
-    true
-}
-
-fn apply_zen_viewport_placement(
-    session: &mut ReviewSession,
-    placement: zen::ZenViewportPlacement,
-    tui_state: &mut TuiState,
-) {
-    match placement {
-        zen::ZenViewportPlacement::Top => tui_state
-            .diff_viewport
-            .place_top(session, current_diff_inner(session, tui_state)),
-        zen::ZenViewportPlacement::Cursor { margin } => {
-            let inner = current_diff_inner(session, tui_state);
-            tui_state
-                .diff_viewport
-                .place_cursor_with_margin(session, margin, inner);
-        }
-        zen::ZenViewportPlacement::Keep => {
-            tui_state
-                .diff_viewport
-                .reflow(session, current_diff_inner(session, tui_state), false)
-        }
-        zen::ZenViewportPlacement::Unavailable => {}
-    }
-}
-
-/// Zen layer keys, phase-aware. On the focus card and reading view:
-/// enter/n/→ advance (marking the current stop's file viewed; past the last
-/// stop the glance board opens), p/← step back, tab/o toggle the focus card
-/// against the dimmed reading view, g opens the glance board, esc (or the
-/// zen key) ends the walkthrough. Everything else falls through to the
-/// normal keymap so the full review vocabulary (comments, flags, context
-/// expansion, view toggles) keeps working mid-walkthrough. The glance board
-/// captures navigation keys itself: j/k move, enter jumps and ends zen,
-/// a bulk-marks every glance file viewed and finishes.
-fn handle_zen_key(
-    key: KeyEvent,
-    zen: &mut ZenState,
-    session: &mut ReviewSession,
-    keymap: &KeyMap,
-    review_loader: &ReviewLoader<'_>,
-    tui_state: &mut TuiState,
-) -> ZenKeyOutcome {
-    if zen.phase == zen::ZenPhase::Glance {
-        return handle_zen_glance_key(key, zen, session, keymap, review_loader, tui_state);
-    }
-    if let zen::ZenPhase::Artifact { index, scroll } = zen.phase {
-        return handle_zen_artifact_key(key, zen, index, scroll, keymap);
-    }
-    let actions = keymap.layered_actions_for(&key, session.focus == Focus::Diff);
-    if actions.zen == Some(Action::ZenClose) {
-        // Esc peels layers in order: an active range selection is more
-        // transient than the walkthrough, so cancel it first.
-        if session.has_active_diff_range() {
-            return ZenKeyOutcome::Fallthrough;
-        }
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Info,
-            message: "zen ended".to_owned(),
-        });
-        return ZenKeyOutcome::End {
-            restore_target: true,
-        };
-    }
-    match actions.zen {
-        Some(Action::ZenNext) => {
-            let Some(stop) = zen.current().cloned() else {
-                return ZenKeyOutcome::End {
-                    restore_target: true,
-                };
-            };
-            let prior_session = session.clone();
-            let prior_zen = zen.clone();
-            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
-            let transition = tui_state
-                .diff_viewport
-                .transition_snapshot(session, current_diff_inner(session, tui_state));
-            zen::mark_stop_viewed(session, &stop);
-            tui_state.diff_viewport.finish_transition(
-                transition,
-                session,
-                current_diff_inner(session, tui_state),
-            );
-            if zen.advance() {
-                if let Some(next) = zen.current().cloned()
-                    && !zen_goto_stop(review_loader, session, zen, &next, tui_state)
-                {
-                    *session = prior_session;
-                    *zen = prior_zen;
-                    tui_state.diff_viewport.restore_transaction(prior_viewport);
-                    return ZenKeyOutcome::Consumed;
-                }
-                tui_state.notice = None;
-                return ZenKeyOutcome::Consumed;
-            }
-            // Past the last spotlight: the glance board finishes the
-            // briefing, so the boilerplate is skimmed rather than skipped.
-            if zen.has_glance() {
-                zen.phase = zen::ZenPhase::Glance;
-                tui_state.notice = None;
-                return ZenKeyOutcome::Consumed;
-            }
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "zen complete — all stops visited".to_owned(),
-            });
-            return ZenKeyOutcome::End {
-                restore_target: true,
-            };
-        }
-        Some(Action::ZenPrevious) => {
-            let prior_session = session.clone();
-            let prior_zen = zen.clone();
-            let prior_viewport = tui_state.diff_viewport.transaction_snapshot();
-            if zen.back()
-                && let Some(stop) = zen.current().cloned()
-                && !zen_goto_stop(review_loader, session, zen, &stop, tui_state)
-            {
-                *session = prior_session;
-                *zen = prior_zen;
-                tui_state.diff_viewport.restore_transaction(prior_viewport);
-            }
-            return ZenKeyOutcome::Consumed;
-        }
-        Some(Action::ZenToggleView) => {
-            zen.phase = match zen.phase {
-                zen::ZenPhase::Focus => zen::ZenPhase::Reading,
-                _ => zen::ZenPhase::Focus,
-            };
-            return ZenKeyOutcome::Consumed;
-        }
-        Some(Action::ZenRefocus) => {
-            // Refocus: snap the cursor/scroll back to the current stop after
-            // wandering off it with line navigation.
-            if let Some(stop) = zen.current().cloned() {
-                zen_goto_stop(review_loader, session, zen, &stop, tui_state);
-            }
-            return ZenKeyOutcome::Consumed;
-        }
-        Some(Action::ZenGlance) if zen.phase == zen::ZenPhase::Focus => {
-            if zen.has_glance() {
-                zen.phase = zen::ZenPhase::Glance;
-            } else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "nothing on the glance board — every change is a stop".to_owned(),
-                });
-            }
-            return ZenKeyOutcome::Consumed;
-        }
-        Some(Action::ZenArtifact) if zen.phase == zen::ZenPhase::Focus => {
-            let artifacts = zen
-                .current()
-                .map(|stop| zen::stop_artifacts(stop).len())
-                .unwrap_or(0);
-            if artifacts > 0 {
-                zen.phase = zen::ZenPhase::Artifact {
-                    index: 0,
-                    scroll: 0,
-                };
-            } else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "no artifacts on this stop".to_owned(),
-                });
-            }
-            return ZenKeyOutcome::Consumed;
-        }
-        Some(Action::ZenToggleDetails)
-            if zen.phase == zen::ZenPhase::Focus
-                && matches!(zen.current(), Some(zen::ZenStop::Chapter(_))) =>
-        {
-            zen.chapter_description_collapsed = !zen.chapter_description_collapsed;
-            zen.chapter_brief_expanded = !zen.chapter_brief_expanded;
-            return ZenKeyOutcome::Consumed;
-        }
-        _ => {}
-    }
-    // Pressing the zen key again also ends the walkthrough.
-    if actions.normal == Some(Action::Zen) {
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Info,
-            message: "zen ended".to_owned(),
-        });
-        return ZenKeyOutcome::End {
-            restore_target: true,
-        };
-    }
-    ZenKeyOutcome::Fallthrough
-}
-
-/// Glance board keys. Unlike the focus/reading surfaces the board captures
-/// everything (it is a bulk-skim screen, not a diff view): j/k/↑/↓ move,
-/// enter jumps to the selected entry in the normal UI and ends zen, `a`
-/// marks every glance file viewed and finishes, p/← returns to the last
-/// spotlight stop, esc ends.
-fn handle_zen_glance_key(
-    key: KeyEvent,
-    zen: &mut ZenState,
-    session: &mut ReviewSession,
-    keymap: &KeyMap,
-    review_loader: &ReviewLoader<'_>,
-    tui_state: &mut TuiState,
-) -> ZenKeyOutcome {
-    match keymap.popup_action_for(KeyContext::ZenGlance, &key) {
-        Some(Action::PopupMoveDown) => {
-            zen.move_glance_selection(1);
-            ZenKeyOutcome::Consumed
-        }
-        Some(Action::PopupMoveUp) => {
-            zen.move_glance_selection(-1);
-            ZenKeyOutcome::Consumed
-        }
-        Some(Action::PopupSelect) => {
-            let Some(row) = zen.selected_glance().cloned() else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: "selected glance target is no longer available".to_owned(),
-                });
-                return ZenKeyOutcome::Consumed;
-            };
-            let Some(part) = row.part.as_ref() else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: "selected glance item has no code target".to_owned(),
-                });
-                return ZenKeyOutcome::Consumed;
-            };
-            // Validate the complete load-and-jump transaction on a clone.
-            // A stale row must not end zen or leave the live review parked on
-            // unrelated content from a newly loaded target.
-            let desired = zen::row_target(&row, &zen.home_target);
-            let target_changed = session.target != desired;
-            let mut probe = session.clone();
-            if target_changed && review_loader.load(&mut probe, desired.clone()).is_err() {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: format!("glance target no longer resolves in {desired}"),
-                });
-                return ZenKeyOutcome::Consumed;
-            }
-            let Some(placement) = probe.jump_to_chunk_part(part) else {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Error,
-                    message: format!(
-                        "glance target {} no longer resolves in {desired}",
-                        part.path
-                    ),
-                });
-                return ZenKeyOutcome::Consumed;
-            };
-            *session = probe;
-            if target_changed {
-                tui_state.diff_viewport.reset(session);
-                reapply_agent_overlay(session, review_loader, tui_state);
-            }
-            apply_navigation_viewport_placement(
-                session,
-                core_navigation_placement(placement),
-                tui_state,
-            );
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: format!("zen ended — jumped to {}", part.path),
-            });
-            ZenKeyOutcome::End {
-                restore_target: false,
-            }
-        }
-        Some(Action::ZenAcknowledge) => {
-            zen::mark_glance_viewed(session, zen);
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: format!(
-                    "zen complete — {} glance item(s) marked viewed",
-                    zen.glance_rows.len()
-                ),
-            });
-            ZenKeyOutcome::End {
-                restore_target: true,
-            }
-        }
-        Some(Action::ZenPrevious) => {
-            zen.phase = zen::ZenPhase::Focus;
-            if let Some(stop) = zen.current().cloned() {
-                zen_goto_stop(review_loader, session, zen, &stop, tui_state);
-            }
-            ZenKeyOutcome::Consumed
-        }
-        Some(Action::PopupClose) => {
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "zen ended".to_owned(),
-            });
-            ZenKeyOutcome::End {
-                restore_target: true,
-            }
-        }
-        _ => {
-            if keymap.normal_action_for(&key, true) == Some(Action::Zen) {
-                tui_state.notice = Some(UiNotice {
-                    level: UiNoticeLevel::Info,
-                    message: "zen ended".to_owned(),
-                });
-                return ZenKeyOutcome::End {
-                    restore_target: true,
-                };
-            }
-            // The board is modal: swallow everything else so invisible
-            // normal-mode actions cannot fire underneath it.
-            ZenKeyOutcome::Consumed
-        }
-    }
-}
-
-/// Artifact viewer keys. A modal layer over the focus card: j/k (↑/↓)
-/// scroll the exhibit, h/l (←/→, tab) cycle between exhibits, and
-/// e/esc/enter/q close back to the card. Everything else is swallowed so
-/// normal-mode actions cannot fire invisibly underneath.
-fn handle_zen_artifact_key(
-    key: KeyEvent,
-    zen: &mut ZenState,
-    index: usize,
-    scroll: u16,
-    keymap: &KeyMap,
-) -> ZenKeyOutcome {
-    let count = zen
-        .current()
-        .map(|stop| zen::stop_artifacts(stop).len())
-        .unwrap_or(0);
-    if count == 0 {
-        zen.phase = zen::ZenPhase::Focus;
-        return ZenKeyOutcome::Consumed;
-    }
-    match keymap.popup_action_for(KeyContext::ZenArtifact, &key) {
-        Some(
-            Action::PopupClose | Action::PopupCloseQ | Action::PopupSelect | Action::ZenArtifact,
-        ) => {
-            zen.phase = zen::ZenPhase::Focus;
-        }
-        Some(Action::PopupMoveDown) => {
-            zen.phase = zen::ZenPhase::Artifact {
-                index,
-                scroll: scroll.saturating_add(1),
-            };
-        }
-        Some(Action::PopupMoveUp) => {
-            zen.phase = zen::ZenPhase::Artifact {
-                index,
-                scroll: scroll.saturating_sub(1),
-            };
-        }
-        Some(Action::ZenArtifactNext) => {
-            zen.phase = zen::ZenPhase::Artifact {
-                index: (index + 1) % count,
-                scroll: 0,
-            };
-        }
-        Some(Action::ZenArtifactPrevious) => {
-            zen.phase = zen::ZenPhase::Artifact {
-                index: index.checked_sub(1).unwrap_or(count - 1),
-                scroll: 0,
-            };
-        }
-        _ => {}
-    }
-    ZenKeyOutcome::Consumed
 }
 
 /// Normal-review glance popup controls. Enter jumps to the selected fold,
@@ -5244,11 +4341,7 @@ fn enter_open_work_row(
         && session.files.iter().any(|file| file.path == *path)
     {
         return session
-            .jump_to_chunk_part(&ChunkPart {
-                path: path.clone(),
-                start_line: target.line,
-                end_line: target.end_line,
-            })
+            .jump_to_review_target(target)
             .map(core_navigation_placement);
     }
     let linked_comment = session
@@ -5419,15 +4512,10 @@ fn jump_to_walkthrough_step(
     session: &mut ReviewSession,
     step: &WalkthroughStep,
 ) -> Option<NavigationViewportPlacement> {
-    let Some(path) = &step.target.file else {
+    let Some(_) = &step.target.file else {
         return None;
     };
-    let part = ChunkPart {
-        path: path.clone(),
-        start_line: step.target.line,
-        end_line: step.target.end_line,
-    };
-    let placement = session.jump_to_chunk_part(&part)?;
+    let placement = session.jump_to_review_target(&step.target)?;
     session.focus = Focus::Diff;
     if let Some(owner) = session.selected_walkthrough_card_owner(&step.target) {
         session.jump_to_diff_row(owner);
@@ -5489,16 +4577,14 @@ fn load_review_target(
     target: ReviewTarget,
     tui_state: &mut TuiState,
 ) {
-    let reapply_attention_focus = tui_state.attention_focus.is_some();
-    if reapply_attention_focus {
-        tui_state.leave_attention_focus(session);
-    }
+    let attention_focus = tui_state.suspend_attention_focus_for_load(session);
     match review_loader.load(session, target.clone()) {
         Ok(()) => {
             tui_state.diff_viewport.reset(session);
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus.clone() {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
+            reconcile_present_spotlight(session, tui_state);
             // Re-raise the large-change nudge when the newly loaded target
             // is itself big and unorganized.
             let message = match session.large_change_nudge() {
@@ -5511,9 +4597,10 @@ fn load_review_target(
             });
         }
         Err(error) => {
-            if reapply_attention_focus {
-                tui_state.enter_attention_focus(session);
+            if let Some(state) = attention_focus {
+                tui_state.resume_attention_focus_after_load(session, state);
             }
+            reconcile_present_spotlight(session, tui_state);
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Error,
                 message: format!("failed to load {target}: {error:?}"),
@@ -5663,17 +4750,6 @@ fn handle_mouse_event(
         return;
     }
 
-    let zen_takeover = tui_state
-        .zen
-        .as_ref()
-        .is_some_and(|zen| !matches!(zen.phase, zen::ZenPhase::Reading));
-    if handle_zen_mouse_event(mouse, terminal_size, session, tui_state) {
-        if zen_takeover {
-            tui_state.diff_drag = None;
-        }
-        return;
-    }
-
     let layout = tui_state.review_layout(
         session,
         Rect::new(0, 0, terminal_size.width, terminal_size.height),
@@ -5696,89 +4772,6 @@ fn handle_mouse_event(
         }
         _ => {}
     }
-}
-
-fn handle_zen_mouse_event(
-    mouse: MouseEvent,
-    terminal_size: ratatui::prelude::Size,
-    session: &mut ReviewSession,
-    tui_state: &mut TuiState,
-) -> bool {
-    let layout = tui_state.review_layout(
-        session,
-        Rect::new(0, 0, terminal_size.width, terminal_size.height),
-    );
-    let Some(zen) = tui_state.zen.as_mut() else {
-        return false;
-    };
-    let body = Rect {
-        height: terminal_size.height.saturating_sub(2),
-        ..Rect::new(0, 0, terminal_size.width, terminal_size.height)
-    };
-
-    let takeover = !matches!(zen.phase, zen::ZenPhase::Reading);
-    let handled = match mouse.kind {
-        MouseEventKind::ScrollDown => match zen.phase {
-            zen::ZenPhase::Artifact { index, scroll }
-                if point_in_rect(mouse.column, mouse.row, body) =>
-            {
-                zen.phase = zen::ZenPhase::Artifact {
-                    index,
-                    scroll: scroll.saturating_add(3),
-                };
-                true
-            }
-            zen::ZenPhase::Glance if point_in_rect(mouse.column, mouse.row, body) => {
-                zen.move_glance_selection(1);
-                true
-            }
-            zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
-                if session.zen_focus.is_some() && session.move_diff_cursor(3) {
-                    session.focus = Focus::Diff;
-                    tui_state
-                        .diff_viewport
-                        .logical_selection(session, inner_bordered(layout.diff));
-                }
-                true
-            }
-            zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-                scroll_diff_visual(session, inner_bordered(layout.diff), 3, tui_state);
-                true
-            }
-            _ => false,
-        },
-        MouseEventKind::ScrollUp => match zen.phase {
-            zen::ZenPhase::Artifact { index, scroll }
-                if point_in_rect(mouse.column, mouse.row, body) =>
-            {
-                zen.phase = zen::ZenPhase::Artifact {
-                    index,
-                    scroll: scroll.saturating_sub(3),
-                };
-                true
-            }
-            zen::ZenPhase::Glance if point_in_rect(mouse.column, mouse.row, body) => {
-                zen.move_glance_selection(-1);
-                true
-            }
-            zen::ZenPhase::Focus if point_in_rect(mouse.column, mouse.row, body) => {
-                if session.zen_focus.is_some() && session.move_diff_cursor(-3) {
-                    session.focus = Focus::Diff;
-                    tui_state
-                        .diff_viewport
-                        .logical_selection(session, inner_bordered(layout.diff));
-                }
-                true
-            }
-            zen::ZenPhase::Reading if point_in_rect(mouse.column, mouse.row, layout.diff) => {
-                scroll_diff_visual(session, inner_bordered(layout.diff), -3, tui_state);
-                true
-            }
-            _ => false,
-        },
-        _ => false,
-    };
-    handled || takeover
 }
 
 fn handle_left_down(
@@ -5996,6 +4989,317 @@ mod tests {
         session
     }
 
+    fn presentation_session() -> ReviewSession {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n-old_one\n+new_one\n-old_two\n+new_two\n-old_three\n+new_three\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Supporting);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let step = |id: &str, line: usize| WalkthroughStep {
+            id: id.into(),
+            author: Some(crate::state::Identity::agent()),
+            title: Some(id.into()),
+            target: crate::attention::target_for_diff(&files, "a.rs", Some(line), None).unwrap(),
+            ..Default::default()
+        };
+        session.sessions[0].attention_regions.clear();
+        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+            id: "presentation".into(),
+            steps: vec![step("first", 1), step("second", 3)],
+            ..Default::default()
+        }];
+        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        session
+    }
+
+    fn stale_fingerprint(target: &mut crate::state::ReviewTarget) {
+        match target.anchor.as_mut().unwrap() {
+            crate::anchor::CommentAnchor::File {
+                diff_fingerprint, ..
+            }
+            | crate::anchor::CommentAnchor::Line {
+                diff_fingerprint, ..
+            }
+            | crate::anchor::CommentAnchor::Range {
+                diff_fingerprint, ..
+            } => *diff_fingerprint = "stale-fingerprint".into(),
+        }
+    }
+
+    #[test]
+    fn startup_tour_maps_to_first_spotlight_in_normal_stream_focus() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+
+        start_stream_presentation(&mut session, &mut tui_state).unwrap();
+
+        assert!(session.stream_mode);
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(tui_state.attention_focus.is_some());
+        assert_eq!(tui_state.presentation.as_ref().unwrap().index, 0);
+        assert_eq!(session.selected_file().unwrap().path, "a.rs");
+        assert_eq!(present_status(&session, &tui_state)["view"], "focus");
+        assert!(present_status(&session, &tui_state).get("phase").is_none());
+    }
+
+    #[test]
+    fn startup_tour_without_spotlights_keeps_existing_focus_and_reports_notice() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = snapshot_session(raw);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+
+        let error = start_stream_presentation(&mut session, &mut tui_state).unwrap_err();
+        assert!(error.1.contains("no current Spotlight"));
+        assert!(tui_state.attention_focus.is_some());
+        assert!(tui_state.presentation.is_none());
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(session.fold_context);
+
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        start_startup_tour_or_notice(&mut session, &loader, &mut tui_state);
+        assert!(
+            tui_state
+                .notice
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("no current Spotlight")
+        );
+    }
+
+    #[test]
+    fn quit_cleanup_restores_attention_focus_ephemeral_state() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = snapshot_session(raw);
+        session.focus = Focus::Files;
+        session.fold_context = false;
+        let mut tui_state = TuiState {
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                split_percent: 41,
+            },
+            ..TuiState::default()
+        };
+        tui_state.enter_attention_focus(&mut session);
+        finish_ephemeral_views_on_quit(&mut session, &mut tui_state);
+        assert!(tui_state.attention_focus.is_none());
+        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+        assert_eq!(tui_state.file_pane.split_percent, 41);
+        assert_eq!(session.focus, Focus::Files);
+        assert!(!session.fold_context);
+    }
+
+    #[test]
+    fn stream_presentation_keeps_normal_actions_and_survives_retarget() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        session.focus = Focus::Files;
+        session.fold_context = false;
+        session.expanded_skim_folds.insert("prior-peek".into());
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            file_pane: FilePaneState {
+                explicit_override: Some(true),
+                split_percent: 47,
+            },
+            ..TuiState::default()
+        };
+        start_stream_presentation(&mut session, &mut tui_state).unwrap();
+
+        handle_normal_action(
+            Action::RangeComment,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(session.has_active_diff_range());
+        assert!(tui_state.presentation.is_some());
+
+        load_review_target(
+            &loader,
+            &mut session,
+            ReviewTarget::new("main", "@"),
+            &mut tui_state,
+        );
+        assert!(tui_state.presentation.is_some());
+        assert!(tui_state.attention_focus.is_some());
+        assert!(session.stream_mode);
+        assert_eq!(session.focus, Focus::Diff);
+        assert!(tui_state.presentation.as_ref().unwrap().stale);
+
+        #[cfg(unix)]
+        {
+            let status = apply_present_command(
+                crate::acp::socket::PresentCommand::End,
+                &loader,
+                &mut session,
+                &mode,
+                &mut tui_state,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(status, json!({ "active": false }));
+            assert!(tui_state.presentation.is_none());
+            assert!(tui_state.attention_focus.is_none());
+            assert_eq!(tui_state.file_pane.explicit_override, Some(true));
+            assert_eq!(tui_state.file_pane.split_percent, 47);
+            assert!(!session.fold_context);
+            assert!(session.expanded_skim_folds.contains("prior-peek"));
+        }
+    }
+
+    #[test]
+    fn presenter_reanchors_identity_when_spotlights_insert_or_reorder() {
+        let mut session = presentation_session();
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        start_stream_presentation(&mut session, &mut tui_state).unwrap();
+        goto_present_spotlight(&mut session, &mut tui_state, 1).unwrap();
+        assert_eq!(
+            tui_state.presentation.as_ref().unwrap().identity.step_id,
+            "second"
+        );
+
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        session.sessions[0].walkthroughs[0].steps.insert(
+            0,
+            WalkthroughStep {
+                id: "inserted".into(),
+                author: Some(crate::state::Identity::agent()),
+                title: Some("inserted".into()),
+                target: crate::attention::target_for_diff(&files, "a.rs", Some(2), None).unwrap(),
+                ..Default::default()
+            },
+        );
+        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        assert!(reconcile_present_spotlight(&mut session, &mut tui_state));
+        let presentation = tui_state.presentation.as_ref().unwrap();
+        assert_eq!(presentation.identity.step_id, "second");
+        assert_eq!(presentation.index, 2);
+        assert!(!presentation.stale);
+
+        let second = session.sessions[0].walkthroughs[0].steps.remove(2);
+        session.sessions[0].walkthroughs[0].steps.insert(0, second);
+        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        assert!(reconcile_present_spotlight(&mut session, &mut tui_state));
+        let presentation = tui_state.presentation.as_ref().unwrap();
+        assert_eq!(presentation.identity.step_id, "second");
+        assert_eq!(presentation.index, 0);
+    }
+
+    #[test]
+    fn presenter_marks_removed_identity_stale_without_numeric_fallback() {
+        let mut session = presentation_session();
+        let mut tui_state = TuiState::default();
+        start_stream_presentation(&mut session, &mut tui_state).unwrap();
+        goto_present_spotlight(&mut session, &mut tui_state, 1).unwrap();
+        let selected_anchor = session.selected_stream_row().unwrap().anchor;
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        session.sessions[0].walkthroughs[0]
+            .steps
+            .retain(|step| step.id != "second");
+        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+
+        assert!(!reconcile_present_spotlight(&mut session, &mut tui_state));
+        let presentation = tui_state.presentation.as_ref().unwrap();
+        assert_eq!(presentation.identity.step_id, "second");
+        assert_eq!(presentation.index, 1);
+        assert!(presentation.stale);
+        assert_eq!(
+            session.selected_stream_row().unwrap().anchor,
+            selected_anchor
+        );
+        assert_eq!(
+            present_status(&session, &tui_state)["current"]["stale"],
+            true
+        );
+    }
+
+    #[test]
+    fn presenter_marks_fingerprint_stale_identity_without_moving() {
+        let mut session = presentation_session();
+        let mut tui_state = TuiState::default();
+        start_stream_presentation(&mut session, &mut tui_state).unwrap();
+        goto_present_spotlight(&mut session, &mut tui_state, 1).unwrap();
+        let selected_anchor = session.selected_stream_row().unwrap().anchor;
+        stale_fingerprint(&mut session.sessions[0].walkthroughs[0].steps[1].target);
+        stale_fingerprint(&mut session.sessions[0].attention_regions[1].target);
+
+        assert!(!reconcile_present_spotlight(&mut session, &mut tui_state));
+        assert!(tui_state.presentation.as_ref().unwrap().stale);
+        assert_eq!(
+            session.selected_stream_row().unwrap().anchor,
+            selected_anchor
+        );
+        assert_eq!(present_status(&session, &tui_state)["slide_count"], 1);
+    }
+
+    #[test]
+    fn tour_render_uses_focus_stream_and_requires_current_spotlights() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        let backend = MockJjBackend::with_diff(Ok(raw.into()));
+        let rendered = render_tour_text(
+            &mut session,
+            &KeybindingsConfig::default(),
+            &backend,
+            80,
+            20,
+            None,
+        )
+        .unwrap();
+        assert!(rendered.contains("slide 1/1"));
+        assert!(rendered.contains("a.rs"));
+        assert!(session.fold_context, "tour render applies the Focus preset");
+
+        let mut empty = snapshot_session(raw);
+        let rendered = render_tour_text(
+            &mut empty,
+            &KeybindingsConfig::default(),
+            &backend,
+            80,
+            20,
+            None,
+        )
+        .unwrap();
+        assert!(rendered.contains("no current Spotlight regions"));
+    }
+
     #[test]
     fn attention_focus_restores_exact_pane_folds_cards_and_viewport_state() {
         let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
@@ -6010,7 +5314,6 @@ mod tests {
             file_pane: FilePaneState {
                 explicit_override: Some(true),
                 split_percent: 35,
-                ..FilePaneState::default()
             },
             ..TuiState::default()
         };
@@ -6085,65 +5388,6 @@ mod tests {
         .unwrap();
         assert!(matches!(mode, Mode::FileSearch(_)));
         assert!(tui_state.attention_focus.is_some());
-    }
-
-    #[test]
-    fn attention_focus_pins_current_spotlight_and_preserves_card_expansion() {
-        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
-        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
-        let files = session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
-        session.sessions[0]
-            .walkthroughs
-            .push(crate::state::Walkthrough {
-                id: "walk".into(),
-                steps: vec![WalkthroughStep {
-                    id: "spot".into(),
-                    target: target.clone(),
-                    title: Some("Current narration".into()),
-                    why: Some("This is the mental-model delta".into()),
-                    artifacts: vec![crate::state::StepArtifact {
-                        title: "example".into(),
-                        kind: crate::state::StepArtifactKind::Example,
-                        body: "expanded body".into(),
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            });
-        let owner = session.stream_walkthrough_card_owner(&target).unwrap();
-        session.select_stream_row(owner, false);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 24),
-            ..TuiState::default()
-        };
-        assert_eq!(
-            tui_state
-                .diff_viewport
-                .toggle_annotation_artifacts(&session),
-            Some(true)
-        );
-
-        tui_state.enter_attention_focus(&mut session);
-        assert_eq!(
-            tui_state.diff_viewport.selected_annotation_source(&session),
-            Some(annotation_card::AnnotationSource::Walkthrough {
-                step_id: "spot".into(),
-                part: 0,
-            })
-        );
-        tui_state.leave_attention_focus(&mut session);
-        assert_eq!(
-            tui_state
-                .diff_viewport
-                .toggle_annotation_artifacts(&session),
-            Some(false),
-            "the exact pre-Focus artifact expansion was restored"
-        );
     }
 
     #[test]
@@ -6849,35 +6093,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_startup_tour_falls_back_to_normal_tui_with_notice() {
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut session = snapshot_session("");
-        let mut tui_state = TuiState::default();
-
-        start_startup_tour_or_notice(&mut session, &loader, &mut tui_state);
-
-        assert!(tui_state.zen.is_none());
-        let notice = tui_state.notice.expect("empty startup tour notice");
-        assert_eq!(notice.level, UiNoticeLevel::Info);
-        assert!(notice.message.contains("selected target is empty"));
-        assert!(
-            notice
-                .message
-                .contains("no changed files or walkthrough stops")
-        );
-        assert!(
-            notice
-                .message
-                .contains("target-selection controls remain available")
-        );
-    }
-
     struct MockJjBackend {
         snapshot_calls: RefCell<usize>,
         calls: RefCell<Vec<ReviewTarget>>,
@@ -7540,356 +6755,6 @@ mod tests {
     }
 
     #[test]
-    fn annotation_selection_tracks_exact_owner_across_click_and_keyboard_navigation() {
-        let mut session = snapshot_session(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
-        );
-        session.file_pane_visible = false;
-        session.focus = Focus::Diff;
-        session.agent_identity = crate::state::Identity {
-            kind: AuthorKind::Agent,
-            name: "configured-review-agent".into(),
-        };
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            briefs: vec![crate::agent::ChangeBrief {
-                change_id: "change-1".into(),
-                summary: "Agent-authored chapter".into(),
-                artifacts: Vec::new(),
-            }],
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "guided-lines".into(),
-                title: "Agent-guided lines".into(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: Some("Each line has its own card owner".into()),
-                explanation: Some("Use the card at the current line".into()),
-                artifacts: vec![crate::agent::Artifact {
-                    title: "evidence".into(),
-                    kind: crate::agent::ArtifactKind::Example,
-                    body: "CURRENT ROW ARTIFACT".into(),
-                }],
-                parts: vec![
-                    crate::agent::ChunkPart {
-                        path: "a.txt".into(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    },
-                    crate::agent::ChunkPart {
-                        path: "a.txt".into(),
-                        start_line: Some(2),
-                        end_line: Some(2),
-                    },
-                ],
-            }],
-            ..Default::default()
-        });
-
-        let files = session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        let configured_agent = session.agent_identity.clone();
-        let durable = review::active_session_for_loaded_review(
-            &session.sessions,
-            &session.repo,
-            &session.target.base,
-            &session.target.rev,
-        )
-        .unwrap();
-        let chapter = durable.walkthroughs[0]
-            .steps
-            .iter()
-            .find(|step| step.id == "chapter-change-1")
-            .unwrap();
-        assert_eq!(chapter.author.as_ref(), Some(&configured_agent));
-        let persisted_guided = durable.walkthroughs[0]
-            .steps
-            .iter()
-            .find(|step| step.id == "guided-lines")
-            .unwrap();
-        assert_eq!(persisted_guided.author.as_ref(), Some(&configured_agent));
-        assert!(persisted_guided.target.anchor.is_some());
-        assert_eq!(persisted_guided.extra_targets.len(), 1);
-        assert!(persisted_guided.extra_targets[0].anchor.is_some());
-        let effective = crate::attention::resolve_effective_attention(
-            durable,
-            &persisted_guided.target,
-            &files,
-        );
-        assert_eq!(effective.salience, crate::state::Salience::Spotlight);
-        assert_eq!(effective.source, Some(crate::state::SalienceSource::Agent));
-        let projected_card = annotation_card::AnnotationCard::from_walkthrough_step(
-            persisted_guided,
-            &persisted_guided.target,
-            0,
-            None,
-            false,
-        );
-        let projected_layout = projected_card.layout(
-            72,
-            annotation_card::AnnotationCardDensity::Expanded,
-            false,
-            "E",
-        );
-        let rendered_card = (0..projected_layout.len())
-            .map(|index| projected_layout.plain_line(index))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered_card.contains("agent:configured-review-agent"));
-
-        let size = ratatui::prelude::Size::new(100, 36);
-        let mut tui_state = TuiState {
-            terminal_size: size,
-            ..TuiState::default()
-        };
-        let layout = tui_state.review_layout(&session, Rect::new(0, 0, size.width, size.height));
-        let inner = inner_bordered(layout.diff);
-        let first_source = annotation_card::AnnotationSource::Walkthrough {
-            step_id: "guided-lines".into(),
-            part: 0,
-        };
-        let visible = tui_state
-            .diff_viewport
-            .annotation_visible_row(&session, inner, &first_source)
-            .expect("first agent card visible");
-        let mut mode = Mode::Normal;
-        handle_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: inner.x + 4,
-                row: inner.y + visible as u16,
-                modifiers: KeyModifiers::NONE,
-            },
-            size,
-            &mut session,
-            &mut mode,
-            &mut tui_state,
-        );
-        assert_eq!(
-            tui_state.diff_viewport.selected_annotation_source(&session),
-            Some(first_source)
-        );
-        assert!(selected_onboarding_target(&session, &tui_state));
-        assert_eq!(
-            inferred_comment_channel(
-                &session,
-                &tui_state,
-                selected_onboarding_target(&session, &tui_state),
-                None,
-            ),
-            Channel::Delegation
-        );
-        render::reconcile_diff_viewport(
-            &mut session,
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width.saturating_sub(12),
-                inner.height,
-            ),
-            true,
-            &tui_state,
-        );
-        assert_eq!(
-            tui_state.diff_viewport.selected_annotation_source(&session),
-            Some(annotation_card::AnnotationSource::Walkthrough {
-                step_id: "guided-lines".into(),
-                part: 0,
-            }),
-            "layout reflow on the same owner must preserve exact card selection"
-        );
-
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        handle_normal_action(
-            Action::MoveDown,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        let second_owner = session
-            .diff_rows_for_selected_file()
-            .iter()
-            .position(|row| row.new_lineno == Some(2))
-            .unwrap();
-        assert_eq!(session.diff_cursor, second_owner);
-        assert_eq!(
-            tui_state.diff_viewport.selected_annotation_source(&session),
-            None
-        );
-        assert!(!selected_onboarding_target(&session, &tui_state));
-        assert_eq!(
-            inferred_comment_channel(&session, &tui_state, false, None),
-            Channel::Note
-        );
-
-        handle_normal_action(
-            Action::ToggleAnnotationArtifacts,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        handle_normal_action(
-            Action::MoveUp,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert_eq!(
-            tui_state
-                .diff_viewport
-                .toggle_annotation_artifacts(&session),
-            Some(true),
-            "E on the second owner must not expand the formerly selected first card"
-        );
-        handle_normal_action(
-            Action::MoveDown,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert_eq!(
-            tui_state
-                .diff_viewport
-                .toggle_annotation_artifacts(&session),
-            Some(false),
-            "the current-row card was the one expanded by E"
-        );
-    }
-
-    #[test]
-    fn invalid_overlay_parts_remain_durable_stale_and_non_rendered() {
-        let mut session = snapshot_session(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
-        );
-        let valid_overlay = crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "out-of-range".into(),
-                title: "Initially current".into(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: None,
-                artifacts: Vec::new(),
-                parts: vec![crate::agent::ChunkPart {
-                    path: "a.txt".into(),
-                    start_line: Some(2),
-                    end_line: Some(2),
-                }],
-            }],
-            ..Default::default()
-        };
-        session.apply_agent_overlay(&valid_overlay);
-        let original_assignment = session.sessions[0].attention_regions[0].clone();
-
-        session.replace_diff(
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old one\n+new one\n",
-            )
-            .unwrap(),
-        );
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![
-                valid_overlay.chunks[0].clone(),
-                crate::agent::ReviewChunk {
-                    id: "missing-file".into(),
-                    title: "Missing file".into(),
-                    importance: crate::agent::ChunkImportance::Spotlight,
-                    change_id: None,
-                    rationale: None,
-                    explanation: None,
-                    artifacts: Vec::new(),
-                    parts: vec![crate::agent::ChunkPart {
-                        path: "missing.txt".into(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    }],
-                },
-            ],
-            ..Default::default()
-        });
-
-        let durable = review::active_session_for_loaded_review(
-            &session.sessions,
-            &session.repo,
-            &session.target.base,
-            &session.target.rev,
-        )
-        .unwrap();
-        let steps = &durable.walkthroughs[0].steps;
-        assert_eq!(steps.len(), 2);
-        assert!(steps.iter().all(|step| step.target.anchor.is_none()));
-        assert_eq!(
-            durable.attention_regions.as_slice(),
-            std::slice::from_ref(&original_assignment)
-        );
-        let files = session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        assert!(crate::attention::region_is_stale(
-            &original_assignment,
-            &files
-        ));
-        let input = render::selected_file_annotation_input(&session, &BTreeSet::new(), "E");
-        for step_id in ["out-of-range", "missing-file"] {
-            assert!(
-                !input.contains_source(&annotation_card::AnnotationSource::Walkthrough {
-                    step_id: step_id.into(),
-                    part: 0,
-                })
-            );
-        }
-
-        session.replace_diff(
-            ReviewTarget::trunk_to_current(),
-            DiffSet::parse(
-                "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
-            )
-            .unwrap(),
-        );
-        session.apply_agent_overlay(&valid_overlay);
-        let durable = review::active_session_for_loaded_review(
-            &session.sessions,
-            &session.repo,
-            &session.target.base,
-            &session.target.rev,
-        )
-        .unwrap();
-        assert!(durable.walkthroughs[0].steps[0].target.anchor.is_some());
-        assert!(!crate::attention::region_is_stale(
-            &durable.attention_regions[0],
-            &session
-                .files
-                .iter()
-                .map(|file| file.diff.clone())
-                .collect::<Vec<_>>(),
-        ));
-        assert!(
-            render::selected_file_annotation_input(&session, &BTreeSet::new(), "E")
-                .contains_source(&annotation_card::AnnotationSource::Walkthrough {
-                    step_id: "out-of-range".into(),
-                    part: 0,
-                })
-        );
-    }
-
-    #[test]
     fn empty_comment_center_creates_general_comment_and_readies_drafts() {
         let mut session = snapshot_session("diff --git a/a.txt b/a.txt\n");
         let backend = MockJjBackend::with_diff(Ok(String::new()));
@@ -8067,123 +6932,6 @@ mod tests {
         assert_eq!(
             latest_operation_description(&loader, Path::new(".")),
             Some("undo operation 4a3b2c1d9e0f…".to_owned())
-        );
-    }
-
-    #[test]
-    fn reapply_agent_overlay_preserves_change_anchored_chunks_with_loaded_change_diff() {
-        let dir = tempfile::tempdir().unwrap();
-        let overlay_path = dir.path().join("agent.json");
-        crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "anchored".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: Some("change1".to_owned()),
-                rationale: None,
-                explanation: None,
-                artifacts: Vec::new(),
-                parts: vec![crate::agent::ChunkPart {
-                    path: "src/lib.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
-            ..Default::default()
-        }
-        .save(&overlay_path)
-        .unwrap();
-        let mut session =
-            snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n");
-        let backend = MockJjBackend::with_diff(Ok(
-            "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
-        ));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState {
-            agent_overlay_path: Some(overlay_path),
-            ..Default::default()
-        };
-
-        reapply_agent_overlay(&mut session, &loader, &mut tui_state);
-
-        assert_eq!(session.review_chunks.len(), 1);
-        assert_eq!(session.review_chunks[0].parts.len(), 1);
-        assert_eq!(backend.calls.borrow().len(), 1);
-        assert_eq!(backend.calls.borrow()[0].rev, "change1");
-        assert!(tui_state.notice.is_none());
-    }
-
-    #[test]
-    fn reapply_agent_overlay_warns_when_change_anchored_chunks_really_invalidate() {
-        let dir = tempfile::tempdir().unwrap();
-        let overlay_path = dir.path().join("agent.json");
-        crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "anchored".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: Some("change1".to_owned()),
-                rationale: None,
-                explanation: None,
-                artifacts: Vec::new(),
-                parts: vec![crate::agent::ChunkPart {
-                    path: "src/missing.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
-            ..Default::default()
-        }
-        .save(&overlay_path)
-        .unwrap();
-        let mut session =
-            snapshot_session("diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n");
-        let backend = MockJjBackend::with_diff(Ok(
-            "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n".to_owned(),
-        ));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState {
-            agent_overlay_path: Some(overlay_path),
-            ..Default::default()
-        };
-
-        reapply_agent_overlay(&mut session, &loader, &mut tui_state);
-
-        assert_eq!(session.review_chunks.len(), 1);
-        assert_eq!(session.review_chunks[0].parts.len(), 1);
-        let durable = review::active_session_for_loaded_review(
-            &session.sessions,
-            &session.repo,
-            &session.target.base,
-            &session.target.rev,
-        )
-        .unwrap();
-        assert_eq!(durable.walkthroughs[0].steps.len(), 1);
-        assert!(durable.walkthroughs[0].steps[0].target.anchor.is_none());
-        assert!(durable.attention_regions.is_empty());
-        assert_eq!(tui_state.invalid_chunk_parts.len(), 1);
-        assert_eq!(
-            tui_state
-                .notice
-                .as_ref()
-                .map(|notice| notice.message.as_str()),
-            Some(
-                "1 curated walkthrough part(s) no longer match the diff; update the agent overlay or durable walkthrough targets"
-            )
-        );
-        assert!(
-            tui_state
-                .activity
-                .back()
-                .is_some_and(|event| event.message.contains("curated walkthrough part"))
         );
     }
 
@@ -9489,86 +8237,13 @@ diff --git a/b.rs b/b.rs
         assert_eq!(session.agent_ordering, ["b.rs"]);
         assert_eq!(
             tui_state.notice.as_ref().unwrap().message,
-            "agent suggestions updated"
+            "agent ordering/flags updated"
         );
 
         // Unchanged mtime: no re-notification.
         tui_state.notice = None;
         maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
         assert!(tui_state.notice.is_none());
-    }
-
-    #[test]
-    fn overlay_polling_ignores_invalid_chunk_parts_with_notice() {
-        let dir = tempfile::tempdir().unwrap();
-        let overlay_path = dir.path().join("agent.json");
-        let mut session = snapshot_session(
-            r#"diff --git a/a.rs b/a.rs
---- a/a.rs
-+++ b/a.rs
-@@ -1 +1 @@
--old
-+new
-"#,
-        );
-        crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "mixed".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: None,
-                artifacts: Vec::new(),
-                parts: vec![
-                    crate::agent::ChunkPart {
-                        path: "a.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    },
-                    crate::agent::ChunkPart {
-                        path: "missing.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    },
-                ],
-            }],
-            ..Default::default()
-        }
-        .save(&overlay_path)
-        .unwrap();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState::default();
-
-        maybe_reload_agent_overlay(&mut session, &overlay_path, &mut tui_state, &loader, true);
-
-        assert_eq!(session.review_chunks.len(), 1);
-        assert_eq!(session.review_chunks[0].parts.len(), 2);
-        assert_eq!(session.review_chunks[0].parts[0].path, "a.rs");
-        let durable = review::active_session_for_loaded_review(
-            &session.sessions,
-            &session.repo,
-            &session.target.base,
-            &session.target.rev,
-        )
-        .unwrap();
-        let step = &durable.walkthroughs[0].steps[0];
-        assert!(step.target.anchor.is_some());
-        assert_eq!(step.extra_targets.len(), 1);
-        assert!(step.extra_targets[0].anchor.is_none());
-        assert_eq!(durable.attention_regions.len(), 1);
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("1 invalid chunk part")
-        );
     }
 
     fn draft_session_with_overlay(dir: &std::path::Path) -> (ReviewSession, PathBuf) {
@@ -10155,764 +8830,6 @@ diff --git a/b.rs b/b.rs
         assert!(notice.message.contains("gone.rs"));
     }
 
-    fn zen_session() -> ReviewSession {
-        let mut session = snapshot_session(
-            r#"diff --git a/a.rs b/a.rs
---- a/a.rs
-+++ b/a.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/b.rs b/b.rs
---- a/b.rs
-+++ b/b.rs
-@@ -1 +1 @@
--old
-+new
-"#,
-        );
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "core flow".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                explanation: None,
-                rationale: Some("read together".to_owned()),
-                artifacts: Vec::new(),
-                parts: vec![
-                    crate::agent::ChunkPart {
-                        path: "a.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    },
-                    crate::agent::ChunkPart {
-                        path: "b.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    },
-                ],
-            }],
-            ..Default::default()
-        });
-        session
-    }
-
-    /// Loader over a mock backend for zen navigation tests (retargeting
-    /// change-anchored stops goes through the loader).
-    fn zen_loader(backend: &MockJjBackend) -> ReviewLoader<'_> {
-        ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: backend,
-        }
-    }
-
-    fn unavailable_change_anchored_zen_session() -> ReviewSession {
-        let mut session = zen_session();
-        for chunk in &mut session.review_chunks {
-            chunk.change_id = Some("abc".into());
-        }
-        for step in session
-            .sessions
-            .iter_mut()
-            .flat_map(|durable| durable.walkthroughs.iter_mut())
-            .flat_map(|walkthrough| walkthrough.steps.iter_mut())
-        {
-            step.change_id = Some("abc".into());
-        }
-        session.change_diffs.push((
-            "abc".into(),
-            DiffSet::parse(
-                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            )
-            .unwrap(),
-        ));
-        session
-    }
-
-    #[test]
-    fn zen_advances_through_stops_marking_files_viewed() {
-        let mut session = zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        // Advancing past the opening chapter card marks nothing viewed and
-        // lands on the first stop.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert!(session.files.iter().all(|file| !file.viewed));
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
-
-        // Advancing past the first stop marks a.rs viewed and moves on.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert!(
-            session
-                .files
-                .iter()
-                .find(|file| file.path == "a.rs")
-                .unwrap()
-                .viewed
-        );
-        assert_eq!(session.selected_file().unwrap().path, "b.rs");
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
-
-        // Advancing past the last stop ends the walkthrough with a notice.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::End { .. }
-        ));
-        assert!(session.files.iter().all(|file| file.viewed));
-        assert!(tui_state.notice.unwrap().message.contains("zen complete"));
-    }
-
-    #[test]
-    fn zen_esc_ends_the_walkthrough_without_marking_viewed() {
-        let mut session = zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Esc),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::End { .. }
-        ));
-        assert!(session.files.iter().all(|file| !file.viewed));
-    }
-
-    #[test]
-    fn zen_esc_cancels_an_active_range_selection_first() {
-        let mut session = zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.advance(); // past the chapter card onto the first stop
-        zen::jump_to_stop(&mut session, &zen.stops[1].clone());
-        session.toggle_diff_range_selection();
-        assert!(session.has_active_diff_range());
-
-        // Esc falls through to the normal vocabulary, which cancels the
-        // range; the walkthrough survives.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Esc),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Fallthrough
-        ));
-    }
-
-    #[test]
-    fn zen_lets_review_keys_fall_through() {
-        let mut session = zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        // A comment key is not a zen navigation key: the caller routes it
-        // to the normal-mode vocabulary.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('c')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Fallthrough
-        ));
-    }
-
-    #[test]
-    fn zen_key_ends_the_walkthrough() {
-        let mut session = zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('T')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::End { .. }
-        ));
-        assert!(tui_state.notice.unwrap().message.contains("zen ended"));
-    }
-
-    /// A session where the spotlight covers only a.rs, leaving b.rs for the
-    /// glance board.
-    fn zen_session_with_glance() -> ReviewSession {
-        let mut session = zen_session();
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![crate::agent::ReviewChunk {
-                id: "c1".to_owned(),
-                title: "the important bit".to_owned(),
-                importance: crate::agent::ChunkImportance::Spotlight,
-                change_id: None,
-                rationale: None,
-                explanation: Some("This is the heart of the change.".to_owned()),
-                artifacts: Vec::new(),
-                parts: vec![crate::agent::ChunkPart {
-                    path: "a.rs".to_owned(),
-                    start_line: Some(1),
-                    end_line: Some(1),
-                }],
-            }],
-            ..Default::default()
-        });
-        session
-    }
-
-    #[test]
-    fn zen_opens_the_glance_board_after_the_last_stop() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        assert_eq!(zen.stops.len(), 2); // chapter card + one spotlight
-        assert!(zen.has_glance());
-
-        // Step off the chapter card onto the only stop.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert_eq!(zen.phase, zen::ZenPhase::Focus);
-
-        // Advancing past the only stop lands on the glance board instead of
-        // ending, so the boilerplate is skimmed rather than skipped.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert_eq!(zen.phase, zen::ZenPhase::Glance);
-
-        // `a` bulk-acknowledges the glance items and finishes the briefing.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('a')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::End { .. }
-        ));
-        assert!(session.files.iter().all(|file| file.viewed));
-        assert!(tui_state.notice.unwrap().message.contains("zen complete"));
-    }
-
-    #[test]
-    fn stale_glance_target_keeps_zen_and_live_review_unchanged() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(
-            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n"
-                .to_owned(),
-        ));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Glance;
-        zen.glance_rows[0].change_id = Some("bbb".to_owned());
-        let before = (
-            session.target.clone(),
-            session.selected,
-            session.diff_cursor,
-            session.diff_scroll,
-            session.focus,
-            session.selected_file().map(|file| file.path.clone()),
-        );
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-
-        assert_eq!(zen.phase, zen::ZenPhase::Glance);
-        assert_eq!(
-            (
-                session.target.clone(),
-                session.selected,
-                session.diff_cursor,
-                session.diff_scroll,
-                session.focus,
-                session.selected_file().map(|file| file.path.clone()),
-            ),
-            before
-        );
-        assert!(
-            tui_state
-                .notice
-                .as_ref()
-                .is_some_and(|notice| notice.message.contains("no longer resolves"))
-        );
-        assert_eq!(
-            zen_backend.calls.borrow().as_slice(),
-            [ReviewTarget::new("bbb-", "bbb")]
-        );
-    }
-
-    #[test]
-    fn zen_dot_refocuses_the_current_stop_after_wandering() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.advance(); // past the chapter card onto the stop
-        zen::jump_to_stop(&mut session, &zen.stops[1].clone());
-        let home = session.diff_cursor;
-
-        // Wander off the stop with normal line navigation.
-        session.move_diff_cursor(-1);
-        assert_ne!(session.diff_cursor, home);
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('.')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert_eq!(session.diff_cursor, home);
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "a.rs");
-    }
-
-    #[test]
-    fn zen_tab_toggles_between_focus_card_and_reading_view() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        assert_eq!(zen.phase, zen::ZenPhase::Focus);
-
-        for expected in [zen::ZenPhase::Reading, zen::ZenPhase::Focus] {
-            assert!(matches!(
-                handle_zen_key(
-                    KeyEvent::from(KeyCode::Tab),
-                    &mut zen,
-                    &mut session,
-                    &keymap,
-                    &zen_loader(&zen_backend),
-                    &mut tui_state,
-                ),
-                ZenKeyOutcome::Consumed
-            ));
-            assert_eq!(zen.phase, expected);
-        }
-    }
-
-    #[test]
-    fn zen_d_collapses_the_chapter_description_but_only_on_chapter_cards() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        assert!(!zen.chapter_description_collapsed);
-
-        // On the chapter card `d` toggles the description body.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('d')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert!(zen.chapter_description_collapsed);
-
-        // On a spotlight stop `d` is not a zen key: the normal vocabulary
-        // keeps it.
-        zen.advance();
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('d')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Fallthrough
-        ));
-        assert!(zen.chapter_description_collapsed);
-    }
-
-    #[test]
-    fn zen_e_opens_scrolls_and_closes_the_artifact_viewer() {
-        let mut session = zen_session_with_glance();
-        // Attach two exhibits to the spotlight chunk.
-        session.review_chunks[0].artifacts = vec![
-            crate::agent::Artifact {
-                title: "usage".to_owned(),
-                kind: crate::agent::ArtifactKind::Example,
-                body: "line one\nline two\nline three".to_owned(),
-            },
-            crate::agent::Artifact {
-                title: "test run".to_owned(),
-                kind: crate::agent::ArtifactKind::Output,
-                body: "3 passed".to_owned(),
-            },
-        ];
-        let spotlight_id = session.review_chunks[0].id.clone();
-        let artifacts: Vec<_> = session.review_chunks[0]
-            .artifacts
-            .iter()
-            .map(|artifact| crate::state::StepArtifact {
-                title: artifact.title.clone(),
-                kind: match artifact.kind {
-                    crate::agent::ArtifactKind::Example => crate::state::StepArtifactKind::Example,
-                    crate::agent::ArtifactKind::Output => crate::state::StepArtifactKind::Output,
-                    crate::agent::ArtifactKind::Diagram => crate::state::StepArtifactKind::Diagram,
-                    crate::agent::ArtifactKind::Note => crate::state::StepArtifactKind::Note,
-                },
-                body: artifact.body.clone(),
-            })
-            .collect();
-        for step in session
-            .sessions
-            .iter_mut()
-            .flat_map(|durable| durable.walkthroughs.iter_mut())
-            .flat_map(|walkthrough| walkthrough.steps.iter_mut())
-        {
-            if step.id == spotlight_id {
-                step.artifacts = artifacts.clone();
-            }
-        }
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.advance(); // chapter card -> the spotlight stop
-
-        // `e` on the chapter card would find no artifacts; on the stop it
-        // opens the viewer.
-        let mut press = |code: KeyCode, zen: &mut ZenState, session: &mut ReviewSession| {
-            assert!(matches!(
-                handle_zen_key(
-                    KeyEvent::from(code),
-                    zen,
-                    session,
-                    &keymap,
-                    &zen_loader(&zen_backend),
-                    &mut tui_state,
-                ),
-                ZenKeyOutcome::Consumed
-            ));
-        };
-        press(KeyCode::Char('e'), &mut zen, &mut session);
-        assert_eq!(
-            zen.phase,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 0
-            }
-        );
-
-        // j scrolls, l cycles to the next exhibit (resetting scroll), h
-        // wraps back, esc closes.
-        press(KeyCode::Char('j'), &mut zen, &mut session);
-        assert_eq!(
-            zen.phase,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 1
-            }
-        );
-        press(KeyCode::Char('l'), &mut zen, &mut session);
-        assert_eq!(
-            zen.phase,
-            zen::ZenPhase::Artifact {
-                index: 1,
-                scroll: 0
-            }
-        );
-        press(KeyCode::Char('h'), &mut zen, &mut session);
-        assert_eq!(
-            zen.phase,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 0
-            }
-        );
-        // The viewer is modal: normal keys are swallowed, not fallen through.
-        press(KeyCode::Char('c'), &mut zen, &mut session);
-        press(KeyCode::Esc, &mut zen, &mut session);
-        assert_eq!(zen.phase, zen::ZenPhase::Focus);
-    }
-
-    #[test]
-    fn mouse_wheel_scrolls_zen_artifact_viewer() {
-        let mut session = zen_session_with_glance();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Artifact {
-            index: 0,
-            scroll: 0,
-        };
-        let mut tui_state = TuiState {
-            zen: Some(zen),
-            ..TuiState::default()
-        };
-
-        assert!(handle_zen_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 10,
-                row: 10,
-                modifiers: KeyModifiers::empty(),
-            },
-            ratatui::prelude::Size::new(80, 24),
-            &mut session,
-            &mut tui_state,
-        ));
-        assert_eq!(
-            tui_state.zen.as_ref().unwrap().phase,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 3
-            }
-        );
-
-        assert!(handle_zen_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: 10,
-                row: 10,
-                modifiers: KeyModifiers::empty(),
-            },
-            ratatui::prelude::Size::new(80, 24),
-            &mut session,
-            &mut tui_state,
-        ));
-        assert_eq!(
-            tui_state.zen.as_ref().unwrap().phase,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 0
-            }
-        );
-    }
-
-    #[test]
-    fn mouse_wheel_on_zen_chapter_is_consumed_without_hidden_diff_move() {
-        let mut session = zen_session_with_glance();
-        let original_cursor = session.diff_cursor;
-        let zen = ZenState::new(&session, &[]).unwrap();
-        let mut tui_state = TuiState {
-            zen: Some(zen),
-            ..TuiState::default()
-        };
-
-        assert!(handle_zen_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 10,
-                row: 10,
-                modifiers: KeyModifiers::empty(),
-            },
-            ratatui::prelude::Size::new(80, 24),
-            &mut session,
-            &mut tui_state,
-        ));
-        assert_eq!(session.diff_cursor, original_cursor);
-    }
-
-    #[test]
-    fn mouse_wheel_scrolls_framed_zen_focus_snippet() {
-        let mut session = zen_session_with_glance();
-        session.zen_focus = Some(crate::app::ZenFocus {
-            path: session.selected_file().unwrap().path.clone(),
-            lines: Some((1, 1)),
-        });
-        let original_cursor = session.diff_cursor;
-        let zen = ZenState::new(&session, &[]).unwrap();
-        let mut tui_state = TuiState {
-            zen: Some(zen),
-            ..TuiState::default()
-        };
-        assert!(handle_zen_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                column: 10,
-                row: 10,
-                modifiers: KeyModifiers::empty(),
-            },
-            ratatui::prelude::Size::new(80, 24),
-            &mut session,
-            &mut tui_state,
-        ));
-        assert!(session.diff_cursor > original_cursor);
-    }
-
-    #[test]
-    fn zen_full_screen_phases_own_unsupported_pointer_events() {
-        let size = ratatui::prelude::Size::new(80, 20);
-        for phase in [
-            zen::ZenPhase::Focus,
-            zen::ZenPhase::Glance,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 0,
-            },
-        ] {
-            let mut session = zen_session_with_glance();
-            let mut zen = ZenState::new(&session, &[]).unwrap();
-            zen.phase = phase;
-            let mut tui_state = TuiState {
-                terminal_size: size,
-                zen: Some(zen),
-                ..TuiState::default()
-            };
-            for kind in [
-                MouseEventKind::Down(MouseButton::Left),
-                MouseEventKind::Drag(MouseButton::Left),
-                MouseEventKind::Up(MouseButton::Left),
-            ] {
-                assert!(handle_zen_mouse_event(
-                    MouseEvent {
-                        kind,
-                        column: 1,
-                        row: 1,
-                        modifiers: KeyModifiers::NONE,
-                    },
-                    size,
-                    &mut session,
-                    &mut tui_state,
-                ));
-            }
-        }
-
-        let mut session = zen_session_with_glance();
-        let mut takeover = ZenState::new(&session, &[]).unwrap();
-        takeover.phase = zen::ZenPhase::Focus;
-        let mut mode = Mode::Normal;
-        let mut tui_state = TuiState {
-            terminal_size: size,
-            zen: Some(takeover),
-            diff_drag: Some(DiffDrag {
-                start_row: 0,
-                start_file_index: 0,
-                current_row: 0,
-                saw_drag: true,
-            }),
-            ..TuiState::default()
-        };
-        handle_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 1,
-                row: 1,
-                modifiers: KeyModifiers::NONE,
-            },
-            size,
-            &mut session,
-            &mut mode,
-            &mut tui_state,
-        );
-        assert_eq!(tui_state.diff_drag, None);
-
-        let mut session = zen_session_with_glance();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Reading;
-        let mut tui_state = TuiState {
-            terminal_size: size,
-            zen: Some(zen),
-            ..TuiState::default()
-        };
-        assert!(!handle_zen_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 1,
-                row: 1,
-                modifiers: KeyModifiers::NONE,
-            },
-            size,
-            &mut session,
-            &mut tui_state,
-        ));
-    }
-
     #[test]
     fn target_and_view_modals_block_click_wheel_and_drag_from_review() {
         let diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n-old\n-old2\n-old3\n-old4\n+new\n+new2\n+new3\n+new4\n";
@@ -11215,308 +9132,6 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn zen_e_without_artifacts_notices_instead_of_opening() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('e')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-        assert_eq!(zen.phase, zen::ZenPhase::Focus);
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("no artifacts on this stop")
-        );
-    }
-
-    #[test]
-    fn glance_board_enter_jumps_to_the_entry_and_ends_zen() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(30, 4),
-            ..TuiState::default()
-        };
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Glance;
-
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Enter),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::End { .. }
-        ));
-        assert_eq!(session.selected_file().unwrap().path, "b.rs");
-        assert_eq!(session.diff_scroll, 0);
-        assert!(tui_state.notice.unwrap().message.contains("jumped to b.rs"));
-    }
-
-    #[test]
-    fn glance_line_target_places_visible_cursor() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(30, 4),
-            ..TuiState::default()
-        };
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Glance;
-        zen.glance_rows[0].part.as_mut().unwrap().start_line = Some(1);
-
-        let _ = handle_zen_key(
-            KeyEvent::from(KeyCode::Enter),
-            &mut zen,
-            &mut session,
-            &keymap,
-            &zen_loader(&zen_backend),
-            &mut tui_state,
-        );
-        assert!(diff_cursor_is_visible(
-            &session,
-            current_diff_inner(&session, &tui_state),
-            &tui_state,
-        ));
-    }
-
-    #[test]
-    fn glance_board_swallows_normal_mode_keys() {
-        let mut session = zen_session_with_glance();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(String::new()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.phase = zen::ZenPhase::Glance;
-
-        // 'c' would open a comment editor in normal mode; the board is a
-        // bulk-skim screen, so it must not fire invisibly underneath.
-        assert!(matches!(
-            handle_zen_key(
-                KeyEvent::from(KeyCode::Char('c')),
-                &mut zen,
-                &mut session,
-                &keymap,
-                &zen_loader(&zen_backend),
-                &mut tui_state,
-            ),
-            ZenKeyOutcome::Consumed
-        ));
-    }
-
-    /// A session where chunk two is anchored to a stack change `bbb`.
-    fn stacked_zen_session() -> ReviewSession {
-        let mut session = zen_session();
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![
-                crate::agent::ReviewChunk {
-                    id: "c1".to_owned(),
-                    title: "home stop".to_owned(),
-                    importance: crate::agent::ChunkImportance::Spotlight,
-                    change_id: None,
-                    rationale: None,
-                    explanation: None,
-                    artifacts: Vec::new(),
-                    parts: vec![crate::agent::ChunkPart {
-                        path: "a.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    }],
-                },
-                crate::agent::ReviewChunk {
-                    id: "c2".to_owned(),
-                    title: "stacked stop".to_owned(),
-                    importance: crate::agent::ChunkImportance::Spotlight,
-                    change_id: Some("bbb".to_owned()),
-                    rationale: None,
-                    explanation: Some("The second change of the stack.".to_owned()),
-                    artifacts: Vec::new(),
-                    parts: vec![crate::agent::ChunkPart {
-                        path: "b.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    }],
-                },
-            ],
-            ..Default::default()
-        });
-        session
-    }
-
-    #[test]
-    fn zen_retargets_to_a_change_anchored_stop_without_going_stale() {
-        let mut session = stacked_zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Ok(r#"diff --git a/b.rs b/b.rs
---- a/b.rs
-+++ b/b.rs
-@@ -1 +1 @@
--old
-+new
-"#
-        .to_owned()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        session.file_pane_visible = false;
-        // [home chapter, home stop, bbb chapter, bbb stop]: the chapter
-        // card for bbb already retargets the review to that change.
-        assert_eq!(zen.stops.len(), 4);
-
-        // Advancing to the bbb-anchored stop retargets the review to that
-        // change's own diff (stacked-PR style) without ending zen.
-        for _ in 0..3 {
-            assert!(matches!(
-                handle_zen_key(
-                    KeyEvent::from(KeyCode::Enter),
-                    &mut zen,
-                    &mut session,
-                    &keymap,
-                    &zen_loader(&zen_backend),
-                    &mut tui_state,
-                ),
-                ZenKeyOutcome::Consumed
-            ));
-        }
-        assert_eq!(session.target, ReviewTarget::new("bbb-", "bbb"));
-        assert!(!zen.is_stale(&session));
-        assert!(!session.file_pane_visible);
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
-        assert_eq!(
-            zen_backend.calls.borrow().as_slice(),
-            [ReviewTarget::new("bbb-", "bbb")]
-        );
-
-        // Ending the walkthrough returns to the home target.
-        tui_state.zen = Some(zen);
-        let mut mode = Mode::Normal;
-        handle_key_event(
-            KeyEvent::from(KeyCode::Esc),
-            &mut session,
-            &mut mode,
-            &keymap,
-            &zen_loader(&zen_backend),
-            &mut tui_state,
-        )
-        .unwrap();
-        assert!(tui_state.zen.is_none());
-        assert_eq!(session.target, ReviewTarget::trunk_to_current());
-        assert_eq!(
-            zen_backend.calls.borrow().as_slice(),
-            [
-                ReviewTarget::new("bbb-", "bbb"),
-                ReviewTarget::trunk_to_current(),
-            ]
-        );
-    }
-
-    #[test]
-    fn zen_stays_put_when_a_change_anchored_stop_fails_to_load() {
-        let mut session = stacked_zen_session();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let zen_backend = MockJjBackend::with_diff(Err("boom".to_owned()));
-        let mut tui_state = TuiState::default();
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-
-        // Step off the home chapter onto the home stop, then try to enter
-        // the bbb chapter (which needs its change's diff).
-        for _ in 0..2 {
-            assert!(matches!(
-                handle_zen_key(
-                    KeyEvent::from(KeyCode::Enter),
-                    &mut zen,
-                    &mut session,
-                    &keymap,
-                    &zen_loader(&zen_backend),
-                    &mut tui_state,
-                ),
-                ZenKeyOutcome::Consumed
-            ));
-        }
-
-        // The load failed: still on the home stop, target unchanged, and
-        // the notice explains what happened.
-        assert_eq!(zen.index, 1);
-        assert_eq!(session.target, ReviewTarget::trunk_to_current());
-        let notice = tui_state.notice.unwrap();
-        assert_eq!(notice.level, UiNoticeLevel::Error);
-        assert!(notice.message.contains("bbb"));
-    }
-
-    const REFRESHED_DIFF: &str = r#"diff --git a/a.rs b/a.rs
---- a/a.rs
-+++ b/a.rs
-@@ -1 +1 @@
--old
-+newer
-diff --git a/b.rs b/b.rs
---- a/b.rs
-+++ b/b.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/c.rs b/c.rs
---- a/c.rs
-+++ b/c.rs
-@@ -1 +1 @@
--old
-+new
-"#;
-
-    #[test]
-    fn repo_polling_baselines_then_refreshes_in_place_on_change() {
-        let mut session = zen_session();
-        session.file_pane_visible = false;
-        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-
-        // First poll only records the baseline: no reload, no notice.
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert!(backend.calls.borrow().is_empty());
-        assert!(tui_state.notice.is_none());
-
-        // Unchanged fingerprint: still nothing.
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert!(backend.calls.borrow().is_empty());
-
-        // New work landed: the review reloads in place, preserving view
-        // state (hidden file pane) and picking up the new file.
-        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert_eq!(backend.calls.borrow().len(), 1);
-        assert!(!session.file_pane_visible);
-        assert!(session.files.iter().any(|file| file.path == "c.rs"));
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("repository changed")
-        );
-    }
-
-    #[test]
     fn fingerprint_events_report_range_updates_and_at_moves() {
         let events = fingerprint_events(
             "@ old c0\nold c0\nstay c1\nrewrite c2\n",
@@ -11556,153 +9171,12 @@ diff --git a/c.rs b/c.rs
     }
 
     #[test]
-    fn repo_polling_notice_and_activity_include_specific_events() {
-        let mut session = zen_session();
-        session.files[0].viewed = true;
-        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-        *backend.fingerprint.borrow_mut() = Ok("@ old c0\nold c0\n".to_owned());
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        *backend.fingerprint.borrow_mut() = Ok("@ new c1\nnew c1\n".to_owned());
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        let notice = tui_state.notice.unwrap().message;
-        assert!(notice.contains("@ moved to new"));
-        assert!(notice.contains("change new entered range"));
-        assert!(notice.contains("change old left range"));
-        assert!(notice.contains("1 viewed file changed — needs re-review"));
-        assert!(
-            tui_state
-                .activity
-                .iter()
-                .any(|event| event.message == "@ moved to new")
-        );
-        // Only the file that actually changed in this refresh is named:
-        // c.rs is new; a.rs/b.rs carried identical content and stay quiet.
-        assert!(
-            tui_state
-                .activity
-                .iter()
-                .any(|event| event.message == "c.rs appeared (+1 −1)")
-        );
-        assert!(
-            tui_state
-                .activity
-                .iter()
-                .any(|event| event.message == "a.rs updated — was viewed, needs re-review")
-        );
-        assert!(
-            !tui_state
-                .activity
-                .iter()
-                .any(|event| event.message.starts_with("b.rs"))
-        );
-    }
-
-    #[test]
     fn live_refresh_runs_under_read_only_popups() {
         assert!(mode_allows_live_refresh(&Mode::Normal));
         assert!(mode_allows_live_refresh(&Mode::Activity(
             ActivityListState::new()
         )));
         assert!(mode_allows_live_refresh(&Mode::Help));
-    }
-
-    #[test]
-    fn repo_polling_is_throttled_and_ignores_fingerprint_errors() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
-
-        // Within the poll interval: the change is not even inspected.
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert!(backend.calls.borrow().is_empty());
-
-        // Transient jj failures skip the tick without noise or baseline
-        // loss.
-        *backend.fingerprint.borrow_mut() = Err("locked".to_owned());
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert!(backend.calls.borrow().is_empty());
-        assert!(tui_state.notice.is_none());
-    }
-
-    #[test]
-    fn persistent_fingerprint_failures_surface_an_error_then_recovery() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-
-        *backend.fingerprint.borrow_mut() =
-            Err("jj log failed fingerprinting trunk()..@".to_owned());
-        for tick in 1..FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
-            tui_state.last_repo_poll = None;
-            maybe_refresh_review(&loader, &mut session, &mut tui_state);
-            assert!(tui_state.notice.is_none(), "quiet failure #{tick}");
-        }
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        let notice = tui_state.notice.clone().expect("failure notice");
-        assert_eq!(notice.level, UiNoticeLevel::Error);
-        assert!(notice.message.contains("live refresh is failing"));
-        assert!(notice.message.contains("jj log failed fingerprinting"));
-
-        // Further failures do not re-post (no footer spam).
-        tui_state.notice = None;
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        assert!(tui_state.notice.is_none());
-
-        // Recovery replaces the warning and resets the counter.
-        *backend.fingerprint.borrow_mut() = Ok("baseline".to_owned());
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        let notice = tui_state.notice.clone().expect("recovery notice");
-        assert_eq!(notice.level, UiNoticeLevel::Info);
-        assert!(notice.message.contains("live refresh recovered"));
-        assert_eq!(tui_state.fingerprint_failures, 0);
-    }
-
-    #[test]
-    fn refresh_keeps_an_active_zen_walkthrough_alive() {
-        let dir = tempfile::tempdir().unwrap();
-        let overlay_path = dir.path().join("agent.json");
-        let mut session = zen_session();
-        let overlay = crate::agent::AgentOverlay {
-            chunks: session.review_chunks.clone(),
-            ..Default::default()
-        };
-        overlay.save(&overlay_path).unwrap();
-        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            agent_overlay_path: Some(overlay_path),
-            ..TuiState::default()
-        };
-        let mut zen = ZenState::new(&session, &[]).unwrap();
-        zen.advance(); // chapter card -> first stop
-        zen.advance(); // -> second stop (b.rs)
-        tui_state.zen = Some(zen);
-
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
-        tui_state.last_repo_poll = None;
-        maybe_refresh_review(&loader, &mut session, &mut tui_state);
-
-        // The walkthrough survived the reload: stops rebuilt from the
-        // reapplied overlay chunks, position kept, staleness key updated.
-        let zen = tui_state.zen.as_ref().unwrap();
-        assert_eq!(zen.source, zen::ZenSource::Curated);
-        assert_eq!(zen.index, 2);
-        assert!(!zen.is_stale(&session));
-        assert!(!session.review_chunks.is_empty());
-        assert_eq!(session.zen_focus.as_ref().unwrap().path, "b.rs");
     }
 
     const CONTEXT_EXPANSION_DIFF: &str = r#"diff --git a/a.txt b/a.txt
@@ -12270,563 +9744,6 @@ diff --git a/c.rs b/c.rs
     }
 
     #[test]
-    fn starting_zen_with_no_files_shows_a_notice() {
-        let mut session = snapshot_session("");
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState::default();
-        let mut mode = Mode::Normal;
-
-        handle_normal_action(
-            Action::Zen,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-
-        assert!(matches!(mode, Mode::Normal));
-        assert!(tui_state.zen.is_none());
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("nothing to review")
-        );
-    }
-
-    #[test]
-    fn starting_zen_without_chunks_tours_files_and_hides_the_pane() {
-        let mut session = zen_session();
-        session.review_chunks.clear();
-        session.sessions.clear();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState::default();
-        let mut mode = Mode::Normal;
-
-        handle_normal_action(
-            Action::Zen,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-
-        assert!(matches!(mode, Mode::Normal));
-        let zen = tui_state.zen.as_ref().unwrap();
-        assert_eq!(zen.stops.len(), 3); // opening chapter + one stop per file
-        assert!(zen.restore_file_pane);
-        assert!(!session.file_pane_visible);
-        // Zen lands on the opening chapter card: nothing framed yet, parked
-        // at the top of the change.
-        assert!(session.zen_focus.is_none());
-        assert_eq!(session.selected_file().unwrap().path, "a.rs");
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("touring 2 file(s)")
-        );
-    }
-
-    #[test]
-    fn focus_and_legacy_zen_start_end_without_stacking_presentation_state() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        tui_state.enter_attention_focus(&mut session);
-        assert!(tui_state.attention_focus.is_some());
-
-        seed_zen_tour(&mut session, &loader, &mut tui_state);
-        assert!(tui_state.attention_focus.is_none());
-        assert!(tui_state.zen.is_some());
-        assert!(tui_state.file_pane.presentation_scope.is_some());
-
-        let mut mode = Mode::Normal;
-        handle_normal_action(
-            Action::AttentionFocus,
-            &mut session,
-            &mut mode,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert!(tui_state.attention_focus.is_none());
-        assert!(tui_state.zen.is_some());
-
-        let zen = tui_state.zen.take().unwrap();
-        finish_zen_presentation(&mut session, &mut tui_state, &zen);
-        assert!(tui_state.zen.is_none());
-        assert!(tui_state.file_pane.presentation_scope.is_none());
-        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
-        assert!(session.stream_mode);
-    }
-
-    #[test]
-    fn quit_cleanup_restores_focus_or_zen_ephemeral_view_state() {
-        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
-        let mut focused = attention_session(raw, "a.rs", Salience::Skim);
-        focused.focus = Focus::Files;
-        focused.fold_context = false;
-        focused.expanded_skim_folds.insert("prior-peek".into());
-        let mut focus_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        focus_state.enter_attention_focus(&mut focused);
-        finish_ephemeral_views_on_quit(&mut focused, &mut focus_state);
-        assert!(focus_state.attention_focus.is_none());
-        assert_eq!(focus_state.file_pane.explicit_override, Some(true));
-        assert_eq!(focused.focus, Focus::Files);
-        assert!(!focused.fold_context);
-        assert!(focused.expanded_skim_folds.contains("prior-peek"));
-
-        let mut zen_session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut zen_state = TuiState::default();
-        seed_zen_tour(&mut zen_session, &loader, &mut zen_state);
-        assert!(zen_state.zen.is_some());
-        finish_ephemeral_views_on_quit(&mut zen_session, &mut zen_state);
-        assert!(zen_state.zen.is_none());
-        assert!(zen_state.file_pane.presentation_scope.is_none());
-        assert!(zen_session.stream_mode);
-        assert!(zen_session.zen_focus.is_none());
-    }
-
-    #[test]
-    fn zen_scope_hides_forced_pane_geometry_and_hit_testing_then_restores_override() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let size = ratatui::prelude::Size::new(100, 20);
-        let mut tui_state = TuiState {
-            terminal_size: size,
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-
-        seed_zen_tour(&mut session, &loader, &mut tui_state);
-
-        assert!(tui_state.zen.is_some());
-        assert_eq!(session.focus, Focus::Diff);
-        assert_eq!(
-            tui_state.file_pane.presentation_scope,
-            Some(PresentationFilePaneScope {
-                prior_explicit_override: Some(true),
-            })
-        );
-        for phase in [
-            zen::ZenPhase::Focus,
-            zen::ZenPhase::Reading,
-            zen::ZenPhase::Glance,
-            zen::ZenPhase::Artifact {
-                index: 0,
-                scroll: 0,
-            },
-        ] {
-            tui_state.zen.as_mut().unwrap().phase = phase;
-            assert!(!tui_state.effective_file_pane(&session, size.width).visible);
-            assert_eq!(
-                tui_state
-                    .review_layout(&session, Rect::new(0, 0, size.width, size.height))
-                    .files
-                    .width,
-                0
-            );
-        }
-
-        // Reading uses the normal pane hit-testing path. A click where the
-        // forced-visible files pane would have been must still target the
-        // full-width diff while the presentation scope is active.
-        tui_state.zen.as_mut().unwrap().phase = zen::ZenPhase::Reading;
-        session.focus = Focus::Files;
-        let mut mode = Mode::Normal;
-        handle_mouse_event(
-            MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 5,
-                row: 1,
-                modifiers: KeyModifiers::NONE,
-            },
-            size,
-            &mut session,
-            &mut mode,
-            &mut tui_state,
-        );
-        assert_eq!(session.focus, Focus::Diff);
-
-        handle_key_event(
-            KeyEvent::from(KeyCode::Esc),
-            &mut session,
-            &mut mode,
-            &keymap,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-
-        assert!(tui_state.zen.is_none());
-        assert!(tui_state.file_pane.presentation_scope.is_none());
-        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
-        assert!(tui_state.effective_file_pane(&session, size.width).visible);
-        assert_eq!(
-            tui_state
-                .review_layout(&session, Rect::new(0, 0, size.width, size.height))
-                .files
-                .width,
-            30
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn present_end_restores_forced_pane_override() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
-
-        apply_present_command(
-            crate::acp::socket::PresentCommand::End,
-            &loader,
-            &mut session,
-            &Mode::Normal,
-            &mut tui_state,
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert!(tui_state.zen.is_none());
-        assert!(tui_state.file_pane.presentation_scope.is_none());
-        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
-        assert!(tui_state.effective_file_pane(&session, 100).visible);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn present_reload_failure_restores_forced_pane_override() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
-        assert!(!tui_state.effective_file_pane(&session, 100).visible);
-
-        session.replace_diff(
-            session.target.clone(),
-            DiffSet::parse("").expect("empty diff parses"),
-        );
-        let error = reload_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
-
-        assert!(error.1.contains("no slides"));
-        assert!(tui_state.zen.is_none());
-        assert!(tui_state.file_pane.presentation_scope.is_none());
-        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
-        assert!(tui_state.effective_file_pane(&session, 100).visible);
-    }
-
-    #[test]
-    fn focus_keyboard_zen_no_slides_keeps_active_and_underlying_snapshots() {
-        let mut session = snapshot_session("");
-        session.focus = Focus::Files;
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let mut mode = Mode::Normal;
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        let underlying = (session.focus, tui_state.file_pane);
-        tui_state.enter_attention_focus(&mut session);
-        let active = (
-            session.focus,
-            session.stream_cursor,
-            session.stream_scroll,
-            session.fold_context,
-        );
-
-        handle_key_event(
-            KeyEvent::from(KeyCode::Char('T')),
-            &mut session,
-            &mut mode,
-            &keymap,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert!(tui_state.attention_focus.is_some());
-        assert!(tui_state.zen.is_none());
-        assert_eq!(
-            (
-                session.focus,
-                session.stream_cursor,
-                session.stream_scroll,
-                session.fold_context,
-            ),
-            active
-        );
-        tui_state.leave_attention_focus(&mut session);
-        assert_eq!((session.focus, tui_state.file_pane), underlying);
-    }
-
-    #[test]
-    fn focus_keyboard_zen_unavailable_stop_keeps_active_and_underlying_snapshots() {
-        let mut session = unavailable_change_anchored_zen_session();
-        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
-        backend.stack = vec![stack_change("abc", "change")];
-        let loader = zen_loader(&backend);
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let mut mode = Mode::Normal;
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        let underlying = (session.selected, session.stream_cursor, tui_state.file_pane);
-        tui_state.enter_attention_focus(&mut session);
-        session.move_stream_cursor(1);
-        let active = (
-            session.selected,
-            session.stream_cursor,
-            session.stream_scroll,
-        );
-
-        handle_key_event(
-            KeyEvent::from(KeyCode::Char('T')),
-            &mut session,
-            &mut mode,
-            &keymap,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert!(tui_state.attention_focus.is_some());
-        assert!(tui_state.zen.is_none());
-        assert_eq!(
-            (
-                session.selected,
-                session.stream_cursor,
-                session.stream_scroll
-            ),
-            active
-        );
-        tui_state.leave_attention_focus(&mut session);
-        assert_eq!(
-            (session.selected, session.stream_cursor, tui_state.file_pane),
-            underlying
-        );
-    }
-
-    #[test]
-    fn focus_keyboard_zen_success_exits_focus_cleanly() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-        let mut mode = Mode::Normal;
-        let mut tui_state = TuiState::default();
-        tui_state.enter_attention_focus(&mut session);
-
-        handle_key_event(
-            KeyEvent::from(KeyCode::Char('T')),
-            &mut session,
-            &mut mode,
-            &keymap,
-            &loader,
-            &mut tui_state,
-        )
-        .unwrap();
-        assert!(tui_state.attention_focus.is_none());
-        assert!(tui_state.zen.is_some());
-        assert!(tui_state.file_pane.presentation_scope.is_some());
-    }
-
-    #[test]
-    fn focus_presenter_zen_no_slides_keeps_active_and_underlying_snapshots() {
-        let mut session = snapshot_session("");
-        session.focus = Focus::Files;
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        let underlying = (session.focus, tui_state.file_pane);
-        tui_state.enter_attention_focus(&mut session);
-        let active = (session.focus, session.stream_cursor, session.fold_context);
-
-        let error = start_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
-        assert!(error.1.contains("nothing to review"));
-        assert!(tui_state.attention_focus.is_some());
-        assert!(tui_state.zen.is_none());
-        assert_eq!(
-            (session.focus, session.stream_cursor, session.fold_context),
-            active
-        );
-        tui_state.leave_attention_focus(&mut session);
-        assert_eq!((session.focus, tui_state.file_pane), underlying);
-    }
-
-    #[test]
-    fn focus_presenter_zen_unavailable_stop_keeps_active_and_underlying_snapshots() {
-        let mut session = unavailable_change_anchored_zen_session();
-        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
-        backend.stack = vec![stack_change("abc", "change")];
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState {
-            terminal_size: ratatui::prelude::Size::new(100, 20),
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        let underlying = (session.selected, session.stream_cursor, tui_state.file_pane);
-        tui_state.enter_attention_focus(&mut session);
-        session.move_stream_cursor(1);
-        let active = (
-            session.selected,
-            session.stream_cursor,
-            session.stream_scroll,
-        );
-
-        let error = start_present_tour(&loader, &mut session, &mut tui_state).unwrap_err();
-        assert!(error.1.contains("unavailable"));
-        assert!(tui_state.attention_focus.is_some());
-        assert!(tui_state.zen.is_none());
-        assert_eq!(
-            (
-                session.selected,
-                session.stream_cursor,
-                session.stream_scroll
-            ),
-            active
-        );
-        tui_state.leave_attention_focus(&mut session);
-        assert_eq!(
-            (session.selected, session.stream_cursor, tui_state.file_pane),
-            underlying
-        );
-    }
-
-    #[test]
-    fn focus_presenter_zen_success_exits_focus_cleanly() {
-        let mut session = zen_session();
-        let backend = MockJjBackend::with_diff(Ok(String::new()));
-        let loader = zen_loader(&backend);
-        let mut tui_state = TuiState::default();
-        tui_state.enter_attention_focus(&mut session);
-
-        start_present_tour(&loader, &mut session, &mut tui_state).unwrap();
-        assert!(tui_state.attention_focus.is_none());
-        assert!(tui_state.zen.is_some());
-        assert!(tui_state.file_pane.presentation_scope.is_some());
-    }
-
-    #[test]
-    fn unavailable_initial_zen_stop_restores_startup_state() {
-        let mut session = unavailable_change_anchored_zen_session();
-        let mut backend = MockJjBackend::with_diff(Err("unavailable".into()));
-        backend.stack = vec![stack_change("abc", "change")];
-        let loader = ReviewLoader {
-            ignore_globs: Vec::new(),
-            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
-            jj: &backend,
-        };
-        let mut tui_state = TuiState {
-            file_pane: FilePaneState {
-                explicit_override: Some(true),
-                ..FilePaneState::default()
-            },
-            ..TuiState::default()
-        };
-        let before = (
-            session.selected,
-            session.diff_scroll,
-            session.diff_cursor,
-            session.file_pane_visible,
-        );
-        seed_zen_tour(&mut session, &loader, &mut tui_state);
-        assert!(tui_state.zen.is_none());
-        assert!(tui_state.file_pane.presentation_scope.is_none());
-        assert_eq!(tui_state.file_pane.explicit_override, Some(true));
-        assert_eq!(
-            (
-                session.selected,
-                session.diff_scroll,
-                session.diff_cursor,
-                session.file_pane_visible,
-            ),
-            before
-        );
-        assert!(
-            tui_state
-                .notice
-                .unwrap()
-                .message
-                .contains("could not start")
-        );
-    }
-
-    #[test]
     fn large_change_nudge_appends_to_load_notice() {
         let mut session = snapshot_session("");
         session.nudge_files = 1;
@@ -12938,5 +9855,432 @@ diff --git a/c.rs b/c.rs
 
         assert_eq!(chooser.query, "gG");
         assert_eq!(chooser.filtered, vec![1]);
+    }
+
+    const POLLING_DIFF: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    const REFRESHED_DIFF: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+newer\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/c.rs b/c.rs\n--- a/c.rs\n+++ b/c.rs\n@@ -1 +1 @@\n-old\n+new\n";
+
+    fn polling_session() -> ReviewSession {
+        snapshot_session(POLLING_DIFF)
+    }
+
+    fn polling_loader(backend: &MockJjBackend) -> ReviewLoader<'_> {
+        ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: backend,
+        }
+    }
+
+    #[test]
+    fn annotation_selection_tracks_exact_owner_across_click_and_keyboard_navigation() {
+        let raw = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n";
+        let mut session = attention_session(raw, "a.txt", Salience::Supporting);
+        session.file_pane_visible = false;
+        session.focus = Focus::Diff;
+        session.agent_identity = crate::state::Identity {
+            kind: AuthorKind::Agent,
+            name: "configured-review-agent".into(),
+        };
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let configured_agent = session.agent_identity.clone();
+        let first = crate::attention::target_for_diff(&files, "a.txt", Some(1), None).unwrap();
+        let second = crate::attention::target_for_diff(&files, "a.txt", Some(2), None).unwrap();
+        session.sessions[0].attention_regions.clear();
+        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+            id: "guided".into(),
+            steps: vec![WalkthroughStep {
+                id: "guided-lines".into(),
+                author: Some(configured_agent.clone()),
+                title: Some("Agent-guided lines".into()),
+                why: Some("Each line has its own card owner".into()),
+                body: Some("Use the card at the current line".into()),
+                artifacts: vec![crate::state::StepArtifact {
+                    title: "evidence".into(),
+                    kind: crate::state::StepArtifactKind::Example,
+                    body: "CURRENT ROW ARTIFACT".into(),
+                }],
+                target: first,
+                extra_targets: vec![second],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        let durable = review::active_session_for_loaded_review(
+            &session.sessions,
+            &session.repo,
+            &session.target.base,
+            &session.target.rev,
+        )
+        .unwrap();
+        let persisted_guided = durable.walkthroughs[0]
+            .steps
+            .iter()
+            .find(|step| step.id == "guided-lines")
+            .unwrap();
+        assert_eq!(persisted_guided.author.as_ref(), Some(&configured_agent));
+        assert!(persisted_guided.target.anchor.is_some());
+        assert_eq!(persisted_guided.extra_targets.len(), 1);
+        assert!(persisted_guided.extra_targets[0].anchor.is_some());
+        let effective = crate::attention::resolve_effective_attention(
+            durable,
+            &persisted_guided.target,
+            &files,
+        );
+        assert_eq!(effective.salience, crate::state::Salience::Spotlight);
+        assert_eq!(effective.source, Some(crate::state::SalienceSource::Agent));
+        let projected_card = annotation_card::AnnotationCard::from_walkthrough_step(
+            persisted_guided,
+            &persisted_guided.target,
+            0,
+            None,
+            false,
+        );
+        let projected_layout = projected_card.layout(
+            72,
+            annotation_card::AnnotationCardDensity::Expanded,
+            false,
+            "E",
+        );
+        let rendered_card = (0..projected_layout.len())
+            .map(|index| projected_layout.plain_line(index))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered_card.contains("agent:configured-review-agent"));
+
+        let size = ratatui::prelude::Size::new(100, 36);
+        let mut tui_state = TuiState {
+            terminal_size: size,
+            ..TuiState::default()
+        };
+        let layout = tui_state.review_layout(&session, Rect::new(0, 0, size.width, size.height));
+        let inner = inner_bordered(layout.diff);
+        let first_source = annotation_card::AnnotationSource::Walkthrough {
+            step_id: "guided-lines".into(),
+            part: 0,
+        };
+        let visible = tui_state
+            .diff_viewport
+            .annotation_visible_row(&session, inner, &first_source)
+            .expect("first agent card visible");
+        let mut mode = Mode::Normal;
+        handle_mouse_event(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: inner.x + 4,
+                row: inner.y + visible as u16,
+                modifiers: KeyModifiers::NONE,
+            },
+            size,
+            &mut session,
+            &mut mode,
+            &mut tui_state,
+        );
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(first_source)
+        );
+        assert!(selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(
+                &session,
+                &tui_state,
+                selected_onboarding_target(&session, &tui_state),
+                None,
+            ),
+            Channel::Delegation
+        );
+        render::reconcile_diff_viewport(
+            &mut session,
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width.saturating_sub(12),
+                inner.height,
+            ),
+            true,
+            &tui_state,
+        );
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "guided-lines".into(),
+                part: 0,
+            }),
+            "layout reflow on the same owner must preserve exact card selection"
+        );
+
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        let second_owner = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(2))
+            .unwrap();
+        assert_eq!(session.diff_cursor, second_owner);
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            None
+        );
+        assert!(!selected_onboarding_target(&session, &tui_state));
+        assert_eq!(
+            inferred_comment_channel(&session, &tui_state, false, None),
+            Channel::Note
+        );
+
+        handle_normal_action(
+            Action::ToggleAnnotationArtifacts,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        handle_normal_action(
+            Action::MoveUp,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(true),
+            "E on the second owner must not expand the formerly selected first card"
+        );
+        handle_normal_action(
+            Action::MoveDown,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(false),
+            "the current-row card was the one expanded by E"
+        );
+    }
+
+    #[test]
+    fn attention_focus_pins_current_spotlight_and_preserves_card_expansion() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Spotlight);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+        session.sessions[0]
+            .walkthroughs
+            .push(crate::state::Walkthrough {
+                id: "walk".into(),
+                steps: vec![WalkthroughStep {
+                    id: "spot".into(),
+                    target: target.clone(),
+                    title: Some("Current narration".into()),
+                    why: Some("This is the mental-model delta".into()),
+                    artifacts: vec![crate::state::StepArtifact {
+                        title: "example".into(),
+                        kind: crate::state::StepArtifactKind::Example,
+                        body: "expanded body".into(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let owner = session.stream_walkthrough_card_owner(&target).unwrap();
+        session.select_stream_row(owner, false);
+        let mut tui_state = TuiState {
+            terminal_size: ratatui::prelude::Size::new(100, 24),
+            ..TuiState::default()
+        };
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(true)
+        );
+
+        tui_state.enter_attention_focus(&mut session);
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "spot".into(),
+                part: 0,
+            })
+        );
+        tui_state.leave_attention_focus(&mut session);
+        assert_eq!(
+            tui_state
+                .diff_viewport
+                .toggle_annotation_artifacts(&session),
+            Some(false),
+            "the exact pre-Focus artifact expansion was restored"
+        );
+    }
+
+    #[test]
+    fn persistent_fingerprint_failures_surface_an_error_then_recovery() {
+        let mut session = polling_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = polling_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        *backend.fingerprint.borrow_mut() =
+            Err("jj log failed fingerprinting trunk()..@".to_owned());
+        for tick in 1..FINGERPRINT_FAILURE_NOTICE_THRESHOLD {
+            tui_state.last_repo_poll = None;
+            maybe_refresh_review(&loader, &mut session, &mut tui_state);
+            assert!(tui_state.notice.is_none(), "quiet failure #{tick}");
+        }
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.clone().expect("failure notice");
+        assert_eq!(notice.level, UiNoticeLevel::Error);
+        assert!(notice.message.contains("live refresh is failing"));
+        assert!(notice.message.contains("jj log failed fingerprinting"));
+
+        // Further failures do not re-post (no footer spam).
+        tui_state.notice = None;
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(tui_state.notice.is_none());
+
+        // Recovery replaces the warning and resets the counter.
+        *backend.fingerprint.borrow_mut() = Ok("baseline".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.clone().expect("recovery notice");
+        assert_eq!(notice.level, UiNoticeLevel::Info);
+        assert!(notice.message.contains("live refresh recovered"));
+        assert_eq!(tui_state.fingerprint_failures, 0);
+    }
+
+    #[test]
+    fn repo_polling_baselines_then_refreshes_in_place_on_change() {
+        let mut session = polling_session();
+        session.file_pane_visible = false;
+        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
+        let loader = polling_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        // First poll only records the baseline: no reload, no notice.
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+        assert!(tui_state.notice.is_none());
+
+        // Unchanged fingerprint: still nothing.
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+
+        // New work landed: the review reloads in place, preserving view
+        // state (hidden file pane) and picking up the new file.
+        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert_eq!(backend.calls.borrow().len(), 1);
+        assert!(!session.file_pane_visible);
+        assert!(session.files.iter().any(|file| file.path == "c.rs"));
+        assert!(
+            tui_state
+                .notice
+                .unwrap()
+                .message
+                .contains("repository changed")
+        );
+    }
+
+    #[test]
+    fn repo_polling_is_throttled_and_ignores_fingerprint_errors() {
+        let mut session = polling_session();
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = polling_loader(&backend);
+        let mut tui_state = TuiState::default();
+
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        *backend.fingerprint.borrow_mut() = Ok("changed".to_owned());
+
+        // Within the poll interval: the change is not even inspected.
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+
+        // Transient jj failures skip the tick without noise or baseline
+        // loss.
+        *backend.fingerprint.borrow_mut() = Err("locked".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        assert!(backend.calls.borrow().is_empty());
+        assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn repo_polling_notice_and_activity_include_specific_events() {
+        let mut session = polling_session();
+        session.files[0].viewed = true;
+        let backend = MockJjBackend::with_diff(Ok(REFRESHED_DIFF.to_owned()));
+        let loader = polling_loader(&backend);
+        let mut tui_state = TuiState::default();
+        *backend.fingerprint.borrow_mut() = Ok("@ old c0\nold c0\n".to_owned());
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        *backend.fingerprint.borrow_mut() = Ok("@ new c1\nnew c1\n".to_owned());
+        tui_state.last_repo_poll = None;
+        maybe_refresh_review(&loader, &mut session, &mut tui_state);
+        let notice = tui_state.notice.unwrap().message;
+        assert!(notice.contains("@ moved to new"));
+        assert!(notice.contains("change new entered range"));
+        assert!(notice.contains("change old left range"));
+        assert!(notice.contains("1 viewed file changed — needs re-review"));
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message == "@ moved to new")
+        );
+        // Only the file that actually changed in this refresh is named:
+        // c.rs is new; a.rs/b.rs carried identical content and stay quiet.
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message == "c.rs appeared (+1 −1)")
+        );
+        assert!(
+            tui_state
+                .activity
+                .iter()
+                .any(|event| event.message == "a.rs updated — was viewed, needs re-review")
+        );
+        assert!(
+            !tui_state
+                .activity
+                .iter()
+                .any(|event| event.message.starts_with("b.rs"))
+        );
     }
 }

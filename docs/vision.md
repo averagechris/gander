@@ -139,8 +139,8 @@ gander walkthrough export
 - Make the TUI read and write the same session objects as the CLI.
 - Add first-class affordances for key hunks, walkthrough editing, action-tagged
   todo comments, and open action-item work.
-- Present focused/zen review as views over walkthrough/session state; the
-  end state is the attention map (M18).
+- Present focused review as normal-stream views over walkthrough/session state;
+  delivered by the attention map (M18).
 
 ### M14: MCP parity adapter
 
@@ -186,7 +186,8 @@ Design: [docs/attention.md](attention.md).
   inline narration cards on spotlights, chapters as stream headers.
 - Recast walkthroughs as an ordering over spotlight regions; focus becomes a
   view preset, coverage replaces files-viewed as progress.
-- Delete the zen phase machinery and the ephemeral overlay-chunk model.
+- Delete the old full-screen presentation machinery and ephemeral overlay
+  curation model (complete).
 
 ### M19: Presentation polish
 

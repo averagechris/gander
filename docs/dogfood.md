@@ -1,5 +1,12 @@
 # Dogfood loop
 
+> Historical note: this score log records the former full-screen walkthrough
+> and overlay curation experiments using their then-current names and commands.
+> Those surfaces were intentionally deleted at M18 completion. Current testing
+> uses durable walkthrough/attention curation with Focus, Spotlight navigation,
+> and Glance in the normal stream; the entries below are archival evidence, not
+> current instructions.
+
 Gander is graded by agents actually using it. Evaluator agents drive the real
 binary (CLI directly; TUI via tmux `send-keys`/`capture-pane`) against fixture
 jj repos, follow scripted scenarios, and score the experience on a fixed

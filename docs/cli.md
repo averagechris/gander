@@ -306,8 +306,8 @@ gander walkthrough show
 gander walkthrough export
 ```
 
-Walkthroughs are the durable source of truth for zen tours. Steps have a title,
-importance (`spotlight` tours; `glance` lands on the glance board), optional
+Walkthroughs are the durable source of truth for normal-stream curation. Steps have a title,
+importance (`spotlight` joins ordered Focus navigation; `glance` contributes Skim attention), optional
 why/body/artifacts, an optional change id, and an optional stable target. `--line`
 and `--end-line` are 1-indexed diff line anchors: new side (post-image)
 preferred, with old-side fallback for removed-only lines in the current jj diff.
@@ -357,9 +357,16 @@ preserved-id result without writing state. The target is a nested object:
 
 Repeated `walkthrough set` runs preserve existing step ids, matching by explicit
 id first and then by `(kind, title, target.file, target.line)`; only new steps
-receive new UUIDs. The command warns about unknown JSON fields and targets that
-fall outside the diff line space (including the valid ranges); chapter steps
-must include a non-empty `change_id`.
+receive new UUIDs. Duplicate omitted identities consume prior matches one-to-one
+in prior order, while explicit ids reserve their prior slots before omitted
+matching regardless of incoming order. Duplicate explicit ids or any duplicate
+final ids after preservation/generation reject the whole replacement without a
+state write. CLI and MCP replacement use the same normalization service,
+including exact current-stack validation for chapter change ids. The command
+warns about unknown JSON fields and targets that
+cannot anchor in the current diff; those durable targets remain stale until a
+matching fingerprint can re-anchor. Chapter steps must include a non-empty
+`change_id`.
 `show` emits JSON; `export` emits Markdown.
 
 File-anchor commands accept both `--path` and `--file` for compatibility. The
@@ -367,19 +374,22 @@ canonical form in docs and JSON remains `--path`.
 
 ## Drafts
 
-## Tour slide deck
+## Tour compatibility over the review stream
 
 ```sh
 gander tui --tour
 gander tour render [--width 100] [--height 30] [--slide N]
 ```
 
-`tui --tour` launches the normal TUI directly into zen's full-screen slide deck.
-`tour render` uses the same ratatui draw path with a test backend and prints the
+`tui --tour` starts Focus at the first current durable Spotlight in the normal
+review stream. It errors non-fatally into ordinary review when no current
+Spotlight exists; there is no changed-file fallback or separate modal surface.
+`tour render` uses the same normal-stream ratatui draw path with a test backend and prints the
 slides as plain text separated by `──── slide K/N ────`, which is useful for
-agents and documentation snapshots. If a walkthrough is present, spotlight steps
-become slides, chapter steps become intro slides, and glance steps appear on the
-final “At a glance” slide; otherwise the tour falls back to changed files.
+agents and documentation snapshots. Current Spotlight regions become slides in
+durable walkthrough order; chapter headers and inline narration remain ordinary
+stream rows/cards. Focus keeps comments, search, folds, retargeting, and other
+normal review actions available.
 
 ```sh
 gander drafts list|add [--file <spec>]|remove --id <id>
@@ -388,9 +398,9 @@ gander drafts list|add [--file <spec>]|remove --id <id>
 Drafts remain a supported CLI surface, now backed by durable agent-authored
 comments (`state=draft`, `channel=onboarding`) rather than an overlay bucket.
 Specs are JSON files or stdin, and a live TUI on the same workspace picks up
-review-state writes within a poll. Public `chunks` and `briefs` commands have been removed; use
-`walkthrough` for durable tour curation. ACP/MCP agents may still provide live
-overlay chunks and change briefs, which Gander adapts into walkthrough/zen views.
+review-state writes within a poll. Legacy chunk and change-brief commands/tools
+are removed. Use `walkthrough set|add-step|show` plus
+`attention set|seed-heuristics|list` for durable curation.
 
 ## Live state and the TUI
 
@@ -541,14 +551,20 @@ Examples:
 
 ```bash
 gander present                         # present/status
-gander present start                   # start the tour
-gander present next                    # advance one slide
-gander present goto --index 3          # zero-based slide index
+gander present start                   # Focus the first current Spotlight
+gander present next                    # advance one Spotlight
+gander present goto --index 3          # zero-based Spotlight index
 gander present goto --step step-id     # durable walkthrough step id
 gander present focus --path src/foo.rs --line 42 --end-line 60 --note "look here"
-gander present reload                  # reload review state and rebuild tour
+gander present reload                  # reload state and re-anchor presentation
 ```
 
-The command requires a live TUI (`gander tui --tour`) and respects modal
+The command requires a live TUI (`gander tui`) and respects modal
 safety: if the human is typing a comment or using a popup, the TUI returns
-`user is busy: <mode>` instead of moving the view.
+`user is busy: <mode>` instead of moving the view. `present start` applies the
+Focus preset and drives the same durable Spotlight ordering as Alt-N/Alt-P in the
+normal stream. Explicit `present end` restores the prior view when presentation
+owned Focus. Retarget and refresh preserve presentation/Focus safely and
+re-resolve `(step_id, part)` identity, so insertion/reordering cannot change the
+current target. Removed or stale identities report stale/empty rather than
+falling through to the prior numeric index.

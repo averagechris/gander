@@ -1,6 +1,5 @@
-//! Attention-map glance board state. This popup is deliberately independent
-//! of legacy zen phases: rows come from the current review stream/effective
-//! attention map and durable fingerprint-guarded progress.
+//! Attention-map glance board state. Rows come from the current review stream,
+//! effective attention map, and durable fingerprint-guarded progress.
 
 use crate::{
     app::ReviewSession,

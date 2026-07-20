@@ -16,8 +16,6 @@
   autosave, Focus refresh preserves both active and underlying viewports,
   spotlight navigation repins exact narration, glance peek is idempotent, and
   CLI/MCP selectors reject unknown, ambiguous, conflicting, or invalid targets.
-  Failed keyboard or presenter legacy-zen startup now atomically restores both
-  active and underlying Focus snapshots; successful startup still exits Focus.
 - Added the continuous M18 salience-driven review stream: one cross-file diff
   projection with stable file/line anchors, contiguous generated-churn skim
   folds (`Space` peek, contextual `a` acknowledgement), fully expanded
@@ -78,6 +76,21 @@
   channel-colored editor chip/border, and one semantic channel color language
   across gutter marks, inline cards, comment/open-work lists, and agent
   draft rows. CLI comment add/edit now accept `--channel` for scriptable parity.
+
+### Changed
+
+- Removed the former full-screen focused-presentation phases, ephemeral overlay
+  chunks/change briefs, their ACP/MCP/CLI compatibility and line-space APIs,
+  and the legacy `T` key/config aliases. Durable walkthrough steps and attention
+  regions are now the only curation model. `gander tui --tour`, `gander tour
+  render`, and `gander present` remain script-compatible by applying Focus and
+  driving durable Spotlights in the normal stream, with full review actions and
+  retarget/refresh safety. Existing `agent.json` chunk/brief fields are ignored
+  rather than migrated and are discarded on the next save; ordering and flags
+  survive. Presenter refresh tracks durable `(step_id, part)` identity instead
+  of numeric position, and CLI/MCP walkthrough replacement now shares
+  deterministic id preservation, target normalization, and exact stack chapter
+  validation, with atomic rejection of duplicate explicit or final step ids.
 
 ## v0.7.2 - 2026-07-12
 

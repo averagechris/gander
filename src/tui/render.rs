@@ -49,10 +49,7 @@ use super::{
     theme::AppTheme,
     view_options::{ViewOption, ViewOptionsState},
     walkthroughs::WalkthroughListState,
-    zen::{ZenState, ZenStop},
 };
-
-use super::zen::ZenPhase;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct UiLayout {
@@ -67,7 +64,6 @@ struct FooterContext<'a> {
     keymap: &'a KeyMap,
     identity_chip: Option<&'a str>,
     notice: Option<&'a UiNotice>,
-    zen: Option<&'a ZenState>,
     attention_focus: bool,
 }
 
@@ -76,14 +72,12 @@ fn footer_context<'a>(
     keymap: &'a KeyMap,
     tui_state: &'a TuiState,
     notice: Option<&'a UiNotice>,
-    zen: Option<&'a ZenState>,
 ) -> FooterContext<'a> {
     FooterContext {
         mode,
         keymap,
         identity_chip: tui_state.current_identity_chip.as_deref(),
         notice,
-        zen,
         attention_focus: tui_state.attention_focus.is_some(),
     }
 }
@@ -95,7 +89,6 @@ pub(super) fn draw(
     keymap: &KeyMap,
     tui_state: &TuiState,
     notice: Option<&UiNotice>,
-    zen: Option<&ZenState>,
 ) {
     let theme = &tui_state.theme;
     tui_state.diff_viewport.set_annotation_artifact_hint(
@@ -108,86 +101,24 @@ pub(super) fn draw(
     let effective_file_pane = tui_state.effective_file_pane(session, full_area.width);
     let layout = tui_state.review_layout(session, full_area);
 
-    // The zen focus card and glance board are full-screen takeovers: the
-    // point is a single object of attention, not panes. The reading phase
-    // keeps the normal panes with out-of-range rows dimmed.
-    match zen.map(|zen| zen.phase) {
-        Some(ZenPhase::Focus) => {
-            let body = body_area(frame.area());
-            draw_zen_focus(
-                frame,
-                body,
-                session,
-                zen.expect("checked above"),
-                keymap,
-                theme,
-            );
-            draw_footer(
-                frame,
-                layout.footer,
-                session,
-                &footer_context(mode, keymap, tui_state, notice, zen),
-                theme,
-            );
-        }
-        Some(ZenPhase::Artifact { index, scroll }) => {
-            let body = body_area(frame.area());
-            let zen = zen.expect("checked above");
-            draw_zen_focus(frame, body, session, zen, keymap, theme);
-            draw_zen_artifact(frame, body, zen, index, scroll, keymap, theme);
-            draw_footer(
-                frame,
-                layout.footer,
-                session,
-                &footer_context(mode, keymap, tui_state, notice, Some(zen)),
-                theme,
-            );
-        }
-        Some(ZenPhase::Glance) => {
-            let body = body_area(frame.area());
-            draw_zen_glance(
-                frame,
-                body,
-                session,
-                zen.expect("checked above"),
-                keymap,
-                theme,
-            );
-            draw_footer(
-                frame,
-                layout.footer,
-                session,
-                &footer_context(mode, keymap, tui_state, notice, zen),
-                theme,
-            );
-        }
-        _ => {
-            if layout.files.width > 0 {
-                draw_files(frame, layout.files, session, theme);
-            }
-            draw_menu_bar(frame, layout.menu, keymap, theme);
-            draw_diff(
-                frame,
-                layout.diff,
-                session,
-                tui_state,
-                effective_file_pane.visible,
-            );
-            draw_footer(
-                frame,
-                layout.footer,
-                session,
-                &footer_context(mode, keymap, tui_state, notice, zen),
-                theme,
-            );
-
-            // The zen reading panel is a layer under any popup: progress and
-            // rationale stay visible while e.g. a comment is being written.
-            if let Some(zen) = zen {
-                draw_zen_panel(frame, frame.area(), session, zen, keymap, theme);
-            }
-        }
+    if layout.files.width > 0 {
+        draw_files(frame, layout.files, session, theme);
     }
+    draw_menu_bar(frame, layout.menu, keymap, theme);
+    draw_diff(
+        frame,
+        layout.diff,
+        session,
+        tui_state,
+        effective_file_pane.visible,
+    );
+    draw_footer(
+        frame,
+        layout.footer,
+        session,
+        &footer_context(mode, keymap, tui_state, notice),
+        theme,
+    );
 
     match mode {
         Mode::TargetChooser(chooser) => {
@@ -278,15 +209,6 @@ pub(super) fn ui_layout(
         files: body[0],
         diff: body[1],
         footer: main[2],
-    }
-}
-
-/// Everything above the two-line footer: the canvas for zen's full-screen
-/// surfaces.
-fn body_area(area: Rect) -> Rect {
-    Rect {
-        height: area.height.saturating_sub(2),
-        ..area
     }
 }
 
@@ -1736,9 +1658,6 @@ fn prepare_diff_cell(
         line_number_width,
         theme,
     );
-    if zen_row_dimmed(session, row, cell.row) {
-        all = dim_spans(all);
-    }
     let content = if all.len() > CHROME_SPANS {
         all.split_off(CHROME_SPANS)
     } else {
@@ -1943,7 +1862,7 @@ fn unified_row_line(
     comment_count: usize,
     theme: &AppTheme,
 ) -> Line<'static> {
-    let line = match row.kind {
+    match row.kind {
         DiffRowKind::ChapterHeader => Line::from(Span::styled(
             row.text.clone(),
             Style::default()
@@ -1999,52 +1918,7 @@ fn unified_row_line(
             comment_count,
             theme,
         )),
-    };
-    if zen_row_dimmed(session, row, index) {
-        Line::from(dim_spans(line.spans))
-    } else {
-        line
     }
-}
-
-/// True when the zen walkthrough frames a line range in the selected file
-/// and this row falls outside it: chrome rows and out-of-range diff lines
-/// recede so the current stop visually pops (docs/focused-diff-ux.md §6).
-/// The cursor row never dims so it stays readable while moving around.
-fn zen_row_dimmed(session: &ReviewSession, row: &DiffRow, index: usize) -> bool {
-    let Some(focus) = &session.zen_focus else {
-        return false;
-    };
-    let Some((start, end)) = focus.lines else {
-        return false;
-    };
-    if session
-        .selected_visible_file()
-        .map(|file| file.path.as_str())
-        != Some(focus.path.as_str())
-    {
-        return false;
-    }
-    if session.focus == Focus::Diff && render_cursor(session) == index {
-        return false;
-    }
-    match row.kind {
-        DiffRowKind::DiffLine(_) => {
-            let lineno = row.new_lineno.or(row.old_lineno);
-            lineno.is_none_or(|line| line < start || line > end)
-        }
-        _ => true,
-    }
-}
-
-fn dim_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    spans
-        .into_iter()
-        .map(|span| {
-            let style = span.style.add_modifier(Modifier::DIM);
-            Span::styled(span.content, style)
-        })
-        .collect()
 }
 
 /// Gutter + line number + prefix + text spans for one diff line, with the
@@ -2509,116 +2383,9 @@ fn draw_footer(
 ) {
     let mode = context.mode;
     let keymap = context.keymap;
-    let zen = context.zen;
     let mode_text = match mode {
-        Mode::Normal if zen.is_some() => {
-            let zen = zen.expect("checked above");
-            match zen.phase {
-                ZenPhase::Focus => match zen.current() {
-                    Some(ZenStop::Chapter(chapter)) => {
-                        let mut text = format!(
-                            "zen chapter {}/{} · {} tours its {} stop(s)",
-                            chapter.position.0,
-                            chapter.position.1,
-                            keymap.hint(Action::ZenNext),
-                            chapter.stop_count,
-                        );
-                        if !chapter.description_body().is_empty() {
-                            let details = if zen.chapter_description_collapsed {
-                                format!(" · {} details", keymap.hint(Action::ZenToggleDetails))
-                            } else {
-                                format!(
-                                    " · {} collapse/expand brief",
-                                    keymap.hint(Action::ZenToggleDetails)
-                                )
-                            };
-                            text.push_str(&details);
-                        }
-                        if !chapter.artifacts.is_empty() {
-                            text.push_str(&format!(
-                                " · {} {} artifact(s)",
-                                keymap.hint(Action::ZenArtifact),
-                                chapter.artifacts.len()
-                            ));
-                        }
-                        text.push_str(&format!(
-                            " · {} back · {} full diff · {} glance · {} end",
-                            keymap.hint(Action::ZenPrevious),
-                            keymap.hint(Action::ZenToggleView),
-                            keymap.hint(Action::ZenGlance),
-                            keymap.layered_hint(Action::ZenClose, true),
-                        ));
-                        text
-                    }
-                    current => {
-                        let (current_stop, total) = zen.chunk_position();
-                        let artifacts = current
-                            .map(|stop| super::zen::stop_artifacts(stop).len())
-                            .unwrap_or(0);
-                        let artifact_hint = if artifacts > 0 {
-                            format!(
-                                " · {} {artifacts} artifact(s)",
-                                keymap.hint(Action::ZenArtifact)
-                            )
-                        } else {
-                            String::new()
-                        };
-                        format!(
-                            "zen {current_stop}/{total} · {next} next (marks viewed) · {previous} back · {down}/{up} lines · {refocus} refocus · {view} full diff · {glance} glance{artifact_hint} · {comment} comment · {close} end",
-                            next = keymap.layered_hint(Action::ZenNext, true),
-                            previous = keymap.layered_hint(Action::ZenPrevious, true),
-                            down = keymap.layered_hint(Action::MoveDown, true),
-                            up = keymap.layered_hint(Action::MoveUp, true),
-                            refocus = keymap.layered_hint(Action::ZenRefocus, true),
-                            view = keymap.layered_hint(Action::ZenToggleView, true),
-                            glance = keymap.layered_hint(Action::ZenGlance, true),
-                            comment = keymap.layered_hint(Action::Comment, true),
-                            close = keymap.layered_hint(Action::ZenClose, true),
-                        )
-                    }
-                },
-                ZenPhase::Reading => {
-                    let (current, total) = zen.chunk_position();
-                    format!(
-                        "zen read {current}/{total} · {} next · {} back · {} refocus · {} focus card · {} end · other keys as normal",
-                        keymap.hint(Action::ZenNext),
-                        keymap.hint(Action::ZenPrevious),
-                        keymap.hint(Action::ZenRefocus),
-                        keymap.hint(Action::ZenToggleView),
-                        keymap.layered_hint(Action::ZenClose, true),
-                    )
-                }
-                ZenPhase::Glance => format!(
-                    "zen glance · {} item(s) · {}/{} move · {} jump · {} mark all viewed & finish · {} back · {} end",
-                    zen.glance_rows.len(),
-                    keymap.hint(Action::PopupMoveDown),
-                    keymap.hint(Action::PopupMoveUp),
-                    keymap.hint(Action::PopupSelect),
-                    keymap.hint(Action::ZenAcknowledge),
-                    keymap.hint(Action::ZenPrevious),
-                    keymap.hint(Action::PopupClose),
-                ),
-                ZenPhase::Artifact { index, .. } => {
-                    let count = zen
-                        .current()
-                        .map(|stop| super::zen::stop_artifacts(stop).len())
-                        .unwrap_or(0);
-                    format!(
-                        "zen artifact {}/{count} · {}/{} scroll · {}/{} switch · {}/{} close",
-                        (index + 1).min(count),
-                        keymap.hint(Action::PopupMoveDown),
-                        keymap.hint(Action::PopupMoveUp),
-                        keymap.hint(Action::ZenArtifactPrevious),
-                        keymap.hint(Action::ZenArtifactNext),
-                        keymap.hint(Action::PopupClose),
-                        keymap.hint(Action::PopupCloseQ),
-                    )
-                }
-            }
-        }
         Mode::Normal if session.focus == Focus::Files => footer_line(files_footer_segments(
             session,
-            zen,
             keymap,
             &format!(
                 "focus files{}{}{}",
@@ -2638,7 +2405,6 @@ fn draw_footer(
         Mode::Normal => {
             let mut text = footer_line(diff_footer_segments(
                 session,
-                zen,
                 keymap,
                 &format!(
                     "focus diff{}{}{}{}",
@@ -2807,10 +2573,7 @@ fn draw_footer(
     } else {
         session.summary_line()
     };
-    let display_target = context
-        .zen
-        .map(|zen| &zen.home_target)
-        .unwrap_or(&session.target);
+    let display_target = &session.target;
     if display_target.is_symbolic() {
         summary.push_str(&format!(" · following {}", display_target.rev));
     }
@@ -2888,7 +2651,6 @@ fn hint_segments(keymap: &KeyMap, hints: &[FooterHint]) -> Vec<String> {
 
 fn files_footer_segments(
     session: &ReviewSession,
-    zen: Option<&ZenState>,
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
@@ -2907,9 +2669,7 @@ fn files_footer_segments(
         FooterHint::new([Action::Help], "help"),
         FooterHint::new([Action::Quit], "quit"),
     ];
-    let target = zen
-        .map(|zen| zen.home_target.to_string())
-        .unwrap_or_else(|| session.target.to_string());
+    let target = session.target.to_string();
     let mut segments = vec![target, focus_label.to_owned()];
     segments.extend(hint_segments(keymap, &hints));
     segments
@@ -2917,7 +2677,6 @@ fn files_footer_segments(
 
 fn diff_footer_segments(
     session: &ReviewSession,
-    zen: Option<&ZenState>,
     keymap: &KeyMap,
     focus_label: &str,
 ) -> Vec<String> {
@@ -2959,9 +2718,7 @@ fn diff_footer_segments(
             FooterHint::new([Action::Quit], "quit"),
         ]
     };
-    let target = zen
-        .map(|zen| zen.home_target.to_string())
-        .unwrap_or_else(|| session.target.to_string());
+    let target = session.target.to_string();
     let mut segments = vec![target, focus_label.to_owned()];
     segments.extend(hint_segments(keymap, &hints));
     segments
@@ -3028,7 +2785,6 @@ fn draw_help_popup(
         entry(&[Action::Comment], "comment on what needs work"),
         entry(&[Action::AttentionFocus], "toggle attention Focus preset"),
         entry(&[Action::AttentionGlance], "open attention glance board"),
-        entry(&[Action::Zen], "legacy zen briefing"),
         entry(&[Action::YankHandoff], "copy handoff when done"),
         section("diff & view"),
         entry(&[Action::MoveDown, Action::MoveUp], "move diff cursor"),
@@ -3129,18 +2885,6 @@ fn draw_help_popup(
             &[Action::GlanceAcknowledgeAll],
             "acknowledge all current skims",
         ),
-        section("legacy zen keys"),
-        entry(&[Action::ZenNext, Action::ZenPrevious], "next/back stop"),
-        entry(&[Action::ZenToggleView], "toggle focus card / reading view"),
-        entry(&[Action::ZenGlance], "open glance board"),
-        entry(&[Action::ZenArtifact], "open/close artifacts"),
-        entry(
-            &[Action::ZenToggleDetails],
-            "toggle chapter details / expand brief",
-        ),
-        entry(&[Action::ZenRefocus], "refocus current stop"),
-        entry(&[Action::ZenAcknowledge], "acknowledge glance items"),
-        entry(&[Action::ZenClose], "leave zen; close modal zen"),
         section("comments"),
         entry(&[Action::Comment], "comment at cursor"),
         entry(&[Action::RangeComment], "start/finish range comment"),
@@ -3183,7 +2927,6 @@ fn draw_help_popup(
         entry(&[Action::YankHandoff], "copy agent handoff markdown"),
         entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
         entry(&[Action::FlagList], "agent-flagged sections"),
-        entry(&[Action::Zen], "zen briefing (focus stops + glance)"),
         entry(&[Action::DraftList], "agent draft comments"),
         section("badges"),
         literal(
@@ -3608,190 +3351,6 @@ fn draw_flag_list_popup(
 /// location, the agent's rationale, and flags in the stop's file — the
 /// orientation device that replaces the hidden file tree
 /// (docs/focused-diff-ux.md §6).
-fn draw_zen_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &ReviewSession,
-    zen: &ZenState,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    let height = if zen.glance_rows.is_empty() { 6 } else { 8 }.min(area.height);
-    let panel = Rect {
-        x: area.x,
-        y: area
-            .y
-            .saturating_add(area.height.saturating_sub(height + 2)),
-        width: area.width,
-        height,
-    };
-    clear_popup(frame, panel, theme);
-
-    let mut lines = Vec::new();
-    let mut flagged = 0usize;
-    match zen.current() {
-        Some(ZenStop::Chapter(chapter)) => {
-            let (number, total) = chapter.position;
-            let headline = if chapter.description.is_empty() {
-                zen.home_target.to_string()
-            } else {
-                chapter.title().to_owned()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("chapter {number}/{total}  "),
-                    Style::default()
-                        .fg(theme.detail)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    truncate_tail(&headline, area.width.saturating_sub(18) as usize),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            lines.push(Line::from(Span::styled(
-                chapter.summary.clone().unwrap_or_else(|| {
-                    "(no change brief from the agent — @ summons one)".to_owned()
-                }),
-                Style::default().fg(theme.subtle),
-            )));
-        }
-        Some(ZenStop::Chunk(stop)) => {
-            let position = stop
-                .part_position
-                .map(|(part, total)| format!(" (part {part}/{total})"))
-                .unwrap_or_default();
-            let location = chunk_row_location_width(stop, area.width.saturating_div(2) as usize);
-            flagged = stop
-                .part
-                .as_ref()
-                .map(|part| {
-                    session
-                        .agent_flags
-                        .iter()
-                        .filter(|flag| flag.path == part.path)
-                        .count()
-                })
-                .unwrap_or(0);
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "{}{}  ",
-                        truncate_tail(&stop.title, area.width.saturating_div(2) as usize),
-                        position
-                    ),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(location, Style::default().fg(theme.detail)),
-            ]));
-            lines.push(Line::from(Span::styled(
-                stop.rationale
-                    .clone()
-                    .unwrap_or_else(|| "(no rationale given)".to_owned()),
-                Style::default().fg(theme.subtle),
-            )));
-        }
-        None => {}
-    }
-    if !zen.glance_rows.is_empty() {
-        let shown = zen.glance_rows.iter().take(3).map(|row| {
-            let location = chunk_row_location_width(row, 32);
-            format!("{} @ {location}", truncate_tail(&row.title, 24))
-        });
-        let mut glance = shown.collect::<Vec<_>>().join("  ·  ");
-        let hidden = zen.glance_rows.len().saturating_sub(3);
-        if hidden > 0 {
-            glance.push_str(&format!("  ·  +{hidden} more"));
-        }
-        lines.push(Line::from(vec![
-            Span::styled(
-                "glance rail  ",
-                Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(glance, Style::default().fg(theme.muted)),
-        ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{} next (marks viewed) · {} back · {} refocus · {} focus card · {} end · comment/flag/expand as normal",
-            keymap.hint(Action::ZenNext),
-            keymap.hint(Action::ZenPrevious),
-            keymap.hint(Action::ZenRefocus),
-            keymap.hint(Action::ZenToggleView),
-            keymap.hint(Action::PopupClose),
-        ),
-        Style::default().fg(theme.muted),
-    )));
-
-    let mut title = match zen.current() {
-        Some(ZenStop::Chapter(chapter)) => {
-            format!("zen chapter {}/{}", chapter.position.0, chapter.position.1)
-        }
-        _ => {
-            let (current, total) = zen.chunk_position();
-            format!("zen spotlight {current}/{total}")
-        }
-    };
-    if !zen.glance_rows.is_empty() {
-        title.push_str(&format!(" · {} glance", zen.glance_rows.len()));
-    }
-    if flagged > 0 {
-        title.push_str(&format!(" · {flagged} flagged"));
-    }
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(truncate_tail(
-                &title,
-                panel.width.saturating_sub(4) as usize,
-            )))
-            .wrap(Wrap { trim: false }),
-        panel,
-    );
-}
-
-fn chunk_row_location_width(row: &super::chunks::WalkthroughRow, max_width: usize) -> String {
-    match (&row.change_id, &row.part) {
-        (Some(change_id), Some(part)) => {
-            let location = match (part.start_line, part.end_line) {
-                (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
-                (Some(start), None) => format!("{}:{start}", part.path),
-                _ => part.path.clone(),
-            };
-            let id_budget = (max_width / 4).clamp(4, 12);
-            let path_budget = max_width.saturating_sub(id_budget + 3);
-            format!(
-                "[{}] {}",
-                truncate_middle(change_id, id_budget),
-                truncate_middle(&location, path_budget)
-            )
-        }
-        _ => truncate_middle(&chunk_row_location_raw(row), max_width),
-    }
-}
-
-fn chunk_row_location_raw(row: &super::chunks::WalkthroughRow) -> String {
-    let location = match &row.part {
-        Some(part) => match (part.start_line, part.end_line) {
-            (Some(start), Some(end)) => format!("{}:{start}-{end}", part.path),
-            (Some(start), None) => format!("{}:{start}", part.path),
-            _ => part.path.clone(),
-        },
-        None => "(no location)".to_owned(),
-    };
-    // Change-anchored chunks tour their own change's diff: say which one.
-    match &row.change_id {
-        Some(change_id) => format!("[{change_id}] {location}"),
-        None => location,
-    }
-}
-
 fn truncate_tail(text: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(text) <= max_width {
         return text.to_owned();
@@ -3828,952 +3387,27 @@ fn truncate_middle(text: &str, max_width: usize) -> String {
     }
     let left_w = (max_width - 1) / 3;
     let right_w = max_width - 1 - left_w;
-    let left = take_width_prefix(text, left_w);
-    let right = take_width_suffix(text, right_w);
-    format!("{left}…{right}")
-}
-
-fn take_width_prefix(text: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
-        if width + w > max_width {
-            break;
-        }
-        out.push(ch);
-        width += w;
-    }
-    out
-}
-
-fn take_width_suffix(text: &str, max_width: usize) -> String {
-    let mut chars = Vec::new();
+    let left: String = text
+        .chars()
+        .scan(0, |width, ch| {
+            let next = *width + ch.width().unwrap_or(0);
+            (next <= left_w).then(|| {
+                *width = next;
+                ch
+            })
+        })
+        .collect();
+    let mut right = Vec::new();
     let mut width = 0;
     for ch in text.chars().rev() {
-        let w = ch.width().unwrap_or(0);
-        if width + w > max_width {
+        let next = width + ch.width().unwrap_or(0);
+        if next > right_w {
             break;
         }
-        chars.push(ch);
-        width += w;
+        right.push(ch);
+        width = next;
     }
-    chars.into_iter().rev().collect()
-}
-
-/// The zen focus surface: a chapter intro card between changes, or a
-/// spotlight stop card inside one (docs/focused-diff-ux.md §6).
-fn draw_zen_focus(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &ReviewSession,
-    zen: &ZenState,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    match zen.current() {
-        Some(ZenStop::Chapter(chapter)) => {
-            draw_zen_chapter(frame, area, session, zen, chapter, keymap, theme)
-        }
-        Some(ZenStop::Chunk(stop)) => draw_zen_stop(frame, area, session, zen, stop, keymap, theme),
-        None => {}
-    }
-}
-
-/// The chapter card: a full-screen intro for one jj change before its
-/// stops — description, bookmarks, live diff stats, and the agent's
-/// high-level brief. Kills the "dropped into a random change id" feeling
-/// of stacked walkthroughs: every change opens with its story.
-fn draw_zen_chapter(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &ReviewSession,
-    zen: &ZenState,
-    chapter: &super::zen::ChapterCard,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    clear_popup(frame, area, theme);
-    let inner = slide_inner(area);
-    let (number, total) = chapter.position;
-
-    // Where this chapter lives: its own change, or the walkthrough's target.
-    let mut location = match &chapter.change_id {
-        Some(change_id) => format!("change {change_id}"),
-        None => zen.home_target.to_string(),
-    };
-    if !chapter.bookmarks.is_empty() {
-        location.push_str(&format!(" · {}", chapter.bookmarks));
-    }
-
-    let headline = if chapter.title().is_empty() {
-        "chapter".to_owned()
-    } else {
-        chapter.title().to_owned()
-    };
-    let description_body = chapter.description_body();
-    let additions: usize = session.files.iter().map(|file| file.additions).sum();
-    let deletions: usize = session.files.iter().map(|file| file.deletions).sum();
-    let stats = format!(
-        "{} file(s) · +{additions} −{deletions}",
-        session.files.len()
-    );
-    let mut stops_hint = if chapter.stop_count == 0 {
-        "0 stops — skim".to_owned()
-    } else {
-        format!("{} stop(s) in this chapter", chapter.stop_count)
-    };
-    if !chapter.artifacts.is_empty() {
-        stops_hint.push_str(&format!(
-            " · e opens {} artifact(s)",
-            chapter.artifacts.len()
-        ));
-    }
-
-    let mut body: Vec<Line<'static>> = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("chapter {number}/{total} · {location}"),
-                Style::default().fg(theme.muted),
-            ),
-            Span::raw("  "),
-            Span::styled(zen_progress_label(zen), Style::default().fg(theme.muted)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            headline,
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    if !chapter.subtitle().is_empty() {
-        body.push(Line::from(Span::styled(
-            chapter.subtitle().to_owned(),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    // The change's own words come right after the headline: the full
-    // description body, collapsible with `d` when it gets in the way.
-    if !description_body.is_empty() {
-        if zen.chapter_description_collapsed {
-            body.push(Line::from(Span::styled(
-                format!(
-                    "… d expands the description ({} more line(s))",
-                    description_body.len()
-                ),
-                Style::default().fg(theme.muted),
-            )));
-        } else {
-            body.push(Line::from(""));
-            push_text_lines(
-                &mut body,
-                &description_body.join("\n"),
-                Style::default().fg(theme.subtle),
-            );
-        }
-    }
-    body.push(Line::from(""));
-    body.push(Line::from(Span::styled(
-        stats,
-        Style::default().fg(theme.detail),
-    )));
-    body.push(Line::from(Span::styled(
-        stops_hint,
-        Style::default().fg(theme.muted),
-    )));
-    let has_curated_brief = chapter.summary.is_some();
-    let summary = chapter.summary.clone().unwrap_or_else(|| {
-        "No agent brief for this change — the facts above are derived from the diff.".to_owned()
-    });
-    if has_curated_brief {
-        body.push(Line::from(""));
-        body.push(Line::from(Span::styled(
-            "what this change does",
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for line in summary.lines() {
-            body.push(Line::from(Span::styled(
-                line.to_owned(),
-                Style::default().fg(theme.subtle),
-            )));
-        }
-    } else if !chapter.derived_lines.is_empty() {
-        body.push(Line::from(""));
-        body.push(Line::from(Span::styled(
-            "derived facts",
-            Style::default().fg(theme.muted),
-        )));
-        for line in chapter.derived_lines.iter().take(3) {
-            body.push(Line::from(Span::styled(
-                truncate_tail(&format!("  {line}"), inner.width as usize),
-                Style::default().fg(theme.muted),
-            )));
-        }
-    }
-    if !chapter.derived_lines.is_empty() && inner.height < 18 {
-        body.push(Line::from(Span::styled(
-            format!("derived: {}", derived_summary(&chapter.derived_lines)),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    if chapter.stop_count > 0 {
-        body.push(Line::from(""));
-        body.push(Line::from(Span::styled(
-            format!(
-                "{} to begin — {} stops",
-                keymap.hint(Action::ZenNext),
-                chapter.stop_count
-            ),
-            Style::default().fg(theme.detail),
-        )));
-    }
-    if inner.height < 8 {
-        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
-        return;
-    }
-    frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false }), inner);
-}
-
-fn slide_inner(area: Rect) -> Rect {
-    slide_column(area, 72)
-}
-
-fn slide_column(area: Rect, target_width: usize) -> Rect {
-    let available = area.width as usize;
-    let width = target_width
-        .clamp(20.min(available), available)
-        .min(available) as u16;
-    // Keep the deck from drifting to the exact center on wide terminals. A
-    // one-third leftover margin feels editorial: enough air at the right edge,
-    // with the reading column anchored in a stable, slightly-left-of-center spot.
-    let margin = area.width.saturating_sub(width) / 3;
-    Rect {
-        x: area.x + margin,
-        y: area.y + 1.min(area.height),
-        width,
-        height: area.height.saturating_sub(2),
-    }
-}
-
-fn measured_content_width(available: u16, excerpt_width: usize) -> usize {
-    let available = available as usize;
-    if available < 72 {
-        return available;
-    }
-    excerpt_width.clamp(72, 100).min(available)
-}
-
-fn line_width(line: &Line<'_>) -> usize {
-    line.spans.iter().map(|span| span.content.width()).sum()
-}
-
-fn wrapped_line_height(line: &Line<'_>, width: usize) -> usize {
-    let line_width = line_width(line);
-    if line_width == 0 || width == 0 {
-        1
-    } else {
-        line_width.div_ceil(width).max(1)
-    }
-}
-
-fn zen_progress_label(zen: &ZenState) -> String {
-    let (chapter, chapters) = current_chapter_position(zen);
-    format!("ch {chapter}/{chapters}")
-}
-
-fn current_chapter_position(zen: &ZenState) -> (usize, usize) {
-    let total = zen
-        .stops
-        .iter()
-        .filter(|stop| matches!(stop, ZenStop::Chapter(_)))
-        .count()
-        .max(1);
-    let current = zen
-        .stops
-        .iter()
-        .take(zen.index.saturating_add(1))
-        .filter(|stop| matches!(stop, ZenStop::Chapter(_)))
-        .count()
-        .max(1);
-    (current, total)
-}
-
-fn push_text_lines(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
-    for raw in text.split('\n') {
-        if raw.trim().is_empty() {
-            lines.push(Line::from(""));
-        } else {
-            lines.push(Line::from(Span::styled(raw.to_owned(), style)));
-        }
-    }
-}
-
-fn derived_summary(lines: &[String]) -> String {
-    let churn = lines
-        .iter()
-        .find_map(|line| line.strip_prefix("churn: "))
-        .unwrap_or("diff facts");
-    let symbols = lines
-        .iter()
-        .find_map(|line| line.strip_prefix("top changed symbols: "))
-        .filter(|symbols| *symbols != "none detected")
-        .map(|symbols| format!(" · symbols: {symbols}"))
-        .unwrap_or_default();
-    format!("{churn}{symbols}")
-}
-
-fn zen_stop_comment_cards(
-    session: &ReviewSession,
-    stop: &super::chunks::WalkthroughRow,
-) -> Vec<AnnotationCard> {
-    super::zen::comments_for_stop(&session.comments, stop)
-        .into_iter()
-        .map(AnnotationCard::from_comment)
-        .collect()
-}
-
-/// The zen focus card: a full-screen stop showing only the critical lines
-/// (extracted and vertically centered) with the agent's explanation as the
-/// co-star. One object of attention per stop — pop in, understand, move on.
-/// `tab` drops into the full dimmed diff when surrounding context is needed.
-fn draw_zen_stop(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &ReviewSession,
-    zen: &ZenState,
-    stop: &super::chunks::WalkthroughRow,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    clear_popup(frame, area, theme);
-    let initial_inner = slide_inner(area);
-    let (stop_number, stop_total) = zen.chunk_position();
-    if initial_inner.height < 8 {
-        frame.render_widget(
-            Paragraph::new(zen_focus_header_lines(zen, stop, theme)).wrap(Wrap { trim: false }),
-            initial_inner,
-        );
-        return;
-    }
-
-    let rows = session.diff_rows_for_selected_file();
-    let cursor = (session.focus == Focus::Diff).then_some(session.diff_cursor);
-    let probe_rows = ((initial_inner.height as usize) / 2).clamp(5, 18);
-    let (probe_indices, _, _) = zen_excerpt_indices(&rows, stop, probe_rows, cursor);
-    let probe_width = probe_indices
-        .iter()
-        .map(|&index| line_width(&unified_row_line(session, &rows[index], index, 0, theme)))
-        .max()
-        .unwrap_or(0);
-    let content_width = measured_content_width(area.width, probe_width);
-    let inner = slide_column(area, content_width);
-
-    let text_width = inner.width.max(20) as usize;
-    let mut prose_lines = vec![Line::from(vec![Span::styled(
-        format!(
-            "stop {stop_number}/{stop_total} · {} · {}",
-            chunk_row_location_width(stop, text_width / 2),
-            zen_progress_label(zen)
-        ),
-        Style::default().fg(theme.muted),
-    )])];
-    prose_lines.push(Line::from(""));
-    let narration = AnnotationCard::from_walkthrough_row(stop);
-    let narration_layout = narration.layout(
-        text_width,
-        AnnotationCardDensity::Expanded,
-        false,
-        keymap.hint(Action::ZenArtifact),
-    );
-    prose_lines.extend(
-        (0..narration_layout.len())
-            .map(|line| narration_layout.line(line, narration.channel, false, false, theme)),
-    );
-    for comment in zen_stop_comment_cards(session, stop) {
-        prose_lines.push(Line::from(""));
-        let layout = comment.layout(
-            text_width,
-            AnnotationCardDensity::Compact,
-            false,
-            keymap.hint(Action::ZenArtifact),
-        );
-        prose_lines.extend(
-            (0..layout.len()).map(|line| layout.line(line, comment.channel, false, false, theme)),
-        );
-    }
-    let prose_height: usize = prose_lines
-        .iter()
-        .map(|line| wrapped_line_height(line, text_width))
-        .sum();
-    let reserved_after_excerpt = if stop.artifacts.is_empty() { 0 } else { 2 } + 1;
-    let max_excerpt = (inner.height as usize)
-        // One row separates prose from code, one row is the divider after the
-        // excerpt, and one row of slack keeps the static footer/live footer
-        // from being the thing that clips the trailer at exact boundaries.
-        .saturating_sub(prose_height + reserved_after_excerpt + 2)
-        .clamp(3, 24);
-    let (mut indices, wandered, clipped) = zen_excerpt_indices(&rows, stop, max_excerpt, cursor);
-    let mut excerpt: Vec<Line<'static>> = Vec::new();
-    if indices.is_empty() {
-        excerpt.push(Line::from(Span::styled(
-            "  (no diff lines to excerpt — tab shows the full file)",
-            Style::default().fg(theme.muted),
-        )));
-    }
-    let last_excerpt_lineno = indices
-        .last()
-        .and_then(|&index| rows.get(index))
-        .and_then(|row| row.new_lineno.or(row.old_lineno));
-    let mut forced_clip = clipped.or_else(|| {
-        let end = stop.part.as_ref()?.end_line?;
-        let last = last_excerpt_lineno?;
-        (last < end).then_some((end.saturating_sub(last), end))
-    });
-    if forced_clip.is_some() && indices.len() >= max_excerpt {
-        indices.pop();
-        if let Some(end) = stop.part.as_ref().and_then(|part| part.end_line)
-            && let Some(last) = indices
-                .last()
-                .and_then(|&index| rows.get(index))
-                .and_then(|row| row.new_lineno.or(row.old_lineno))
-        {
-            forced_clip = Some((end.saturating_sub(last), end));
-        }
-    }
-    for index in indices {
-        excerpt.push(unified_row_line(session, &rows[index], index, 0, theme));
-    }
-    if let Some((more, end)) = forced_clip {
-        excerpt.push(Line::from(Span::styled(
-            format!(
-                "  … {more} more lines through {end} — {}/{}",
-                keymap.hint(Action::MoveDown),
-                keymap.hint(Action::MoveUp),
-            ),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    let mut lines = prose_lines;
-    lines.push(Line::from(""));
-    lines.extend(excerpt);
-    lines.push(Line::from(Span::styled(
-        "─".repeat(text_width),
-        Style::default().fg(theme.muted),
-    )));
-    if wandered {
-        lines.push(Line::from(Span::styled(
-            "off the stop — . refocuses",
-            Style::default().fg(theme.secondary),
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-/// Header lines for the focus card backdrop: the progress dots.
-fn zen_focus_header_lines(
-    zen: &ZenState,
-    stop: &super::chunks::WalkthroughRow,
-    theme: &AppTheme,
-) -> Vec<Line<'static>> {
-    let position = stop
-        .part_position
-        .map(|(part, total)| format!(" (part {part}/{total})"))
-        .unwrap_or_default();
-    vec![
-        zen_progress_line(zen, theme),
-        Line::from(vec![
-            Span::styled(
-                format!("{}{position}", truncate_tail(&stop.title, 48)),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                chunk_row_location_width(stop, 48),
-                Style::default().fg(theme.detail),
-            ),
-        ]),
-        Line::from(""),
-    ]
-}
-
-/// The walkthrough progress strip: a dot per spotlight stop, grouped by
-/// chapter (`▎` bars introduce each chapter), the current station bold.
-fn zen_progress_line(zen: &ZenState, theme: &AppTheme) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (index, stop) in zen.stops.iter().take(40).enumerate() {
-        let glyph = match stop {
-            super::zen::ZenStop::Chapter(_) => "▎",
-            super::zen::ZenStop::Chunk(_) if index <= zen.index => "● ",
-            super::zen::ZenStop::Chunk(_) => "○ ",
-        };
-        spans.push(if index == zen.index {
-            Span::styled(
-                glyph,
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(glyph, Style::default().fg(theme.muted))
-        });
-    }
-    Line::from(spans)
-}
-
-/// Rows worth excerpting for a stop: diff lines whose line number falls in
-/// the stop's range ± context, or the first changed lines for whole-file
-/// stops. When the cursor has wandered outside that window, the excerpt
-/// becomes a sliding window centered on the cursor instead — the code
-/// scrolls with j/k rather than letting the cursor vanish — and the second
-/// return value reports the wander so the UI can offer a refocus hint.
-/// Indices into the selected file's diff rows.
-fn zen_excerpt_indices(
-    rows: &[DiffRow],
-    stop: &super::chunks::WalkthroughRow,
-    max_rows: usize,
-    cursor: Option<usize>,
-) -> (Vec<usize>, bool, Option<(usize, usize)>) {
-    const CONTEXT: usize = 2;
-    let range = stop.part.as_ref().and_then(|part| {
-        part.start_line
-            .map(|start| (start, part.end_line.unwrap_or(start)))
-    });
-    let mut indices: Vec<usize> = match range {
-        Some((start, end)) => {
-            let lo = if max_rows <= CONTEXT + 1 {
-                start
-            } else {
-                start.saturating_sub(CONTEXT)
-            };
-            let hi = end + CONTEXT;
-            rows.iter()
-                .enumerate()
-                .filter(|(_, row)| {
-                    matches!(row.kind, DiffRowKind::DiffLine(_))
-                        && row
-                            .new_lineno
-                            .or(row.old_lineno)
-                            .is_some_and(|line| line >= lo && line <= hi)
-                })
-                .map(|(index, _)| index)
-                .collect()
-        }
-        None => rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                matches!(
-                    row.kind,
-                    DiffRowKind::DiffLine(DiffLineKind::Added | DiffLineKind::Removed)
-                )
-            })
-            .map(|(index, _)| index)
-            .collect(),
-    };
-    let max_rows = max_rows.max(1);
-    if let Some((start, end)) = range
-        && indices.len() > max_rows
-        && let Some(anchor_pos) = indices.iter().position(|&index| {
-            rows.get(index).is_some_and(|row| {
-                row.new_lineno
-                    .or(row.old_lineno)
-                    .is_some_and(|line| line >= start && line <= end)
-            })
-        })
-    {
-        indices = indices[anchor_pos..].to_vec();
-    }
-    let clipped = if let Some((_, end)) = range {
-        if indices.len() > max_rows {
-            // The trailer is part of the excerpt's vertical budget. Reserve a
-            // row for it up front; otherwise exact-fit focus cards render a
-            // full code window and the `… N more lines through <end>` cue is
-            // pushed below the slide/footer.
-            let visible_rows = max_rows.saturating_sub(1).max(1);
-            let more = indices.len().saturating_sub(visible_rows);
-            indices.truncate(visible_rows);
-            Some((more, end))
-        } else {
-            indices.truncate(max_rows);
-            let last_visible_line = indices
-                .last()
-                .and_then(|&index| rows.get(index))
-                .and_then(|row| row.new_lineno.or(row.old_lineno));
-            last_visible_line.filter(|line| *line < end).map(|line| {
-                if indices.len() >= max_rows {
-                    let visible_rows = max_rows.saturating_sub(1).max(1);
-                    indices.truncate(visible_rows);
-                    let line = indices
-                        .last()
-                        .and_then(|&index| rows.get(index))
-                        .and_then(|row| row.new_lineno.or(row.old_lineno))
-                        .unwrap_or(line);
-                    (end.saturating_sub(line), end)
-                } else {
-                    (end.saturating_sub(line), end)
-                }
-            })
-        }
-    } else {
-        indices.truncate(max_rows);
-        None
-    };
-
-    // Cursor off the stop: follow it with a window of the same size.
-    if let Some(cursor) = cursor
-        && !indices.contains(&cursor)
-        && rows
-            .get(cursor)
-            .is_some_and(|row| matches!(row.kind, DiffRowKind::DiffLine(_)))
-    {
-        let all: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| matches!(row.kind, DiffRowKind::DiffLine(_)))
-            .map(|(index, _)| index)
-            .collect();
-        if let Some(position) = all.iter().position(|&index| index == cursor) {
-            let start = position.saturating_sub(max_rows / 2);
-            let end = (start + max_rows).min(all.len());
-            let start = end.saturating_sub(max_rows);
-            return (all[start..end].to_vec(), true, None);
-        }
-    }
-    (indices, false, clipped)
-}
-
-/// A modal exhibit viewer layered over the focus card: one agent-produced
-/// artifact (usage example, captured output, diagram) rendered verbatim and
-/// scrollable. `h`/`l` cycle when the stop carries several exhibits.
-fn draw_zen_artifact(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    zen: &ZenState,
-    index: usize,
-    scroll: u16,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    let Some(stop) = zen.current() else {
-        return;
-    };
-    let artifacts = super::zen::stop_artifacts(stop);
-    let Some(artifact) = artifacts.get(index.min(artifacts.len().saturating_sub(1))) else {
-        return;
-    };
-
-    // Size the popup to the exhibit (plus chrome), bounded by the screen.
-    let widest = artifact
-        .body
-        .lines()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0) as u16;
-    let max_width = area.width.saturating_sub(6).max(20);
-    let width = (widest + 4).clamp(40.min(max_width), max_width);
-    let body_lines = artifact.body.lines().count() as u16;
-    let max_height = area.height.saturating_sub(2).max(6);
-    let height = (body_lines + 3).clamp(6.min(max_height), max_height);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-
-    clear_popup(frame, popup, theme);
-    let mut title_spans = vec![
-        Span::styled(
-            format!(" {} ", artifact.title),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("· {} ", artifact.kind.label()),
-            Style::default().fg(theme.secondary),
-        ),
-    ];
-    if artifacts.len() > 1 {
-        title_spans.push(Span::styled(
-            format!(
-                "· {}/{} ({}/{} switch) ",
-                index + 1,
-                artifacts.len(),
-                keymap.hint(Action::ZenArtifactPrevious),
-                keymap.hint(Action::ZenArtifactNext),
-            ),
-            Style::default().fg(theme.detail),
-        ));
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme.secondary))
-        .title(Line::from(title_spans))
-        .title_bottom(Line::from(Span::styled(
-            format!(
-                " {}/{} scroll · {}/{} close ",
-                keymap.hint(Action::PopupMoveDown),
-                keymap.hint(Action::PopupMoveUp),
-                keymap.hint(Action::PopupClose),
-                keymap.hint(Action::PopupCloseQ),
-            ),
-            Style::default().fg(theme.muted),
-        )));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    // Clamp so scrolling stops at the last line instead of a blank void.
-    let max_scroll = (artifact.body.lines().count() as u16).saturating_sub(inner.height);
-    frame.render_widget(
-        Paragraph::new(artifact.body.clone())
-            .style(Style::default().fg(theme.subtle))
-            .block(Block::default().padding(Padding::horizontal(1)))
-            .scroll((scroll.min(max_scroll), 0)),
-        inner,
-    );
-}
-
-/// The zen glance board: everything not worth a full stop — glance chunks
-/// and uncovered files — on one skimmable screen. `a` acknowledges the lot.
-fn draw_zen_glance(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    session: &ReviewSession,
-    zen: &ZenState,
-    keymap: &KeyMap,
-    theme: &AppTheme,
-) {
-    clear_popup(frame, area, theme);
-    let inner = slide_inner(area);
-
-    let curated_rows = zen
-        .glance_rows
-        .iter()
-        .enumerate()
-        .filter(|(_, row)| row.part.as_ref().is_none_or(|part| part.path != row.title))
-        .collect::<Vec<_>>();
-    let auto_rows = zen
-        .glance_rows
-        .iter()
-        .filter(|row| row.part.as_ref().is_some_and(|part| part.path == row.title))
-        .collect::<Vec<_>>();
-    let glance_groups = grouped_glance_rows(&zen.glance_rows);
-    let selected_group = glance_groups
-        .iter()
-        .position(|group| group.indices.contains(&zen.glance_selected))
-        .unwrap_or(0);
-    let fixed_lines = 5usize;
-    let list_height = (inner.height as usize).saturating_sub(fixed_lines).max(1);
-    let window = picker_visible_window(selected_group, glance_groups.len(), list_height);
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "At a glance",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!(
-                "{} curated · {} files not toured",
-                curated_rows.len(),
-                auto_rows.len()
-            ),
-            Style::default().fg(theme.muted),
-        )),
-        Line::from(""),
-    ];
-    if window.hidden_above > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("  ↑ {} more", window.hidden_above),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
-        "curated",
-        Style::default()
-            .fg(theme.secondary)
-            .add_modifier(Modifier::BOLD),
-    )));
-    let mut rendered = 0usize;
-    for (group_index, group) in glance_groups
-        .iter()
-        .enumerate()
-        .skip(window.start)
-        .take(window.end.saturating_sub(window.start))
-    {
-        let row = group.rows[0];
-        if row.part.as_ref().is_some_and(|part| part.path == row.title) {
-            continue;
-        }
-        rendered += 1;
-        let selected = group_index == selected_group;
-        let marker = if selected { "›" } else { " " };
-        let viewed = group
-            .rows
-            .iter()
-            .all(|row| super::zen::glance_row_viewed(session, row));
-        let check = if viewed { "✓" } else { "•" };
-        let style = if selected {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else if viewed {
-            Style::default().fg(theme.muted)
-        } else {
-            Style::default().fg(theme.subtle)
-        };
-        let rationale = row
-            .rationale
-            .as_deref()
-            .filter(|rationale| !rationale.trim().is_empty())
-            .map(|rationale| format!(" · {rationale}"))
-            .unwrap_or_default();
-        let locations = group
-            .rows
-            .iter()
-            .map(|row| chunk_row_location_width(row, 46))
-            .collect::<Vec<_>>()
-            .join(" · ");
-        let title = if group.rows.len() == 1
-            && row.part.as_ref().is_some_and(|part| part.path == row.title)
-        {
-            String::new()
-        } else {
-            format!("{} ", row.title)
-        };
-        let row_width = inner.width.saturating_sub(4) as usize;
-        let detail = truncate_tail(&format!("{title}{rationale}"), row_width);
-        lines.push(Line::from(vec![
-            Span::styled(format!("{marker} "), style),
-            Span::styled(format!("{check} "), Style::default().fg(theme.positive)),
-            Span::styled(
-                truncate_tail(&locations, row_width),
-                Style::default().fg(theme.detail),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("    "),
-            Span::styled(detail, Style::default().fg(theme.muted)),
-        ]));
-    }
-    if rendered == 0 {
-        lines.push(Line::from(Span::styled(
-            "  (none)",
-            Style::default().fg(theme.muted),
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!("not toured — {} files", auto_rows.len()),
-        Style::default()
-            .fg(theme.secondary)
-            .add_modifier(Modifier::BOLD),
-    )));
-    for line in glance_auto_role_lines(&auto_rows, inner.width.saturating_sub(4) as usize) {
-        lines.push(Line::from(Span::styled(
-            format!("  {line}"),
-            Style::default().fg(theme.subtle),
-        )));
-    }
-    if window.hidden_below > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("  ↓ {} more", window.hidden_below),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{}/{} select · {} dives to location · {} ends tour",
-            keymap.hint(Action::PopupMoveDown),
-            keymap.hint(Action::PopupMoveUp),
-            keymap.hint(Action::PopupSelect),
-            keymap.hint(Action::PopupClose),
-        ),
-        Style::default().fg(theme.muted),
-    )));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-struct GlanceGroup<'a> {
-    indices: Vec<usize>,
-    rows: Vec<&'a super::chunks::WalkthroughRow>,
-}
-
-fn grouped_glance_rows(rows: &[super::chunks::WalkthroughRow]) -> Vec<GlanceGroup<'_>> {
-    let mut groups: Vec<GlanceGroup<'_>> = Vec::new();
-    for (index, row) in rows.iter().enumerate() {
-        if row.part_position.is_some()
-            && let Some(group) = groups.iter_mut().find(|group| {
-                group
-                    .rows
-                    .first()
-                    .is_some_and(|first| first.source_id == row.source_id)
-            })
-        {
-            group.indices.push(index);
-            group.rows.push(row);
-            continue;
-        }
-        groups.push(GlanceGroup {
-            indices: vec![index],
-            rows: vec![row],
-        });
-    }
-    groups
-}
-
-fn glance_auto_role_lines(
-    rows: &[&super::chunks::WalkthroughRow],
-    max_width: usize,
-) -> Vec<String> {
-    let mut by_role = std::collections::BTreeMap::<String, Vec<String>>::new();
-    for row in rows {
-        let path = row
-            .part
-            .as_ref()
-            .map(|part| part.path.clone())
-            .unwrap_or_else(|| row.title.clone());
-        let role = row
-            .rationale
-            .as_deref()
-            .unwrap_or("other")
-            .split('·')
-            .next()
-            .unwrap_or("other")
-            .trim()
-            .to_owned();
-        by_role.entry(role).or_default().push(path);
-    }
-    by_role
-        .into_iter()
-        .map(|(role, paths)| {
-            let names = paths
-                .iter()
-                .map(|p| distinguish_path_tail(p))
-                .collect::<Vec<_>>()
-                .join(" · ");
-            truncate_tail(&format!("{role} ({}): {names}", paths.len()), max_width)
-        })
-        .collect()
-}
-
-fn distinguish_path_tail(path: &str) -> String {
-    let mut parts = path.rsplit('/');
-    let file = parts.next().unwrap_or(path);
-    if let Some(parent) = parts.next() {
-        format!("{parent}/{file}")
-    } else {
-        file.to_owned()
-    }
+    format!("{left}…{}", right.into_iter().rev().collect::<String>())
 }
 
 fn draw_draft_list_popup(
@@ -5832,6 +4466,37 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 #[cfg(test)]
+fn measured_content_width(available: usize, requested: usize) -> usize {
+    requested.clamp(72.min(available), 100.min(available))
+}
+
+#[cfg(test)]
+fn render_tui_text(session: &ReviewSession, mode: &Mode, width: u16, height: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    let keymap = KeyMap::try_from(&crate::config::KeybindingsConfig::default()).unwrap();
+    let tui_state = TuiState {
+        terminal_size: ratatui::prelude::Size::new(width, height),
+        ..TuiState::default()
+    };
+    terminal
+        .draw(|frame| draw(frame, session, mode, &keymap, &tui_state, None))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut output = (0..height)
+        .map(|y| {
+            let line = (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            line.trim_end().to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    output.push('\n');
+    output
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{
@@ -5851,10 +4516,6 @@ mod tests {
         syntax::{HighlightKind, SyntaxSpan, SyntaxThemeConfig},
         tui::test_support::snapshot_session,
     };
-
-    fn render_tui_text(session: &ReviewSession, mode: &Mode, width: u16, height: u16) -> String {
-        render_tui_text_with_zen(session, mode, None, width, height)
-    }
 
     #[test]
     fn tui_snapshot_salience_driven_cross_file_stream() {
@@ -6058,17 +4719,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    session,
-                    mode,
-                    &keymap,
-                    &TuiState::default(),
-                    None,
-                    None,
-                )
-            })
+            .draw(|frame| draw(frame, session, mode, &keymap, &TuiState::default(), None))
             .unwrap();
         let position = terminal.backend().cursor_position();
         (
@@ -6160,7 +4811,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         terminal
-            .draw(|frame| draw(frame, session, mode, &keymap, tui_state, None, None))
+            .draw(|frame| draw(frame, session, mode, &keymap, tui_state, None))
             .unwrap();
         terminal.backend().buffer().clone()
     }
@@ -6184,7 +4835,6 @@ mod tests {
                     keymap,
                     tui_state,
                     tui_state.notice.as_ref(),
-                    None,
                 )
             })
             .unwrap();
@@ -6383,34 +5033,6 @@ mod tests {
         assert!(forced.contains("[x] file pane"), "{forced}");
     }
 
-    fn render_tui_text_with_zen(
-        session: &ReviewSession,
-        mode: &Mode,
-        zen: Option<&ZenState>,
-        width: u16,
-        height: u16,
-    ) -> String {
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
-
-        terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    session,
-                    mode,
-                    &keymap,
-                    &TuiState::default(),
-                    None,
-                    zen,
-                )
-            })
-            .unwrap();
-
-        buffer_text(terminal.backend().buffer())
-    }
-
     #[test]
     fn popup_footer_uses_effective_configured_hints() {
         let session = snapshot_session("");
@@ -6425,17 +5047,7 @@ mod tests {
         let backend = TestBackend::new(180, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| {
-                draw(
-                    frame,
-                    &session,
-                    &mode,
-                    &keymap,
-                    &TuiState::default(),
-                    None,
-                    None,
-                )
-            })
+            .draw(|frame| draw(frame, &session, &mode, &keymap, &TuiState::default(), None))
             .unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
 
@@ -6472,7 +5084,6 @@ mod tests {
                     &keymap,
                     tui_state,
                     tui_state.notice.as_ref(),
-                    None,
                 )
             })
             .unwrap();
@@ -7385,297 +5996,12 @@ diff --git a/README.md b/README.md
         );
     }
 
-    fn zen_snapshot_session() -> (ReviewSession, ZenState) {
-        let mut session = snapshot_session(
-            r#"diff --git a/src/app.rs b/src/app.rs
---- a/src/app.rs
-+++ b/src/app.rs
-@@ -1,4 +1,5 @@
- fn main() {
--    old();
-+    new();
-+    extra();
- }
-diff --git a/tests/app.rs b/tests/app.rs
---- a/tests/app.rs
-+++ b/tests/app.rs
-@@ -1 +1 @@
--check_old();
-+check_new();
-"#,
-        );
-        session.apply_agent_overlay(&crate::agent::AgentOverlay {
-            chunks: vec![
-                crate::agent::ReviewChunk {
-                    id: "c1".to_owned(),
-                    title: "core change".to_owned(),
-                    importance: crate::agent::ChunkImportance::Spotlight,
-                    change_id: None,
-                    explanation: Some(
-                        "main() now calls new() and adds extra() — the old single-call \
-                         contract is gone, so every caller that relied on old() firing \
-                         once must be re-checked."
-                            .to_owned(),
-                    ),
-                    rationale: Some("start here".to_owned()),
-                    artifacts: vec![crate::agent::Artifact {
-                        title: "startup output".to_owned(),
-                        kind: crate::agent::ArtifactKind::Output,
-                        body: "$ cargo run\nnew: ready\nextra: ready".to_owned(),
-                    }],
-                    parts: vec![crate::agent::ChunkPart {
-                        path: "src/app.rs".to_owned(),
-                        start_line: Some(2),
-                        end_line: Some(3),
-                    }],
-                },
-                crate::agent::ReviewChunk {
-                    id: "c2".to_owned(),
-                    title: "test churn".to_owned(),
-                    importance: crate::agent::ChunkImportance::Glance,
-                    change_id: None,
-                    explanation: None,
-                    rationale: Some("mechanical rename in tests".to_owned()),
-                    artifacts: Vec::new(),
-                    parts: vec![crate::agent::ChunkPart {
-                        path: "tests/app.rs".to_owned(),
-                        start_line: Some(1),
-                        end_line: Some(1),
-                    }],
-                },
-            ],
-            briefs: vec![crate::agent::ChangeBrief {
-                change_id: "zzzzyyyy".to_owned(),
-                summary: "Swaps the legacy old() startup call for new() and batches extra() \
-                          alongside it, so both effects fire together."
-                    .to_owned(),
-                artifacts: Vec::new(),
-            }],
-            ..Default::default()
-        });
-        // A single-change stack: the opening chapter card carries the
-        // change's full description and the agent's brief.
-        let stack = vec![crate::jj::JjChangeSummary {
-            change_id: "zzzzyyyy".to_owned(),
-            bookmarks: "startup-fix".to_owned(),
-            description: "feat: swap old() for new()\n\nold() fired a single effect; new() \
-                          batches extra() alongside it\nso startup converges in one pass."
-                .to_owned(),
-        }];
-        let mut zen = ZenState::new(&session, &stack).unwrap();
-        session.file_pane_visible = false;
-        // Land on the first spotlight stop (stops[0] is the chapter card).
-        zen.index = 1;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
-        (session, zen)
-    }
-
-    fn fallback_zen_snapshot_session() -> (ReviewSession, ZenState) {
-        let mut session = snapshot_session(
-            r#"diff --git a/src/app.rs b/src/app.rs
---- a/src/app.rs
-+++ b/src/app.rs
-@@ -1,4 +1,6 @@
- fn main() {
--    old();
-+    new();
-+    extra();
- }
-+fn helper() {}
-diff --git a/tests/app.rs b/tests/app.rs
---- a/tests/app.rs
-+++ b/tests/app.rs
-@@ -1 +1 @@
--check_old();
-+check_new();
-diff --git a/Cargo.toml b/Cargo.toml
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -1 +1,2 @@
- [dependencies]
-+itertools = "1"
-"#,
-        );
-        let zen = ZenState::new(&session, &[]).unwrap();
-        session.file_pane_visible = false;
-        (session, zen)
-    }
-
-    #[test]
-    fn tui_snapshot_zen_chapter_card() {
-        let (mut session, mut zen) = zen_snapshot_session();
-        zen.index = 0;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_focus_card() {
-        let (session, zen) = zen_snapshot_session();
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_focus_card_long_header_truncates() {
-        let (mut session, mut zen) = zen_snapshot_session();
-        if let Some(ZenStop::Chunk(row)) = zen.stops.get_mut(1) {
-            row.title =
-                "very long generated client compatibility migration with unusually verbose title"
-                    .to_owned();
-            if let Some(part) = row.part.as_mut() {
-                part.path =
-                    "src/deeply/nested/generated/client/compatibility/transport/retry_policy.rs"
-                        .to_owned();
-            }
-        }
-        zen.index = 1;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            80,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_fallback_zen_chapter_card() {
-        let (mut session, mut zen) = fallback_zen_snapshot_session();
-        zen.index = 0;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_fallback_zen_stop() {
-        let (mut session, mut zen) = fallback_zen_snapshot_session();
-        zen.index = 1;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[1].clone());
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_chapter_card_collapsed_description() {
-        let (mut session, mut zen) = zen_snapshot_session();
-        zen.index = 0;
-        zen.chapter_description_collapsed = true;
-        crate::tui::zen::jump_to_stop(&mut session, &zen.stops[0].clone());
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_artifact_viewer() {
-        let (session, mut zen) = zen_snapshot_session();
-        zen.phase = crate::tui::zen::ZenPhase::Artifact {
-            index: 0,
-            scroll: 0,
-        };
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            24
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_reading_panel() {
-        let (session, mut zen) = zen_snapshot_session();
-        zen.phase = crate::tui::zen::ZenPhase::Reading;
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            20
-        ));
-    }
-
-    #[test]
-    fn tui_snapshot_zen_glance_board() {
-        let (session, mut zen) = zen_snapshot_session();
-        zen.phase = crate::tui::zen::ZenPhase::Glance;
-
-        insta::assert_snapshot!(render_tui_text_with_zen(
-            &session,
-            &Mode::Normal,
-            Some(&zen),
-            100,
-            18
-        ));
-    }
-
     #[test]
     fn measured_content_width_tracks_excerpt_but_stays_readable() {
         assert_eq!(measured_content_width(200, 48), 72);
         assert_eq!(measured_content_width(200, 88), 88);
         assert_eq!(measured_content_width(200, 140), 100);
         assert_eq!(measured_content_width(80, 140), 80);
-    }
-
-    #[test]
-    fn chunk_row_location_names_the_anchored_change() {
-        let mut row = crate::tui::chunks::WalkthroughRow {
-            source_id: "c1".to_owned(),
-            author: None,
-            title: "stop".to_owned(),
-            importance: crate::agent::ChunkImportance::Spotlight,
-            change_id: None,
-            rationale: None,
-            explanation: None,
-            artifacts: Vec::new(),
-            part: Some(crate::agent::ChunkPart {
-                path: "src/app.rs".to_owned(),
-                start_line: Some(3),
-                end_line: Some(9),
-            }),
-            part_position: None,
-            invalid_reason: None,
-        };
-        assert_eq!(chunk_row_location_raw(&row), "src/app.rs:3-9");
-
-        row.change_id = Some("xyzkwqrs".to_owned());
-        assert_eq!(chunk_row_location_raw(&row), "[xyzkwqrs] src/app.rs:3-9");
     }
 
     #[test]
@@ -7686,197 +6012,6 @@ diff --git a/Cargo.toml b/Cargo.toml
             "src/v…e.rs:10-20"
         );
         assert!(truncate_tail("界界界", 5).width() <= 5);
-    }
-
-    #[test]
-    fn glance_rows_group_multi_part_chunks() {
-        let row = |path: &str, pos| crate::tui::chunks::WalkthroughRow {
-            source_id: "c1".to_owned(),
-            author: None,
-            title: "shared".to_owned(),
-            importance: crate::agent::ChunkImportance::Glance,
-            change_id: None,
-            rationale: Some("one reason".to_owned()),
-            explanation: None,
-            artifacts: Vec::new(),
-            part: Some(crate::agent::ChunkPart {
-                path: path.to_owned(),
-                start_line: Some(1),
-                end_line: Some(2),
-            }),
-            part_position: Some(pos),
-            invalid_reason: None,
-        };
-        let rows = vec![row("a.rs", (1, 2)), row("b.rs", (2, 2))];
-        let groups = grouped_glance_rows(&rows);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].indices, vec![0, 1]);
-        assert_eq!(groups[0].rows.len(), 2);
-    }
-
-    #[test]
-    fn zen_excerpt_follows_a_wandering_cursor_and_reports_it() {
-        let mut body = String::from(
-            "diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,30 +1,30 @@\n",
-        );
-        for index in 1..=30 {
-            body.push_str(&format!("+line {index}\n"));
-        }
-        let mut session = snapshot_session(&body);
-        session.focus = Focus::Diff;
-        let rows = session.diff_rows_for_selected_file().to_vec();
-        let stop = crate::tui::chunks::WalkthroughRow {
-            source_id: "c1".to_owned(),
-            author: None,
-            title: "stop".to_owned(),
-            importance: crate::agent::ChunkImportance::Spotlight,
-            change_id: None,
-            rationale: None,
-            explanation: None,
-            artifacts: Vec::new(),
-            part: Some(crate::agent::ChunkPart {
-                path: "big.txt".to_owned(),
-                start_line: Some(2),
-                end_line: Some(3),
-            }),
-            part_position: None,
-            invalid_reason: None,
-        };
-
-        // Cursor inside the stop range: the excerpt is the range window.
-        let in_range = rows
-            .iter()
-            .position(|row| row.new_lineno == Some(2))
-            .unwrap();
-        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, Some(in_range));
-        assert!(!wandered);
-        assert!(indices.contains(&in_range));
-        assert_eq!(rows[indices[0]].new_lineno, Some(1)); // 2 - context
-
-        // Cursor far below the range: the excerpt slides to keep it visible.
-        let far = rows
-            .iter()
-            .position(|row| row.new_lineno == Some(20))
-            .unwrap();
-        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, Some(far));
-        assert!(wandered);
-        assert!(indices.contains(&far));
-        assert_eq!(indices.len(), 5);
-        // Roughly centered on the cursor.
-        assert_eq!(rows[indices[0]].new_lineno, Some(18));
-
-        // No cursor (files pane focus): the stop range wins.
-        let (indices, wandered, _) = zen_excerpt_indices(&rows, &stop, 5, None);
-        assert!(!wandered);
-        assert_eq!(rows[indices[0]].new_lineno, Some(1));
-
-        // At tiny prose-first heights, do not spend the whole budget on
-        // leading context: start at the target range and still report the
-        // clipped range trailer.
-        let stop = crate::tui::chunks::WalkthroughRow {
-            part: Some(crate::agent::ChunkPart {
-                path: "big.txt".to_owned(),
-                start_line: Some(10),
-                end_line: Some(20),
-            }),
-            ..stop
-        };
-        let (indices, wandered, clipped) = zen_excerpt_indices(&rows, &stop, 3, None);
-        assert!(!wandered);
-        assert_eq!(rows[indices[0]].new_lineno, Some(10));
-        assert_eq!(indices.len(), 2);
-        assert_eq!(clipped, Some((11, 20)));
-
-        // Exact budget boundary: the trailer still gets a reserved row rather
-        // than being pushed out by the last visible code line.
-        let (indices, wandered, clipped) = zen_excerpt_indices(&rows, &stop, 11, None);
-        assert!(!wandered);
-        assert_eq!(indices.len(), 10);
-        assert_eq!(clipped, Some((3, 20)));
-    }
-
-    #[test]
-    fn zen_focus_dims_rows_outside_the_stop_range() {
-        let mut session = snapshot_session(
-            r#"diff --git a/src/app.rs b/src/app.rs
---- a/src/app.rs
-+++ b/src/app.rs
-@@ -1,4 +1,5 @@
- fn main() {
--    old();
-+    new();
-+    extra();
- }
-"#,
-        );
-        session.zen_focus = Some(crate::app::ZenFocus {
-            path: "src/app.rs".to_owned(),
-            lines: Some((2, 3)),
-        });
-        session.focus = Focus::Diff;
-        let rows = session.diff_rows_for_selected_file().to_vec();
-        let in_range = rows
-            .iter()
-            .position(|row| row.new_lineno == Some(2))
-            .unwrap();
-        let out_of_range = rows
-            .iter()
-            .position(|row| row.new_lineno == Some(4))
-            .unwrap();
-        let header = rows
-            .iter()
-            .position(|row| matches!(row.kind, DiffRowKind::FileHeader))
-            .unwrap();
-        session.diff_cursor = usize::MAX; // keep the cursor away from the probes
-
-        assert!(!zen_row_dimmed(&session, &rows[in_range], in_range));
-        assert!(zen_row_dimmed(&session, &rows[out_of_range], out_of_range));
-        assert!(zen_row_dimmed(&session, &rows[header], header));
-    }
-
-    #[test]
-    fn zen_focus_never_dims_the_cursor_row_or_other_files() {
-        let mut session = snapshot_session(
-            r#"diff --git a/src/app.rs b/src/app.rs
---- a/src/app.rs
-+++ b/src/app.rs
-@@ -1,4 +1,5 @@
- fn main() {
--    old();
-+    new();
-+    extra();
- }
-"#,
-        );
-        session.focus = Focus::Diff;
-        let rows = session.diff_rows_for_selected_file().to_vec();
-        let out_of_range = rows
-            .iter()
-            .position(|row| row.new_lineno == Some(4))
-            .unwrap();
-
-        // Cursor row stays readable even outside the frame.
-        session.zen_focus = Some(crate::app::ZenFocus {
-            path: "src/app.rs".to_owned(),
-            lines: Some((2, 3)),
-        });
-        session.diff_cursor = out_of_range;
-        assert!(!zen_row_dimmed(&session, &rows[out_of_range], out_of_range));
-
-        // A frame pointing at a different file dims nothing here.
-        session.zen_focus = Some(crate::app::ZenFocus {
-            path: "other.rs".to_owned(),
-            lines: Some((2, 3)),
-        });
-        session.diff_cursor = usize::MAX;
-        assert!(!zen_row_dimmed(&session, &rows[out_of_range], out_of_range));
-
-        // A whole-file frame (chunkless fallback) dims nothing.
-        session.zen_focus = Some(crate::app::ZenFocus {
-            path: "src/app.rs".to_owned(),
-            lines: None,
-        });
-        assert!(!zen_row_dimmed(&session, &rows[out_of_range], out_of_range));
     }
 
     #[test]
@@ -8032,15 +6167,7 @@ diff --git a/Cargo.toml b/Cargo.toml
                     let mut terminal = Terminal::new(backend).unwrap();
                     terminal
                         .draw(|frame| {
-                            draw(
-                                frame,
-                                session,
-                                &Mode::Normal,
-                                &keymap,
-                                &tui_state,
-                                None,
-                                None,
-                            )
+                            draw(frame, session, &Mode::Normal, &keymap, &tui_state, None)
                         })
                         .unwrap();
                     let buffer = terminal.backend().buffer();

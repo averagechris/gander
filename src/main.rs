@@ -37,7 +37,7 @@ use color_eyre::eyre::{Context, eyre};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{AgentOverlay, chunk_line_space},
+    agent::AgentOverlay,
     anchor::comment_anchor_for_file_lines,
     app::ReviewSession,
     artifact::{
@@ -164,11 +164,11 @@ enum Command {
         /// Artifact output path for --artifact-on-quit write.
         #[arg(long = "artifact-output")]
         artifact_output: Option<PathBuf>,
-        /// Start directly in the full-screen tour slide deck.
+        /// Start Focus at the first durable Spotlight in the normal review stream.
         #[arg(long)]
         tour: bool,
     },
-    /// Render the tour slide deck to plain terminal text.
+    /// Render normal-stream Spotlight/Focus slides to plain terminal text.
     Tour {
         #[command(subcommand)]
         command: TourCommand,
@@ -247,9 +247,9 @@ enum Command {
     MarkGeneratedViewed,
     /// Low-level/internal ACP bridge for debugging live review integrations.
     Acp,
-    /// Drive the tour/view in a live TUI via its ACP socket (defaults to status).
+    /// Drive stream Spotlight/Focus presentation in a live TUI (defaults to status).
     #[command(
-        after_help = "Examples:\n  gander present\n  gander present next\n  gander present goto --index 3\n  gander present focus --path src/lib.rs --line 42 --end-line 60 --note 'look here'\n\nRequires a live TUI for this workspace; start one with `gander tui --tour`."
+        after_help = "Examples:\n  gander present\n  gander present start\n  gander present next\n  gander present goto --index 3\n  gander present focus --path src/lib.rs --line 42 --end-line 60 --note 'look here'\n\nRequires a live TUI for this workspace; start one with `gander tui`. Presentation uses durable Spotlight ordering in the normal stream and applies Focus without removing review actions."
     )]
     Present {
         #[command(subcommand)]
@@ -320,7 +320,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum TourCommand {
-    /// Render tour slides using the production TUI draw path.
+    /// Render durable Spotlights in Focus using the production normal-stream draw path.
     Render {
         /// Render width in terminal columns.
         #[arg(long, default_value_t = 100, value_name = "COLUMNS")]
@@ -374,15 +374,15 @@ struct DraftCommentSpec {
 enum PresentCommand {
     /// Print live presentation status.
     Status,
-    /// Start the tour, like pressing T in the TUI.
+    /// Start Focus at the first durable Spotlight in the normal stream.
     Start,
-    /// End the tour.
+    /// End stream presentation, restoring Focus if presentation applied it.
     End,
-    /// Advance to the next slide.
+    /// Advance to the next durable Spotlight.
     Next,
-    /// Move to the previous slide.
+    /// Move to the previous durable Spotlight.
     Prev,
-    /// Jump to a slide by zero-based index or durable step id.
+    /// Jump to a Spotlight by zero-based index or durable step id.
     Goto {
         /// Zero-based slide index (compatibility behavior).
         #[arg(
@@ -407,7 +407,7 @@ enum PresentCommand {
         #[arg(long)]
         note: Option<String>,
     },
-    /// Reload review/walkthrough state and rebuild the active tour.
+    /// Reload durable review state and re-anchor the active Spotlight.
     Reload,
 }
 
@@ -797,7 +797,7 @@ enum WalkthroughCommand {
         /// Optional step details/body text.
         #[arg(long)]
         body: Option<String>,
-        /// Presentation importance in zen mode.
+        /// Salience used by stream Spotlight ordering or the glance board.
         #[arg(long, value_enum, default_value_t = StepImportanceArg::Spotlight)]
         importance: StepImportanceArg,
         /// jj change id this step belongs to.
@@ -2780,7 +2780,16 @@ fn run() -> color_eyre::Result<()> {
                 print_json(&step)?;
             }
             WalkthroughCommand::Set { file, dry_run } => {
-                let mut spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
+                let spec: WalkthroughSetSpec = read_json_spec(file.as_ref(), "walkthrough")?;
+                let stack_change_ids =
+                    if spec.steps.iter().any(|step| step.kind == StepKind::Chapter) {
+                        jj.stack_changes(&session.repo, &session.target)?
+                            .into_iter()
+                            .map(|change| change.change_id)
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
                 let target_spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &target_spec);
                 let rs = review::ensure_session(&mut state, &target_spec, None);
@@ -2794,21 +2803,30 @@ fn run() -> color_eyre::Result<()> {
                     .first()
                     .map(|walkthrough| walkthrough.steps.as_slice())
                     .unwrap_or(&[]);
-                spec.steps = review::preserve_walkthrough_step_ids(prior, spec.steps);
-                for step in &mut spec.steps {
-                    step.author = Some(config.human_identity());
+                let normalized = review::normalize_walkthrough_replacement(
+                    prior,
+                    spec.title,
+                    spec.steps,
+                    &config.human_identity(),
+                    &attention_diff.files,
+                    &stack_change_ids,
+                )
+                .map_err(into_user_error)?;
+                for warning in &normalized.warnings {
+                    eprintln!("warning: {warning}");
                 }
-                anchor_walkthrough_steps(&mut spec.steps, &attention_diff.files);
-                warn_walkthrough_set_issues(&session, &jj, &spec)?;
-                let new_count = spec.steps.len();
+                let new_count = normalized.steps.len();
                 if dry_run {
                     eprintln!(
                         "would replace walkthrough ({replaced} steps) with {new_count} steps"
                     );
-                    print_json(&spec)?;
+                    print_json(&WalkthroughSetSpec {
+                        title: normalized.title,
+                        steps: normalized.steps,
+                    })?;
                     return Ok(());
                 }
-                let walkthrough = review::set_walkthrough(rs, spec.title, spec.steps);
+                let walkthrough = review::set_walkthrough(rs, normalized.title, normalized.steps);
                 attention::sync_agent_attention(rs, &attention_diff.files)
                     .map_err(into_user_error)?;
                 state.save(&state_path)?;
@@ -3355,114 +3373,6 @@ fn parse_step_artifacts(values: &[String]) -> color_eyre::Result<Vec<StepArtifac
         .collect()
 }
 
-fn warn_walkthrough_set_issues(
-    session: &ReviewSession,
-    jj: &dyn JjBackend,
-    spec: &WalkthroughSetSpec,
-) -> color_eyre::Result<()> {
-    let chapter_ids: Vec<String> = spec
-        .steps
-        .iter()
-        .filter(|step| step.kind == StepKind::Chapter)
-        .map(|step| {
-            step.change_id
-                .clone()
-                .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| {
-                    user_error(format!(
-                        "chapter step {} missing change_id",
-                        step_label(step)
-                    ))
-                })
-        })
-        .collect::<color_eyre::Result<Vec<_>>>()?;
-    if !chapter_ids.is_empty() {
-        validate_change_ids_for_cli(session, jj, &chapter_ids)?;
-    }
-    let line_space = chunk_line_space(
-        &session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>(),
-        None,
-    );
-    for step in &spec.steps {
-        for target in std::iter::once(&step.target).chain(step.extra_targets.iter()) {
-            attention::validate_target_anchor(target).map_err(|error| {
-                user_error(format!(
-                    "walkthrough step {} has invalid target anchor: {error}",
-                    step_label(step)
-                ))
-            })?;
-            if let Some(file) = target.file.as_deref()
-                && !session.files.iter().any(|f| f.path == file)
-            {
-                eprintln!(
-                    "warning: walkthrough step {} targets file not in diff: {file}",
-                    step_label(step)
-                );
-            } else if let (Some(file), Some(line)) = (target.file.as_deref(), target.line) {
-                let in_range = line_space
-                    .iter()
-                    .find(|entry| entry.path == file)
-                    .is_some_and(|entry| {
-                        entry
-                            .hunks
-                            .iter()
-                            .any(|hunk| line >= hunk.start_line && line <= hunk.end_line)
-                    });
-                if !in_range {
-                    let ranges = line_space
-                        .iter()
-                        .find(|entry| entry.path == file)
-                        .map(|entry| {
-                            entry
-                                .hunks
-                                .iter()
-                                .map(|hunk| format!("{}-{}", hunk.start_line, hunk.end_line))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .filter(|ranges| !ranges.is_empty())
-                        .unwrap_or_else(|| "none".to_owned());
-                    eprintln!(
-                        "warning: walkthrough step {} targets {file}:{line} outside diff line space; valid ranges: {ranges}",
-                        step_label(step)
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn step_label(step: &WalkthroughStep) -> &str {
-    if !step.id.is_empty() {
-        &step.id
-    } else {
-        step.title.as_deref().unwrap_or("<untitled>")
-    }
-}
-
-fn anchor_walkthrough_steps(steps: &mut [WalkthroughStep], files: &[crate::diff::FileDiff]) {
-    for step in steps {
-        for target in std::iter::once(&mut step.target).chain(step.extra_targets.iter_mut()) {
-            if target.anchor.is_some() {
-                continue;
-            }
-            let Some(path) = target.file.clone() else {
-                continue;
-            };
-            if let Ok(anchored) =
-                attention::target_for_diff(files, &path, target.line, target.end_line)
-            {
-                target.anchor = anchored.anchor;
-            }
-        }
-    }
-}
-
 fn warn_target_line_space(
     session: &ReviewSession,
     label: &str,
@@ -3475,28 +3385,9 @@ fn warn_target_line_space(
         .iter()
         .map(|file| file.diff.clone())
         .collect::<Vec<_>>();
-    let line_space = chunk_line_space(&files, Some(file));
-    let in_range = line_space.first().is_some_and(|entry| {
-        entry
-            .hunks
-            .iter()
-            .any(|hunk| line >= hunk.start_line && line <= hunk.end_line)
-    });
-    if !in_range {
-        let ranges = line_space
-            .first()
-            .map(|entry| {
-                entry
-                    .hunks
-                    .iter()
-                    .map(|hunk| format!("{}-{}", hunk.start_line, hunk.end_line))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .filter(|ranges| !ranges.is_empty())
-            .unwrap_or_else(|| "none".to_owned());
+    if attention::target_for_diff(&files, file, Some(line), None).is_err() {
         eprintln!(
-            "warning: walkthrough step {label} targets {file}:{line} outside diff line space; valid ranges: {ranges}"
+            "warning: walkthrough step {label} targets {file}:{line} outside the current diff; it will remain durable and stale until it re-anchors"
         );
     }
     Ok(())
@@ -4110,7 +4001,7 @@ fn select_present_instance(
     }
     match matches.as_slice() {
         [] => Err(user_error(
-            "no live TUI for this workspace; start one with `gander tui --tour` and retry",
+            "no live TUI for this workspace; start one with `gander tui` and retry",
         )),
         [one] => Ok(one.clone()),
         many => {
@@ -4383,6 +4274,28 @@ impl From<TuiArtifactOnQuitArg> for TuiArtifactOnQuitConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_full_screen_and_chunk_models_stay_absent_from_core_sources() {
+        let sources = [
+            include_str!("app/mod.rs"),
+            include_str!("app/stream.rs"),
+            include_str!("tui/mod.rs"),
+            include_str!("tui/render.rs"),
+        ]
+        .join("\n");
+        for removed in [
+            concat!("Zen", "Phase"),
+            concat!("Zen", "State"),
+            concat!("Review", "Chunk"),
+            concat!("Chunk", "Part"),
+            concat!("Change", "Brief"),
+            concat!("mod ", "zen;"),
+            concat!("mod ", "chunks;"),
+        ] {
+            assert!(!sources.contains(removed), "{removed}");
+        }
+    }
     use chrono::TimeZone;
     use clap::CommandFactory;
     use std::cell::RefCell;
@@ -4548,11 +4461,11 @@ mod tests {
 
     #[test]
     fn user_error_formatting_is_plain_and_preserves_multiline_details() {
-        let error = UserError::new("invalid chunk part(s):\n- src/lib.rs:99-100 outside diff");
+        let error = UserError::new("invalid walkthrough target:\n- src/lib.rs:99-100 outside diff");
 
         assert_eq!(
             format_user_error(&error),
-            "error: invalid chunk part(s):\n- src/lib.rs:99-100 outside diff\n"
+            "error: invalid walkthrough target:\n- src/lib.rs:99-100 outside diff\n"
         );
     }
 

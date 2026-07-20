@@ -443,6 +443,13 @@ fn resize_pty(probe: &PtyProbe, cols: u16, rows: u16) {
     // SAFETY: master fd is valid; TIOCSWINSZ takes a winsize pointer.
     let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) };
     assert_eq!(rc, 0, "TIOCSWINSZ failed");
+    // Darwin does not reliably deliver SIGWINCH for a master-side TIOCSWINSZ
+    // when many PTY children run in parallel. The real terminal contract is
+    // the size update plus SIGWINCH, so deliver the signal explicitly instead
+    // of allowing this harness race to omit the resize event.
+    // SAFETY: the probe child pid is live and SIGWINCH has its normal meaning.
+    let rc = unsafe { libc::kill(probe.child.id() as libc::pid_t, libc::SIGWINCH) };
+    assert_eq!(rc, 0, "SIGWINCH delivery failed");
 }
 
 // ---------------------------------------------------------------------------

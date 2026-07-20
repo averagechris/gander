@@ -54,7 +54,7 @@ This repo is intentionally early, but the first vertical slice is in place:
   files and diffs over a configurable size threshold (`L` to expand)
 - hosts agent-collaborative review through CLI-first workflows, optional MCP
   (`gander mcp`), and the lower-level ACP bridge (`gander acp`): agents read
-  the session, curate walkthroughs (`W`/`T`), suggest ordering (`A`), flag
+  the session, curate walkthroughs (`W`, Alt-N/Alt-P), suggest ordering (`A`), flag
   critical sections (`F`), and draft comments the human triages (`D`)
 - offers optional MCP (`gander mcp`) with live-session tools plus CLI-parity
   tools for reviews, comments, action items, and walkthroughs; see
@@ -281,7 +281,8 @@ open-work = ["X"]
 walkthrough-list = ["W"]
 attention-focus = ["Z"]
 attention-glance = ["alt-g"]
-zen = ["T"] # legacy presentation until the next M18 package
+spotlight-next = ["alt-n"]
+spotlight-previous = ["alt-p"]
 draft-list = ["D"]
 target-picker-down = ["down", "ctrl-j"]
 target-picker-up = ["up", "ctrl-k"]
@@ -290,7 +291,7 @@ popup-move-up = ["k", "up"]
 popup-select = ["enter"]
 popup-toggle = ["space"]
 popup-close = ["esc"]
-popup-close-q = ["q"] # only help, View Options, and zen artifacts
+popup-close-q = ["q"] # only help and View Options
 toggle-generated = ["h"]
 cycle-viewed-filter = ["f"]
 toggle-fold = ["space"]
@@ -334,16 +335,6 @@ draft-discard = ["x"]
 walkthrough-delete = ["d"]
 walkthrough-move-down = ["J"]
 walkthrough-move-up = ["K"]
-zen-next = ["n", "enter", "right", "space"]
-zen-previous = ["p", "left"]
-zen-toggle-view = ["tab"]
-zen-glance = ["g"]
-zen-artifact = ["e"]
-zen-toggle-details = ["d"]
-zen-refocus = ["."]
-zen-acknowledge = ["a"]
-zen-artifact-next = ["l", "right", "tab"]
-zen-artifact-previous = ["h", "left"]
 insert-newline = ["enter"]
 submit-comment = ["ctrl-s"]
 cycle-comment-channel = ["tab"]
@@ -436,8 +427,6 @@ popup-move-down = ["n", "down"]
 popup-move-up = ["e", "up"]
 comment-list-new-general = ["ctrl-n"]
 draft-edit = ["alt-e"]
-zen-artifact = ["i"]
-zen-next = ["enter", "right", "space"]
 ```
 
 See [docs/keybindings.md](docs/keybindings.md) for the complete action/context
@@ -522,9 +511,9 @@ and `control-j`/`ctrl-j` are equivalent. Unknown keybinding fields, invalid key
 syntax, and duplicate canonical assignments in an overlapping input context are
 errors; `G` and `shift-g` are equivalent, while shifted punctuation is bound by
 its emitted character. Immutable movement/select/Esc fallbacks also participate
-in validation. Zen focus keys dispatch before—and otherwise fall through to—the
-normal review map, with only documented built-in shadows allowed. The same key
-may be reused in disjoint modes. Press `?` in the TUI for the full grouped
+in validation. Focus and Spotlight navigation use the normal review map, with no
+layered presentation key context. The same key may be reused in disjoint modes.
+Press `?` in the TUI for the full grouped
 keymap; the footer only shows the everyday hints.
 
 | Key | Action |
@@ -553,7 +542,7 @@ keymap; the footer only shows the everyday hints.
 | `W` | walkthrough panel (jump, reorder with `J`/`K`, delete with `d`) |
 | `Z` | toggle the attention Focus preset (maximum folding, pane hidden, narration pinned; toggle restores exactly) |
 | `Alt-G` | open the attention glance board (jump/peek/selected or bulk acknowledge) |
-| `T` | legacy zen walkthrough until the next M18 removal package |
+| Alt-N / Alt-P | next / previous durable Spotlight in the normal review stream |
 | `D` | agent draft comments triage popup (accept/edit/discard) |
 | `V` | View Options popup for word highlights, line backgrounds, gutter bar, soft wrap, file pane, and side-by-side view |
 | `w` / `\|` | hide/show the file pane / toggle unified vs side-by-side diff view |
@@ -707,8 +696,9 @@ gander mcp
 Tools: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (what the human is looking at right now), `stack_changes`
 and `change_diff` (the jj stack and one change's own diff, for
-stacked-PR-style reviews), `set_ordering`, `flag_section`, `set_chunks`
-(internal live-curation inputs that can anchor to a stack change via `change_id`), `draft_comment`,
+stacked-PR-style reviews), `set_ordering`, `flag_section`,
+`walkthrough_set`/`walkthrough_add_step`/`walkthrough_show`,
+`attention_set`/`attention_list`/`attention_seed_heuristics`, `draft_comment`,
 and `list_reviews` (every
 running review instance). Spawned in a workspace, each tool call routes to
 that workspace's live gander TUI through the instance registry — with
@@ -732,16 +722,18 @@ opencode:
 ```
 
 When a review is large (thresholds under `[limits]`), the TUI nudges you
-that an agent can organize it: summon one with `@` or ask your harness,
-then press `T` for the legacy **zen mode** — a focused walkthrough of authored
-steps and chapters. The file pane hides, rows outside the current stop dim, and
-a bottom panel shows progress and rationale; advancing (Enter/`n`) marks the
-file viewed. Without walkthrough steps, zen walks the files in review order
-instead. Public `chunks`/`briefs` commands have been removed; use
-`gander walkthrough ...` for durable automation, while ACP/MCP overlay chunks and
-briefs remain active internal curation inputs. Every
-normal review key (comments, flags, context expansion, view toggles) keeps
-working mid-walkthrough; Esc returns to free navigation.
+that an agent can organize it: summon one with `@` or ask your harness to author
+durable walkthrough steps and attention regions. `Z` applies Focus in the normal
+stream, Alt-N/Alt-P follows Spotlight order, and Alt-G summarizes Skim folds.
+`gander tui --tour` is retained for scripts and maps to Focus at the first
+current Spotlight; `gander tour render` renders those same normal-stream
+Spotlights. Comments, search, retargeting, folding, and every other normal review
+action remain available because presentation is no longer a separate mode.
+
+This release intentionally discards legacy `agent.json` chunk and change-brief
+fields rather than migrating them. Unknown fields load harmlessly and disappear
+on the next overlay save; ordering and flags remain intact. Recreate curation with
+`gander walkthrough set` and `gander attention set|seed-heuristics`.
 
 See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:
 CLI-first automation, optional MCP registration for opencode/Claude Code/Codex,

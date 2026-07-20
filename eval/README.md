@@ -2,6 +2,12 @@
 
 This directory contains repeatable dogfood scenarios for evaluating gander against a disposable jj fixture repo. The harness is docs/scripts only; do not point evaluators at a real working repo.
 
+Archived reports preserve the vocabulary and commands of the removed
+full-screen walkthrough and overlay-curation experiments. They are historical
+evidence, not current instructions; scenario 2 now evaluates durable
+walkthrough/attention curation with Focus, Spotlight navigation, and Glance in
+the normal stream.
+
 ## Loop
 
 1. Build the binary under test:

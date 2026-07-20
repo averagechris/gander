@@ -98,8 +98,8 @@ EOF
         }
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        let output = Command::new(env!("CARGO_BIN_EXE_gander"))
+    fn output(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_gander"))
             .arg("--repo")
             .arg(&self.repo)
             .arg("--config")
@@ -112,7 +112,11 @@ EOF
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("HOME", &self.home)
             .output()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let output = self.output(args);
         assert!(
             output.status.success(),
             "gander {args:?} failed:\nstdout:\n{}\nstderr:\n{}",
@@ -129,6 +133,34 @@ EOF
     fn load_state(&self) -> Value {
         serde_json::from_slice(&fs::read(&self.state).unwrap()).unwrap()
     }
+}
+
+#[test]
+fn cli_walkthrough_set_rejects_duplicate_ids_without_state_mutation() {
+    let fixture = CliFixture::new(Vec::new());
+    let spec = fixture._dir.path().join("duplicate-walkthrough.json");
+    fs::write(
+        &spec,
+        serde_json::to_vec_pretty(&json!({
+            "title": "Duplicate ids",
+            "steps": [
+                { "id": "duplicate", "title": "First" },
+                { "id": "duplicate", "title": "Second" }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let before = fs::read(&fixture.state).unwrap();
+
+    let output = fixture.output(&["walkthrough", "set", "--file", spec.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("duplicate explicit walkthrough step id(s): duplicate")
+    );
+    assert_eq!(fs::read(&fixture.state).unwrap(), before);
 }
 
 fn comment(id: &str, body: &str, state: &str, channel: &str) -> Value {

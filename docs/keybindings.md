@@ -10,8 +10,9 @@ first-match-wins shadow.
 Configuration layering is unchanged: XDG user config, repository
 `gander.toml`, deprecated repository `.gander/config.toml`, then explicit
 `--config`, with each later field replacing the earlier field's complete key
-list. `tour` remains an alias for `zen`, and `task-list` remains an alias for
-`open-work`.
+list. `task-list` remains an alias for `open-work`. The removed presentation
+binding names have no aliases; old configs fail clearly instead of silently
+rebinding `T`.
 
 Preset layering happens inside `[keybindings]`: the last configured
 `preset = "gander"` (the default) or `preset = "hunk"` selects the complete
@@ -44,8 +45,8 @@ behavior. Normal review also retains Vim `j`/`k` movement fallbacks. Non-text
 list popups retain `j`/`k` and arrow movement. In text-filter popups (`target
 chooser` and `file search`), literal `j` and `k` are query text; movement uses
 Up/Down or Ctrl-K/Ctrl-J. No popup gains `q` as an implicit close key.
-The existing `q` close behavior remains limited to help, View Options, and the
-zen artifact viewer and is configurable as `popup-close-q`.
+The existing `q` close behavior remains limited to help and View Options and is
+configurable as `popup-close-q`.
 
 These are immutable safety bindings, not just defaults: normal `j`/`k` and
 arrows, filter arrows/Ctrl-J/Ctrl-K, list `j`/`k` and arrows, popup Enter, and
@@ -53,14 +54,6 @@ popup Esc are part of collision validation even when their configurable action
 list is replaced. Repeating a safety key for the same action is valid; assigning
 it to another action in the same effective context reports an `immutable
 fallback` collision.
-
-Zen focus/reading is layered over normal review. Zen actions dispatch first and
-other keys fall through to the active normal files/diff context. Validation uses
-that same layering and permits only the declared built-in shadows (for example
-zen `n/p/g/e/d`, Enter, Tab, arrows, and Space over their established normal
-actions). A custom shadow such as `zen-next = ["c"]` is rejected because it
-would hide normal `comment`. Esc is an immutable zen-close action; changing
-`popup-close` does not change or mislabel the focus/reading close key.
 
 ## Context inventory
 
@@ -78,9 +71,6 @@ would hide normal `comment`. Esc is an immutable zen-close action; changing
 | view options | list movement, toggle, select, close |
 | comment editor | local text editing plus configurable channel cycle, newline, save, cancel, backspace |
 | attention glance | list movement/select/close plus peek, selected acknowledge, and bulk acknowledge |
-| zen focus/reading | configurable stop, card, glance, artifact, detail, and refocus actions; other normal actions fall through |
-| zen glance | list movement/select/close, acknowledge all, back |
-| zen artifact | scroll/select/close and previous/next artifact |
 
 ## Default action map
 
@@ -134,7 +124,7 @@ remains effective.
 | `toggle-agent-order` / `flag-list` | `A` / `F` | normal |
 | `open-work` / `activity` | `X` / Ctrl-A | normal |
 | `walkthrough-list` / `mark-walkthrough` | `W` / `Y` | normal / normal diff |
-| `zen` / `draft-list` | `T` / `D` | normal (legacy zen remains until its M18 removal package) |
+| `draft-list` | `D` | normal |
 
 ### Comments and editor
 
@@ -163,30 +153,16 @@ grapheme, so combining text and emoji clusters are never split.
 | Field | Default | Effective context |
 | --- | --- | --- |
 | `target-picker-down` / `target-picker-up` | Down, Ctrl-J / Up, Ctrl-K | text-filter popups |
-| `popup-move-down` / `popup-move-up` | `j`, Down / `k`, Up | non-text lists, help, zen glance/artifact |
-| `popup-select` | Enter | selectable popups and zen glance/artifact |
+| `popup-move-down` / `popup-move-up` | `j`, Down / `k`, Up | non-text lists and help |
+| `popup-select` | Enter | selectable popups |
 | `popup-toggle` | Space | View Options |
-| `popup-close` | Esc | popups and zen glance/artifact; focus/reading uses immutable zen Esc |
-| `popup-close-q` | `q` | help, View Options, and zen artifacts only (established compatibility) |
+| `popup-close` | Esc | popups |
+| `popup-close-q` | `q` | help and View Options only |
 | `draft-accept` / `draft-edit` / `draft-discard` | Enter, `a` / `e` / `x` | draft list |
 | `walkthrough-delete` | `d` | walkthrough list |
 | `walkthrough-move-down` / `walkthrough-move-up` | `J` / `K` | walkthrough list |
 | `glance-peek` | Space | attention glance; opens the selected current fold in the stream and closes |
 | `glance-acknowledge` / `glance-acknowledge-all` | `a` / `A` | attention glance; stale entries remain inert |
-
-### Zen controls
-
-| Field | Default | Effective context |
-| --- | --- | --- |
-| `zen-next` | `n`, Enter, Right, Space | focus/reading |
-| `zen-previous` | `p`, Left | focus/reading and glance |
-| `zen-toggle-view` | Tab | focus/reading |
-| `zen-glance` | `g` | focus |
-| `zen-artifact` | `e` | focus and artifact close |
-| `zen-toggle-details` | `d` | chapter focus |
-| `zen-refocus` | `.` | focus/reading |
-| `zen-acknowledge` | `a` | glance |
-| `zen-artifact-next` / `zen-artifact-previous` | `l`, Right, Tab / `h`, Left | artifact viewer |
 
 ## Collision-free Colemak Mod-DH override
 
@@ -207,14 +183,11 @@ popup-move-down = ["n", "down"]
 popup-move-up = ["e", "up"]
 comment-list-new-general = ["ctrl-n"]
 draft-edit = ["alt-e"]
-zen-artifact = ["i"]
-zen-next = ["enter", "right", "space"]
 ```
 
 The apparently repeated `alt-e` is valid: comment editing in normal/comment
 center and agent-draft editing are disjoint dispatch contexts. `alt-j` avoids
 the immutable normal `j` movement fallback. In contrast, leaving
-`edit-comment = ["e"]`, `comment-list-new-general = ["n"]`,
-`draft-edit = ["e"]`, `zen-artifact = ["e"]`, or the default `n` in
-`zen-next` would collide with an effective popup or layered zen/normal action,
-so the keymap validator rejects those incomplete overrides.
+`edit-comment = ["e"]`, `comment-list-new-general = ["n"]`, or
+`draft-edit = ["e"]` would collide in an effective context, so the keymap
+validator rejects those incomplete overrides.

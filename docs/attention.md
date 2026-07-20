@@ -3,9 +3,9 @@
 A review's job is to update the reviewer's mental model so they can course
 correct. The attention map is how gander spends the reviewer's attention where
 the mental-model delta is — and lets them dismiss everything else with
-confidence, without a separate presentation mode. Status: design accepted;
-implementation tracked in roadmap milestone 18. Supersedes the zen phase
-machinery and the ephemeral overlay-chunk model.
+confidence, without a separate presentation mode. Status: implemented; milestone
+18 is complete. This stream replaced the former full-screen presentation state
+and ephemeral overlay curation model.
 
 ## Model
 
@@ -60,7 +60,7 @@ Current automation is available through
 `gander attention list|set|clear|promote|demote|seed-heuristics|recompute-heuristics`
 and matching MCP tools. TUI folds, narration cards, chapters, walkthrough
 navigation, coverage, the ephemeral Focus preset, and the attention glance
-board are implemented. Legacy zen removal remains a later package.
+board and final legacy deletion are implemented.
 
 ## The review stream
 
@@ -90,8 +90,8 @@ window. The stream projection and file/local owner indexes share one signature
 cache that includes syntax configuration.
 
 Contiguous spotlight regions sharing a `change_id` open with a chapter
-header row (jj description, bookmarks, diff stats) — replacing the zen
-chapter card.
+header row (jj description, bookmarks, diff stats), replacing the former
+full-screen chapter card.
 
 ## Navigation and progress
 
@@ -116,16 +116,21 @@ folding, and pins narration at the current spotlight. It is not a `Mode` or
 phase: comments, ranges, search, retargeting, file navigation, and salience
 actions keep their normal dispatch.
 
-## What this deletes
+## Deleted compatibility surfaces
 
-- `ZenPhase` (Focus / Reading / Glance / Artifact) and its full-screen
-  takeover surfaces.
-- The ephemeral overlay-chunk model and its `set_chunks` compatibility path;
-  durable walkthrough steps + attention regions are the only curation
+- The old four-phase full-screen takeover and its focus/chapter/glance/artifact
+  render and dispatch paths are gone.
+- Ephemeral overlay chunks, chunk line-space APIs, and per-change overlay briefs
+  are gone. Durable walkthrough steps + attention regions are the only curation
   surface for agents (CLI, MCP, ACP alike).
-- The "walkthrough dies on retarget" cliff: attention regions re-anchor with
-  the same fingerprint machinery as comments and mark themselves stale
-  instead of tearing down the presentation.
+- The old `T` binding and all related config aliases are gone. `Z` Focus,
+  `Alt-G` Glance, and `Alt-N`/`Alt-P` Spotlight navigation are canonical.
+- Retarget and refresh no longer tear down presentation. Fingerprint-drifted
+  walkthrough/attention targets remain durable and stale.
+
+This is an explicit breaking cleanup. Existing `agent.json` `chunks` and
+`briefs` fields are ignored, not migrated, and disappear on the next overlay
+save. Ordering and flags are preserved.
 
 ## Interactions
 

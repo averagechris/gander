@@ -22,7 +22,8 @@
 
 > Organize this review for the human in the adjacent Gander TUI. Use
 > `stack_changes` and `change_diff` for stacked changes, `set_ordering` for
-> risky files first, `flag_section` for sensitive areas, walkthrough tools for
-> a guided zen pass (use `set_chunks` only as a compatibility fallback), and
+> risky files first, `flag_section` for sensitive areas, `walkthrough_set` for
+> a guided normal-stream Focus pass, and `attention_set` / `attention_seed_heuristics`
+> for durable salience regions. Use
 > `draft_comment` only for comments the human should triage. Ask the human or use
 > `comments ready` before delegating comments to an implementation agent.

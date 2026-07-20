@@ -131,9 +131,8 @@ Client Protocol schema compliance is future work.
   polls the shared agent overlay live)
 - [x] agent-flagged critical sections that are surfaced/pinned in the UI
   (`review/flag_section`; red `!` gutter/file pins + `F` flag list popup)
-- [x] review chunks: break a change into reviewable units that can span or
-  subdivide files, rather than reviewing strictly file-by-file
-  (`review/set_chunks` + `S` chunk popup with part-level jumps)
+- [x] review chunks: historical M7 experiment, removed at M18 completion in
+  favor of durable walkthrough steps + attention regions
 - [x] two-way feedback: agents draft comments/questions into the session; the
   human accepts, edits, or discards them before export
   (`review/draft_comment` + `D` triage popup; dispositions are written back
@@ -187,7 +186,7 @@ below).
 - [x] `gander mcp`: MCP stdio server (rmcp SDK) bridging to the live
   instance by cwd through the instance registry, with a snapshot fallback;
   tools: `review_summary`, `review_files`, `file_diff`, `comments`,
-  `set_ordering`, `flag_section`, `set_chunks`, `draft_comment`,
+  `set_ordering`, `flag_section`, durable walkthrough/attention tools, `draft_comment`,
   `current_focus`, `list_reviews`
 - [x] `current_focus` plumbing in the TUI (selected file/line/hunk via the
   `review/current_focus` method + `last_input_at` heartbeat in the
@@ -196,10 +195,8 @@ below).
   nudge thresholds (`nudge-diff-lines`/`nudge-files`, 0 disables) and no
   agent has organized it yet, the footer hints that an agent can (`@` or
   the harness); re-raised on retarget
-- [x] tour mode (`T`): step through agent-suggested review chunks in order with
-  rationale displayed in a bottom panel; auto-mark viewed on advance; esc
-  returns to free navigation (evolved into walkthrough-backed zen mode in
-  milestone 10)
+- [x] tour mode: historical M9 experiment, replaced at M18 by Focus and
+  Spotlight ordering in the normal review stream
 - [x] docs: harness setup recipes (docs/harness-setup.md — opencode/claude/
   codex MCP registration, split-pane workflow, attach-to-running-server
   summon commands)
@@ -229,12 +226,9 @@ Status: designed, in progress.
   terminals
 - [x] per-gap hunk context expansion (`+`/`=`/`-`) backed by lazy
   `jj file show` content; expanded rows not commentable in v1
-- [x] zen mode (tour mode + the above + agent-curated walkthroughs): tour
-  evolved into a non-modal walkthrough layer (now legacy `T`; `Z` belongs to
-  M18 Focus) — file pane
-  hidden, out-of-stop rows dimmed, progress panel, file-order fallback when no
-  walkthrough exists, full review vocabulary available mid-walkthrough
-  (docs/focused-diff-ux.md §6)
+- [x] focused walkthrough experiment completed and evaluated; its dedicated
+  takeover UI was removed at M18 in favor of `Z` Focus, stream cards, and
+  durable Spotlight ordering
 
 ## Milestone 11: first-class review sessions
 
@@ -272,16 +266,15 @@ have landed. Remaining work is a stable JSON contract audit.
 ## Milestone 13: TUI over the shared session core
 
 Status: in progress. Action tags, task popup, and walkthrough authoring have
-landed; zen/focused modes still need to become views over the durable
-walkthrough/session state.
+landed; M18 replaced the remaining focused-mode work with stream views over
+durable walkthrough/session state.
 
 - [ ] make TUI state mutations call the same services as the CLI/MCP adapters
 - [x] add first-class key hunk and walkthrough editing affordances
 - [x] support action-tagged comments/action items (`fix`, `explain`, `test`,
   `follow-up`) for agent handoff
-- [ ] keep zen/focused review modes as views over walkthrough/session state —
-  direction refined into the attention map (milestone 18,
-  docs/attention.md)
+- [x] replace focused presentation modes with attention-map stream views over
+  walkthrough/session state (milestone 18, docs/attention.md)
 
 ## Milestone 14: MCP parity adapter
 
@@ -354,9 +347,9 @@ Deferred follow-up (not part of M17 completion):
 Spend attention where the mental-model delta is; dismiss the rest with
 confidence — in one diff view, not a separate mode. Design:
 [docs/attention.md](attention.md). Supersedes backlog item 5 and the
-remaining M13 zen item.
+remaining M13 focused-presentation item.
 
-Status: domain and automation foundation in progress.
+Status: complete.
 
 - [x] durable per-region salience (spotlight/supporting/skim) on the session;
   sources: human override > agent curation > generated/lockfile heuristics
@@ -374,9 +367,9 @@ Status: domain and automation foundation in progress.
 - [x] focus is a one-key view preset (max fold, file pane hidden, cards
   pinned) — no modal phases, full review vocabulary throughout
 - [x] glance board becomes a summary popup over the attention map
-- [ ] delete `ZenPhase` machinery and the overlay-chunk model + `set_chunks`
-  compatibility path; regions re-anchor/stale via fingerprints instead of
-  tearing down on retarget
+- [x] delete the old full-screen phase machinery and overlay chunk/brief
+  compatibility paths; regions re-anchor/stale via fingerprints instead of
+  tearing presentation down on retarget
 
 ## Milestone 19: presentation polish
 
@@ -423,10 +416,9 @@ session can start here without re-deriving them:
    snapshot operation can revert those edits on disk. A future non-mutating
    working-copy fingerprint (or filesystem watcher that only snapshots after a
    visible prompt) would be needed to remove the footgun entirely.
-5. **Zen/focused modes over durable walkthroughs** (M13). Superseded by
-   milestone 18 (attention map, docs/attention.md): zen collapses into
-   salience-driven rendering of the one diff view instead of touring either
-   chunk source.
+5. ~~**Focused modes over durable walkthroughs** (M13).~~ Completed by
+   milestone 18: salience-driven rendering, Focus, Glance, and Spotlight
+   navigation all use the one normal diff stream.
 6. **TUI comment creation through the service layer** (M13). TUI comment adds
    still go through `app::ReviewSession::add_comment`; unify with
    `review::add_comment` so kind/action can be set at creation time in the
@@ -436,9 +428,9 @@ session can start here without re-deriving them:
    and commits the GIF whenever the tape or fixture change (guarded by
    docs/demo.gif.inputs-sha256 to avoid render loops). The flake now uses a
    single `nixpkgs-unstable` pin with a working ttyd/vhs on darwin.
-7. **Example review size** (M15 polish). docs/pages/example.html is
-    ~1.6 MB because it embeds the full diff; consider regenerating from a
-    smaller change or trimming hunks for the example link.
+7. **Example review size** (M15 polish). docs/pages/example.html remains a
+   historical exported-review fixture and is ~1.6 MB because it embeds its full
+   diff; consider regenerating from a smaller current change.
 
 ## Known debt (from the 2026-07 pre-MVP code review)
 

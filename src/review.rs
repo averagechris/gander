@@ -7,11 +7,12 @@ use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
 use std::path::Path;
 
+use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, ActionItem, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
     CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition, ReviewSession,
-    ReviewSessionStatus, ReviewState, ReviewTarget, Walkthrough, WalkthroughStep,
+    ReviewSessionStatus, ReviewState, ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1076,7 +1077,6 @@ pub fn add_walkthrough_step(session: &mut ReviewSession, step: WalkthroughStep) 
     step
 }
 
-#[allow(dead_code)]
 pub fn set_walkthrough(
     session: &mut ReviewSession,
     title: Option<String>,
@@ -1094,22 +1094,151 @@ pub fn set_walkthrough(
 
 pub fn preserve_walkthrough_step_ids(
     prior: &[WalkthroughStep],
+    steps: Vec<WalkthroughStep>,
+) -> Result<Vec<WalkthroughStep>> {
+    preserve_walkthrough_step_ids_with(prior, steps, || uuid::Uuid::new_v4().to_string())
+}
+
+fn preserve_walkthrough_step_ids_with(
+    prior: &[WalkthroughStep],
     mut steps: Vec<WalkthroughStep>,
-) -> Vec<WalkthroughStep> {
-    for step in &mut steps {
-        if !step.id.is_empty() && prior.iter().any(|old| old.id == step.id) {
-            continue;
-        }
-        if let Some(old) = prior
+    mut generate_id: impl FnMut() -> String,
+) -> Result<Vec<WalkthroughStep>> {
+    let duplicate_explicit = duplicate_nonempty_ids(steps.iter().map(|step| step.id.as_str()));
+    if !duplicate_explicit.is_empty() {
+        return Err(eyre!(
+            "duplicate explicit walkthrough step id(s): {}",
+            duplicate_explicit.join(", ")
+        ));
+    }
+
+    let mut used_prior = std::collections::BTreeSet::new();
+    // Explicit ids reserve their prior slots before omitted ids perform
+    // identity matching. This makes mixed explicit/omitted replacements
+    // independent of incoming order and prevents reusing the explicit id.
+    for step in steps.iter().filter(|step| !step.id.is_empty()) {
+        if let Some((index, _)) = prior
             .iter()
-            .find(|old| same_walkthrough_identity(old, step))
+            .enumerate()
+            .find(|(index, old)| !used_prior.contains(index) && old.id == step.id)
         {
-            step.id = old.id.clone();
-        } else if step.id.is_empty() {
-            step.id = uuid::Uuid::new_v4().to_string();
+            used_prior.insert(index);
         }
     }
-    steps
+    for step in &mut steps {
+        if !step.id.is_empty() {
+            continue;
+        }
+        if let Some((index, old)) = prior.iter().enumerate().find(|(index, old)| {
+            !used_prior.contains(index) && same_walkthrough_identity(old, step)
+        }) {
+            step.id = old.id.clone();
+            used_prior.insert(index);
+        } else {
+            step.id = generate_id();
+        }
+    }
+    let duplicate_final = duplicate_nonempty_ids(steps.iter().map(|step| step.id.as_str()));
+    if !duplicate_final.is_empty() {
+        return Err(eyre!(
+            "duplicate final walkthrough step id(s): {}",
+            duplicate_final.join(", ")
+        ));
+    }
+    Ok(steps)
+}
+
+fn duplicate_nonempty_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut duplicates = std::collections::BTreeSet::new();
+    for id in ids.into_iter().filter(|id| !id.is_empty()) {
+        if !seen.insert(id) {
+            duplicates.insert(id.to_owned());
+        }
+    }
+    duplicates.into_iter().collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedWalkthroughReplacement {
+    pub title: Option<String>,
+    pub steps: Vec<WalkthroughStep>,
+    pub warnings: Vec<String>,
+}
+
+/// Normalize and validate a complete durable walkthrough replacement for every
+/// adapter. This is the one place that preserves omitted ids, stamps authors,
+/// validates chapter change ids, validates supplied anchors, and anchors
+/// current targets while retaining unavailable targets as stale with warnings.
+pub fn normalize_walkthrough_replacement(
+    prior: &[WalkthroughStep],
+    title: Option<String>,
+    steps: Vec<WalkthroughStep>,
+    author: &Identity,
+    files: &[FileDiff],
+    stack_change_ids: &[String],
+) -> Result<NormalizedWalkthroughReplacement> {
+    let mut steps = preserve_walkthrough_step_ids(prior, steps)?;
+    let mut warnings = Vec::new();
+    for step in &mut steps {
+        step.author = Some(author.clone());
+        let label = step_label(step).to_owned();
+        if step.kind == StepKind::Chapter {
+            let change_id = step
+                .change_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|change_id| !change_id.is_empty())
+                .ok_or_else(|| eyre!("chapter step {label} missing change_id"))?;
+            if !stack_change_ids.iter().any(|known| known == change_id) {
+                return Err(eyre!("unknown change id(s): {change_id}"));
+            }
+        }
+        for target in std::iter::once(&mut step.target).chain(step.extra_targets.iter_mut()) {
+            crate::attention::validate_target_anchor(target).map_err(|error| {
+                eyre!(
+                    "walkthrough step {} has invalid target anchor: {error}",
+                    label
+                )
+            })?;
+            let Some(path) = target.file.clone() else {
+                continue;
+            };
+            let current =
+                crate::attention::target_for_diff(files, &path, target.line, target.end_line);
+            if target.anchor.is_none()
+                && let Ok(anchored) = &current
+            {
+                target.anchor = anchored.anchor.clone();
+            }
+            if files.iter().all(|file| file.path != path) {
+                warnings.push(format!(
+                    "walkthrough step {} targets file not in diff: {path}",
+                    label
+                ));
+            } else if let Some(line) = target.line
+                && current.is_err()
+            {
+                warnings.push(format!(
+                    "walkthrough step {} targets {path}:{line} outside the current diff; it will remain durable and stale until it re-anchors",
+                    label
+                ));
+            }
+        }
+    }
+    Ok(NormalizedWalkthroughReplacement {
+        title,
+        steps,
+        warnings,
+    })
+}
+
+fn step_label(step: &WalkthroughStep) -> &str {
+    if !step.id.is_empty() {
+        &step.id
+    } else {
+        step.title.as_deref().unwrap_or("<untitled>")
+    }
 }
 
 fn same_walkthrough_identity(a: &WalkthroughStep, b: &WalkthroughStep) -> bool {
@@ -2207,5 +2336,256 @@ mod tests {
             };
             assert_eq!(infer_comment_channel(context), Channel::Note);
         }
+    }
+
+    #[test]
+    fn walkthrough_replacement_preserves_omitted_duplicate_identities_one_to_one() {
+        let prior = vec![
+            WalkthroughStep {
+                id: "first".into(),
+                title: Some("same".into()),
+                ..Default::default()
+            },
+            WalkthroughStep {
+                id: "second".into(),
+                title: Some("same".into()),
+                ..Default::default()
+            },
+        ];
+        let replacement = vec![
+            WalkthroughStep {
+                title: Some("same".into()),
+                ..Default::default()
+            },
+            WalkthroughStep {
+                title: Some("same".into()),
+                ..Default::default()
+            },
+        ];
+
+        let normalized = normalize_walkthrough_replacement(
+            &prior,
+            None,
+            replacement,
+            &Identity::agent(),
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(normalized.steps[0].id, "first");
+        assert_eq!(normalized.steps[1].id, "second");
+        assert!(
+            normalized
+                .steps
+                .iter()
+                .all(|step| step.author == Some(Identity::agent()))
+        );
+    }
+
+    #[test]
+    fn explicit_prior_id_is_reserved_before_same_identity_omitted_matching() {
+        let prior = vec![WalkthroughStep {
+            id: "prior-first".into(),
+            title: Some("same".into()),
+            ..Default::default()
+        }];
+        let incoming = vec![
+            WalkthroughStep {
+                id: "prior-first".into(),
+                title: Some("explicit first".into()),
+                ..Default::default()
+            },
+            WalkthroughStep {
+                title: Some("same".into()),
+                ..Default::default()
+            },
+        ];
+
+        let normalized =
+            preserve_walkthrough_step_ids_with(&prior, incoming, || "generated-second".into())
+                .unwrap();
+        assert_eq!(normalized[0].id, "prior-first");
+        assert_eq!(normalized[1].id, "generated-second");
+    }
+
+    #[test]
+    fn duplicate_explicit_walkthrough_ids_are_rejected() {
+        let error = preserve_walkthrough_step_ids(
+            &[],
+            vec![
+                WalkthroughStep {
+                    id: "duplicate".into(),
+                    ..Default::default()
+                },
+                WalkthroughStep {
+                    id: "duplicate".into(),
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate explicit walkthrough step id(s): duplicate"
+        );
+    }
+
+    #[test]
+    fn generated_and_preserved_walkthrough_id_collision_is_rejected() {
+        let prior = vec![WalkthroughStep {
+            id: "collision".into(),
+            title: Some("preserved".into()),
+            ..Default::default()
+        }];
+        let error = preserve_walkthrough_step_ids_with(
+            &prior,
+            vec![
+                WalkthroughStep {
+                    title: Some("preserved".into()),
+                    ..Default::default()
+                },
+                WalkthroughStep {
+                    title: Some("new".into()),
+                    ..Default::default()
+                },
+            ],
+            || "collision".into(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "duplicate final walkthrough step id(s): collision"
+        );
+    }
+
+    #[test]
+    fn mixed_explicit_and_omitted_reorder_is_idempotent() {
+        let prior = vec![
+            WalkthroughStep {
+                id: "alpha-id".into(),
+                title: Some("alpha".into()),
+                ..Default::default()
+            },
+            WalkthroughStep {
+                id: "beta-id".into(),
+                title: Some("beta".into()),
+                ..Default::default()
+            },
+        ];
+        let replacement = vec![
+            WalkthroughStep {
+                title: Some("beta".into()),
+                ..Default::default()
+            },
+            WalkthroughStep {
+                id: "alpha-id".into(),
+                title: Some("alpha explicit".into()),
+                ..Default::default()
+            },
+        ];
+        let first = preserve_walkthrough_step_ids(&prior, replacement).unwrap();
+        assert_eq!(first[0].id, "beta-id");
+        assert_eq!(first[1].id, "alpha-id");
+
+        let second = preserve_walkthrough_step_ids(
+            &first,
+            first
+                .iter()
+                .cloned()
+                .map(|mut step| {
+                    if step.title.as_deref() == Some("beta") {
+                        step.id.clear();
+                    }
+                    step
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            second
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            ["beta-id", "alpha-id"]
+        );
+    }
+
+    #[test]
+    fn walkthrough_replacement_validates_chapter_ids_exactly() {
+        let chapter = WalkthroughStep {
+            kind: StepKind::Chapter,
+            change_id: Some("abc".into()),
+            title: Some("chapter".into()),
+            ..Default::default()
+        };
+        assert!(
+            normalize_walkthrough_replacement(
+                &[],
+                None,
+                vec![chapter.clone()],
+                &Identity::agent(),
+                &[],
+                &["abcdef".into()],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unknown change id")
+        );
+        assert!(
+            normalize_walkthrough_replacement(
+                &[],
+                None,
+                vec![WalkthroughStep {
+                    change_id: Some("abcdef".into()),
+                    ..chapter
+                }],
+                &Identity::agent(),
+                &[],
+                &["abcdef".into()],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn walkthrough_replacement_anchors_current_targets_and_warns_for_stale_ones() {
+        let files = crate::diff::DiffSet::parse(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap()
+        .files;
+        let normalized = normalize_walkthrough_replacement(
+            &[],
+            None,
+            vec![
+                WalkthroughStep {
+                    title: Some("current".into()),
+                    target: ReviewTarget {
+                        file: Some("a.rs".into()),
+                        line: Some(1),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                WalkthroughStep {
+                    title: Some("stale".into()),
+                    target: ReviewTarget {
+                        file: Some("missing.rs".into()),
+                        line: Some(9),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ],
+            &Identity::agent(),
+            &files,
+            &[],
+        )
+        .unwrap();
+        assert!(normalized.steps[0].target.anchor.is_some());
+        assert!(normalized.steps[1].target.anchor.is_none());
+        assert_eq!(normalized.warnings.len(), 1);
+        assert!(normalized.warnings[0].contains("missing.rs"));
     }
 }

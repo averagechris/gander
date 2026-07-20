@@ -248,8 +248,8 @@ fn append_skim_summary(
 }
 
 /// Derive current stream folds plus optional stale durable skim assignments
-/// directly from the effective attention map. No cursor or ZenPhase state is
-/// consulted, so every adapter observes the same identities and progress.
+/// directly from the effective attention map. No TUI cursor state is consulted,
+/// so every adapter observes the same identities and progress.
 pub fn list_skim_folds(
     session: &ReviewSession,
     files: &[FileDiff],

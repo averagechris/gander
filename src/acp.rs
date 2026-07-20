@@ -25,12 +25,7 @@ use color_eyre::eyre::Result;
 use serde_json::{Value, json};
 
 use crate::{
-    agent::{
-        AgentFlag, AgentOverlay, Artifact, ArtifactKind, ChangeBrief, ChangeDiffContext,
-        ChunkImportance, ChunkPart, ChunkValidationContext, FlagPriority, ReviewChunk,
-        brief_without_spotlight_warnings, invalid_chunk_parts_message, remove_review_chunks,
-        replace_review_chunks, update_review_chunks,
-    },
+    agent::{AgentFlag, AgentOverlay, FlagPriority},
     anchor::CommentAnchor,
     app::{Focus, ReviewSession},
     jj::{JjBackend, ReviewTarget},
@@ -53,7 +48,7 @@ pub fn is_present_method(method: &str) -> bool {
 }
 
 pub fn no_live_tui_error() -> String {
-    "present/* methods require a live TUI; start one with `gander tui --tour` and retry".to_owned()
+    "present/* methods require a live TUI; start one with `gander tui` and retry".to_owned()
 }
 
 /// Method dispatch plus overlay persistence, independent of transport and of
@@ -294,10 +289,6 @@ impl AcpHandler {
                     "review/change_diff",
                     "review/set_ordering",
                     "review/flag_section",
-                    "review/set_chunks",
-                    "review/update_chunks",
-                    "review/remove_chunks",
-                    "review/set_change_briefs",
                     "review/draft_comment",
                     "present/status",
                     "present/start",
@@ -361,8 +352,8 @@ impl AcpHandler {
                 serde_json::to_value(&self.overlay).map_err(|error| error.to_string())
             }
             // The jj stack the review lives in (`trunk()..@`, oldest first).
-            // The human often treats these as stacked PRs, so agents should
-            // organize chunks change-by-change when several changes exist.
+            // The human often treats these as stacked PRs, so agents can
+            // author durable walkthrough chapters change-by-change.
             "review/stack_changes" => {
                 let jj = self.require_jj()?;
                 let mut stack = jj
@@ -390,8 +381,8 @@ impl AcpHandler {
                         .collect::<Vec<_>>(),
                 }))
             }
-            // One change's own diff against its parent. Line numbers here
-            // are what chunk parts carrying this change_id must reference.
+            // One change's own diff against its parent. Durable walkthrough
+            // and attention targets can use its line numbers.
             "review/change_diff" => {
                 let change_id = require_str(params, "change_id")?;
                 if change_id.trim().is_empty() {
@@ -503,81 +494,6 @@ impl AcpHandler {
                 self.save_overlay()?;
                 Ok(json!({ "id": flag.id }))
             }
-            "review/set_chunks" => {
-                let chunks = params
-                    .get("chunks")
-                    .and_then(Value::as_array)
-                    .ok_or("missing array param: chunks")?
-                    .iter()
-                    .map(parse_chunk)
-                    .collect::<Result<Vec<_>, String>>()?;
-                let context = self.chunk_validation_context(session, &chunks)?;
-                replace_review_chunks(&mut self.overlay.chunks, chunks, &context).map_err(
-                    |invalid| {
-                        format!(
-                            "invalid chunk part(s): {}",
-                            invalid_chunk_parts_message(&invalid)
-                        )
-                    },
-                )?;
-                self.save_overlay()?;
-                Ok(json!({ "chunks": self.overlay.chunks.len() }))
-            }
-            "review/update_chunks" => {
-                let chunks = params
-                    .get("chunks")
-                    .and_then(Value::as_array)
-                    .ok_or("missing array param: chunks")?
-                    .iter()
-                    .map(parse_chunk)
-                    .collect::<Result<Vec<_>, String>>()?;
-                let context = self.chunk_validation_context(session, &chunks)?;
-                let summary = update_review_chunks(&mut self.overlay.chunks, chunks, &context)
-                    .map_err(|invalid| {
-                        format!(
-                            "invalid chunk part(s): {}",
-                            invalid_chunk_parts_message(&invalid)
-                        )
-                    })?;
-                self.save_overlay()?;
-                Ok(
-                    json!({ "chunks": summary.chunks, "updated": summary.updated, "added": summary.added }),
-                )
-            }
-            "review/remove_chunks" => {
-                let ids = params
-                    .get("ids")
-                    .and_then(Value::as_array)
-                    .ok_or("missing array param: ids")?
-                    .iter()
-                    .map(|id| {
-                        id.as_str()
-                            .map(str::to_owned)
-                            .ok_or_else(|| "ids must be strings".to_owned())
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let summary = remove_review_chunks(&mut self.overlay.chunks, &ids)
-                    .map_err(|unknown| format!("unknown chunk id(s): {}", unknown.join(", ")))?;
-                self.save_overlay()?;
-                Ok(json!({ "chunks": summary.chunks, "removed": summary.removed }))
-            }
-            // Per-change briefings, one per change in the stack. The zen
-            // walkthrough shows each as a chapter intro card before that
-            // change's stops. Replaces the previous set.
-            "review/set_change_briefs" => {
-                let briefs = params
-                    .get("briefs")
-                    .and_then(Value::as_array)
-                    .ok_or("missing array param: briefs")?
-                    .iter()
-                    .map(parse_change_brief)
-                    .collect::<Result<Vec<_>, String>>()?;
-                self.overlay.briefs = briefs;
-                let warnings =
-                    brief_without_spotlight_warnings(&self.overlay.briefs, &self.overlay.chunks);
-                self.save_overlay()?;
-                Ok(json!({ "briefs": self.overlay.briefs.len(), "warnings": warnings }))
-            }
             other => Err(format!("unknown method: {other}")),
         }
     }
@@ -592,51 +508,6 @@ impl AcpHandler {
         self.overlay
             .save(&self.overlay_path)
             .map_err(|error| error.to_string())
-    }
-
-    pub(crate) fn chunk_validation_context(
-        &self,
-        session: &ReviewSession,
-        chunks: &[ReviewChunk],
-    ) -> Result<ChunkValidationContext<'static>, String> {
-        let session_files = session
-            .files
-            .iter()
-            .map(|file| file.diff.clone())
-            .collect::<Vec<_>>();
-        let mut parsed_changes = Vec::new();
-        if chunks.iter().any(|chunk| chunk.change_id.is_some()) {
-            let jj = self.require_jj()?;
-            for change_id in chunks.iter().filter_map(|chunk| chunk.change_id.as_ref()) {
-                if parsed_changes
-                    .iter()
-                    .any(|(existing, _): &(String, crate::diff::DiffSet)| existing == change_id)
-                {
-                    continue;
-                }
-                let target = ReviewTarget::new(format!("{change_id}-"), change_id.clone());
-                if let Ok(raw) = jj.diff(&session.repo, &target)
-                    && let Ok(diff) = crate::diff::DiffSet::parse(&raw)
-                {
-                    parsed_changes.push((change_id.clone(), diff));
-                }
-            }
-        }
-        let leaked_session: &'static [crate::diff::FileDiff] =
-            Box::leak(session_files.into_boxed_slice());
-        let leaked_changes: &'static [(String, crate::diff::DiffSet)] =
-            Box::leak(parsed_changes.into_boxed_slice());
-        let change_diffs = leaked_changes
-            .iter()
-            .map(|(change_id, diff)| ChangeDiffContext {
-                change_id: change_id.clone(),
-                files: &diff.files,
-            })
-            .collect::<Vec<_>>();
-        Ok(ChunkValidationContext {
-            session_files: leaked_session,
-            change_diffs,
-        })
     }
 }
 
@@ -666,125 +537,6 @@ pub(crate) fn comments_json<'a>(
             }))
             .collect::<Vec<_>>()
     )
-}
-
-fn parse_chunk(value: &Value) -> Result<ReviewChunk, String> {
-    let title = require_str(value, "title")?;
-    let parts = value
-        .get("parts")
-        .and_then(Value::as_array)
-        .map(|parts| {
-            parts
-                .iter()
-                .map(|part| {
-                    Ok(ChunkPart {
-                        path: require_str(part, "path")?,
-                        start_line: part
-                            .get("start_line")
-                            .and_then(Value::as_u64)
-                            .map(|line| line as usize),
-                        end_line: part
-                            .get("end_line")
-                            .and_then(Value::as_u64)
-                            .map(|line| line as usize),
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    Ok(ReviewChunk {
-        id: value
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        title,
-        importance: parse_chunk_importance(value.get("importance").and_then(Value::as_str))?,
-        change_id: value
-            .get("change_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|change_id| !change_id.is_empty())
-            .map(str::to_owned),
-        rationale: value
-            .get("rationale")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        explanation: value
-            .get("explanation")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        artifacts: parse_artifacts(value)?,
-        parts,
-    })
-}
-
-fn parse_change_brief(value: &Value) -> Result<ChangeBrief, String> {
-    let change_id = require_str(value, "change_id")?;
-    let change_id = change_id.trim();
-    if change_id.is_empty() {
-        return Err("change_id must not be empty".to_owned());
-    }
-    let summary = require_str(value, "summary")?;
-    if summary.trim().is_empty() {
-        return Err("summary must not be empty".to_owned());
-    }
-    Ok(ChangeBrief {
-        change_id: change_id.to_owned(),
-        summary,
-        artifacts: parse_artifacts(value)?,
-    })
-}
-
-fn parse_artifacts(value: &Value) -> Result<Vec<Artifact>, String> {
-    value
-        .get("artifacts")
-        .and_then(Value::as_array)
-        .map(|artifacts| {
-            artifacts
-                .iter()
-                .map(|artifact| {
-                    let title = require_str(artifact, "title")?;
-                    if title.trim().is_empty() {
-                        return Err("artifact title must not be empty".to_owned());
-                    }
-                    let body = require_str(artifact, "body")?;
-                    if body.trim().is_empty() {
-                        return Err("artifact body must not be empty".to_owned());
-                    }
-                    Ok(Artifact {
-                        title,
-                        kind: parse_artifact_kind(artifact.get("kind").and_then(Value::as_str))?,
-                        body,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()
-        .map(Option::unwrap_or_default)
-}
-
-fn parse_artifact_kind(value: Option<&str>) -> Result<ArtifactKind, String> {
-    match value.unwrap_or("example").to_ascii_lowercase().as_str() {
-        "example" | "usage" => Ok(ArtifactKind::Example),
-        "output" | "run" | "result" => Ok(ArtifactKind::Output),
-        "diagram" | "chart" => Ok(ArtifactKind::Diagram),
-        "note" | "text" => Ok(ArtifactKind::Note),
-        other => Err(format!(
-            "invalid artifact kind: {other} (expected example, output, diagram, or note)"
-        )),
-    }
-}
-
-fn parse_chunk_importance(value: Option<&str>) -> Result<ChunkImportance, String> {
-    match value.unwrap_or("spotlight").to_ascii_lowercase().as_str() {
-        "spotlight" | "tour" | "focus" | "important" => Ok(ChunkImportance::Spotlight),
-        "glance" | "skim" | "overview" | "routine" => Ok(ChunkImportance::Glance),
-        other => Err(format!(
-            "invalid chunk importance: {other} (expected spotlight or glance)"
-        )),
-    }
 }
 
 fn require_str(params: &Value, key: &str) -> Result<String, String> {
@@ -1317,6 +1069,35 @@ diff --git a/README.md b/README.md
                 .unwrap()
                 .contains(&json!("present/status"))
         );
+        let capabilities = result["capabilities"].as_array().unwrap();
+        for removed in [
+            "review/set_chunks",
+            "review/update_chunks",
+            "review/remove_chunks",
+            "review/set_change_briefs",
+        ] {
+            assert!(!capabilities.contains(&json!(removed)), "{removed}");
+        }
+    }
+
+    #[test]
+    fn removed_curation_methods_return_unknown_method_errors() {
+        let (mut server, _dir) = server();
+        for method in [
+            "review/set_chunks",
+            "review/update_chunks",
+            "review/remove_chunks",
+            "review/set_change_briefs",
+        ] {
+            let request =
+                json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": {} }).to_string();
+            let response = server.handle_line(&request).unwrap();
+            assert_eq!(response["error"]["code"], -32000);
+            assert_eq!(
+                response["error"]["message"],
+                format!("unknown method: {method}")
+            );
+        }
     }
 
     #[test]
@@ -1549,99 +1330,6 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn configured_agent_identity_stamps_executed_acp_draft_while_writes_persist() {
-        let (mut server, dir) = server();
-        server.session.agent_identity = crate::state::Identity {
-            kind: crate::state::AuthorKind::Agent,
-            name: "ACP Bot".into(),
-        };
-
-        call(
-            &mut server,
-            "review/set_ordering",
-            json!({ "paths": ["README.md", "src/app.rs"] }),
-        );
-        let flag = call(
-            &mut server,
-            "review/flag_section",
-            json!({ "path": "src/app.rs", "line": 1, "reason": "risky", "priority": "critical" }),
-        );
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [
-                { "title": "core change", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] }
-            ] }),
-        );
-        let draft = call(
-            &mut server,
-            "review/draft_comment",
-            json!({ "path": "README.md", "body": "typo in the title" }),
-        );
-
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.ordering, ["README.md", "src/app.rs"]);
-        assert_eq!(overlay.flags.len(), 1);
-        assert_eq!(overlay.flags[0].id, flag["id"].as_str().unwrap());
-        assert_eq!(overlay.flags[0].priority, FlagPriority::Critical);
-        assert_eq!(overlay.chunks.len(), 1);
-        assert_eq!(overlay.chunks[0].title, "core change");
-        assert!(!overlay.has_legacy_drafts());
-        let durable = server
-            .session
-            .comments
-            .iter()
-            .find(|comment| comment.id == draft["id"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(durable.state, crate::state::CommentState::Draft);
-        assert_eq!(durable.channel, crate::state::Channel::Onboarding);
-        assert_eq!(durable.author.kind, crate::state::AuthorKind::Agent);
-        assert_eq!(durable.author.name, "ACP Bot");
-    }
-
-    #[test]
-    fn update_and_remove_chunks_are_incremental_and_strict() {
-        let (mut server, dir) = server();
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [
-                { "id": "a", "title": "first", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] },
-                { "id": "b", "title": "second", "parts": [{ "path": "README.md", "start_line": 1, "end_line": 1 }] }
-            ] }),
-        );
-        let result = call(
-            &mut server,
-            "review/update_chunks",
-            json!({ "chunks": [
-                { "id": "a", "title": "updated", "importance": "glance", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] },
-                { "id": "c", "title": "third", "parts": [{ "path": "README.md", "start_line": 1, "end_line": 1 }] }
-            ] }),
-        );
-        assert_eq!(result, json!({ "chunks": 3, "updated": 1, "added": 1 }));
-        let request = json!({ "jsonrpc": "2.0", "id": 1, "method": "review/remove_chunks", "params": { "ids": ["missing"] } }).to_string();
-        let err = server.handle_line(&request).unwrap();
-        assert!(
-            err["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("unknown chunk id")
-        );
-        let result = call(&mut server, "review/remove_chunks", json!({ "ids": ["b"] }));
-        assert_eq!(result, json!({ "chunks": 2, "removed": 1 }));
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(
-            overlay
-                .chunks
-                .iter()
-                .map(|chunk| chunk.id.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "c"]
-        );
-        assert_eq!(overlay.chunks[0].title, "updated");
-    }
-
-    #[test]
     fn stack_methods_error_without_a_jj_backend() {
         let (mut server, _dir) = server();
 
@@ -1698,205 +1386,6 @@ diff --git a/README.md b/README.md
         assert!(result["raw"].as_str().unwrap().contains("+new"));
         assert_eq!(result["files"][0]["path"], "src/app.rs");
         assert_eq!(result["files"][0]["additions"], 1);
-    }
-
-    #[test]
-    fn set_chunks_records_change_anchors() {
-        let (server, dir) = server();
-        let mut server = server.with_jj(Box::new(MockJj));
-
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [
-                {
-                    "title": "stacked change",
-                    "change_id": "abc",
-                    "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }],
-                },
-                { "title": "unanchored", "change_id": "  ", "parts": [] },
-            ] }),
-        );
-
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.chunks[0].change_id.as_deref(), Some("abc"));
-        // Blank anchors normalize to None instead of a whitespace revset.
-        assert_eq!(overlay.chunks[1].change_id, None);
-    }
-
-    #[test]
-    fn set_chunks_rejects_invalid_part_and_applies_nothing() {
-        let (mut server, dir) = server();
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [
-                { "title": "valid", "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }] }
-            ] }),
-        );
-        let request = json!({
-            "jsonrpc": "2.0", "id": 9,
-            "method": "review/set_chunks",
-            "params": { "chunks": [
-                { "title": "bad", "parts": [{ "path": "missing.rs", "start_line": 1, "end_line": 1 }] }
-            ] }
-        })
-        .to_string();
-        let response = server.handle_line(&request).unwrap();
-        assert!(
-            response["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("invalid chunk part")
-        );
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.chunks.len(), 1);
-        assert_eq!(overlay.chunks[0].title, "valid");
-    }
-
-    #[test]
-    fn set_change_briefs_replaces_and_validates() {
-        let (mut server, dir) = server();
-
-        call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [
-                { "change_id": " abc ", "summary": "Lays the groundwork for the retry loop." },
-            ] }),
-        );
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.briefs.len(), 1);
-        // Whitespace around the change id normalizes away.
-        assert_eq!(overlay.briefs[0].change_id, "abc");
-
-        // A later call replaces the previous set wholesale.
-        call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [
-                { "change_id": "def", "summary": "Builds the retry loop on the groundwork." },
-            ] }),
-        );
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        assert_eq!(overlay.briefs.len(), 1);
-        assert_eq!(overlay.briefs[0].change_id, "def");
-
-        for bad in [
-            json!({}),
-            json!({ "briefs": [{ "change_id": "  ", "summary": "x" }] }),
-            json!({ "briefs": [{ "change_id": "abc", "summary": "   " }] }),
-        ] {
-            let request = json!({
-                "jsonrpc": "2.0", "id": 9,
-                "method": "review/set_change_briefs",
-                "params": bad,
-            })
-            .to_string();
-            let response = server.handle_line(&request).unwrap();
-            assert!(response.get("error").is_some(), "expected error for {bad}");
-        }
-    }
-
-    #[test]
-    fn set_change_briefs_warns_without_current_spotlight_chunk() {
-        let (server, _dir) = server();
-        let mut server = server.with_jj(Box::new(MockJj));
-
-        let no_chunks = call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
-        );
-        assert_eq!(
-            no_chunks["warnings"].as_array().unwrap()[0],
-            "brief for change abc has no spotlight chunk yet and will not render on a curated zen chapter right now"
-        );
-
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [{
-                "title": "skim", "importance": "glance", "change_id": "abc",
-                "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }]
-            }] }),
-        );
-        let glance_only = call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
-        );
-        assert_eq!(glance_only["warnings"].as_array().unwrap().len(), 1);
-
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [{
-                "title": "tour", "importance": "spotlight", "change_id": "abc",
-                "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }]
-            }] }),
-        );
-        let spotlight = call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [{ "change_id": "abc", "summary": "Summary" }] }),
-        );
-        assert!(spotlight["warnings"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn chunks_and_briefs_carry_artifacts() {
-        let (mut server, dir) = server();
-
-        call(
-            &mut server,
-            "review/set_chunks",
-            json!({ "chunks": [
-                {
-                    "title": "core change",
-                    "parts": [{ "path": "src/app.rs", "start_line": 1, "end_line": 1 }],
-                    "artifacts": [
-                        { "title": "usage", "body": "let app = App::new();" },
-                        { "title": "test run", "kind": "output", "body": "3 passed" },
-                    ],
-                }
-            ] }),
-        );
-        call(
-            &mut server,
-            "review/set_change_briefs",
-            json!({ "briefs": [
-                {
-                    "change_id": "abc",
-                    "summary": "Reworks the core loop.",
-                    "artifacts": [{ "title": "flow", "kind": "diagram", "body": "a -> b" }],
-                },
-            ] }),
-        );
-
-        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
-        let artifacts = &overlay.chunks[0].artifacts;
-        assert_eq!(artifacts.len(), 2);
-        // Kind defaults to `example` when omitted.
-        assert_eq!(artifacts[0].kind, ArtifactKind::Example);
-        assert_eq!(artifacts[1].kind, ArtifactKind::Output);
-        assert_eq!(overlay.briefs[0].artifacts.len(), 1);
-        assert_eq!(overlay.briefs[0].artifacts[0].kind, ArtifactKind::Diagram);
-
-        for bad in [
-            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": " ", "body": "y" }] }] }),
-            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": "y", "body": "  " }] }] }),
-            json!({ "chunks": [{ "title": "x", "artifacts": [{ "title": "y", "kind": "movie", "body": "z" }] }] }),
-        ] {
-            let request = json!({
-                "jsonrpc": "2.0", "id": 11,
-                "method": "review/set_chunks",
-                "params": bad,
-            })
-            .to_string();
-            let response = server.handle_line(&request).unwrap();
-            assert!(response.get("error").is_some(), "expected error for {bad}");
-        }
     }
 
     #[test]
@@ -2166,5 +1655,47 @@ diff --git a/README.md b/README.md
             assert!(!socket::is_live(&socket_path));
             AcpBridge::bind(socket_path, overlay_path, None).unwrap();
         }
+    }
+
+    #[test]
+    fn configured_agent_identity_stamps_executed_acp_draft_while_writes_persist() {
+        let (mut server, dir) = server();
+        server.session.agent_identity = crate::state::Identity {
+            kind: crate::state::AuthorKind::Agent,
+            name: "ACP Bot".into(),
+        };
+
+        call(
+            &mut server,
+            "review/set_ordering",
+            json!({ "paths": ["README.md", "src/app.rs"] }),
+        );
+        let flag = call(
+            &mut server,
+            "review/flag_section",
+            json!({ "path": "src/app.rs", "line": 1, "reason": "risky", "priority": "critical" }),
+        );
+        let draft = call(
+            &mut server,
+            "review/draft_comment",
+            json!({ "path": "README.md", "body": "typo in the title" }),
+        );
+
+        let overlay = AgentOverlay::load_or_default(&dir.path().join("agent.json")).unwrap();
+        assert_eq!(overlay.ordering, ["README.md", "src/app.rs"]);
+        assert_eq!(overlay.flags.len(), 1);
+        assert_eq!(overlay.flags[0].id, flag["id"].as_str().unwrap());
+        assert_eq!(overlay.flags[0].priority, FlagPriority::Critical);
+        assert!(!overlay.has_legacy_drafts());
+        let durable = server
+            .session
+            .comments
+            .iter()
+            .find(|comment| comment.id == draft["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(durable.state, crate::state::CommentState::Draft);
+        assert_eq!(durable.channel, crate::state::Channel::Onboarding);
+        assert_eq!(durable.author.kind, crate::state::AuthorKind::Agent);
+        assert_eq!(durable.author.name, "ACP Bot");
     }
 }

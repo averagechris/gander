@@ -12,24 +12,24 @@ expression: "render_tui_text(&session, &Mode::Help, 110, 32)"
 │     │         ./,  next/previous file from either pane       space  peek selected skim fold           │    │
 │     │       enter  mark viewed and advance                       a  acknowledge selected skim         │    │
 │     │           c  comment on what needs work                    A  acknowledge all current skims     │    │
-│     │           Z  toggle attention Focus preset      legacy zen keys                                 │    │
-│     │       alt-g  open attention glance board                 n/p  next/back stop                    │    │
-│     │           T  legacy zen briefing                         tab  toggle focus card / reading view  │    │
-│     │      ctrl-y  copy handoff when done                        g  open glance board                 │    │
-│     │diff & view                                                 e  open/close artifacts              │    │
-│     │         j/k  move diff cursor                              d  toggle chapter details / expand   │    │
-│     │         d/u  vertical scroll                    brief                                           │    │
-│     │  shift-left/shift-right  horizontal scroll when            .  refocus current stop              │    │
-│     │wrap is off                                                 a  acknowledge glance items          │    │
-│     │           V  soft wrap, layout, and visual cues          esc  leave zen; close modal zen        │    │
-│     │  alt-right/alt-left  widen/narrow file pane     comments                                        │    │
-│     │split                                                       c  comment at cursor                 │    │
-│     │general                                                     r  start/finish range comment        │    │
-│     │         tab  switch focus between files and diff           s  cycle comment state               │    │
-│     │           w  hide/show file pane                           e  edit comment                      │    │
-│     │           ?  this help                                     x  delete comment                    │    │
-│     │      ctrl-a  activity feed (live refresh while             C  comment center                    │    │
-│     │open)                                                     C/n  create general comment (sequence) │    │
+│     │           Z  toggle attention Focus preset      comments                                        │    │
+│     │       alt-g  open attention glance board                   c  comment at cursor                 │    │
+│     │      ctrl-y  copy handoff when done                        r  start/finish range comment        │    │
+│     │diff & view                                                 s  cycle comment state               │    │
+│     │         j/k  move diff cursor                              e  edit comment                      │    │
+│     │         d/u  vertical scroll                               x  delete comment                    │    │
+│     │  shift-left/shift-right  horizontal scroll when            C  comment center                    │    │
+│     │wrap is off                                               C/n  create general comment (sequence) │    │
+│     │           V  soft wrap, layout, and visual cues            R  ready all draft comments          │    │
+│     │  alt-right/alt-left  widen/narrow file pane              tab  cycle comment channel while       │    │
+│     │split                                            composing                                       │    │
+│     │general                                                     X  action items & todo feedback      │    │
+│     │         tab  switch focus between files and diff           W  walkthrough panel                 │    │
+│     │           w  hide/show file pane                           Y  mark for walkthrough              │    │
+│     │           ?  this help                                   m/M  next/previous comment             │    │
+│     │      ctrl-a  activity feed (live refresh while  targets & jj                                    │    │
+│     │open)                                                       t  return to launch target           │    │
+│     │      ctrl-g  dismiss range/notice                          p  compare @-..@                     │    │
 │     └─────────────────────────────────────────────────────────────────────────────────────────────────┘    │
 └───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @

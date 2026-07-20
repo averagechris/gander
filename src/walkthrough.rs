@@ -5,8 +5,8 @@ use crate::state::{
 /// Render persisted local walkthroughs as Markdown.
 ///
 /// This intentionally reads only Gander review state: no server, forge
-/// metadata, agent overlay, or working-copy mutation. Agent/zen concepts can be
-/// mapped into persisted walkthroughs by a later reconciliation layer.
+/// metadata, agent overlay, or working-copy mutation. Durable walkthroughs are
+/// the shared curation source for every adapter.
 pub fn render_walkthroughs_markdown(state: &ReviewState) -> String {
     let walkthroughs = state
         .sessions
