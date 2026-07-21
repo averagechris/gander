@@ -19,11 +19,12 @@ pub trait JjBackend {
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the reviewed range (`base..rev`), oldest first.
     fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>>;
-    /// Consistent author name across the non-empty reviewed range, read
-    /// without snapshotting or mutating the workspace. Mixed/empty/ambiguous
-    /// ranges return `None`.
-    fn target_author(&self, _repo: &Path, _target: &ReviewTarget) -> Result<Option<String>> {
-        Ok(None)
+    /// Consistent author identity across the non-empty reviewed range, read
+    /// without snapshotting or mutating the workspace. Each field is `Some`
+    /// only when it is non-empty and consistent across every change; mixed,
+    /// empty, or ambiguous ranges leave the field `None`.
+    fn target_author(&self, _repo: &Path, _target: &ReviewTarget) -> Result<TargetAuthor> {
+        Ok(TargetAuthor::default())
     }
     /// Deliberately snapshot the working copy so subsequent read-only queries
     /// can observe disk edits without each query implicitly writing an op.
@@ -63,6 +64,15 @@ pub struct JjChangeSummary {
     pub bookmarks: String,
     /// Full multiline description; use [`Self::title`] for one-line surfaces.
     pub description: String,
+}
+
+/// Consistent author identity of the reviewed range for channel inference.
+/// Fields are independent: benign drift in one field (for example a display
+/// name spelled differently) does not discard the other as evidence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetAuthor {
+    pub name: Option<String>,
+    pub email: Option<String>,
 }
 
 impl JjChangeSummary {
@@ -269,7 +279,7 @@ impl JjCommand {
         binary: &Path,
         repo: &Path,
         target: &ReviewTarget,
-    ) -> Result<Option<String>> {
+    ) -> Result<TargetAuthor> {
         let output = Command::new(binary)
             .arg("--ignore-working-copy")
             .arg("log")
@@ -283,7 +293,7 @@ impl JjCommand {
             .arg("--color=never")
             .arg("--no-pager")
             .arg("--template")
-            .arg("author.name() ++ \"\\0\"")
+            .arg("author.name() ++ \"\\x1f\" ++ author.email() ++ \"\\0\"")
             .stdin(Stdio::null())
             .current_dir(repo)
             .output()?;
@@ -295,7 +305,7 @@ impl JjCommand {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        Ok(parse_consistent_author(&String::from_utf8_lossy(
+        Ok(parse_consistent_target_author(&String::from_utf8_lossy(
             &output.stdout,
         )))
     }
@@ -382,7 +392,7 @@ impl JjBackend for JjCliBackend {
         JjCommand::stack_changes(&self.binary, repo, target)
     }
 
-    fn target_author(&self, repo: &Path, target: &ReviewTarget) -> Result<Option<String>> {
+    fn target_author(&self, repo: &Path, target: &ReviewTarget) -> Result<TargetAuthor> {
         JjCommand::target_author(&self.binary, repo, target)
     }
 
@@ -478,21 +488,39 @@ fn parse_change_summaries(output: &str) -> Result<Vec<JjChangeSummary>> {
         .collect()
 }
 
-fn parse_consistent_author(output: &str) -> Option<String> {
-    let records = output.strip_suffix('\0').unwrap_or(output).split('\0');
-    let mut author: Option<&str> = None;
-    for record in records {
-        let record = record.trim();
-        if record.is_empty() {
-            return None;
-        }
-        match author {
-            None => author = Some(record),
-            Some(expected) if expected == record => {}
-            Some(_) => return None,
-        }
+/// One record per change: `name \x1f email`, NUL-terminated. Each identity
+/// field is kept only when it is non-empty and identical (after trimming)
+/// across every record; fields are evaluated independently so drift in one
+/// does not discard the other.
+fn parse_consistent_target_author(output: &str) -> TargetAuthor {
+    let trimmed = output.strip_suffix('\0').unwrap_or(output);
+    if trimmed.is_empty() {
+        return TargetAuthor::default();
     }
-    author.map(str::to_owned)
+    let mut name: Option<Option<&str>> = None;
+    let mut email: Option<Option<&str>> = None;
+    for record in trimmed.split('\0') {
+        let (record_name, record_email) = record.split_once('\x1f').unwrap_or((record, ""));
+        merge_consistent_field(&mut name, record_name);
+        merge_consistent_field(&mut email, record_email);
+    }
+    TargetAuthor {
+        name: name.flatten().map(str::to_owned),
+        email: email.flatten().map(str::to_owned),
+    }
+}
+
+/// Fold one record's field into the running consistency state:
+/// `None` = unseen, `Some(None)` = poisoned (empty or inconsistent).
+fn merge_consistent_field<'a>(state: &mut Option<Option<&'a str>>, value: &'a str) {
+    let value = value.trim();
+    *state = match *state {
+        _ if value.is_empty() => Some(None),
+        Some(None) => Some(None),
+        None => Some(Some(value)),
+        Some(Some(expected)) if expected == value => Some(Some(value)),
+        Some(Some(_)) => Some(None),
+    };
 }
 
 fn resolve_binary_with_probe(
@@ -696,23 +724,63 @@ mod tests {
         assert!(parse_operation_summaries("\tno id\n").is_err());
     }
 
+    fn author(name: Option<&str>, email: Option<&str>) -> TargetAuthor {
+        TargetAuthor {
+            name: name.map(str::to_owned),
+            email: email.map(str::to_owned),
+        }
+    }
+
     #[test]
-    fn target_author_requires_one_consistent_nonempty_range_author() {
+    fn target_author_requires_one_consistent_nonempty_range_author_per_field() {
         assert_eq!(
-            parse_consistent_author("Reviewer\0"),
-            Some("Reviewer".into())
+            parse_consistent_target_author("Reviewer\u{1f}reviewer@example.com\0"),
+            author(Some("Reviewer"), Some("reviewer@example.com"))
         );
         assert_eq!(
-            parse_consistent_author("  Reviewer  \0"),
-            Some("Reviewer".into())
+            parse_consistent_target_author("  Reviewer  \u{1f} reviewer@example.com \0"),
+            author(Some("Reviewer"), Some("reviewer@example.com"))
         );
         assert_eq!(
-            parse_consistent_author("Reviewer\0 Reviewer \0Reviewer\0"),
-            Some("Reviewer".into())
+            parse_consistent_target_author(
+                "Reviewer\u{1f}reviewer@example.com\0 Reviewer \u{1f}reviewer@example.com\0"
+            ),
+            author(Some("Reviewer"), Some("reviewer@example.com"))
         );
-        assert_eq!(parse_consistent_author(""), None);
-        assert_eq!(parse_consistent_author("Reviewer\0Teammate\0"), None);
-        assert_eq!(parse_consistent_author("Reviewer\0\0"), None);
+        // Fields are independent: name drift keeps the consistent email and
+        // vice versa; an empty field in any record poisons only that field.
+        assert_eq!(
+            parse_consistent_target_author(
+                "chris\u{1f}chris@example.com\0Chris Ericson\u{1f}chris@example.com\0"
+            ),
+            author(None, Some("chris@example.com"))
+        );
+        assert_eq!(
+            parse_consistent_target_author(
+                "Reviewer\u{1f}work@example.com\0Reviewer\u{1f}home@example.com\0"
+            ),
+            author(Some("Reviewer"), None)
+        );
+        assert_eq!(
+            parse_consistent_target_author("Reviewer\u{1f}\0Reviewer\u{1f}chris@example.com\0"),
+            author(Some("Reviewer"), None)
+        );
+        // Records without the field separator still yield the name.
+        assert_eq!(
+            parse_consistent_target_author("Reviewer\0"),
+            author(Some("Reviewer"), None)
+        );
+        assert_eq!(parse_consistent_target_author(""), TargetAuthor::default());
+        assert_eq!(
+            parse_consistent_target_author(
+                "Reviewer\u{1f}reviewer@example.com\0Teammate\u{1f}teammate@example.com\0"
+            ),
+            TargetAuthor::default()
+        );
+        assert_eq!(
+            parse_consistent_target_author("Reviewer\u{1f}reviewer@example.com\0\u{1f}\0"),
+            TargetAuthor::default()
+        );
     }
 
     #[cfg(unix)]
@@ -723,10 +791,19 @@ mod tests {
         let args_path = dir.path().join("args");
         let target = ReviewTarget::new("main", "feature");
         for (output, expected) in [
-            ("Reviewer\\0", Some("Reviewer")),
-            ("Reviewer\\0Reviewer\\0", Some("Reviewer")),
-            ("Reviewer\\0Teammate\\0", None),
-            ("", None),
+            (
+                "Reviewer\\037r@example.com\\0",
+                author(Some("Reviewer"), Some("r@example.com")),
+            ),
+            (
+                "Reviewer\\037r@example.com\\0Reviewer\\037r@example.com\\0",
+                author(Some("Reviewer"), Some("r@example.com")),
+            ),
+            (
+                "Reviewer\\037r@example.com\\0Teammate\\037r@example.com\\0",
+                author(None, Some("r@example.com")),
+            ),
+            ("", TargetAuthor::default()),
         ] {
             fs::write(
                 &script,
@@ -743,7 +820,7 @@ mod tests {
 
             assert_eq!(
                 JjCommand::target_author(&script, dir.path(), &target).unwrap(),
-                expected.map(str::to_owned),
+                expected,
                 "fake output {output:?}"
             );
             let args = fs::read_to_string(&args_path).unwrap();
@@ -753,7 +830,10 @@ mod tests {
                 "author inference must exclude empty changes such as the \
                  working-copy commit: {args:?}"
             );
-            assert!(args.contains("author.name()"));
+            assert!(
+                args.contains("author.name() ++ \"\\x1f\" ++ author.email() ++ \"\\0\"\n"),
+                "author inference must read name and email: {args:?}"
+            );
         }
     }
 

@@ -10,9 +10,10 @@ use std::path::Path;
 use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
-    ActionIntent, ActionItem, ActionItemStatus, Channel, ClosedDisposition, Comment, CommentKind,
-    CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition, ReviewSession,
-    ReviewSessionStatus, ReviewState, ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
+    ActionIntent, ActionItem, ActionItemStatus, AuthorKind, Channel, ClosedDisposition, Comment,
+    CommentKind, CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition,
+    ReviewSession, ReviewSessionStatus, ReviewState, ReviewTarget, StepKind, Walkthrough,
+    WalkthroughStep,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,17 +73,36 @@ pub struct ChannelInferenceContext<'a> {
     /// Explicit `[identity].name`; fallback/migration identities are not
     /// reliable evidence that a jj change is the reviewer's own.
     pub configured_human_name: Option<&'a str>,
+    /// Explicit `[identity].email`, when configured.
+    pub configured_human_email: Option<&'a str>,
     /// Consistent author name read across `base..rev` via a read-only jj query.
     pub target_author_name: Option<&'a str>,
+    /// Consistent author email read across `base..rev` via the same query.
+    pub target_author_email: Option<&'a str>,
     /// `[comments].default-channel`, when configured.
     pub fixed_default: Option<Channel>,
+}
+
+/// Trimmed, case-insensitive equality of one configured/actual identity pair.
+/// `None` when either side is missing or blank: an incomparable pair is not
+/// evidence in either direction.
+fn identity_field_matches(configured: Option<&str>, actual: Option<&str>) -> Option<bool> {
+    let configured = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let actual = actual.map(str::trim).filter(|value| !value.is_empty())?;
+    Some(configured.to_lowercase() == actual.to_lowercase())
 }
 
 /// Infer the safest annotation channel from already-gathered review facts.
 ///
 /// Thread continuity is structural and wins even over a pinned default. A
 /// fixed default otherwise disables contextual inference. Missing or
-/// ambiguous authorship never implies collaboration or ownership.
+/// ambiguous authorship never implies collaboration or ownership. Ownership
+/// tolerates benign identity drift: the reviewed range is the reviewer's own
+/// when the configured name *or* email matches the range's consistent jj
+/// author (trimmed, case-insensitive). When neither pair is comparable,
+/// inference falls back to the private note channel.
 pub fn infer_comment_channel(context: ChannelInferenceContext<'_>) -> Channel {
     if let Some(channel) = context.thread_channel {
         return channel;
@@ -94,10 +114,14 @@ pub fn infer_comment_channel(context: ChannelInferenceContext<'_>) -> Channel {
         return Channel::Delegation;
     }
 
-    let author_relation = context
-        .configured_human_name
-        .zip(context.target_author_name)
-        .map(|(human, author)| human.trim() == author.trim());
+    let name_matches =
+        identity_field_matches(context.configured_human_name, context.target_author_name);
+    let email_matches =
+        identity_field_matches(context.configured_human_email, context.target_author_email);
+    let author_relation = match (name_matches, email_matches) {
+        (None, None) => None,
+        (name, email) => Some(name == Some(true) || email == Some(true)),
+    };
     if context.agent_attached && author_relation == Some(true) {
         return Channel::Delegation;
     }
@@ -350,13 +374,19 @@ pub struct ReadyCommentsResult {
     pub readied: usize,
     /// Explicitly selected comments that were already todo.
     pub already_ready: usize,
+    /// Bulk-mode agent-authored drafts left untouched awaiting human triage.
+    pub skipped_agent_drafts: usize,
 }
 
 /// Atomically mark comments ready for implementation.
 ///
 /// `Some(selectors)` resolves every id prefix before making any mutation. An
 /// unknown, ambiguous, out-of-session, or resolved selection rejects the whole
-/// operation. `None` means all drafts belonging to the active session; scoped
+/// operation. `None` means all *human-authored* drafts belonging to the active
+/// session: agent-authored drafts are onboarding suggestions awaiting human
+/// triage (docs/annotations.md), so a bulk sweep skips them (reporting the
+/// count) instead of escalating them past accept-time channel inference.
+/// Explicitly selecting an agent draft by id/prefix still readies it. Scoped
 /// comments from other sessions are simply excluded. Legacy unscoped comments
 /// belong to every session for compatibility.
 pub fn ready_comments(
@@ -364,7 +394,7 @@ pub fn ready_comments(
     comments: &mut [Comment],
     selectors: Option<&[String]>,
 ) -> Result<ReadyCommentsResult> {
-    let (indices, already_ready) = if let Some(selectors) = selectors {
+    let (indices, already_ready, skipped_agent_drafts) = if let Some(selectors) = selectors {
         let mut indices = Vec::with_capacity(selectors.len());
         for selector in selectors {
             let canonical_id = resolve_comment_id(comments, selector)?;
@@ -391,18 +421,27 @@ pub fn ready_comments(
             .iter()
             .filter(|index| comments[**index].state == CommentState::Todo)
             .count();
-        (indices, already_ready)
+        (indices, already_ready, 0)
     } else {
+        let session_drafts = comments
+            .iter()
+            .enumerate()
+            .filter(|(_, comment)| {
+                comment.state == CommentState::Draft && comment.belongs_to_session(&session.id)
+            })
+            .collect::<Vec<_>>();
+        let skipped_agent_drafts = session_drafts
+            .iter()
+            .filter(|(_, comment)| comment.author.kind == AuthorKind::Agent)
+            .count();
         (
-            comments
-                .iter()
-                .enumerate()
-                .filter(|(_, comment)| {
-                    comment.state == CommentState::Draft && comment.belongs_to_session(&session.id)
-                })
+            session_drafts
+                .into_iter()
+                .filter(|(_, comment)| comment.author.kind == AuthorKind::Human)
                 .map(|(index, _)| index)
                 .collect(),
             0,
+            skipped_agent_drafts,
         )
     };
 
@@ -414,6 +453,7 @@ pub fn ready_comments(
         return Ok(ReadyCommentsResult {
             readied: 0,
             already_ready,
+            skipped_agent_drafts,
         });
     }
 
@@ -429,6 +469,7 @@ pub fn ready_comments(
     Ok(ReadyCommentsResult {
         readied: draft_indices.len(),
         already_ready,
+        skipped_agent_drafts,
     })
 }
 
@@ -1836,7 +1877,8 @@ mod tests {
             result,
             ReadyCommentsResult {
                 readied: 1,
-                already_ready: 1
+                already_ready: 1,
+                skipped_agent_drafts: 0
             }
         );
         assert_eq!(comments[0].state, CommentState::Todo);
@@ -1918,16 +1960,63 @@ mod tests {
         onboarding.channel = Channel::Onboarding;
         let mut note = scoped_comment("note", Some("session-a"), CommentState::Draft);
         note.channel = Channel::Note;
-        let mut comments = vec![collaboration, onboarding, note];
+        let mut agent_draft = scoped_comment("agent-draft", Some("session-a"), CommentState::Draft);
+        agent_draft.author = Identity::agent();
+        agent_draft.channel = Channel::Onboarding;
+        let mut comments = vec![collaboration, onboarding, note, agent_draft];
 
         let result = ready_all_drafts(&mut session, &mut comments).unwrap();
         assert_eq!(result.readied, 3);
+        assert_eq!(result.skipped_agent_drafts, 1);
         assert_eq!(comments[0].state, CommentState::Todo);
         assert_eq!(comments[0].channel, Channel::Collaboration);
         assert_eq!(comments[1].state, CommentState::Todo);
         assert_eq!(comments[1].channel, Channel::Delegation);
         assert_eq!(comments[2].state, CommentState::Todo);
         assert_eq!(comments[2].channel, Channel::Delegation);
+        // Agent-authored onboarding drafts await human triage untouched.
+        assert_eq!(comments[3].state, CommentState::Draft);
+        assert_eq!(comments[3].channel, Channel::Onboarding);
+    }
+
+    #[test]
+    fn ready_all_drafts_skips_agent_drafts_but_explicit_selection_escalates() {
+        let mut session = ReviewSession {
+            id: "session-a".into(),
+            ..ReviewSession::default()
+        };
+        let mut agent_draft = scoped_comment("agent-draft", Some("session-a"), CommentState::Draft);
+        agent_draft.author = Identity::agent();
+        agent_draft.channel = Channel::Onboarding;
+        let mut comments = vec![agent_draft.clone()];
+
+        let bulk = ready_all_drafts(&mut session, &mut comments).unwrap();
+        assert_eq!(
+            bulk,
+            ReadyCommentsResult {
+                readied: 0,
+                already_ready: 0,
+                skipped_agent_drafts: 1
+            }
+        );
+        assert_eq!(comments[0].state, CommentState::Draft);
+        assert_eq!(comments[0].channel, Channel::Onboarding);
+        assert_eq!(comments[0].updated_at, agent_draft.updated_at);
+        assert!(session.updated_at.is_none());
+
+        // Explicit id selection keeps the current escalation behavior.
+        let selected =
+            ready_selected_comments(&mut session, &mut comments, &["agent-".into()]).unwrap();
+        assert_eq!(
+            selected,
+            ReadyCommentsResult {
+                readied: 1,
+                already_ready: 0,
+                skipped_agent_drafts: 0
+            }
+        );
+        assert_eq!(comments[0].state, CommentState::Todo);
+        assert_eq!(comments[0].channel, Channel::Delegation);
     }
 
     #[test]
@@ -2276,7 +2365,7 @@ mod tests {
                 agent_attached: true,
                 configured_human_name: Some("Reviewer"),
                 target_author_name: Some("Teammate"),
-                thread_channel: None,
+                ..ChannelInferenceContext::default()
             };
             assert_eq!(infer_comment_channel(context), default);
         }
@@ -2336,6 +2425,56 @@ mod tests {
             };
             assert_eq!(infer_comment_channel(context), Channel::Note);
         }
+    }
+
+    #[test]
+    fn channel_inference_name_case_and_whitespace_drift_still_owns() {
+        for agent_attached in [false, true] {
+            let context = ChannelInferenceContext {
+                agent_attached,
+                configured_human_name: Some("reviewer"),
+                target_author_name: Some("  REVIEWER "),
+                ..ChannelInferenceContext::default()
+            };
+            let expected = if agent_attached {
+                Channel::Delegation
+            } else {
+                Channel::Note
+            };
+            assert_eq!(infer_comment_channel(context), expected);
+        }
+    }
+
+    #[test]
+    fn channel_inference_email_match_with_name_drift_still_owns() {
+        for agent_attached in [false, true] {
+            let context = ChannelInferenceContext {
+                agent_attached,
+                configured_human_name: Some("chris"),
+                configured_human_email: Some("Chris@Example.com"),
+                target_author_name: Some("Chris Ericson"),
+                target_author_email: Some(" chris@example.com "),
+                ..ChannelInferenceContext::default()
+            };
+            let expected = if agent_attached {
+                Channel::Delegation
+            } else {
+                Channel::Note
+            };
+            assert_eq!(infer_comment_channel(context), expected);
+        }
+    }
+
+    #[test]
+    fn channel_inference_name_and_email_both_drifting_is_collaboration() {
+        let context = ChannelInferenceContext {
+            configured_human_name: Some("Reviewer"),
+            configured_human_email: Some("reviewer@example.com"),
+            target_author_name: Some("Teammate"),
+            target_author_email: Some("teammate@example.com"),
+            ..ChannelInferenceContext::default()
+        };
+        assert_eq!(infer_comment_channel(context), Channel::Collaboration);
     }
 
     #[test]

@@ -85,7 +85,11 @@ pub fn render_html_with_profile_and_attention_files(
         out.push_str("<a class=\"file-link\" href=\"#");
         out.push_str(&file_anchor(&file.path));
         out.push_str("\"><span>");
-        out.push_str(if file.viewed {
+        // Viewed/caught-up progress is private review state; team exports
+        // render a neutral bullet for every file.
+        out.push_str(if team {
+            "• "
+        } else if file.viewed {
             "✓ "
         } else if file.caught_up {
             "◌ "

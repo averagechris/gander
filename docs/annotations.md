@@ -73,7 +73,13 @@ most-specific context first:
 
 The fallback is deliberately the most private channel: a misfire leaks
 nothing. Mixed authors, empty ranges, ambiguous author output, or missing
-configured identity all fall back to `note`. `[comments] default-channel` pins
+configured identity all fall back to `note`. Rule 4 compares the configured
+`[identity]` name and optional email against the range's consistent jj author
+name/email — trimmed and case-insensitively, per field — and treats the work
+as the reviewer's own when either field matches, so benign drift like
+"chris" vs "Chris Ericson" does not misread your own work as a teammate's.
+When neither pair is comparable, inference never guesses and stays `note`.
+`[comments] default-channel` pins
 a fixed default for people who prefer no inference.
 
 **One quiet indicator, which is also the control.** The comment editor's
@@ -124,7 +130,8 @@ The primitives a future GitHub/GitLab/SourceHut plugin needs, built now:
    structured anchors/fingerprints, and an optional session-level disposition
    (`comment | approve | request-changes`). Team Markdown/HTML are filtered
    human summaries over the same public projection.
-3. **Identity config**: `[identity] name` for humans; agent identities from
+3. **Identity config**: `[identity] name` (plus optional `[identity] email`
+   for ownership matching) for humans; agent identities from
    the agent config. Authorship is stamped now so exports are attributable
    later.
 4. **Import as the reverse direction**: a teammate's exported collaboration

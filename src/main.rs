@@ -1297,7 +1297,7 @@ fn run() -> color_eyre::Result<()> {
     }
     let mut session =
         ReviewSession::new_with_config(repo.clone(), target, diff.clone(), state.clone(), &config);
-    session.set_target_author_name(jj.target_author(&repo, &session.target).unwrap_or(None));
+    session.set_target_author(jj.target_author(&repo, &session.target).unwrap_or_default());
     session.annotate_generated_where(|file| {
         generated_matcher.is_match(&file.path)
             || crate::generated::diff_content_looks_generated(&file.diff)
@@ -1898,10 +1898,18 @@ fn run() -> color_eyre::Result<()> {
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&result)?,
-                    ListFormat::Text => println!(
-                        "readied: {}\nalready ready: {}",
-                        result.readied, result.already_ready
-                    ),
+                    ListFormat::Text => {
+                        println!(
+                            "readied: {}\nalready ready: {}",
+                            result.readied, result.already_ready
+                        );
+                        if result.skipped_agent_drafts > 0 {
+                            println!(
+                                "skipped {} agent draft(s) awaiting triage",
+                                result.skipped_agent_drafts
+                            );
+                        }
+                    }
                 }
             }
             CommentsCommand::Resolve { id, reply, format } => {

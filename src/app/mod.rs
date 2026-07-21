@@ -84,10 +84,14 @@ pub struct ReviewSession {
     /// Explicit configured identity name, distinct from the migration-safe
     /// `human:local` fallback used for authorship stamping.
     pub configured_human_name: Option<String>,
+    /// Explicit configured identity email, used only for ownership matching.
+    pub configured_human_email: Option<String>,
     pub agent_identity: Identity,
-    /// Author of exactly one target revision, populated by a read-only jj
+    /// Author name of exactly one target revision, populated by a read-only jj
     /// query. `None` means unavailable or ambiguous and inference stays private.
     pub target_author_name: Option<String>,
+    /// Author email of the same consistent target range, independent of name.
+    pub target_author_email: Option<String>,
     pub selected: usize,
     pub diff_scroll: u16,
     pub diff_cursor: usize,
@@ -558,8 +562,9 @@ struct ReviewSessionOptions {
     comment_default_channel: Option<Channel>,
     human_identity: Identity,
     configured_human_name: Option<String>,
+    configured_human_email: Option<String>,
     agent_identity: Identity,
-    target_author_name: Option<String>,
+    target_author: crate::jj::TargetAuthor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -665,8 +670,9 @@ pub struct ReviewFile {
 }
 
 impl ReviewSession {
-    pub fn set_target_author_name(&mut self, author: Option<String>) {
-        self.target_author_name = author.filter(|name| !name.trim().is_empty());
+    pub fn set_target_author(&mut self, author: crate::jj::TargetAuthor) {
+        self.target_author_name = author.name.filter(|name| !name.trim().is_empty());
+        self.target_author_email = author.email.filter(|email| !email.trim().is_empty());
     }
 
     /// Stable logical identity of the row currently anchoring the diff top.
@@ -791,8 +797,9 @@ impl ReviewSession {
                 comment_default_channel: config.comments.default_channel,
                 human_identity: config.human_identity(),
                 configured_human_name: config.identity.name.clone(),
+                configured_human_email: config.identity.email.clone(),
                 agent_identity: config.agent_identity(),
-                target_author_name: None,
+                target_author: crate::jj::TargetAuthor::default(),
             },
         )
     }
@@ -818,8 +825,9 @@ impl ReviewSession {
                 comment_default_channel: None,
                 human_identity: Identity::local_human(),
                 configured_human_name: None,
+                configured_human_email: None,
                 agent_identity: Identity::agent(),
-                target_author_name: None,
+                target_author: crate::jj::TargetAuthor::default(),
             },
         )
     }
@@ -839,8 +847,9 @@ impl ReviewSession {
             comment_default_channel,
             human_identity,
             configured_human_name,
+            configured_human_email,
             agent_identity,
-            target_author_name,
+            target_author,
         } = options;
         let mut state = state;
         state.normalize_legacy_file_state();
@@ -880,8 +889,10 @@ impl ReviewSession {
             comment_default_channel,
             human_identity,
             configured_human_name,
+            configured_human_email,
             agent_identity,
-            target_author_name,
+            target_author_name: target_author.name,
+            target_author_email: target_author.email,
             selected: 0,
             diff_scroll: 0,
             diff_cursor: 0,
@@ -970,8 +981,12 @@ impl ReviewSession {
                 comment_default_channel: self.comment_default_channel,
                 human_identity: self.human_identity.clone(),
                 configured_human_name: self.configured_human_name.clone(),
+                configured_human_email: self.configured_human_email.clone(),
                 agent_identity: self.agent_identity.clone(),
-                target_author_name: self.target_author_name.clone(),
+                target_author: crate::jj::TargetAuthor {
+                    name: self.target_author_name.clone(),
+                    email: self.target_author_email.clone(),
+                },
             },
         );
         self.stream_mode = stream_mode;
@@ -3599,6 +3614,7 @@ mod tests {
         let config = Config {
             identity: IdentityConfig {
                 name: Some("Human Reviewer".into()),
+                ..Default::default()
             },
             agent: AgentConfig {
                 name: Some("Review Bot".into()),

@@ -4017,7 +4017,9 @@ fn inferred_comment_channel(
         onboarding_target,
         agent_attached,
         configured_human_name: session.configured_human_name.as_deref(),
+        configured_human_email: session.configured_human_email.as_deref(),
         target_author_name: session.target_author_name.as_deref(),
+        target_author_email: session.target_author_email.as_deref(),
         fixed_default: session.comment_default_channel,
     })
 }
@@ -4206,9 +4208,16 @@ fn handle_comment_list_key(
             }
             Action::CommentListReady => {
                 let result = session.ready_all_draft_comments();
+                let mut message = format!("readied {} draft comment(s)", result.readied);
+                if result.skipped_agent_drafts > 0 {
+                    message.push_str(&format!(
+                        "; skipped {} agent draft(s) awaiting triage",
+                        result.skipped_agent_drafts
+                    ));
+                }
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
-                    message: format!("readied {} draft comment(s)", result.readied),
+                    message,
                 });
             }
             Action::CommentListCycleIntent => {
@@ -4548,7 +4557,7 @@ impl ReviewLoader<'_> {
         let target_author = self
             .jj
             .target_author(&session.repo, &target)
-            .unwrap_or(None);
+            .unwrap_or_default();
         let diff_text = self
             .jj
             .diff(&session.repo, &target)
@@ -4561,7 +4570,7 @@ impl ReviewLoader<'_> {
         } else {
             session.replace_diff(target, diff);
         }
-        session.set_target_author_name(target_author);
+        session.set_target_author(target_author);
         session.annotate_generated_where(|file| {
             self.generated_matcher.is_match(&file.path)
                 || crate::generated::diff_content_looks_generated(&file.diff)
@@ -6296,7 +6305,10 @@ mod tests {
             ReviewState::default(),
             &config,
         );
-        session.set_target_author_name(Some("Reviewer".into()));
+        session.set_target_author(crate::jj::TargetAuthor {
+            name: Some("Reviewer".into()),
+            email: None,
+        });
         let backend = MockJjBackend::with_diff(Ok(String::new()));
         let loader = ReviewLoader {
             ignore_globs: Vec::new(),
@@ -6334,7 +6346,10 @@ mod tests {
         assert_eq!(session.comments[0].channel, Channel::Delegation);
         assert_eq!(session.comments[0].state, CommentState::Todo);
 
-        session.set_target_author_name(Some("Teammate".into()));
+        session.set_target_author(crate::jj::TargetAuthor {
+            name: Some("Teammate".into()),
+            email: None,
+        });
         tui_state.agent_config.command = None;
         let channel = inferred_comment_channel(&session, &tui_state, false, None);
         let mut editor = CommentEditor::with_channel(String::new(), channel);
@@ -6369,7 +6384,10 @@ mod tests {
             ReviewState::default(),
             &config,
         );
-        session.set_target_author_name(Some("Reviewer".into()));
+        session.set_target_author(crate::jj::TargetAuthor {
+            name: Some("Reviewer".into()),
+            email: None,
+        });
         let tui_state = TuiState {
             agent_config: config.agent,
             ..TuiState::default()

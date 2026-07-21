@@ -277,7 +277,7 @@ impl<'a> ReviewArtifact<'a> {
             .flat_map(|work| work.action_items.iter().map(|entry| entry.item.id.as_str()))
             .collect::<BTreeSet<_>>();
 
-        let team_projection = team.then(|| build_team_projection(session, durable, agent));
+        let team_projection = team.then(|| build_team_projection(session, durable));
         let comments = if let Some(projection) = &team_projection {
             projection.comments.clone()
         } else {
@@ -288,11 +288,6 @@ impl<'a> ReviewArtifact<'a> {
                     comment_belongs_to_session(comment, durable.map(|active| active.id.as_str()))
                 })
                 .filter(|comment| !options.only_open || comment.state == CommentState::Todo)
-                .filter(|comment| {
-                    !team
-                        || (comment.channel == Channel::Collaboration
-                            && matches!(comment.state, CommentState::Todo | CommentState::Resolved))
-                })
                 .map(|comment| CommentArtifact {
                     comment,
                     linked_action_item_ids: if team {
@@ -335,7 +330,10 @@ impl<'a> ReviewArtifact<'a> {
                     path: &file.path,
                     old_path: file.old_path.as_deref(),
                     status: file.status.to_string(),
-                    viewed: file.viewed,
+                    // Per-file viewed progress is private review state, like
+                    // attention progress: team exports always publish `false`
+                    // so the schema stays stable without leaking progress.
+                    viewed: !team && file.viewed,
                     generated: file.generated,
                     additions: file.additions,
                     deletions: file.deletions,
@@ -428,7 +426,6 @@ impl<'a> ReviewArtifact<'a> {
 pub fn build_team_projection<'a>(
     session: &'a ReviewSession,
     durable: Option<&'a crate::state::ReviewSession>,
-    _agent: bool,
 ) -> TeamProjection<'a> {
     let comments = session
         .comments
@@ -648,12 +645,9 @@ fn hunk_artifact(hunk: &Hunk) -> HunkArtifact<'_> {
     }
 }
 
+/// Team-facing summary. Deliberately omits the private viewed-progress count
+/// that the human/agent [`ReviewSession::summary_line`] reports.
 fn team_summary_line(session: &ReviewSession, comment_count: usize) -> String {
-    let viewed = session
-        .files
-        .iter()
-        .filter(|file| file.viewed || file.caught_up)
-        .count();
     let generated = session.files.iter().filter(|file| file.generated).count();
     let additions: usize = session.files.iter().map(|file| file.additions).sum();
     let deletions: usize = session.files.iter().map(|file| file.deletions).sum();
@@ -663,8 +657,7 @@ fn team_summary_line(session: &ReviewSession, comment_count: usize) -> String {
         "comments"
     };
     format!(
-        "{} files ({viewed}/{} viewed, {generated} generated/noisy), +{additions}/-{deletions}, {comment_count} {noun}",
-        session.files.len(),
+        "{} files ({generated} generated/noisy), +{additions}/-{deletions}, {comment_count} {noun}",
         session.files.len()
     )
 }
@@ -1965,6 +1958,8 @@ mod tests {
     fn team_profile_only_exports_collaboration_todo_resolved_without_private_leaks() {
         let mut session = fixture();
         session.sessions[0].disposition = Some(crate::state::ReviewDisposition::RequestChanges);
+        // Private per-file viewed progress that must not ship to the team.
+        session.files[0].viewed = true;
         for comment in &mut session.comments {
             match comment.id.as_str() {
                 "linked" => {
@@ -1988,6 +1983,13 @@ mod tests {
             }
         }
 
+        let human: serde_json::Value = serde_json::from_str(
+            &render_artifact_with_profile(&session, ArtifactFormat::Json, ArtifactProfile::Human)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(human["files"][0]["viewed"], true);
+
         let json_text =
             render_artifact_with_profile(&session, ArtifactFormat::Json, ArtifactProfile::Team)
                 .unwrap();
@@ -1995,6 +1997,11 @@ mod tests {
         assert_eq!(value["version"], ARTIFACT_SCHEMA_VERSION);
         assert_eq!(value["profile"], "team");
         assert!(value["summary"].as_str().unwrap().contains("1 comment"));
+        assert!(
+            !value["summary"].as_str().unwrap().contains("viewed"),
+            "team summary must not report private viewed progress: {}",
+            value["summary"]
+        );
         assert_eq!(value["session"]["disposition"], "request-changes");
         assert_eq!(value["comments"].as_array().unwrap().len(), 1);
         let exported = &value["comments"][0];
@@ -2004,6 +2011,12 @@ mod tests {
         assert_eq!(exported["channel"], "collaboration");
         assert!(exported["excerpt"].is_array());
         assert!(value["files"][0]["hunks"].is_array());
+        for file in value["files"].as_array().unwrap() {
+            assert_eq!(
+                file["viewed"], false,
+                "team files must not leak viewed progress: {file}"
+            );
+        }
         assert!(
             exported["linked_action_item_ids"]
                 .as_array()
@@ -2026,6 +2039,21 @@ mod tests {
         assert!(!markdown.contains("hunk_index"));
         assert!(!markdown.contains("private collaboration draft"));
         assert!(!markdown.contains("Fix parser behavior"));
+        assert!(
+            !markdown.contains("viewed"),
+            "team markdown must not report viewed progress: {markdown}"
+        );
+
+        let html = crate::web_export::render_html_with_profile(
+            &session,
+            &session.to_state(),
+            ArtifactProfile::Team,
+        );
+        assert!(html.contains("linked evidence body"));
+        assert!(
+            !html.contains("viewed") && !html.contains('✓') && !html.contains('◌'),
+            "team HTML must not carry viewed marks"
+        );
     }
 
     #[test]

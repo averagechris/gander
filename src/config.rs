@@ -206,6 +206,9 @@ pub struct AgentConfig {
 pub struct IdentityConfig {
     /// Name stamped on local human-authored annotations.
     pub name: Option<String>,
+    /// Optional email compared against jj change authors during channel
+    /// inference, so benign display-name drift still counts as ownership.
+    pub email: Option<String>,
 }
 
 impl Config {
@@ -515,6 +518,7 @@ struct AgentConfigPatch {
 #[serde(default, rename_all = "kebab-case")]
 struct IdentityConfigPatch {
     name: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -954,6 +958,9 @@ impl Config {
 
         if let Some(name) = patch.identity.name {
             self.identity.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+        }
+        if let Some(email) = patch.identity.email {
+            self.identity.email = (!email.trim().is_empty()).then(|| email.trim().to_owned());
         }
 
         if let Some(width) = patch.ui.file_pane_auto_hide_width {

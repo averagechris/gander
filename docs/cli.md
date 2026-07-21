@@ -178,7 +178,12 @@ initial-state = "draft" # todo (default) | draft
 The TUI infers new-comment channels in this order: existing thread, agent
 onboarding target, actually attached agent on the reviewer's own reviewed
 range, a consistent foreign jj author across `base..rev`, then private note.
-Mixed/empty/ambiguous range authorship stays private. Merely configuring an
+Ownership matching compares `[identity].name` and the optional
+`[identity].email` against the range's consistent jj author name/email,
+trimmed and case-insensitively; either field matching counts the work as your
+own, so benign display-name drift does not misclassify it as a teammate's.
+Mixed/empty/ambiguous range authorship stays private, as does a range where
+neither identity pair is comparable. Merely configuring an
 agent command is not attachment. `[comments].default-channel` pins the initial
 choice (thread replies still preserve their thread), and Tab cycles all four
 channels while composing.
@@ -210,7 +215,12 @@ Example:
 query; omitting it preserves the full active-session list. JSON and text output
 retain each comment's `author` and `channel`. `comments ready <id>...` marks
 the selected active-session drafts `todo`; `comments ready --all-drafts` marks
-all active-session drafts `todo`. The operation is atomic: if any supplied id is
+all active-session *human-authored* drafts `todo`. Agent-authored drafts are
+onboarding suggestions awaiting your triage, so the bulk sweep leaves them
+untouched and reports `skipped N agent draft(s) awaiting triage` instead of
+escalating them past accept-time channel inference; selecting an agent draft
+explicitly by id/prefix still readies it as a delegation todo. The operation is
+atomic: if any supplied id is
 unknown, ambiguous, not in the active session, or already resolved, no comments
 are changed. `reply` appends an immutable
 UUID-addressed reply with a timestamp and updates the parent comment's

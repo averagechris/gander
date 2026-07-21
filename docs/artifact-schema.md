@@ -24,7 +24,10 @@ Artifacts render in three profiles:
 - `team`: JSON is the canonical forge-mappable team contract. Team JSON carries
   session disposition, collaboration `todo`/`resolved` comments only, comment
   and reply authorship, structured anchors/fingerprints, excerpts, and full
-  hunks. Team Markdown and HTML are filtered human summaries: they preserve the
+  hunks. Per-file `viewed` flags are private review progress, so team JSON
+  always emits `"viewed": false` and the team summary omits viewed counts.
+  Team Markdown and HTML are filtered
+  human summaries: they preserve the
   publication boundary, authorship, channel, disposition, and concise location /
   side context, but are not machine-readable forge mapping contracts.
 
@@ -270,7 +273,10 @@ Notes:
 - `profile`, `files[].hunks`, and `comments[].excerpt` are omitted entirely
   in the `human` profile. The `team` profile sets `"profile": "team"`, includes
   hunks/excerpts for forge mapping, omits action items and walkthroughs, and
-  filters comments to collaboration `todo`/`resolved` only.
+  filters comments to collaboration `todo`/`resolved` only. Team exports keep
+  the `files[].viewed` key for schema stability but always publish `false`:
+  per-file viewed progress is private review state like attention progress,
+  and the team summary line and team HTML file list carry no viewed marks.
 - `attention_regions` contains durable assigned regions (not implicit
   `supporting` content) in human and agent profiles. It includes the existing
   anchor/fingerprint evidence and a derived `stale` flag. Team exports omit the

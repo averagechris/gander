@@ -494,7 +494,7 @@ impl AcpHandler {
                 self.save_overlay()?;
                 Ok(json!({ "id": flag.id }))
             }
-            other => Err(format!("unknown method: {other}")),
+            other => Err(unknown_method_error(other)),
         }
     }
 
@@ -508,6 +508,29 @@ impl AcpHandler {
         self.overlay
             .save(&self.overlay_path)
             .map_err(|error| error.to_string())
+    }
+}
+
+/// Methods deleted with the ephemeral chunk/change-brief overlay. Exactly
+/// these names get a migration hint; other unknown methods stay generic.
+const REMOVED_CURATION_METHODS: [&str; 8] = [
+    "review/set_chunks",
+    "review/update_chunks",
+    "review/remove_chunks",
+    "review/set_change_briefs",
+    "set_chunks",
+    "update_chunks",
+    "remove_chunks",
+    "set_change_briefs",
+];
+
+fn unknown_method_error(method: &str) -> String {
+    if REMOVED_CURATION_METHODS.contains(&method) {
+        format!(
+            "unknown method: {method}; removed in the attention-map redesign; use durable walkthrough steps and attention regions instead (walkthrough_*, attention_*)"
+        )
+    } else {
+        format!("unknown method: {method}")
     }
 }
 
@@ -1095,9 +1118,21 @@ diff --git a/README.md b/README.md
             assert_eq!(response["error"]["code"], -32000);
             assert_eq!(
                 response["error"]["message"],
-                format!("unknown method: {method}")
+                format!(
+                    "unknown method: {method}; removed in the attention-map redesign; use durable walkthrough steps and attention regions instead (walkthrough_*, attention_*)"
+                )
             );
         }
+
+        // Other unknown methods keep the generic error without the hint.
+        let request =
+            json!({ "jsonrpc": "2.0", "id": 9, "method": "review/never_existed", "params": {} })
+                .to_string();
+        let response = server.handle_line(&request).unwrap();
+        assert_eq!(
+            response["error"]["message"],
+            "unknown method: review/never_existed"
+        );
     }
 
     #[test]

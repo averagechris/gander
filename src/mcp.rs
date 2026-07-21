@@ -160,6 +160,11 @@ pub struct CommentAddParams {
     pub action: Option<ActionIntent>,
     /// Initial durable state. Only draft or todo are accepted.
     pub state: Option<InitialCommentState>,
+    /// Annotation channel, like CLI `--channel`: onboarding, delegation,
+    /// collaboration, or note. A todo in a channel that does not permit
+    /// todos (onboarding/note) is stored as a draft instead. Omitted:
+    /// state-derived default (todo -> delegation, else note).
+    pub channel: Option<Channel>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -707,7 +712,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review comment. Equivalent to `gander comments add`; external additions merge into a running TUI."
+        description = "Add a durable review comment. Equivalent to `gander comments add` (including `--channel`), except the CLI-only `[comments].default-channel` config fallback is not consulted; external additions merge into a running TUI."
     )]
     fn comment_add(
         &self,
@@ -749,6 +754,21 @@ impl GanderMcp {
                 .state
                 .map(Into::into)
                 .unwrap_or(this.initial_comment_state);
+            // Same channel semantics as CLI `comments add --channel`: an
+            // explicit channel wins, otherwise the state-derived default;
+            // a non-actionable channel demotes a todo to a private draft.
+            let channel = params.channel.unwrap_or({
+                if initial_state == CommentState::Todo {
+                    Channel::Delegation
+                } else {
+                    Channel::Note
+                }
+            });
+            let initial_state = if initial_state == CommentState::Todo && !channel.permits_todo() {
+                CommentState::Draft
+            } else {
+                initial_state
+            };
             review::add_comment(
                 &mut state.sessions[idx],
                 &mut state.comments,
@@ -764,18 +784,14 @@ impl GanderMcp {
                     action: params.action,
                     state: initial_state,
                     author: this.agent_identity.clone(),
-                    channel: if initial_state == CommentState::Todo {
-                        Channel::Delegation
-                    } else {
-                        Channel::Note
-                    },
+                    channel,
                 },
             )
         })
     }
 
     #[tool(
-        description = "Mark selected durable comments, or all active-session drafts, ready as todos. Equivalent to `gander comments ready`."
+        description = "Mark selected durable comments, or all active-session human-authored drafts, ready as todos. Equivalent to `gander comments ready`. Bulk `all_drafts` skips agent-authored drafts awaiting human triage (reported as `skipped_agent_drafts`); select an agent draft explicitly by id to ready it."
     )]
     fn comments_ready(
         &self,
@@ -2348,6 +2364,14 @@ mod tests {
                 "{method}: {}",
                 text.text
             );
+            assert!(
+                text.text.contains(
+                    "removed in the attention-map redesign; use durable walkthrough steps \
+                     and attention regions instead (walkthrough_*, attention_*)"
+                ),
+                "{method}: {}",
+                text.text
+            );
         }
     }
 
@@ -2468,6 +2492,7 @@ mod tests {
                     kind: Some(CommentKind::Issue),
                     action: Some(ActionIntent::Fix),
                     state: Some(InitialCommentState::Draft),
+                    channel: None,
                 }))
                 .unwrap(),
         );
@@ -2527,6 +2552,7 @@ mod tests {
                     kind: None,
                     action: None,
                     state: None,
+                    channel: None,
                 }))
                 .unwrap(),
         );
@@ -2599,6 +2625,7 @@ mod tests {
                 kind: None,
                 action: None,
                 state: None,
+                channel: None,
             }))
             .unwrap();
         server
@@ -2611,6 +2638,7 @@ mod tests {
                 kind: None,
                 action: None,
                 state: None,
+                channel: None,
             }))
             .unwrap();
 
@@ -2653,6 +2681,7 @@ mod tests {
                         kind: None,
                         action: None,
                         state: None,
+                        channel: None,
                     }))
                     .unwrap(),
             )
@@ -2707,6 +2736,7 @@ mod tests {
                     kind: Some(CommentKind::Question),
                     action: Some(ActionIntent::None),
                     state: Some(InitialCommentState::Draft),
+                    channel: None,
                 }))
                 .unwrap(),
         );
@@ -2714,6 +2744,8 @@ mod tests {
         assert_eq!(comment["state"], "draft");
         assert!(comment["session_id"].as_str().is_some());
 
+        // MCP additions are agent-authored, so the bulk sweep leaves them
+        // as drafts awaiting human triage and reports the skip.
         let ready = result_json(
             &server
                 .comments_ready(Parameters(CommentsReadyParams {
@@ -2722,10 +2754,94 @@ mod tests {
                 }))
                 .unwrap(),
         );
+        assert_eq!(ready["readied"], 0);
+        assert_eq!(ready["skipped_agent_drafts"], 1);
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.comments[0].state, CommentState::Draft);
+
+        // Explicit id selection still escalates the agent draft.
+        let ready = result_json(
+            &server
+                .comments_ready(Parameters(CommentsReadyParams {
+                    ids: Some(vec![comment["id"].as_str().unwrap().to_owned()]),
+                    all_drafts: None,
+                }))
+                .unwrap(),
+        );
         assert_eq!(ready["readied"], 1);
         let state = ReviewState::load_or_default(&server.state_path).unwrap();
         assert_eq!(state.comments[0].state, CommentState::Todo);
         assert!(state.comments[0].is_general());
+    }
+
+    #[test]
+    fn comment_add_channel_param_matches_cli_semantics_including_todo_coercion() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = server(dir.path());
+
+        // Non-actionable channel demotes the configured todo initial state.
+        let onboarding = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: Some("src/app.rs".into()),
+                    general: None,
+                    line: Some(1),
+                    end_line: None,
+                    body: "look here first".to_owned(),
+                    kind: None,
+                    action: None,
+                    state: None,
+                    channel: Some(Channel::Onboarding),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(onboarding["channel"], "onboarding");
+        assert_eq!(onboarding["state"], "draft");
+
+        // A todo-permitting channel keeps the explicit todo state.
+        let collaboration = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: None,
+                    general: Some(true),
+                    line: None,
+                    end_line: None,
+                    body: "team feedback".to_owned(),
+                    kind: None,
+                    action: None,
+                    state: Some(InitialCommentState::Todo),
+                    channel: Some(Channel::Collaboration),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(collaboration["channel"], "collaboration");
+        assert_eq!(collaboration["state"], "todo");
+
+        // Omitted channel keeps the state-derived default.
+        let derived = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: None,
+                    general: Some(true),
+                    line: None,
+                    end_line: None,
+                    body: "derived default".to_owned(),
+                    kind: None,
+                    action: None,
+                    state: Some(InitialCommentState::Draft),
+                    channel: None,
+                }))
+                .unwrap(),
+        );
+        assert_eq!(derived["channel"], "note");
+        assert_eq!(derived["state"], "draft");
+
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.comments.len(), 3);
+        assert_eq!(state.comments[0].channel, Channel::Onboarding);
+        assert_eq!(state.comments[0].state, CommentState::Draft);
+        assert_eq!(state.comments[1].channel, Channel::Collaboration);
+        assert_eq!(state.comments[1].state, CommentState::Todo);
     }
 
     #[test]
@@ -3397,6 +3513,7 @@ mod tests {
                 kind: None,
                 action: None,
                 state: None,
+                channel: None,
             }))
             .unwrap();
         responder.join().unwrap();

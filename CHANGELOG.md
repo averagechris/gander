@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added a `channel` parameter to the MCP `comment_add` tool matching CLI
+  `comments add --channel` semantics, including demoting a todo to a private
+  draft when the selected channel does not permit todos.
 - Added the M18 attention Focus preset and glance board. `Z` now applies and
   exactly restores maximum stream/supporting-context folding, file-pane
   override, narration-card state, and viewport context without entering a mode;
@@ -94,6 +97,23 @@
 
 ### Fixed
 
+- `comments ready --all-drafts` (CLI, TUI, and the MCP bulk mode) now readies
+  only human-authored drafts. Agent-authored onboarding drafts awaiting human
+  triage are left untouched and reported as skipped instead of being silently
+  escalated to delegation todos; explicit id selection still readies them.
+- Channel-inference ownership matching is now robust to benign identity drift:
+  the configured `[identity].name` and new optional `[identity].email` are
+  compared trimmed and case-insensitively against the reviewed range's
+  consistent jj author name and email, and either field matching counts as
+  the reviewer's own work. Incomparable identities still never guess.
+- Team exports no longer leak private per-file viewed progress: team JSON
+  forces `files[].viewed` to `false`, the team summary omits viewed counts,
+  and team HTML renders neutral file bullets instead of viewed marks.
+- Invoking the removed chunk/change-brief curation methods
+  (`review/set_chunks`, `review/update_chunks`, `review/remove_chunks`,
+  `review/set_change_briefs`, and their unprefixed MCP names) now returns a
+  migration hint pointing at durable walkthrough steps and attention regions
+  instead of only a generic unknown-method error.
 - Channel inference now excludes empty changes (such as the empty working-copy
   commit on top of a reviewed stack) when reading the range's consistent jj
   author, so reviewing a teammate's work infers `collaboration` under the
