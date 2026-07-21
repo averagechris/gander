@@ -63,6 +63,8 @@ use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 /// context-expansion epoch (bumped whenever expansion state or fetched file
 /// contents change).
 type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool, u64), Rc<Vec<DiffRow>>>;
+/// file index → (diff fingerprint, memoized cheap structural stream rows).
+type StructuralRowsCache = BTreeMap<usize, (String, Rc<Vec<DiffRow>>)>;
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -148,6 +150,10 @@ pub struct ReviewSession {
     /// structural rows.
     stream_materialized_files: RefCell<BTreeSet<usize>>,
     stream_cache: RefCell<Option<(u64, Rc<ReviewStream>)>>,
+    /// Memoized cheap structural stream rows per file, keyed by the file's
+    /// diff fingerprint. Structural rows depend only on parsed diff content,
+    /// so entries self-invalidate when a refresh changes the fingerprint.
+    structural_rows_cache: RefCell<StructuralRowsCache>,
     #[cfg(test)]
     stream_projection_builds: Cell<usize>,
     selected_comment_id: Option<String>,
@@ -920,6 +926,7 @@ impl ReviewSession {
             expanded_skim_folds: BTreeSet::new(),
             stream_materialized_files: RefCell::new(BTreeSet::new()),
             stream_cache: RefCell::new(None),
+            structural_rows_cache: RefCell::new(BTreeMap::new()),
             #[cfg(test)]
             stream_projection_builds: Cell::new(0),
             selected_comment_id: None,

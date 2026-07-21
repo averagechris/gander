@@ -126,6 +126,12 @@
 
 ### Fixed
 
+- Attention resolution and comment-anchor derivation are now fingerprint-keyed
+  and memoized, so large reviews render interactively again: stream rebuilds,
+  skim folds, and coverage no longer re-derive sha256 line anchors per region
+  per row. On a 129-file/~28k-line review, `tour render` dropped from ~70s to
+  under 5s and `attention coverage show` from ~5.3s to ~0.5s, with byte-identical
+  staleness, fold, and viewed-effect semantics.
 - MCP `comment_add` now honors `[comments].default-channel` between an explicit
   `channel` parameter and the state-derived fallback, matching CLI
   `comments add` channel and todo-coercion semantics.

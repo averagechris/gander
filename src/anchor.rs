@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -5,6 +7,68 @@ use crate::{
     app::ReviewFile,
     diff::{DiffLineKind, FileDiff},
 };
+
+/// Memoized line-anchor lookup for one file-diff generation.
+///
+/// Every entry is keyed by the file's content fingerprint (a sha256 of the raw
+/// per-file diff, including its `diff --git` header), so anchor derivation is
+/// fully deterministic per key and entries can never go stale — a refreshed
+/// diff simply produces a new fingerprint. The cache is bounded and cleared
+/// wholesale when it overflows; a cleared entry only costs re-derivation.
+struct FileAnchorTable {
+    path: String,
+    /// First hunk/line index whose new-side line number matches, preserving
+    /// the historical first-match scan order of `find_line_anchor`.
+    by_new_line: HashMap<usize, (usize, usize)>,
+    /// First hunk/line index whose old-side line number matches.
+    by_old_line: HashMap<usize, (usize, usize)>,
+    /// Lazily derived anchors per (hunk_index, line_index).
+    anchors: RefCell<HashMap<(usize, usize), Option<CommentAnchor>>>,
+}
+
+const ANCHOR_TABLE_CACHE_CAP: usize = 512;
+
+thread_local! {
+    static ANCHOR_TABLES: RefCell<HashMap<String, Rc<FileAnchorTable>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn anchor_table(file: &FileDiff) -> Rc<FileAnchorTable> {
+    ANCHOR_TABLES.with(|tables| {
+        let mut tables = tables.borrow_mut();
+        if let Some(table) = tables.get(file.fingerprint.as_str()) {
+            debug_assert_eq!(table.path, file.path);
+            return Rc::clone(table);
+        }
+        if tables.len() >= ANCHOR_TABLE_CACHE_CAP {
+            tables.clear();
+        }
+        let mut by_new_line = HashMap::new();
+        let mut by_old_line = HashMap::new();
+        for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+            for (line_index, line) in hunk.lines.iter().enumerate() {
+                if let Some(line_number) = line.new_lineno {
+                    by_new_line
+                        .entry(line_number)
+                        .or_insert((hunk_index, line_index));
+                }
+                if let Some(line_number) = line.old_lineno {
+                    by_old_line
+                        .entry(line_number)
+                        .or_insert((hunk_index, line_index));
+                }
+            }
+        }
+        let table = Rc::new(FileAnchorTable {
+            path: file.path.clone(),
+            by_new_line,
+            by_old_line,
+            anchors: RefCell::new(HashMap::new()),
+        });
+        tables.insert(file.fingerprint.clone(), Rc::clone(&table));
+        table
+    })
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +187,23 @@ pub fn line_anchor_for_file_diff(
     hunk_index: usize,
     line_index: usize,
 ) -> Option<CommentAnchor> {
+    let table = anchor_table(file);
+    if let Some(anchor) = table.anchors.borrow().get(&(hunk_index, line_index)) {
+        return anchor.clone();
+    }
+    let anchor = derive_line_anchor(file, hunk_index, line_index);
+    table
+        .anchors
+        .borrow_mut()
+        .insert((hunk_index, line_index), anchor.clone());
+    anchor
+}
+
+fn derive_line_anchor(
+    file: &FileDiff,
+    hunk_index: usize,
+    line_index: usize,
+) -> Option<CommentAnchor> {
     let hunk = file.hunks.get(hunk_index)?;
     let line = hunk.lines.get(line_index)?;
     let (side, line_number) = match line.kind {
@@ -205,19 +286,14 @@ fn anchors_in_line_range(file: &FileDiff, start: usize, end: usize) -> Vec<Comme
 }
 
 fn find_line_anchor(file: &FileDiff, wanted: usize, new_side: bool) -> Option<CommentAnchor> {
-    for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-        for (line_index, line) in hunk.lines.iter().enumerate() {
-            let matches = if new_side {
-                line.new_lineno == Some(wanted)
-            } else {
-                line.old_lineno == Some(wanted)
-            };
-            if matches {
-                return line_anchor_for_file_diff(file, hunk_index, line_index);
-            }
-        }
-    }
-    None
+    let table = anchor_table(file);
+    let index = if new_side {
+        table.by_new_line.get(&wanted)
+    } else {
+        table.by_old_line.get(&wanted)
+    };
+    let (hunk_index, line_index) = *index?;
+    line_anchor_for_file_diff(file, hunk_index, line_index)
 }
 
 pub(crate) fn line_anchor_for_side_line(
@@ -310,6 +386,20 @@ fn range_anchor_from_lines(file: &FileDiff, anchors: Vec<CommentAnchor>) -> Opti
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static LINE_FINGERPRINT_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only visibility into how many sha256 line fingerprints this thread has
+/// derived. Regression tests assert deltas of this counter to prove that
+/// rebuilding projections over an unchanged diff performs no re-derivation.
+#[cfg(test)]
+pub fn line_fingerprint_derivations() -> usize {
+    LINE_FINGERPRINT_DERIVATIONS.with(std::cell::Cell::get)
+}
+
 pub fn fingerprint_line(
     path: &str,
     side: DiffSide,
@@ -317,6 +407,8 @@ pub fn fingerprint_line(
     text: &str,
     diff_fingerprint: &str,
 ) -> String {
+    #[cfg(test)]
+    LINE_FINGERPRINT_DERIVATIONS.with(|count| count.set(count.get() + 1));
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
     hasher.update([0]);

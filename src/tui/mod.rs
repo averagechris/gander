@@ -855,6 +855,22 @@ pub fn render_tour_text(
         return Ok("nothing to tour — no current Spotlight regions; author a durable walkthrough and attention map\n".to_owned());
     }
     tui_state.enter_attention_focus(session);
+    // Every slide's destination is known up front; materialize them in one
+    // stream rebuild instead of paying one full rebuild per jump.
+    let spotlight_files = {
+        let stream = session.review_stream();
+        let mut indexes = Vec::new();
+        for spotlight in &stream.spotlights {
+            if let Some(path) = spotlight.target.file.as_deref()
+                && let Some(index) = session.files.iter().position(|file| file.path == path)
+                && !indexes.contains(&index)
+            {
+                indexes.push(index);
+            }
+        }
+        indexes
+    };
+    session.materialize_stream_files(spotlight_files);
     let indices: Vec<usize> = match slide {
         Some(n) => vec![n.saturating_sub(1).min(total.saturating_sub(1))],
         None => (0..total).collect(),

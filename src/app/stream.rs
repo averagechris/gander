@@ -5,7 +5,7 @@
 //! logical target with current fingerprint evidence so refresh can re-anchor
 //! conservatively without treating changed code as acknowledged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
@@ -237,13 +237,13 @@ pub struct ReviewStream {
     pub spotlights: Vec<SpotlightTarget>,
     pub coverage: Coverage,
     render_rows: Rc<Vec<DiffRow>>,
-    owner_by_row_id: BTreeMap<String, usize>,
-    owner_by_anchor: BTreeMap<(usize, String), usize>,
-    owner_by_line_fingerprint: BTreeMap<(usize, String), usize>,
-    owner_by_old_line: BTreeMap<(usize, usize), usize>,
-    owner_by_new_line: BTreeMap<(usize, usize), usize>,
-    projected_ranges_by_file: BTreeMap<usize, Vec<ProjectedRangeOwner>>,
-    entries_by_file: BTreeMap<usize, Vec<usize>>,
+    owner_by_row_id: HashMap<String, usize>,
+    owner_by_anchor: HashMap<(usize, String), usize>,
+    owner_by_line_fingerprint: HashMap<(usize, String), usize>,
+    owner_by_old_line: HashMap<(usize, usize), usize>,
+    owner_by_new_line: HashMap<(usize, usize), usize>,
+    projected_ranges_by_file: HashMap<usize, Vec<ProjectedRangeOwner>>,
+    entries_by_file: HashMap<usize, Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,13 +289,13 @@ impl ReviewStream {
         spotlights: Vec<SpotlightTarget>,
         coverage: Coverage,
     ) -> Self {
-        let mut owner_by_row_id = BTreeMap::new();
-        let mut owner_by_anchor = BTreeMap::new();
-        let mut owner_by_line_fingerprint = BTreeMap::new();
-        let mut owner_by_old_line = BTreeMap::new();
-        let mut owner_by_new_line = BTreeMap::new();
-        let mut projected_ranges_by_file = BTreeMap::<usize, Vec<ProjectedRangeOwner>>::new();
-        let mut entries_by_file = BTreeMap::<usize, Vec<usize>>::new();
+        let mut owner_by_row_id = HashMap::with_capacity(rows.len());
+        let mut owner_by_anchor = HashMap::with_capacity(rows.len());
+        let mut owner_by_line_fingerprint = HashMap::with_capacity(rows.len());
+        let mut owner_by_old_line = HashMap::with_capacity(rows.len());
+        let mut owner_by_new_line = HashMap::with_capacity(rows.len());
+        let mut projected_ranges_by_file = HashMap::<usize, Vec<ProjectedRangeOwner>>::new();
+        let mut entries_by_file = HashMap::<usize, Vec<usize>>::new();
         for (index, row) in rows.iter().enumerate() {
             owner_by_row_id.insert(row.id.clone(), index);
             if let StreamRowKind::SkimFold(fold) = &row.kind {
@@ -479,18 +479,37 @@ impl ReviewStream {
     }
 }
 
+/// Runtime-only owner-map key. Anchor fingerprints are content-derived sha256
+/// evidence, so composing them is both unique per file diff generation and
+/// dramatically cheaper than serializing the whole anchor per row.
 fn anchor_key(anchor: &CommentAnchor) -> String {
-    serde_json::to_string(anchor).unwrap_or_default()
+    match anchor {
+        CommentAnchor::File {
+            diff_fingerprint, ..
+        } => format!("file:{diff_fingerprint}"),
+        CommentAnchor::Line {
+            side,
+            line,
+            line_fingerprint,
+            ..
+        } => format!("line:{}:{line}:{line_fingerprint}", side.label()),
+        CommentAnchor::Range {
+            start_line,
+            end_line,
+            range_fingerprint,
+            ..
+        } => format!("range:{start_line}:{end_line}:{range_fingerprint}"),
+    }
 }
 
 fn index_structural_owner(
     row: &StreamRow,
     owner: usize,
-    by_anchor: &mut BTreeMap<(usize, String), usize>,
-    by_line_fingerprint: &mut BTreeMap<(usize, String), usize>,
-    by_old_line: &mut BTreeMap<(usize, usize), usize>,
-    by_new_line: &mut BTreeMap<(usize, usize), usize>,
-    projected_ranges: &mut BTreeMap<usize, Vec<ProjectedRangeOwner>>,
+    by_anchor: &mut HashMap<(usize, String), usize>,
+    by_line_fingerprint: &mut HashMap<(usize, String), usize>,
+    by_old_line: &mut HashMap<(usize, usize), usize>,
+    by_new_line: &mut HashMap<(usize, usize), usize>,
+    projected_ranges: &mut HashMap<usize, Vec<ProjectedRangeOwner>>,
 ) {
     let Some(file_index) = row.file_index else {
         return;
@@ -563,6 +582,16 @@ impl ReviewSession {
 
     pub fn materialize_stream_file_reanchored(&mut self, file_index: usize) -> bool {
         self.materialize_stream_files_reanchored([file_index], None, None) > 0
+    }
+
+    /// Batch-promote several files in one stream rebuild. Static adapters
+    /// (`tour render`) know every destination up front; materializing them one
+    /// jump at a time would pay one full projection rebuild per slide.
+    pub(crate) fn materialize_stream_files(
+        &mut self,
+        candidates: impl IntoIterator<Item = usize>,
+    ) -> usize {
+        self.materialize_stream_files_reanchored(candidates, None, None)
     }
 
     /// Promote only the bounded set of ordinary files represented near a
@@ -764,6 +793,10 @@ impl ReviewSession {
             &self.target.base,
             &self.target.rev,
         );
+        // One staleness pass for the whole projection; every row query below
+        // resolves against the same precomputed effective attention map.
+        let resolver =
+            durable.map(|session| attention::EffectiveAttentionResolver::new(session, &diff_files));
         let mut rows = Vec::new();
         let mut pending: Option<PendingFold> = None;
         let mut spotlight_spans = Vec::new();
@@ -773,15 +806,13 @@ impl ReviewSession {
             let local = if materialized.contains(&file_index) {
                 self.diff_rows_for_file_index(file_index)
             } else {
-                Rc::new(structural_rows(file))
+                self.structural_rows_for_file(file_index, file)
             };
             let file_target =
                 attention::target_for_file_diff(&file.diff, &file.path, None, None).ok();
-            let effective = durable.and_then(|session| {
-                file_target.as_ref().map(|target| {
-                    attention::resolve_effective_attention_refs(session, target, &diff_files)
-                })
-            });
+            let effective = resolver
+                .as_ref()
+                .and_then(|resolver| file_target.as_ref().map(|target| resolver.resolve(target)));
 
             // Resolve every anchorable row first. A broad file Skim is only a
             // default; narrower effective Supporting/Spotlight rows punch
@@ -790,14 +821,9 @@ impl ReviewSession {
                 .iter()
                 .map(|row| {
                     let target = row.anchor.as_ref().and_then(target_from_anchor)?;
-                    let resolved = durable
-                        .map(|session| {
-                            attention::resolve_effective_attention_refs(
-                                session,
-                                &target,
-                                &diff_files,
-                            )
-                        })
+                    let resolved = resolver
+                        .as_ref()
+                        .map(|resolver| resolver.resolve(&target))
                         .unwrap_or(crate::attention::EffectiveAttentionRegion {
                             target: target.clone(),
                             salience: Salience::Supporting,
@@ -931,6 +957,27 @@ impl ReviewSession {
     #[cfg(test)]
     pub fn stream_projection_build_count(&self) -> usize {
         self.stream_projection_builds.get()
+    }
+
+    /// Cheap structural stream rows, memoized per file diff fingerprint so
+    /// stream rebuilds triggered by navigation or progress updates reuse the
+    /// per-line anchors instead of re-deriving them.
+    fn structural_rows_for_file(
+        &self,
+        file_index: usize,
+        file: &super::ReviewFile,
+    ) -> Rc<Vec<DiffRow>> {
+        if let Some((fingerprint, rows)) = self.structural_rows_cache.borrow().get(&file_index)
+            && *fingerprint == file.diff.fingerprint
+        {
+            return Rc::clone(rows);
+        }
+        let rows = Rc::new(structural_rows(file));
+        self.structural_rows_cache.borrow_mut().insert(
+            file_index,
+            (file.diff.fingerprint.clone(), Rc::clone(&rows)),
+        );
+        rows
     }
 
     #[cfg(test)]
@@ -1252,8 +1299,7 @@ impl ReviewSession {
         let (row_index, row) = stream.rows.iter().enumerate().find(|(_, row)| {
             row.anchor
                 .as_ref()
-                .and_then(target_from_anchor)
-                .is_some_and(|row_target| targets_overlap(target, &row_target))
+                .is_some_and(|anchor| target_overlaps_anchor(target, anchor))
         })?;
         let resolved = self.land_on_stream_row(row, row_index, true);
         // The destination file may just have acquired gap/fold/syntax rows.
@@ -1561,24 +1607,27 @@ fn stream_diff_row(file_index: usize, local_row: usize, path: &str, row: &DiffRo
 }
 
 fn row_id(path: &str, row: &DiffRow) -> String {
+    // Anchored rows reuse their anchor's content fingerprints: unique per
+    // (file diff, side, line), stable across rebuilds, and free of the
+    // per-row serde+sha cost that dominated large stream rebuilds. The `:`
+    // separators cannot collide with the hex-only hashed ids below.
+    if let Some(anchor) = &row.anchor {
+        return format!("row:{}", anchor_key(anchor));
+    }
     let mut hash = Sha256::new();
     hash.update(b"gander-stream-row-v1\0");
     hash.update(path.as_bytes());
     hash.update(b"\0");
-    if let Some(anchor) = &row.anchor {
-        hash.update(serde_json::to_vec(anchor).unwrap_or_default());
-    } else {
-        hash.update(format!("{:?}", row.kind).as_bytes());
-        match row.kind {
-            DiffRowKind::FileHeader => hash.update(path.as_bytes()),
-            DiffRowKind::HunkHeader => {
-                hash.update(row.hunk_index.unwrap_or_default().to_le_bytes());
-                hash.update(row.text.as_bytes());
-            }
-            _ => {
-                hash.update(row.semantic_key.as_deref().unwrap_or(&row.text).as_bytes());
-                hash.update(row.semantic_occurrence.to_le_bytes());
-            }
+    hash.update(format!("{:?}", row.kind).as_bytes());
+    match row.kind {
+        DiffRowKind::FileHeader => hash.update(path.as_bytes()),
+        DiffRowKind::HunkHeader => {
+            hash.update(row.hunk_index.unwrap_or_default().to_le_bytes());
+            hash.update(row.text.as_bytes());
+        }
+        _ => {
+            hash.update(row.semantic_key.as_deref().unwrap_or(&row.text).as_bytes());
+            hash.update(row.semantic_occurrence.to_le_bytes());
         }
     }
     format!("row:{:x}", hash.finalize())
@@ -1705,12 +1754,37 @@ fn coverage_intersects_target(
     coverage: &AttentionProgressTarget,
     target: &StateReviewTarget,
 ) -> bool {
+    coverage_intersects_bounds(
+        coverage,
+        target.file.as_deref(),
+        target.line,
+        target.end_line,
+    )
+}
+
+/// Anchor-driven variant of [`coverage_intersects_target`] that avoids
+/// cloning the anchor into a throwaway `ReviewTarget` per stream row.
+fn coverage_intersects_anchor(coverage: &AttentionProgressTarget, anchor: &CommentAnchor) -> bool {
+    coverage_intersects_bounds(
+        coverage,
+        Some(anchor.path()),
+        anchor.line(),
+        anchor.end_line().filter(|end| Some(*end) != anchor.line()),
+    )
+}
+
+fn coverage_intersects_bounds(
+    coverage: &AttentionProgressTarget,
+    file: Option<&str>,
+    line: Option<usize>,
+    end_line: Option<usize>,
+) -> bool {
     coverage.members.iter().any(|member| {
-        target.file.as_deref() == Some(member.file.as_str())
-            && match target.line {
+        file == Some(member.file.as_str())
+            && match line {
                 None => true,
                 Some(start) => {
-                    let end = target.end_line.unwrap_or(start);
+                    let end = end_line.unwrap_or(start);
                     let member_start = member.line.unwrap_or(0);
                     let member_end = member.end_line.unwrap_or(member_start);
                     start <= member_end && member_start <= end
@@ -1719,16 +1793,19 @@ fn coverage_intersects_target(
     })
 }
 
-fn targets_overlap(left: &StateReviewTarget, right: &StateReviewTarget) -> bool {
-    if left.file != right.file {
+/// Whether a spotlight jump target overlaps a row's anchored line range,
+/// without cloning the anchor into a throwaway `ReviewTarget` per scanned
+/// stream row.
+fn target_overlaps_anchor(target: &StateReviewTarget, anchor: &CommentAnchor) -> bool {
+    if target.file.as_deref() != Some(anchor.path()) {
         return false;
     }
-    match (left.line, right.line) {
+    match (target.line, anchor.line()) {
         (None, _) | (_, None) => true,
-        (Some(left_start), Some(right_start)) => {
-            let left_end = left.end_line.unwrap_or(left_start);
-            let right_end = right.end_line.unwrap_or(right_start);
-            left_start <= right_end && right_start <= left_end
+        (Some(target_start), Some(anchor_start)) => {
+            let target_end = target.end_line.unwrap_or(target_start);
+            let anchor_end = anchor.end_line().unwrap_or(anchor_start);
+            target_start <= anchor_end && anchor_start <= target_end
         }
     }
 }
@@ -1741,14 +1818,14 @@ fn insert_chapters(
     let mut output = Vec::with_capacity(rows.len());
     let mut current_change: Option<String> = None;
     for row in rows {
-        let row_target = row.anchor.as_ref().and_then(target_from_anchor);
-        let change = row_target
+        let change = row
+            .anchor
             .as_ref()
-            .and_then(|target| {
+            .and_then(|anchor| {
                 spotlights
                     .iter()
                     .find(|spotlight| {
-                        coverage_intersects_target(&spotlight.progress_target, target)
+                        coverage_intersects_anchor(&spotlight.progress_target, anchor)
                     })
                     .and_then(|spotlight| spotlight.change_id.clone())
             })
@@ -2526,6 +2603,110 @@ mod tests {
             }
         }
         assert!(session.diff_range_selection.is_none());
+    }
+
+    #[test]
+    fn stream_rebuilds_over_an_unchanged_diff_do_no_anchor_rederivation() {
+        let mut raw = String::new();
+        for index in 0..20 {
+            raw.push_str(&format!(
+                "diff --git a/src/f{index}.rs b/src/f{index}.rs\n--- a/src/f{index}.rs\n+++ b/src/f{index}.rs\n@@ -1,3 +1,3 @@\n one_{index}\n-old_{index}\n+new_{index}\n three_{index}\n"
+            ));
+        }
+        let mut session = session_with_diff(&raw);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        attach_review(
+            &mut session,
+            crate::state::ReviewSession {
+                id: "memo".into(),
+                attention_regions: vec![
+                    AttentionRegion {
+                        target: target_for_diff(&files, "src/f1.rs", Some(2), None).unwrap(),
+                        salience: Salience::Spotlight,
+                        rationale: Some("look here".into()),
+                        source: SalienceSource::Human,
+                    },
+                    AttentionRegion {
+                        target: target_for_diff(&files, "src/f2.rs", None, None).unwrap(),
+                        salience: Salience::Skim,
+                        rationale: Some("generated churn".into()),
+                        source: SalienceSource::Heuristic,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        session.stream_mode = true;
+
+        // First build derives and memoizes every needed line anchor.
+        let _ = session.review_stream();
+        let builds = session.stream_projection_build_count();
+        let derivations = crate::anchor::line_fingerprint_derivations();
+
+        // A forced rebuild of the same diff must be pure cache reuse.
+        session.stream_cache.borrow_mut().take();
+        let _ = session.review_stream();
+        assert_eq!(session.stream_projection_build_count(), builds + 1);
+        assert_eq!(crate::anchor::line_fingerprint_derivations(), derivations);
+    }
+
+    #[test]
+    fn navigations_over_an_unchanged_diff_do_constant_attention_resolution_work() {
+        let mut raw = String::new();
+        for index in 0..20 {
+            raw.push_str(&format!(
+                "diff --git a/src/f{index}.rs b/src/f{index}.rs\n--- a/src/f{index}.rs\n+++ b/src/f{index}.rs\n@@ -1,3 +1,3 @@\n one_{index}\n-old_{index}\n+new_{index}\n three_{index}\n"
+            ));
+        }
+        let mut session = session_with_diff(&raw);
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        attach_review(
+            &mut session,
+            crate::state::ReviewSession {
+                id: "nav-memo".into(),
+                attention_regions: vec![
+                    AttentionRegion {
+                        target: target_for_diff(&files, "src/f1.rs", Some(2), None).unwrap(),
+                        salience: Salience::Spotlight,
+                        rationale: Some("first stop".into()),
+                        source: SalienceSource::Human,
+                    },
+                    AttentionRegion {
+                        target: target_for_diff(&files, "src/f7.rs", Some(2), None).unwrap(),
+                        salience: Salience::Spotlight,
+                        rationale: Some("second stop".into()),
+                        source: SalienceSource::Human,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        session.stream_mode = true;
+        let _ = session.review_stream();
+        let builds = session.stream_projection_build_count();
+        let derivations = crate::anchor::line_fingerprint_derivations();
+
+        // Real navigations: each jump materializes the destination file and
+        // records visited progress, forcing genuine projection rebuilds.
+        for _ in 0..3 {
+            assert!(session.jump_spotlight(1));
+            let _ = session.review_stream();
+        }
+        assert!(
+            session.stream_projection_build_count() > builds,
+            "navigation must have rebuilt the projection for this test to prove anything"
+        );
+        // O(1) anchor derivation across N navigations: everything after the
+        // first build is served from the fingerprint-keyed memo.
+        assert_eq!(crate::anchor::line_fingerprint_derivations(), derivations);
     }
 
     #[test]

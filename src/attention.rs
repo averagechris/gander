@@ -204,18 +204,17 @@ fn flush_skim_summary(
     pending: &mut Option<PendingSkimFold>,
     output: &mut Vec<SkimFoldSummary>,
     session: &ReviewSession,
-    files: &[FileDiff],
+    files: &[&FileDiff],
 ) {
     let Some(pending) = pending.take() else {
         return;
     };
     let target = AttentionProgressTarget::from_targets(pending.targets.iter());
-    let refs = files.iter().collect::<Vec<_>>();
     let acknowledged = attention_progress_is_current_refs(
         session,
         &target,
         AttentionProgressKind::SkimAcknowledged,
-        &refs,
+        files,
     );
     let paths = pending.paths.into_iter().collect::<Vec<_>>();
     output.push(SkimFoldSummary {
@@ -238,7 +237,7 @@ fn append_skim_summary(
     next: PendingSkimFold,
     output: &mut Vec<SkimFoldSummary>,
     session: &ReviewSession,
-    files: &[FileDiff],
+    files: &[&FileDiff],
 ) {
     if let Some(current) = pending.as_mut()
         && current.rationale == next.rationale
@@ -262,6 +261,8 @@ pub fn list_skim_folds(
     files: &[FileDiff],
     include_stale: bool,
 ) -> Vec<SkimFoldSummary> {
+    let refs = files.iter().collect::<Vec<_>>();
+    let resolver = EffectiveAttentionResolver::new(session, &refs);
     let mut output = Vec::new();
     let mut pending = None;
     for file in files {
@@ -275,15 +276,15 @@ pub fn list_skim_folds(
                 let Ok(target) = target_for_file_diff(file, &file.path, Some(number), None) else {
                     continue;
                 };
-                let effective = resolve_effective_attention(session, &target, files);
+                let effective = resolver.resolve(&target);
                 rows.push((target, effective, line.kind));
             }
         }
         let whole_signature = rows.first().map(|(_, region, _)| fold_signature(region));
         let whole_file_skim = if rows.is_empty() {
-            file_target.as_ref().is_some_and(|target| {
-                resolve_effective_attention(session, target, files).salience == Salience::Skim
-            })
+            file_target
+                .as_ref()
+                .is_some_and(|target| resolver.resolve(target).salience == Salience::Skim)
         } else {
             whole_signature.as_ref().is_some_and(|signature| {
                 signature.salience == Salience::Skim
@@ -293,9 +294,7 @@ pub fn list_skim_folds(
             })
         };
         if whole_file_skim {
-            let effective = file_target
-                .as_ref()
-                .map(|target| resolve_effective_attention(session, target, files));
+            let effective = file_target.as_ref().map(|target| resolver.resolve(target));
             let rationale = skim_rationale(
                 rows.first()
                     .and_then(|(_, region, _)| region.rationale.clone())
@@ -313,13 +312,13 @@ pub fn list_skim_folds(
                 },
                 &mut output,
                 session,
-                files,
+                &refs,
             );
             continue;
         }
         for (target, effective, kind) in rows {
             if effective.salience != Salience::Skim {
-                flush_skim_summary(&mut pending, &mut output, session, files);
+                flush_skim_summary(&mut pending, &mut output, session, &refs);
                 continue;
             }
             append_skim_summary(
@@ -334,19 +333,17 @@ pub fn list_skim_folds(
                 },
                 &mut output,
                 session,
-                files,
+                &refs,
             );
         }
     }
-    flush_skim_summary(&mut pending, &mut output, session, files);
+    flush_skim_summary(&mut pending, &mut output, session, &refs);
 
     if include_stale {
         let mut stale = BTreeMap::<String, SkimFoldSummary>::new();
-        for region in session
-            .attention_regions
-            .iter()
-            .filter(|region| region.salience == Salience::Skim && region_is_stale(region, files))
-        {
+        for region in session.attention_regions.iter().filter(|region| {
+            region.salience == Salience::Skim && region_is_stale_refs(region, &refs)
+        }) {
             let target = AttentionProgressTarget::from_targets([&region.target]);
             let rationale = skim_rationale(region.rationale.clone());
             let paths = region.target.file.clone().into_iter().collect::<Vec<_>>();
@@ -517,6 +514,7 @@ pub fn attention_coverage(session: &ReviewSession, files: &[FileDiff]) -> Attent
     let folds = list_skim_folds(session, files, false);
     let skim_acknowledged = folds.iter().filter(|fold| fold.acknowledged).count();
     let refs = files.iter().collect::<Vec<_>>();
+    let resolver = EffectiveAttentionResolver::new(session, &refs);
     let mut spotlights = Vec::<AttentionProgressTarget>::new();
     for file in files {
         let mut pending = Vec::<ReviewTarget>::new();
@@ -529,7 +527,7 @@ pub fn attention_coverage(session: &ReviewSession, files: &[FileDiff]) -> Attent
                 let Ok(target) = target_for_file_diff(file, &file.path, Some(number), None) else {
                     continue;
                 };
-                let effective = resolve_effective_attention(session, &target, files);
+                let effective = resolver.resolve(&target);
                 let next = fold_signature(&effective);
                 if effective.salience == Salience::Spotlight {
                     if signature.as_ref().is_some_and(|current| current != &next)
@@ -849,6 +847,40 @@ pub fn region_is_stale(region: &AttentionRegion, files: &[FileDiff]) -> bool {
     region_is_stale_refs(region, &refs)
 }
 
+const TARGET_REDERIVABILITY_CACHE_CAP: usize = 4096;
+
+/// (file diff fingerprint, line, end_line) → whether the target re-derives.
+type TargetRederivabilityMemo =
+    std::collections::HashMap<(String, Option<usize>, Option<usize>), bool>;
+
+thread_local! {
+    static TARGET_REDERIVABILITY: std::cell::RefCell<TargetRederivabilityMemo> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Whether `target_for_file_diff` would succeed for this line range against
+/// the current file diff. Derivation is deterministic per file fingerprint (a
+/// sha256 of the raw per-file diff), so the memo is keyed by pure content and
+/// can never go stale; it exists so staleness checks do not re-derive sha256
+/// line anchors on every resolution.
+fn target_is_rederivable(file: &FileDiff, line: Option<usize>, end_line: Option<usize>) -> bool {
+    TARGET_REDERIVABILITY.with(|memo| {
+        if let Some(known) = memo
+            .borrow()
+            .get(&(file.fingerprint.clone(), line, end_line))
+        {
+            return *known;
+        }
+        let rederivable = target_for_file_diff(file, &file.path, line, end_line).is_ok();
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= TARGET_REDERIVABILITY_CACHE_CAP {
+            memo.clear();
+        }
+        memo.insert((file.fingerprint.clone(), line, end_line), rederivable);
+        rederivable
+    })
+}
+
 fn region_is_stale_refs(region: &AttentionRegion, files: &[&FileDiff]) -> bool {
     if validate_persisted_region(region).is_err() {
         return true;
@@ -864,7 +896,7 @@ fn region_is_stale_refs(region: &AttentionRegion, files: &[&FileDiff]) -> bool {
     };
     anchor.path() != path
         || anchor_diff_fingerprint(anchor) != file.fingerprint
-        || target_for_file_diff(file, path, region.target.line, region.target.end_line).is_err()
+        || !target_is_rederivable(file, region.target.line, region.target.end_line)
 }
 
 fn source_rank(source: SalienceSource) -> u8 {
@@ -935,17 +967,60 @@ pub fn resolve_effective_attention_refs(
     query: &ReviewTarget,
     files: &[&FileDiff],
 ) -> EffectiveAttentionRegion {
-    let winner = session
-        .attention_regions
-        .iter()
-        .filter(|region| !region_is_stale_refs(region, files))
-        .filter(|region| covers(&region.target, query))
-        .max_by(|left, right| compare_candidates(left, right));
-    EffectiveAttentionRegion {
-        target: query.clone(),
-        salience: winner.map_or(Salience::Supporting, |region| region.salience),
-        rationale: winner.and_then(|region| region.rationale.clone()),
-        source: winner.map(|region| region.source),
+    EffectiveAttentionResolver::new(session, files).resolve(query)
+}
+
+/// Effective-attention resolver with staleness precomputed once for one
+/// (attention map, current diff) pair.
+///
+/// Hot projections (the review stream, skim folds, coverage) resolve one query
+/// per anchorable diff row; filtering stale regions per query multiplied the
+/// staleness cost by the row count. Constructing this resolver performs the
+/// staleness pass exactly once, and `resolve` then reproduces
+/// `resolve_effective_attention_refs` byte for byte. Build it fresh per
+/// projection; never hold it across state mutations, merges, or diff
+/// refreshes.
+pub struct EffectiveAttentionResolver<'a> {
+    /// Current (non-stale) regions grouped by target file, preserving the
+    /// original `attention_regions` order within each group so tie-breaking in
+    /// `resolve` picks exactly the same winner as a full-list scan. Only
+    /// same-file regions can cover a query, so grouping is a pure index.
+    current_by_file: std::collections::HashMap<&'a str, Vec<&'a AttentionRegion>>,
+}
+
+impl<'a> EffectiveAttentionResolver<'a> {
+    pub fn new(session: &'a ReviewSession, files: &[&FileDiff]) -> Self {
+        let mut current_by_file = std::collections::HashMap::<&str, Vec<&AttentionRegion>>::new();
+        for region in session
+            .attention_regions
+            .iter()
+            .filter(|region| !region_is_stale_refs(region, files))
+        {
+            // Current regions always carry a validated file target; a fileless
+            // region is stale by definition and filtered above.
+            if let Some(file) = region.target.file.as_deref() {
+                current_by_file.entry(file).or_default().push(region);
+            }
+        }
+        Self { current_by_file }
+    }
+
+    pub fn resolve(&self, query: &ReviewTarget) -> EffectiveAttentionRegion {
+        let winner = query
+            .file
+            .as_deref()
+            .and_then(|file| self.current_by_file.get(file))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|region| covers(&region.target, query))
+            .max_by(|left, right| compare_candidates(left, right));
+        EffectiveAttentionRegion {
+            target: query.clone(),
+            salience: winner.map_or(Salience::Supporting, |region| region.salience),
+            rationale: winner.and_then(|region| region.rationale.clone()),
+            source: winner.map(|region| region.source),
+        }
     }
 }
 
@@ -972,16 +1047,18 @@ pub fn list_effective_attention(
     session: &ReviewSession,
     files: &[FileDiff],
 ) -> Vec<EffectiveAttentionRegion> {
+    let refs = files.iter().collect::<Vec<_>>();
+    let resolver = EffectiveAttentionResolver::new(session, &refs);
     let mut effective = Vec::new();
     for file in files {
         let file_target = target_for_diff(files, &file.path, None, None)
             .expect("current diff file must produce a file target");
-        effective.push(resolve_effective_attention(session, &file_target, files));
+        effective.push(resolver.resolve(&file_target));
 
         let mut current_ranges = session
             .attention_regions
             .iter()
-            .filter(|region| !region_is_stale(region, files))
+            .filter(|region| !region_is_stale_refs(region, &refs))
             .filter(|region| region.target.file.as_deref() == Some(file.path.as_str()))
             .filter_map(|region| {
                 let start = region.target.line?;
@@ -1007,7 +1084,7 @@ pub fn list_effective_attention(
             }
             let query = target_for_diff(files, &file.path, Some(line), None)
                 .expect("anchorable row must produce a line target");
-            let resolved = resolve_effective_attention(session, &query, files);
+            let resolved = resolver.resolve(&query);
             let signature = EffectiveSpanSignature {
                 salience: resolved.salience,
                 rationale: resolved.rationale,
@@ -1464,6 +1541,56 @@ mod tests {
             rationale: None,
             source,
         }
+    }
+
+    #[test]
+    fn repeated_effective_resolution_over_an_unchanged_diff_is_memoized() {
+        let files = ten_line_files();
+        let session = ReviewSession {
+            attention_regions: vec![
+                region(
+                    &files,
+                    SalienceSource::Human,
+                    Salience::Spotlight,
+                    Some(2),
+                    Some(5),
+                ),
+                region(
+                    &files,
+                    SalienceSource::Heuristic,
+                    Salience::Skim,
+                    None,
+                    None,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        // Warm-up: derive and memoize each line's anchor evidence once.
+        for line in 1..=10 {
+            let query = target_for_diff(&files, "src/lib.rs", Some(line), None).unwrap();
+            let _ = resolve_effective_attention(&session, &query, &files);
+        }
+        let _ = list_skim_folds(&session, &files, true);
+        let _ = attention_coverage(&session, &files);
+        let derivations = crate::anchor::line_fingerprint_derivations();
+
+        // N further resolutions and full coverage/fold passes over the same
+        // diff must be pure memo reuse: zero new sha256 line fingerprints.
+        for _ in 0..5 {
+            for line in 1..=10 {
+                let query = target_for_diff(&files, "src/lib.rs", Some(line), None).unwrap();
+                let repeat = resolve_effective_attention(&session, &query, &files);
+                if (2..=5).contains(&line) {
+                    assert_eq!(repeat.salience, Salience::Spotlight);
+                } else {
+                    assert_eq!(repeat.salience, Salience::Skim);
+                }
+            }
+            let _ = list_skim_folds(&session, &files, true);
+            let _ = attention_coverage(&session, &files);
+        }
+        assert_eq!(crate::anchor::line_fingerprint_derivations(), derivations);
     }
 
     #[test]
