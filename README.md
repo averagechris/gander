@@ -211,7 +211,8 @@ file-pane-auto-hide-width = 50
 # Wide-terminal file-pane split percentage; runtime Alt-Left/Alt-Right adjust
 # this only for the current TUI session. Values are clamped to 10..60.
 file-pane-split-percent = 30
-# Optional one-line discoverability menu rendered from the live keymap.
+# Optional one-line discoverability menu rendered from the live keymap;
+# titles are mouse-interactive and open clickable dropdowns.
 menu-bar = false
 
 [artifact]
@@ -586,6 +587,9 @@ Mouse support:
 - click the file tree to focus/select files or directories
 - click the diff pane to focus/select a diff line
 - click-drag across diff rows to open a range comment editor
+- click a menu-bar title (optional `menu-bar = true`) to open its dropdown;
+  hover switches menus and highlights items, clicking an item runs the same
+  action as its key, and Esc or clicking elsewhere closes the dropdown
 - modal surfaces own the pointer; clicks, drags, and wheel input never mutate
   the hidden review beneath them
 

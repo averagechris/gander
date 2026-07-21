@@ -170,6 +170,17 @@ grapheme, so combining text and emoji clusters are never split.
 | `glance-peek` | Space | attention glance; opens the selected current fold in the stream and closes |
 | `glance-acknowledge` / `glance-acknowledge-all` | `a` / `A` | attention glance; stale entries remain inert |
 
+## Menu bar
+
+The optional menu bar (`[ui] menu-bar = true`, shown on terminals at least
+80×18) renders titles with their live key hints and is mouse-interactive:
+clicking a title opens a dropdown of related actions with the same labels and
+hints, hovering switches menus and highlights items, and clicking an item
+dispatches exactly what the bound key would. Items whose action is unbound are
+omitted rather than disabled. Esc closes an open dropdown before its usual
+dismissal layers, clicking elsewhere closes it (that click is swallowed), and
+opening any popup or modal closes it too.
+
 ## Alt keys and terminal compatibility
 
 The stream attention defaults are Alt chords: `Alt-G` (`attention-glance`),

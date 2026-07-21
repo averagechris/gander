@@ -41,6 +41,7 @@ use super::{
     glance::GlanceBoardState,
     helpers::{JjHelperOption, JjHelperState},
     keymap::{Action, KeyMap},
+    menu,
     ops::OperationPickerState,
     outline::SymbolOutlineState,
     revset::{RevsetField, RevsetInputState},
@@ -104,7 +105,7 @@ pub(super) fn draw(
     if layout.files.width > 0 {
         draw_files(frame, layout.files, session, theme);
     }
-    draw_menu_bar(frame, layout.menu, keymap, theme);
+    draw_menu_bar(frame, layout.menu, keymap, theme, tui_state.menu.open);
     draw_diff(
         frame,
         layout.diff,
@@ -119,6 +120,9 @@ pub(super) fn draw(
         &footer_context(mode, keymap, tui_state, notice),
         theme,
     );
+    // The dropdown is view chrome layered above the review panes; modal
+    // popups (drawn below) close it on open, so it never fights one.
+    draw_menu_dropdown(frame, full_area, layout.menu, tui_state.menu, keymap, theme);
 
     match mode {
         Mode::TargetChooser(chooser) => {
@@ -212,36 +216,82 @@ pub(super) fn ui_layout(
     }
 }
 
-fn draw_menu_bar(frame: &mut ratatui::Frame<'_>, area: Rect, keymap: &KeyMap, theme: &AppTheme) {
+fn draw_menu_bar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    keymap: &KeyMap,
+    theme: &AppTheme,
+    open_menu: Option<usize>,
+) {
     if area.height == 0 || area.width < 80 {
         return;
     }
-    let items = [
-        ("help", Action::Help),
-        ("hunk", Action::NextChangedHunk),
-        ("file", Action::NextFile),
-        ("comment", Action::Comment),
-        ("view", Action::ViewOptions),
-        ("focus", Action::AttentionFocus),
-        ("glance", Action::AttentionGlance),
-        ("pane", Action::ToggleFilePane),
-        ("quit", Action::Quit),
-    ];
-    let mut text = String::from(" ");
-    let mut rendered_any = false;
-    for (label, action) in items {
-        let Some(hint) = keymap.bound_hint(action) else {
-            continue;
-        };
-        if rendered_any {
-            text.push_str("  ");
+    let entries = menu::bar_entries(keymap);
+    let mut spans = vec![Span::raw(" ")];
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
         }
-        text.push_str(hint);
-        text.push(' ');
-        text.push_str(label);
-        rendered_any = true;
+        let style = if open_menu == Some(entry.menu_index) {
+            theme
+                .base_style()
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.base_style()
+        };
+        spans.push(Span::styled(entry.text.clone(), style));
     }
-    frame.render_widget(Paragraph::new(text).style(theme.base_style()), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(theme.base_style()),
+        area,
+    );
+}
+
+/// Draw the open menu dropdown above the review panes. Geometry comes from
+/// [`menu::dropdown_rect`], the same function mouse hit-testing uses, so a
+/// rendered row is always exactly the row a click resolves to.
+fn draw_menu_dropdown(
+    frame: &mut ratatui::Frame<'_>,
+    full_area: Rect,
+    menu_area: Rect,
+    state: super::menu::MenuUiState,
+    keymap: &KeyMap,
+    theme: &AppTheme,
+) {
+    let Some(open) = state.open else {
+        return;
+    };
+    let Some(rect) = menu::dropdown_rect(open, keymap, menu_area, full_area) else {
+        return;
+    };
+    let items = menu::dropdown_items(open, keymap);
+    clear_popup(frame, rect, theme);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(theme.base_style());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    for (index, item) in items.iter().enumerate() {
+        if index as u16 >= inner.height {
+            break;
+        }
+        let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1);
+        let pad = (inner.width as usize).saturating_sub(
+            2 + UnicodeWidthStr::width(item.label) + UnicodeWidthStr::width(item.hint.as_str()),
+        );
+        let text = format!(" {}{}{} ", item.label, " ".repeat(pad), item.hint);
+        let style = if state.hovered == Some(index) {
+            theme
+                .base_style()
+                .bg(theme.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.base_style()
+        };
+        frame.render_widget(Paragraph::new(text).style(style), row);
+    }
 }
 
 pub(super) fn inner_bordered(area: Rect) -> Rect {
@@ -4956,6 +5006,51 @@ mod tests {
         );
         assert!(!rendered.lines().next().unwrap_or_default().contains("hunk"));
         insta::assert_snapshot!("tui_snapshot_menu_unbound_item_omitted", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_dropdown_open_with_default_preset() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut tui_state = menu_snapshot_state();
+        tui_state
+            .menu
+            .open_menu(menu::MENUS.iter().position(|m| m.title == "view").unwrap());
+        let rendered = render_tui_text_with_state_and_keymap(
+            &session,
+            &Mode::Normal,
+            &tui_state,
+            &keymap,
+            110,
+            20,
+        );
+        // Bound items render with their hints; the unbound "wrap lines"
+        // (ToggleDiffWrap has no default binding) is omitted, not disabled.
+        assert!(rendered.contains("view options"), "{rendered}");
+        assert!(rendered.contains("side-by-side"), "{rendered}");
+        assert!(!rendered.contains("wrap lines"), "{rendered}");
+        insta::assert_snapshot!("tui_snapshot_menu_dropdown_open", rendered);
+    }
+
+    #[test]
+    fn tui_snapshot_menu_dropdown_hovered_item_highlight() {
+        let session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let mut tui_state = menu_snapshot_state();
+        tui_state
+            .menu
+            .open_menu(menu::MENUS.iter().position(|m| m.title == "hunk").unwrap());
+        tui_state.menu.hovered = Some(1);
+        let buffer = render_tui_buffer_with_state(&session, &Mode::Normal, &tui_state, 110, 20);
+        let rendered = format!(
+            "{}\n{}",
+            buffer_text(&buffer),
+            style_runs_for_rows(&buffer, &["next hunk", "previous hunk"])
+        );
+        insta::assert_snapshot!("tui_snapshot_menu_dropdown_hovered_item", rendered);
     }
 
     #[test]

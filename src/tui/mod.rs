@@ -18,6 +18,7 @@ mod flags;
 mod glance;
 mod helpers;
 mod keymap;
+mod menu;
 mod ops;
 mod osc_guard;
 mod outline;
@@ -231,6 +232,10 @@ struct TuiState {
     osc_guard: OscTailGuard,
     layout_config: UiConfig,
     file_pane: FilePaneState,
+    /// Open menu-bar dropdown + hovered item. View chrome, never a Mode:
+    /// opening any modal closes it and Esc treats it as the topmost
+    /// transient layer.
+    menu: menu::MenuUiState,
     /// Ephemeral attention Focus preset. This is view state, never a Mode or
     /// durable review phase, so normal review dispatch remains untouched.
     attention_focus: Option<AttentionFocusState>,
@@ -265,6 +270,7 @@ impl Default for TuiState {
                 explicit_override: None,
                 split_percent: layout_config.file_pane_split_percent,
             },
+            menu: menu::MenuUiState::default(),
             attention_focus: None,
             layout_config,
         }
@@ -1093,7 +1099,28 @@ fn run_loop(
                 }
                 Event::Key(_) => {}
                 Event::Mouse(mouse) => {
-                    handle_mouse_event(mouse, tui_state.terminal_size, session, mode, tui_state)
+                    match handle_menu_mouse_event(
+                        mouse,
+                        tui_state.terminal_size,
+                        session,
+                        mode,
+                        keymap,
+                        review_loader,
+                        tui_state,
+                    )? {
+                        MenuMouseOutcome::Quit => {
+                            quit = true;
+                            break;
+                        }
+                        MenuMouseOutcome::Consumed => {}
+                        MenuMouseOutcome::Ignored => handle_mouse_event(
+                            mouse,
+                            tui_state.terminal_size,
+                            session,
+                            mode,
+                            tui_state,
+                        ),
+                    }
                 }
                 Event::Resize(width, height) => {
                     let queued = ratatui::prelude::Size::new(width, height);
@@ -2204,6 +2231,8 @@ fn handle_key_event(
     }
     if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal {
         tui_state.diff_drag = None;
+        // A modal opening always closes an open menu dropdown.
+        tui_state.menu.close();
     }
     Ok(false)
 }
@@ -2823,10 +2852,12 @@ fn handle_normal_action(
             }
         }
         Action::CancelRangeComment => {
-            // Esc-style dismissal: clear the transient layers (range selection
-            // and footer notice) instead of quitting.
-            session.clear_diff_range_selection();
-            tui_state.notice = None;
+            // Esc-style dismissal: an open menu dropdown is the topmost
+            // transient layer, then range selection and the footer notice.
+            if !tui_state.menu.close() {
+                session.clear_diff_range_selection();
+                tui_state.notice = None;
+            }
         }
         Action::Comment => {
             let onboarding_target = selected_onboarding_target(session, tui_state);
@@ -4662,6 +4693,118 @@ fn apply_editor_command(editor: &mut CommentEditor, command: EditorCommand) {
         DeleteLineStart => editor.delete_to_line_start(),
         DeleteLineEnd => editor.delete_to_line_end(),
         DeletePreviousWord => editor.delete_previous_word(),
+    }
+}
+
+/// How the menu layer disposed of a mouse event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuMouseOutcome {
+    /// Not menu business; give the event to the review surface.
+    Ignored,
+    /// The menu owned the event (including swallowing the click that closed
+    /// an open dropdown, per desktop menubar convention).
+    Consumed,
+    /// A dropdown item dispatched an action that requested quit.
+    Quit,
+}
+
+/// Pointer handling for the interactive menu bar. Runs before the review
+/// surface's [`handle_mouse_event`]; while a dropdown is open the menu owns
+/// the pointer outright. Item dispatch goes through [`handle_normal_action`],
+/// the exact path the keyboard uses.
+fn handle_menu_mouse_event(
+    mouse: MouseEvent,
+    terminal_size: ratatui::prelude::Size,
+    session: &mut ReviewSession,
+    mode: &mut Mode,
+    keymap: &KeyMap,
+    review_loader: &ReviewLoader<'_>,
+    tui_state: &mut TuiState,
+) -> Result<MenuMouseOutcome> {
+    if mode.review_pointer_policy() == ReviewPointerPolicy::BlockedByModal {
+        // Modal surfaces own the pointer; a dropdown can also never survive a
+        // modal opening (defensive: the modal-open hooks already close it).
+        tui_state.menu.close();
+        return Ok(MenuMouseOutcome::Ignored);
+    }
+    let full_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+    let layout = tui_state.review_layout(session, full_area);
+    if layout.menu.height == 0 {
+        tui_state.menu.close();
+        return Ok(MenuMouseOutcome::Ignored);
+    }
+
+    let Some(open) = tui_state.menu.open else {
+        // Closed bar: only a completed click (mouse-up) on a title opens a
+        // dropdown, and never while a diff drag is being released.
+        if mouse.kind == MouseEventKind::Up(MouseButton::Left)
+            && tui_state.diff_drag.is_none()
+            && let Some(index) = menu::title_at(keymap, layout.menu, mouse.column, mouse.row)
+        {
+            if !menu::dropdown_items(index, keymap).is_empty() {
+                tui_state.menu.open_menu(index);
+            }
+            return Ok(MenuMouseOutcome::Consumed);
+        }
+        return Ok(MenuMouseOutcome::Ignored);
+    };
+
+    let dropdown = menu::dropdown_rect(open, keymap, layout.menu, full_area);
+    let items = menu::dropdown_items(open, keymap);
+    let over_dropdown = dropdown.is_some_and(|rect| point_in_rect(mouse.column, mouse.row, rect));
+    match mouse.kind {
+        MouseEventKind::Moved => {
+            // Desktop menubar hover: moving over another title switches the
+            // open dropdown; moving over rows highlights them.
+            if let Some(index) = menu::title_at(keymap, layout.menu, mouse.column, mouse.row) {
+                if index != open && !menu::dropdown_items(index, keymap).is_empty() {
+                    tui_state.menu.open_menu(index);
+                }
+            } else {
+                tui_state.menu.hovered = dropdown.and_then(|rect| {
+                    menu::dropdown_item_at(rect, items.len(), mouse.column, mouse.row)
+                });
+            }
+            Ok(MenuMouseOutcome::Consumed)
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(index) = dropdown
+                .and_then(|rect| menu::dropdown_item_at(rect, items.len(), mouse.column, mouse.row))
+            {
+                let action = items[index].action;
+                let quit = handle_normal_action(action, session, mode, review_loader, tui_state)?;
+                tui_state.menu.close();
+                return Ok(if quit {
+                    MenuMouseOutcome::Quit
+                } else {
+                    MenuMouseOutcome::Consumed
+                });
+            }
+            if let Some(index) = menu::title_at(keymap, layout.menu, mouse.column, mouse.row) {
+                if index == open {
+                    tui_state.menu.close();
+                } else if !menu::dropdown_items(index, keymap).is_empty() {
+                    tui_state.menu.open_menu(index);
+                } else {
+                    tui_state.menu.close();
+                }
+                return Ok(MenuMouseOutcome::Consumed);
+            }
+            tui_state.menu.close();
+            Ok(MenuMouseOutcome::Consumed)
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if !over_dropdown
+                && menu::title_at(keymap, layout.menu, mouse.column, mouse.row).is_none()
+            {
+                // Click-away closes; the closing click is swallowed.
+                tui_state.menu.close();
+            }
+            Ok(MenuMouseOutcome::Consumed)
+        }
+        // While a dropdown is open the menu owns the pointer: drags and
+        // wheel input must not mutate the review underneath it.
+        _ => Ok(MenuMouseOutcome::Consumed),
     }
 }
 
@@ -8941,6 +9084,388 @@ diff --git a/b.rs b/b.rs
         );
         assert_eq!(session.diff_scroll as usize, owner);
         assert!(tui_state.diff_viewport.visual_state(&session).0 > 0);
+    }
+
+    const MENU_TEST_SIZE: ratatui::prelude::Size = ratatui::prelude::Size {
+        width: 110,
+        height: 24,
+    };
+
+    fn menu_test_state() -> TuiState {
+        TuiState {
+            layout_config: UiConfig {
+                menu_bar: true,
+                ..UiConfig::default()
+            },
+            terminal_size: MENU_TEST_SIZE,
+            ..TuiState::default()
+        }
+    }
+
+    fn menu_test_keymap() -> KeyMap {
+        KeyMap::try_from(&KeybindingsConfig::default()).unwrap()
+    }
+
+    fn menu_index(title: &str) -> usize {
+        menu::MENUS
+            .iter()
+            .position(|menu| menu.title == title)
+            .unwrap()
+    }
+
+    fn menu_title_rect(keymap: &KeyMap, menu_area: Rect, title: &str) -> Rect {
+        let index = menu_index(title);
+        menu::bar_entries(keymap)
+            .iter()
+            .find(|entry| entry.menu_index == index)
+            .and_then(|entry| menu::title_region(entry, menu_area))
+            .unwrap()
+    }
+
+    fn menu_mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn dispatch_menu_mouse(
+        mouse: MouseEvent,
+        session: &mut ReviewSession,
+        mode: &mut Mode,
+        keymap: &KeyMap,
+        tui_state: &mut TuiState,
+    ) -> MenuMouseOutcome {
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_menu_mouse_event(
+            mouse,
+            MENU_TEST_SIZE,
+            session,
+            mode,
+            keymap,
+            &loader,
+            tui_state,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn menu_title_click_toggles_dropdown_and_click_away_swallows_and_closes() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        let area = Rect::new(0, 0, MENU_TEST_SIZE.width, MENU_TEST_SIZE.height);
+        let layout = tui_state.review_layout(&session, area);
+        let title = menu_title_rect(&keymap, layout.menu, "hunk");
+
+        let up = MouseEventKind::Up(MouseButton::Left);
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(up, title.x, title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Consumed);
+        assert_eq!(tui_state.menu.open, Some(menu_index("hunk")));
+
+        // Mouse-up on the same title closes it again.
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(up, title.x, title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Consumed);
+        assert_eq!(tui_state.menu.open, None);
+
+        // Reopen, then click away in the diff pane: the dropdown closes and
+        // the closing click is swallowed instead of mutating the review.
+        dispatch_menu_mouse(
+            menu_mouse(up, title.x, title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(tui_state.menu.open, Some(menu_index("hunk")));
+        let diff_inner = inner_bordered(layout.diff);
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                diff_inner.x + 2,
+                diff_inner.y + 1,
+            ),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Consumed);
+        assert_eq!(tui_state.menu.open, None);
+        assert_eq!(tui_state.diff_drag, None);
+
+        // With the menu closed again the same event is not menu business.
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                diff_inner.x + 2,
+                diff_inner.y + 1,
+            ),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Ignored);
+    }
+
+    #[test]
+    fn menu_hover_switches_open_dropdown_and_highlights_items() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        let area = Rect::new(0, 0, MENU_TEST_SIZE.width, MENU_TEST_SIZE.height);
+        let layout = tui_state.review_layout(&session, area);
+        tui_state.menu.open_menu(menu_index("hunk"));
+
+        // Hovering another title switches the open dropdown to it.
+        let file_title = menu_title_rect(&keymap, layout.menu, "file");
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(MouseEventKind::Moved, file_title.x, file_title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Consumed);
+        assert_eq!(tui_state.menu.open, Some(menu_index("file")));
+        assert_eq!(tui_state.menu.hovered, None);
+
+        // Hovering a dropdown row highlights it; leaving clears it.
+        let rect = menu::dropdown_rect(menu_index("file"), &keymap, layout.menu, area).unwrap();
+        dispatch_menu_mouse(
+            menu_mouse(MouseEventKind::Moved, rect.x + 1, rect.y + 2),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(tui_state.menu.hovered, Some(1));
+        dispatch_menu_mouse(
+            menu_mouse(MouseEventKind::Moved, rect.x + 1, rect.y + rect.height + 3),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(tui_state.menu.open, Some(menu_index("file")));
+        assert_eq!(tui_state.menu.hovered, None);
+    }
+
+    #[test]
+    fn menu_item_click_dispatches_the_same_action_as_the_bound_key() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let keymap = menu_test_keymap();
+        let area = Rect::new(0, 0, MENU_TEST_SIZE.width, MENU_TEST_SIZE.height);
+
+        // Mouse path: open "view" and click the "side-by-side" item.
+        let mut session = snapshot_session(raw);
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        let layout = tui_state.review_layout(&session, area);
+        let title = menu_title_rect(&keymap, layout.menu, "view");
+        let up = MouseEventKind::Up(MouseButton::Left);
+        dispatch_menu_mouse(
+            menu_mouse(up, title.x, title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        let view = menu_index("view");
+        let rect = menu::dropdown_rect(view, &keymap, layout.menu, area).unwrap();
+        let items = menu::dropdown_items(view, &keymap);
+        let item = items
+            .iter()
+            .position(|item| item.action == Action::ToggleDiffView)
+            .unwrap();
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(up, rect.x + 1, rect.y + 1 + item as u16),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Consumed);
+        assert_eq!(tui_state.menu.open, None);
+        assert!(matches!(mode, Mode::Normal));
+
+        // Keyboard path: the bound key on a twin session.
+        let mut twin = snapshot_session(raw);
+        twin.focus = Focus::Diff;
+        let mut twin_state = menu_test_state();
+        let mut twin_mode = Mode::Normal;
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('|')),
+            &mut twin,
+            &mut twin_mode,
+            &keymap,
+            &loader,
+            &mut twin_state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            twin.diff_cues.view,
+            crate::config::DiffViewModeConfig::SideBySide
+        );
+        assert_eq!(session.diff_cues.view, twin.diff_cues.view);
+    }
+
+    #[test]
+    fn menu_quit_item_requests_quit_through_normal_dispatch() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        let area = Rect::new(0, 0, MENU_TEST_SIZE.width, MENU_TEST_SIZE.height);
+        let layout = tui_state.review_layout(&session, area);
+        tui_state.menu.open_menu(menu_index("quit"));
+        let rect = menu::dropdown_rect(menu_index("quit"), &keymap, layout.menu, area).unwrap();
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                rect.x + 1,
+                rect.y + 1,
+            ),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Quit);
+        assert_eq!(tui_state.menu.open, None);
+    }
+
+    #[test]
+    fn blocked_modal_state_ignores_menu_clicks() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Help;
+        let area = Rect::new(0, 0, MENU_TEST_SIZE.width, MENU_TEST_SIZE.height);
+        let layout = tui_state.review_layout(&session, area);
+        let title = menu_title_rect(&keymap, layout.menu, "hunk");
+        let outcome = dispatch_menu_mouse(
+            menu_mouse(MouseEventKind::Up(MouseButton::Left), title.x, title.y),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &mut tui_state,
+        );
+        assert_eq!(outcome, MenuMouseOutcome::Ignored);
+        assert_eq!(tui_state.menu.open, None);
+        assert!(matches!(mode, Mode::Help));
+    }
+
+    #[test]
+    fn esc_closes_open_dropdown_before_clearing_other_transient_layers() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        tui_state.menu.open_menu(menu_index("view"));
+        tui_state.notice = Some(UiNotice {
+            level: UiNoticeLevel::Info,
+            message: "transient".to_owned(),
+        });
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+
+        // First Esc: only the dropdown (topmost layer) closes.
+        handle_key_event(
+            KeyEvent::from(KeyCode::Esc),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(tui_state.menu.open, None);
+        assert!(tui_state.notice.is_some());
+        assert!(matches!(mode, Mode::Normal));
+
+        // Second Esc: the existing dismissal behavior is untouched.
+        handle_key_event(
+            KeyEvent::from(KeyCode::Esc),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(tui_state.notice.is_none());
+    }
+
+    #[test]
+    fn opening_a_modal_closes_the_open_dropdown() {
+        let mut session = snapshot_session(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let keymap = menu_test_keymap();
+        let mut tui_state = menu_test_state();
+        let mut mode = Mode::Normal;
+        tui_state.menu.open_menu(menu_index("hunk"));
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        handle_key_event(
+            KeyEvent::from(KeyCode::Char('?')),
+            &mut session,
+            &mut mode,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert!(matches!(mode, Mode::Help));
+        assert_eq!(tui_state.menu.open, None);
     }
 
     #[test]

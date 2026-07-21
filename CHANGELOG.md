@@ -4,6 +4,12 @@
 
 ### Added
 
+- Made the optional menu bar mouse-interactive: clicking a title opens a
+  dropdown of related actions with their live key hints, hovering switches
+  menus and highlights items, and clicking an item dispatches the same action
+  as its bound key. Esc and click-away close the dropdown, unbound items are
+  omitted, and modal surfaces keep pointer ownership (opening one closes the
+  dropdown).
 - Added a `channel` parameter to the MCP `comment_add` tool matching CLI
   `comments add --channel` semantics, including demoting a todo to a private
   draft when the selected channel does not permit todos.
