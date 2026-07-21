@@ -498,6 +498,13 @@ forge-mappable team contract. Team Markdown/HTML are filtered human summaries
 over the same public collaboration projection, not machine-readable forge
 mapping formats.
 
+By default, `gander tui` saves durable review state on quit without dumping a
+Markdown artifact to stdout. It prints a short stderr reminder to run
+`gander export markdown` or `gander handoff` when you want a dump. The artifact
+mechanism remains opt-in: set `[artifact] on-tui-quit = "stdout"` (or pass
+`gander tui --artifact-on-quit stdout`) for the old stdout dump, or use
+`"write"` with `output-dir`/`--artifact-output` to write a file.
+
 ## Bundled agent skills
 
 ```sh

@@ -1413,6 +1413,14 @@ fn run() -> color_eyre::Result<()> {
                         }
                     }
                 }
+            } else {
+                eprintln!(
+                    "review state saved at {} — {} comments, coverage {}/{} files — run `gander export markdown` or `gander handoff` to dump this review",
+                    state_path.display(),
+                    session.comments.len(),
+                    session.files.iter().filter(|file| file.viewed).count(),
+                    session.files.len()
+                );
             }
         }
         Command::Tour { command } => match command {
@@ -4799,17 +4807,14 @@ mod tests {
     }
 
     #[test]
-    fn tui_artifact_defaults_to_stdout_markdown() {
+    fn tui_artifact_defaults_to_never() {
         let repo = tempfile::tempdir().unwrap();
         let config = Config::default();
 
-        let request = resolve_tui_artifact_options(repo.path(), &config, None, None, None, None)
-            .unwrap()
-            .unwrap();
+        let request =
+            resolve_tui_artifact_options(repo.path(), &config, None, None, None, None).unwrap();
 
-        assert_eq!(request.format, OutputFormat::Markdown);
-        assert_eq!(request.profile, OutputProfile::Human);
-        assert_eq!(request.destination, TuiArtifactDestination::Stdout);
+        assert!(request.is_none());
     }
 
     #[test]

@@ -220,7 +220,7 @@ format = "markdown"
 profile = "human" # human | agent | team (team JSON is canonical; Markdown/HTML are human summaries)
 # output_dir = "artifacts" # unset (the default): artifacts go to stdout
 basename = "review"
-on_tui_quit = "stdout" # never | write | stdout
+on_tui_quit = "never" # never | write | stdout; set "stdout" to dump Markdown after TUI quit
 
 [comments]
 initial-state = "todo" # todo (default) | draft; per-comment CLI --state overrides this
@@ -463,7 +463,7 @@ cargo run -- export json --output review.json
 cargo run -- export markdown --output review.md
 cargo run -- export json --profile agent # adds raw hunks + comment excerpts
 cargo run -- export # uses configured artifact defaults
-cargo run -- tui > review.md # TUI on stderr, Markdown artifact on stdout after quit
+cargo run -- tui # durable state is saved; use export/handoff to dump it
 ```
 
 Import comments/viewed state from a JSON artifact:
@@ -476,17 +476,18 @@ Import is conservative: comments with duplicate IDs are skipped, and viewed
 state is restored only when a file path and diff fingerprint still match the
 current review target.
 
-By default, TUI artifact emission prints Markdown to stdout after the alternate
-screen is restored. The TUI itself renders to stderr, so stdout redirection
-captures only the artifact:
+By default, quitting the TUI saves durable review state and prints only a short
+stderr reminder to use `gander export markdown` or `gander handoff` when you
+want a dump. To restore the old stdout Markdown dump after the alternate screen
+is restored, opt in explicitly:
 
 ```sh
-cargo run -- tui > review.md
+cargo run -- tui --artifact-on-quit stdout > review.md
 ```
 
-Set `[artifact].on_tui_quit = "never"` to disable this default, or `"write"` to
-write the artifact to the configured artifact path instead. `write` is mainly
-useful when you want a config-driven save without shell redirection.
+Or set `[artifact].on_tui_quit = "stdout"`. Set it to `"write"` to write the
+artifact to the configured artifact path instead. `write` is mainly useful when
+you want a config-driven save without shell redirection.
 
 Persistent state lives outside the repository, in a per-workspace
 directory under the XDG state dir (`~/.local/state/gander/<workspace-key>/`

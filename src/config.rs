@@ -282,6 +282,7 @@ pub struct ArtifactConfig {
     /// longer drops files into the project directory by default.
     pub output_dir: Option<PathBuf>,
     pub basename: String,
+    #[serde(alias = "on-tui-quit")]
     pub on_tui_quit: TuiArtifactOnQuitConfig,
 }
 
@@ -690,7 +691,7 @@ impl Default for ArtifactConfig {
             profile: ArtifactProfileConfig::default(),
             output_dir: None,
             basename: "review".to_owned(),
-            on_tui_quit: TuiArtifactOnQuitConfig::Stdout,
+            on_tui_quit: TuiArtifactOnQuitConfig::Never,
         }
     }
 }
@@ -1533,7 +1534,7 @@ expand-context = ["ctrl-e"]
         assert_eq!(config.keybindings.delete_comment, ["x"]);
         assert_eq!(config.keybindings.insert_newline, ["enter"]);
         assert_eq!(config.keybindings.submit_comment, ["ctrl-s"]);
-        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Stdout);
+        assert_eq!(config.artifact.on_tui_quit, TuiArtifactOnQuitConfig::Never);
     }
 
     #[test]

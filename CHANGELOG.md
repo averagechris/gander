@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Flipped the default TUI quit artifact behavior to stay quiet: durable review
+  state is the handoff, and agents should read it via CLI/MCP after the human
+  finishes. Restore the previous stdout dump with `[artifact] on-tui-quit = "stdout"`.
+
 ### Added
 
 - Made the optional menu bar mouse-interactive: clicking a title opens a
