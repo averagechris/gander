@@ -67,7 +67,7 @@ pub struct ChannelInferenceContext<'a> {
     pub thread_channel: Option<Channel>,
     /// The composition target is an agent-authored onboarding annotation.
     pub onboarding_target: bool,
-    /// A summoned, contacted, or annotation-producing agent is attached to
+    /// A contacted or annotation-producing agent is attached to
     /// the active review session. Configuration alone is not attachment.
     pub agent_attached: bool,
     /// Explicit `[identity].name`; fallback/migration identities are not

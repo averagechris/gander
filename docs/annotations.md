@@ -62,10 +62,10 @@ most-specific context first:
 
 1. Replying in a thread → the thread's channel.
 2. Composing on or inside an agent's onboarding card → `delegation`.
-3. An agent is attached to the session (actual live harness contact, an active
-   summoned process, or active-session agent-authored annotations) and the
+3. An agent is attached to the session (actual live harness contact or
+   active-session agent-authored annotations) and the
    reviewed range is the reviewer's own → `delegation`. Merely configuring
-   `[agent].command` is not attachment evidence.
+   `[agent].name` is not attachment evidence.
 4. Every non-empty change in the reviewed `base..rev` range has one consistent
    jj author that is not the configured identity (reviewing someone else's
    work) → `collaboration`.

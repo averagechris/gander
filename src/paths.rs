@@ -3,7 +3,7 @@
 //! Gander keeps runtime state out of the project directory. Durable state
 //! (viewed marks, comments, the agent overlay) lives under the XDG state
 //! dir, keyed by a hash+slug of the canonicalized workspace root; ephemeral
-//! endpoints (sockets, instance registry entries, agent logs) live under
+//! endpoints (sockets, instance registry entries) live under
 //! `XDG_RUNTIME_DIR` when set, else the state dir. A committed `gander.toml`
 //! and XDG user config remain the supported configuration surfaces.
 //!
@@ -110,11 +110,6 @@ impl WorkspacePaths {
     /// without contending on a single path.
     pub fn instance_socket_file(&self, pid: u32) -> PathBuf {
         self.runtime_dir.join(format!("acp-{pid}.sock"))
-    }
-
-    /// Output log of a summoned review agent.
-    pub fn agent_log_file(&self) -> PathBuf {
-        self.runtime_dir.join("agent.log")
     }
 
     pub fn legacy_state_file(&self) -> PathBuf {
@@ -247,7 +242,6 @@ mod tests {
 
         assert_eq!(paths.runtime_dir, runtime.join("gander").join(&paths.key));
         assert_ne!(paths.runtime_dir, paths.state_dir);
-        assert_eq!(paths.agent_log_file(), paths.runtime_dir.join("agent.log"));
         assert_eq!(paths.registry_dir, runtime.join("gander").join("registry"));
     }
 

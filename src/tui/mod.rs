@@ -55,14 +55,13 @@ use ratatui::{
 };
 
 use crate::{
-    agent::AgentProcess,
     app::{CommentSelection, Focus, NavigationPlacement, ReviewSession, SkimAcknowledgeResult},
     artifact::{
         ArtifactBuildOptions, ArtifactProfile, ReviewArtifact, action_item_count,
         render_handoff_markdown,
     },
     clipboard::{ClipboardMethod, copy_to_clipboard},
-    config::{AgentConfig, KeybindingsConfig, ThemeConfig, ThemeModeConfig, UiConfig},
+    config::{KeybindingsConfig, ThemeConfig, ThemeModeConfig, UiConfig},
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
@@ -203,12 +202,6 @@ struct TuiState {
     state_tombstones: ReviewStateTombstones,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
-    /// Where a summoned agent's output is logged.
-    agent_log_path: Option<PathBuf>,
-    /// How to summon a review agent (from `[agent]` config).
-    agent_config: AgentConfig,
-    /// A summoned agent, if any. Killed on drop so quitting cannot leak it.
-    agent_process: Option<AgentProcess>,
     /// The live ACP bridge has handled at least one agent/harness request for
     /// this TUI session. Socket existence alone is not attachment evidence.
     agent_contacted: bool,
@@ -258,9 +251,6 @@ impl Default for TuiState {
             state_mtime: None,
             state_tombstones: ReviewStateTombstones::default(),
             agent_overlay_path: None,
-            agent_log_path: None,
-            agent_config: AgentConfig::default(),
-            agent_process: None,
             agent_contacted: false,
             instance_registration: None,
             presentation: None,
@@ -552,8 +542,6 @@ pub struct TuiPaths {
     pub agent_overlay: Option<PathBuf>,
     /// Unix socket for the live ACP endpoint (per instance).
     pub acp_socket: Option<PathBuf>,
-    /// Where a summoned agent's output is logged.
-    pub agent_log: Option<PathBuf>,
     /// Instance registry directory; when set (with `workspace_root`), the
     /// TUI advertises itself while running (docs/decisions.md D3).
     pub registry_dir: Option<PathBuf>,
@@ -574,7 +562,6 @@ pub fn run(
     // stack (`review/stack_changes`, `review/change_diff`).
     acp_jj: Option<Box<dyn JjBackend + Send>>,
     paths: TuiPaths,
-    agent_config: AgentConfig,
     start_tour: bool,
 ) -> Result<()> {
     session.stream_mode = true;
@@ -583,7 +570,6 @@ pub fn run(
         state_file: state_path,
         agent_overlay: agent_overlay_path,
         acp_socket: acp_socket_path,
-        agent_log: agent_log_path,
         registry_dir,
         workspace_root,
     } = paths;
@@ -702,8 +688,6 @@ pub fn run(
         last_autosave: Some(state_fingerprint(session)),
         agent_overlay_path: agent_overlay_path.clone(),
         state_mtime: state_path.as_deref().and_then(state_file_mtime),
-        agent_log_path,
-        agent_config,
         terminal_size: initial_terminal_size,
         theme: app_theme,
         osc_guard,
@@ -724,9 +708,6 @@ pub fn run(
     #[cfg(unix)]
     {
         tui_state.instance_registration = instance_registration;
-    }
-    if tui_state.agent_config.autostart && tui_state.agent_config.command.is_some() {
-        summon_agent(session, &mut tui_state);
     }
     if start_tour {
         start_startup_tour_or_notice(session, &review_loader, &mut tui_state);
@@ -1087,7 +1068,6 @@ fn run_loop(
                 if let Some(state_path) = state_path {
                     maybe_reload_review_state(session, state_path, tui_state, true);
                 }
-                notice_agent_exit(tui_state);
                 // Live refresh: pick up new/rewritten changes while nothing
                 // modal is open (a reload underneath a popup or comment editor
                 // could misanchor what the human is doing).
@@ -1211,57 +1191,6 @@ fn resize_comment_editor(mode: &mut Mode, terminal_size: ratatui::prelude::Size)
     editor.resize(inner.width as usize, inner.height as usize);
 }
 
-/// Launch the configured review agent (`[agent] command`), agent-agnostic:
-/// the command is any CLI that accepts a prompt. Output is logged to the
-/// workspace's agent log (see `gander paths`); suggestions arrive through
-/// ACP like any other agent.
-fn summon_agent(session: &ReviewSession, tui_state: &mut TuiState) {
-    if let Some(process) = &mut tui_state.agent_process
-        && process.try_status().is_none()
-    {
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Info,
-            message: "agent already running".to_owned(),
-        });
-        return;
-    }
-    let Some(command) = tui_state.agent_config.command.clone() else {
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Info,
-            message: "no [agent] command configured (see gander.toml)".to_owned(),
-        });
-        return;
-    };
-    let Some(log_path) = tui_state.agent_log_path.clone() else {
-        tui_state.notice = Some(UiNotice {
-            level: UiNoticeLevel::Error,
-            message: "no agent log path resolved; cannot summon an agent".to_owned(),
-        });
-        return;
-    };
-    let prompt = crate::agent::review_prompt(
-        tui_state.agent_config.prompt.as_deref(),
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    );
-    match AgentProcess::spawn(&session.repo, &command, &prompt, &log_path) {
-        Ok(process) => {
-            tui_state.agent_process = Some(process);
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Info,
-                message: format!("agent summoned (output: {})", log_path.display()),
-            });
-        }
-        Err(error) => {
-            tui_state.notice = Some(UiNotice {
-                level: UiNoticeLevel::Error,
-                message: format!("failed to summon agent: {error}"),
-            });
-        }
-    }
-}
-
 fn yank_handoff(session: &ReviewSession, tui_state: &mut TuiState) {
     yank_handoff_with(session, tui_state, copy_to_clipboard);
 }
@@ -1299,27 +1228,6 @@ fn yank_handoff_with(
                 message: format!("failed to copy handoff: {error}"),
             });
         }
-    }
-}
-
-/// Announce a summoned agent's exit exactly once and release the handle so
-/// it can be summoned again.
-fn notice_agent_exit(tui_state: &mut TuiState) {
-    if let Some(process) = &mut tui_state.agent_process
-        && let Some(status) = process.try_status()
-    {
-        tui_state.agent_process = None;
-        tui_state.notice = Some(if status.success() {
-            UiNotice {
-                level: UiNoticeLevel::Info,
-                message: "agent finished its review".to_owned(),
-            }
-        } else {
-            UiNotice {
-                level: UiNoticeLevel::Error,
-                message: format!("agent exited with {status} (see the agent log: gander paths)"),
-            }
-        });
     }
 }
 
@@ -2384,7 +2292,6 @@ fn handle_normal_action(
             tui_state.help_scroll = 0;
             *mode = Mode::Help;
         }
-        Action::SummonAgent => summon_agent(session, tui_state),
         Action::YankHandoff => yank_handoff(session, tui_state),
         Action::MoveDown => match session.focus {
             Focus::Files => session.move_selection(1),
@@ -3638,17 +3545,29 @@ fn handle_jj_helpers_key(
                 }
                 if !state.confirming {
                     state.confirming = true;
-                } else {
+                } else if is_plain_enter(&key) {
                     let option = state.selected_option().cloned().expect("checked above");
                     run_jj_helper(review_loader, session, &option, tui_state);
                     return true;
                 }
+                // The final verbatim-command confirmation accepts only the
+                // immutable Enter key: an OSC 11 reply payload can never
+                // contain Enter, so no leaked terminal byte can reach this
+                // shell-out under any keybinding configuration
+                // (docs/theme.md). Custom `popup-select` bindings still
+                // navigate and open the confirm step; they are inert here.
             }
             _ => {}
         }
         return false;
     }
     false
+}
+
+/// A literal, unmodified Enter press. The jj helper confirmation is gated on
+/// this exact key regardless of `popup-select` configuration.
+fn is_plain_enter(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter && key.modifiers.is_empty()
 }
 
 /// Run a confirmed jj helper command and reload the current target so the
@@ -4010,8 +3929,7 @@ fn inferred_comment_channel(
                 comment.belongs_to_session(session_id)
             })
     });
-    let agent_attached =
-        tui_state.agent_process.is_some() || tui_state.agent_contacted || has_agent_annotation;
+    let agent_attached = tui_state.agent_contacted || has_agent_annotation;
     review::infer_comment_channel(review::ChannelInferenceContext {
         thread_channel,
         onboarding_target,
@@ -6297,7 +6215,6 @@ mod tests {
         .unwrap();
         let mut config = crate::config::Config::default();
         config.identity.name = Some("Reviewer".into());
-        config.agent.command = Some("agent-cli".into());
         let mut session = ReviewSession::new_with_config(
             ".".into(),
             ReviewTarget::trunk_to_current(),
@@ -6316,7 +6233,6 @@ mod tests {
             jj: &backend,
         };
         let mut tui_state = TuiState {
-            agent_config: config.agent.clone(),
             agent_contacted: true,
             ..TuiState::default()
         };
@@ -6350,7 +6266,6 @@ mod tests {
             name: Some("Teammate".into()),
             email: None,
         });
-        tui_state.agent_config.command = None;
         let channel = inferred_comment_channel(&session, &tui_state, false, None);
         let mut editor = CommentEditor::with_channel(String::new(), channel);
         let target = CommentInputTarget::NewGeneral;
@@ -6369,14 +6284,16 @@ mod tests {
     }
 
     #[test]
-    fn configured_agent_command_alone_is_not_attachment_evidence() {
+    fn configured_agent_identity_alone_is_not_attachment_evidence() {
         let diff = crate::diff::DiffSet::parse(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
         )
         .unwrap();
         let mut config = crate::config::Config::default();
         config.identity.name = Some("Reviewer".into());
-        config.agent.command = Some("configured-but-not-running".into());
+        // `[agent] name` is identity config, not evidence that any agent is
+        // attached to the session (docs/decisions.md D9).
+        config.agent.name = Some("configured-but-not-attached".into());
         let mut session = ReviewSession::new_with_config(
             ".".into(),
             ReviewTarget::trunk_to_current(),
@@ -6388,10 +6305,7 @@ mod tests {
             name: Some("Reviewer".into()),
             email: None,
         });
-        let tui_state = TuiState {
-            agent_config: config.agent,
-            ..TuiState::default()
-        };
+        let tui_state = TuiState::default();
 
         assert_eq!(
             inferred_comment_channel(&session, &tui_state, false, None),
@@ -8142,6 +8056,75 @@ diff --git a/changed.rs b/changed.rs
                 .unwrap()
                 .message
                 .contains("ran jj squash -r @")
+        );
+    }
+
+    #[test]
+    fn jj_helper_confirmation_accepts_only_the_literal_enter_key() {
+        // Bind popup-select to a payload-alphabet key ("g", part of the OSC
+        // 11 reply alphabet). Selection gestures stay remappable, but the
+        // final verbatim-command confirmation must ignore the custom binding
+        // and fire only on the immutable Enter key (docs/theme.md): an OSC
+        // payload can never contain Enter, so no leak reaches the shell-out
+        // under any keybinding configuration.
+        let mut session = snapshot_session(
+            r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+-old
++new
+"#,
+        );
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let mut tui_state = TuiState::default();
+        let mut state = JjHelperState::for_session(&session);
+        let config = KeybindingsConfig {
+            popup_select: vec!["g".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+        let keymap = KeyMap::try_from(&config).unwrap();
+
+        // The custom select key advances to the confirmation step.
+        assert!(!handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Char('g')),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert!(state.confirming);
+
+        // The custom select key must NOT confirm the verbatim command.
+        assert!(!handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Char('g')),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert!(state.confirming);
+        assert!(backend.commands.borrow().is_empty());
+
+        // Only the literal Enter key runs it.
+        assert!(handle_jj_helpers_key(
+            KeyEvent::from(KeyCode::Enter),
+            &mut state,
+            &mut session,
+            &keymap,
+            &loader,
+            &mut tui_state,
+        ));
+        assert_eq!(
+            backend.commands.borrow().as_slice(),
+            [vec!["squash".to_owned(), "-r".to_owned(), "@".to_owned()]]
         );
     }
 

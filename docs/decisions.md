@@ -4,6 +4,41 @@ Short ADR-style log of directional decisions. Newest first. Each entry
 records the decision, the reasoning, and what it supersedes, so future
 sessions (human or agent) can pick up implementation without relitigating.
 
+## D9 (2026-07): gander never spawns agents; harnesses own the agent lifecycle
+
+**Decision.** Gander does not spawn, monitor, or kill agent processes.
+The summon feature is removed entirely: the `@`/`summon-agent` action, the
+`[agent] command`/`autostart`/`prompt` config fields, the `AgentProcess`
+lifecycle (spawn, poll, kill-on-drop), the review-prompt templating
+(`{repo}`/`{base}`/`{rev}`/`{prompt}` substitution), and the workspace
+agent log. Harnesses (opencode, Claude Code, Codex, shell scripts, ...)
+own the conversation *and* the process: they run the agent themselves and
+drive gander from the outside through the CLI, MCP, or ACP surfaces.
+Old configs fail loudly: `[agent] command`/`autostart`/`prompt` produce a
+migration error pointing at docs/harness-setup.md, and a `summon-agent`
+keybinding is rejected as an unknown field.
+
+**Kept.** `[agent] name` survives as identity configuration: it stamps
+agent identity on agent-authored annotations and implies nothing about
+process ownership or attachment.
+
+**Why.** Summoning was the one place gander crossed from "reads code
+state, writes review state" into process orchestration, with real costs:
+a confirmation-free shell-out reachable from a keybinding, prompt/quoting
+surface, log plumbing, and lifecycle edge cases — all duplicating what
+every harness already does better (docs/decisions.md D4). Removing it also
+makes the docs/theme.md containment claim structural rather than
+default-keybinding-conditional: leaked OSC 11 payload characters can
+mutate durable local review state but can never mutate the code workspace
+under any keybinding configuration, because the only remaining shell-out
+(the jj helper popup) requires a literal Enter confirmation and an OSC
+payload can never contain Enter.
+
+**Supersedes/refines.** D2's `[agent] command` mechanism (the
+agent-agnostic principle survives: gander still hardcodes no harness).
+Refines D4/D7: the harness owns not just the chat but the agent process;
+gander's agent-facing surface is CLI/MCP/ACP only.
+
 ## D7 (2026-07): local review core, CLI parity, and no direct forge integration
 
 **Decision.** Gander's core object is a durable local review session over
@@ -131,11 +166,14 @@ gain once cwd routing exists.
 
 ## D2 (2026-07): agent integration is agent-agnostic
 
-**Decision.** Gander never hardcodes a specific harness. `[agent] command`
+**Decision (mechanism superseded by D9).** Gander never hardcodes a specific
+harness. `[agent] command`
 is an arbitrary shell command handed a prompt (`opencode run`, `claude -p`,
 `opencode run --attach <url>` to reuse a running server, ...). Harness
 names appear only in docs as examples. Attach-to-running-server is the
-harness CLI's job, not gander's (no HTTP client in gander).
+harness CLI's job, not gander's (no HTTP client in gander). D9 later removes
+`[agent] command` and all agent spawning; the agent-agnostic principle
+itself stands.
 
 ## D1 (2026-07): TUI and agent server share state through files/sockets, not threads
 

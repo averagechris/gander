@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::{
@@ -183,22 +183,15 @@ pub struct DiffThemeConfig {
     pub gutter_removed: Option<String>,
 }
 
-/// How to summon a review agent from the TUI. Deliberately agent-agnostic:
-/// any CLI that accepts a prompt works (`opencode run`, `claude -p`, ...).
+/// Agent identity configuration. Gander never spawns or owns agent
+/// processes (docs/decisions.md D9): harnesses drive gander from the
+/// outside via CLI/MCP/ACP. This section only names the agent identity
+/// stamped on agent-authored annotations.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct AgentConfig {
     /// Name stamped on agent-authored annotations.
     pub name: Option<String>,
-    /// Shell command that runs the agent. The review prompt is appended as
-    /// a final shell-quoted argument, or substituted for a `{prompt}`
-    /// placeholder when present.
-    pub command: Option<String>,
-    /// Spawn the agent automatically when the TUI starts.
-    pub autostart: bool,
-    /// Custom prompt template; `{repo}`, `{base}`, and `{rev}` are
-    /// substituted. Defaults to a built-in prompt describing the ACP methods.
-    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -298,7 +291,6 @@ pub struct KeybindingsConfig {
     pub preset: KeybindingPresetConfig,
     pub quit: Vec<String>,
     pub help: Vec<String>,
-    pub summon_agent: Vec<String>,
     pub yank_handoff: Vec<String>,
     pub move_down: Vec<String>,
     pub move_up: Vec<String>,
@@ -509,9 +501,28 @@ struct DiffThemeConfigPatch {
 #[serde(default, rename_all = "kebab-case")]
 struct AgentConfigPatch {
     name: Option<String>,
-    command: Option<String>,
-    autostart: Option<bool>,
-    prompt: Option<String>,
+    /// Removed spawn fields (docs/decisions.md D9). Still parsed so old
+    /// configs fail loudly with a migration message instead of silently
+    /// no longer launching anything.
+    command: Option<toml::Value>,
+    autostart: Option<toml::Value>,
+    prompt: Option<toml::Value>,
+}
+
+impl AgentConfigPatch {
+    /// The first removed `[agent]` spawn field present, for the migration
+    /// error.
+    fn removed_field(&self) -> Option<&'static str> {
+        if self.command.is_some() {
+            Some("command")
+        } else if self.autostart.is_some() {
+            Some("autostart")
+        } else if self.prompt.is_some() {
+            Some("prompt")
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -564,7 +575,6 @@ struct KeybindingsConfigPatch {
     preset: Option<KeybindingPresetConfig>,
     quit: Option<Vec<String>>,
     help: Option<Vec<String>>,
-    summon_agent: Option<Vec<String>>,
     yank_handoff: Option<Vec<String>>,
     move_down: Option<Vec<String>>,
     move_up: Option<Vec<String>>,
@@ -707,7 +717,6 @@ impl KeybindingsConfig {
             // (range selection, notices, popups) so it stays safe to mash.
             quit: keys(["q"]),
             help: keys(["?"]),
-            summon_agent: keys(["@"]),
             yank_handoff: keys(["ctrl-y"]),
             move_down: keys(["j", "down"]),
             move_up: keys(["k", "up"]),
@@ -870,6 +879,15 @@ impl Config {
                 .with_context(|| format!("failed to read config {}", source.path.display()))?;
             let mut patch: ConfigPatch = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse config {}", source.path.display()))?;
+            if let Some(field) = patch.agent.removed_field() {
+                bail!(
+                    "failed to parse config {}: `[agent] {field}` was removed: gander no \
+                     longer spawns agents; run your harness against `gander mcp` or the \
+                     CLI instead (see docs/harness-setup.md and docs/decisions.md D9). \
+                     `[agent] name` remains supported as annotation identity.",
+                    source.path.display()
+                );
+            }
             keybinding_patches.push(patch.keybindings.clone());
             patch.keybindings = KeybindingsConfigPatch::default();
             config.apply_patch(patch);
@@ -936,17 +954,8 @@ impl Config {
             self.limits.nudge_files = nudge_files;
         }
 
-        if let Some(command) = patch.agent.command {
-            self.agent.command = Some(command);
-        }
         if let Some(name) = patch.agent.name {
             self.agent.name = (!name.trim().is_empty()).then(|| name.trim().to_owned());
-        }
-        if let Some(autostart) = patch.agent.autostart {
-            self.agent.autostart = autostart;
-        }
-        if let Some(prompt) = patch.agent.prompt {
-            self.agent.prompt = Some(prompt);
         }
 
         if let Some(initial_state) = patch.comments.initial_state {
@@ -1042,7 +1051,6 @@ impl KeybindingsConfig {
     fn apply_action_patch(&mut self, patch: KeybindingsConfigPatch) {
         apply_optional(&mut self.quit, patch.quit);
         apply_optional(&mut self.help, patch.help);
-        apply_optional(&mut self.summon_agent, patch.summon_agent);
         apply_optional(&mut self.yank_handoff, patch.yank_handoff);
         apply_optional(&mut self.move_down, patch.move_down);
         apply_optional(&mut self.move_up, patch.move_up);
@@ -1353,10 +1361,9 @@ submit-comment = ["ctrl-s"]
     }
 
     #[test]
-    fn agent_config_defaults_off_and_parses_from_toml() {
+    fn agent_config_keeps_name_only() {
         assert_eq!(Config::default().agent, AgentConfig::default());
-        assert!(Config::default().agent.command.is_none());
-        assert!(!Config::default().agent.autostart);
+        assert!(Config::default().agent.name.is_none());
 
         let repo = tempfile::tempdir().unwrap();
         let config_path = repo.path().join("config.toml");
@@ -1364,9 +1371,7 @@ submit-comment = ["ctrl-s"]
             &config_path,
             r#"
 [agent]
-command = "opencode run"
-autostart = true
-prompt = "review {repo} at {base}..{rev}"
+name = "reviewbot"
 "#,
         )
         .unwrap();
@@ -1377,12 +1382,34 @@ prompt = "review {repo} at {base}..{rev}"
         }])
         .unwrap();
 
-        assert_eq!(config.agent.command.as_deref(), Some("opencode run"));
-        assert!(config.agent.autostart);
-        assert_eq!(
-            config.agent.prompt.as_deref(),
-            Some("review {repo} at {base}..{rev}")
-        );
+        assert_eq!(config.agent.name.as_deref(), Some("reviewbot"));
+    }
+
+    #[test]
+    fn removed_agent_spawn_fields_error_with_migration_message() {
+        // docs/decisions.md D9: gander no longer spawns agents. Old configs
+        // must fail loudly rather than silently launching nothing.
+        let dir = tempfile::tempdir().unwrap();
+        for (field, value) in [
+            ("command", "\"opencode run\""),
+            ("autostart", "true"),
+            ("prompt", "\"review {repo} at {base}..{rev}\""),
+        ] {
+            let path = dir.path().join(format!("{field}.toml"));
+            fs::write(&path, format!("[agent]\n{field} = {value}\n")).unwrap();
+            let error = Config::load_layers(&[ConfigSource {
+                path,
+                required: true,
+            }])
+            .unwrap_err();
+            let message = format!("{error:?}");
+            assert!(
+                message.contains(&format!("`[agent] {field}` was removed")),
+                "{message}"
+            );
+            assert!(message.contains("no longer spawns agents"), "{message}");
+            assert!(message.contains("docs/harness-setup.md"), "{message}");
+        }
     }
 
     #[test]
@@ -1738,5 +1765,25 @@ transparent = false
             .unwrap_err();
             assert!(format!("{error:?}").contains("unknown field"));
         }
+    }
+
+    #[test]
+    fn removed_summon_agent_keybinding_name_is_rejected() {
+        // docs/decisions.md D9: the summon action is gone; a config still
+        // binding it must fail clearly instead of silently doing nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("summon-agent.toml");
+        fs::write(&path, "[keybindings]\nsummon-agent = [\"@\"]\n").unwrap();
+        let error = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("unknown field `summon-agent`"),
+            "{message}"
+        );
+        assert!(message.contains("failed to parse config"), "{message}");
     }
 }

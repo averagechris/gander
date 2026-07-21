@@ -142,9 +142,9 @@ Client Protocol schema compliance is future work.
 - [x] live ACP endpoint hosted by the TUI on a Unix socket (see `gander paths`);
   `gander acp` bridges stdio to it when live, so agent-spawned servers see
   the current session instead of a startup snapshot
-- [x] summon a configured agent from the TUI (`[agent] command` + `@` key or
-  autostart; agent-agnostic shell command, logged to the workspace agent log,
-  lifecycle owned by gander)
+- [x] summon a configured agent from the TUI: historical M7 feature, removed
+  (2026-07, docs/decisions.md D9) — gander never spawns agents; harnesses own
+  the agent lifecycle and drive gander via CLI/MCP/ACP
 
 ## Milestone 8: state hygiene — get out of the project directory
 
@@ -193,13 +193,14 @@ below).
   registry)
 - [x] large-change nudge: when a review exceeds the `[limits]`
   nudge thresholds (`nudge-diff-lines`/`nudge-files`, 0 disables) and no
-  agent has organized it yet, the footer hints that an agent can (`@` or
-  the harness); re-raised on retarget
+  agent has organized it yet, the footer hints that an agent harness can;
+  re-raised on retarget (the `@` summon half of the hint was removed with
+  summoning, docs/decisions.md D9)
 - [x] tour mode: historical M9 experiment, replaced at M18 by Focus and
   Spotlight ordering in the normal review stream
 - [x] docs: harness setup recipes (docs/harness-setup.md — opencode/claude/
-  codex MCP registration, split-pane workflow, attach-to-running-server
-  summon commands)
+  codex MCP registration, split-pane workflow, harness attach guidance; the
+  in-gander summon section was removed per docs/decisions.md D9)
 - ~~ask popup~~ deliberately deferred (2026-07): one-shot "explain this
   line" routed to the harness would require gander to become a
   harness-API/spec-ACP client (docs/decisions.md D4). The split-pane +

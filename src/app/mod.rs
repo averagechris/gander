@@ -1920,9 +1920,9 @@ impl ReviewSession {
 
     /// A nudge for large changes: when the diff exceeds the size thresholds
     /// and no agent has organized the review yet (no durable walkthrough or
-    /// overlay ordering),
-    /// the overlay), suggest summoning one. `None` when the change is small,
-    /// nudging is disabled, or an agent already structured the review.
+    /// overlay ordering), point at the harness/CLI collaboration flow.
+    /// `None` when the change is small, nudging is disabled, or an agent
+    /// already structured the review.
     pub fn large_change_nudge(&self) -> Option<String> {
         let has_walkthrough = review::active_session_for_loaded_review(
             &self.sessions,
@@ -1951,7 +1951,7 @@ impl ReviewSession {
             return None;
         }
         Some(format!(
-            "large change ({files} files, {lines} changed lines) — @ summons an agent; author a durable walkthrough and attention map"
+            "large change ({files} files, {lines} changed lines) — an agent harness can organize this review (attention regions + walkthrough); see docs/harness-setup.md"
         ))
     }
 
@@ -3649,7 +3649,6 @@ mod tests {
             },
             agent: AgentConfig {
                 name: Some("Review Bot".into()),
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -5095,7 +5094,11 @@ diff --git a/src/c.rs b/src/c.rs
         session.nudge_diff_lines = 1;
         let nudge = session.large_change_nudge().unwrap();
         assert!(nudge.contains("large change"));
-        assert!(nudge.contains('@'));
+        // The nudge points at the harness/CLI flow, never at summoning
+        // (docs/decisions.md D9).
+        assert!(nudge.contains("agent harness"));
+        assert!(nudge.contains("docs/harness-setup.md"));
+        assert!(!nudge.contains('@'));
 
         // 0 disables the line criterion; the file criterion still applies.
         session.nudge_diff_lines = 0;

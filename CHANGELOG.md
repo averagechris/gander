@@ -82,6 +82,20 @@
 
 ### Changed
 
+- Removed agent summoning: gander never spawns or owns agent processes
+  (docs/decisions.md D9); harnesses run agents themselves and drive gander
+  through the CLI, MCP, or ACP. The `@`/`summon-agent` action, the
+  `[agent] command`/`autostart`/`prompt` config fields, the prompt
+  templating, and the workspace agent log are gone; `[agent] name` remains
+  as the annotation identity. Old configs fail loudly: the removed
+  `[agent]` fields error with a migration message pointing at
+  docs/harness-setup.md, and a `summon-agent` keybinding is rejected as an
+  unknown field. The jj helpers popup's final verbatim-command
+  confirmation now accepts only the literal Enter key regardless of the
+  `popup-select` binding, which makes the docs/theme.md containment claim
+  structural: leaked OSC 11 payload characters can mutate durable local
+  review state but can never mutate the code workspace under any
+  keybinding configuration.
 - Swapped the default bracket navigation pairs: `]` / `[` now jump to the
   next/previous changed hunk and `}` / `{` to the next/previous symbol,
   putting hunk-first review navigation on the easier unshifted keys. Restore

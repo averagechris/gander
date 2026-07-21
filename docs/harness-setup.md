@@ -17,6 +17,12 @@ workspace, post selected comments to a forge, or edit files in response to todo
 comments/action items. Gander itself should not fetch PRs, mutate code, or post remote reviews;
 it persists local review sessions, comments, optional action items, walkthroughs, and exports.
 
+Gander also never spawns or owns agent processes (docs/decisions.md D9).
+There is no summon key and no `[agent] command`/`autostart`/`prompt`
+config; the harness owns the agent lifecycle and attaches from the outside
+through the CLI, MCP, or ACP surfaces below. `[agent] name` remains as the
+identity stamped on agent-authored annotations.
+
 ## CLI-first automation
 
 Prefer the CLI when you want explicit, low-context interactions or when MCP
@@ -242,39 +248,30 @@ When a review is large, gander nudges you in the footer
 (`[limits] nudge-diff-lines` / `nudge-files` in `gander.toml`, 0 to
 disable); that's the cue for step 3.
 
-## Summoning from inside gander (`@`)
+## Attaching an agent without a chat pane
 
-If you'd rather not switch panes, configure `[agent] command` in
-`gander.toml` and press `@`. The command is agent-agnostic: any CLI that
-accepts a prompt, spawned with the workspace as cwd, output logged to the
-workspace agent log (`gander paths`).
+Gander does not launch agents (docs/decisions.md D9), so "bring an agent
+into this review" always means driving your harness from outside gander.
+The split-pane setup above is the interactive version; for one-shot or
+scripted passes, hand the harness CLI a prompt yourself:
 
-```toml
-[agent]
-command = "opencode run"   # or: claude -p
-autostart = false                  # true: summon on TUI startup
+```sh
+# one-shot review pass with the MCP tools registered
+opencode run "Review trunk()..@ with the gander MCP tools: author a durable \
+walkthrough and attention map, then draft comments for concrete issues."
+
+# or CLI-only, no MCP: have the agent consume/emit gander state directly
+claude -p "Run \`gander walkthrough show\` and \`gander comments list\` in \
+$PWD, then organize the review with \`gander attention set\` and \
+\`gander walkthrough set\`."
 ```
 
-### Attach to an already-running harness server
-
-Reusing a warm server is the harness CLI's job, not gander's — put the
-attach flag in the command:
-
-```toml
-[agent]
-# opencode: reuse a running `opencode serve` (default port 4096)
-command = "opencode run --attach http://localhost:4096"
-```
-
-```toml
-[agent]
-# claude: continue the most recent conversation in this project
-command = "claude -p --continue"
-```
-
-The prompt gander hands the command is customizable (`[agent] prompt`,
-with `{repo}`/`{base}`/`{rev}` placeholders); the default one tells the
-agent how to reach the review session and what to do with it.
+Reusing a warm server is likewise the harness CLI's job (for example
+`opencode run --attach http://localhost:4096`, or `claude -p --continue`);
+gander only sees the resulting CLI/MCP/ACP traffic. See
+[examples/harness-prompts.md](../examples/harness-prompts.md) for fuller
+prompt recipes and [examples/agent-review-loop.sh](../examples/agent-review-loop.sh)
+for a scripted loop.
 
 ## Headless / scripting
 

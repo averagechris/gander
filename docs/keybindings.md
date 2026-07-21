@@ -12,7 +12,8 @@ Configuration layering is unchanged: XDG user config, repository
 `--config`, with each later field replacing the earlier field's complete key
 list. `task-list` remains an alias for `open-work`. The removed presentation
 binding names have no aliases; old configs fail clearly instead of silently
-rebinding `T`.
+rebinding `T`. The removed `summon-agent` binding (agent summoning itself was
+removed, docs/decisions.md D9) is likewise rejected as an unknown field.
 
 Preset layering happens inside `[keybindings]`: the last configured
 `preset = "gander"` (the default) or `preset = "hunk"` selects the complete
@@ -55,6 +56,12 @@ list is replaced. Repeating a safety key for the same action is valid; assigning
 it to another action in the same effective context reports an `immutable
 fallback` collision.
 
+The jj helpers popup's final verbatim-command confirmation accepts only the
+literal Enter key. A custom `popup-select` binding still navigates and opens
+the confirm step, but it never fires the command itself: an OSC 11 reply
+payload can never contain Enter, so no stray terminal reply can reach the
+only shell-out under any keybinding configuration (docs/theme.md).
+
 ## Context inventory
 
 | Context | Inputs and dispatch |
@@ -84,7 +91,6 @@ remains effective.
 | --- | --- | --- |
 | `quit` | `q` | normal |
 | `help` | `?` | normal |
-| `summon-agent` | `@` | normal |
 | `yank-handoff` | `ctrl-y` | normal |
 | `move-down` / `move-up` | `j`, Down / `k`, Up | normal files and diff |
 | `toggle-focus` | Tab | normal |

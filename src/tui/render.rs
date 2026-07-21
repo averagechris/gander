@@ -2497,9 +2497,11 @@ fn draw_footer(
         }
         Mode::JjHelpers(state) => {
             if state.confirming {
+                // The confirmation accepts only the immutable Enter key
+                // (docs/theme.md), so the hint is literal rather than the
+                // configurable popup-select binding.
                 format!(
-                    "confirm jj command · {} run · {} back",
-                    keymap.hint(Action::PopupSelect),
+                    "confirm jj command · enter run · {} back",
                     keymap.hint(Action::PopupClose)
                 )
             } else {
@@ -2940,7 +2942,6 @@ fn draw_help_popup(
         ),
         entry(&[Action::JjHelpers], "jj helpers (squash, rebase, ...)"),
         section("agent"),
-        entry(&[Action::SummonAgent], "summon configured review agent"),
         entry(&[Action::YankHandoff], "copy agent handoff markdown"),
         entry(&[Action::ToggleAgentOrder], "toggle agent-suggested order"),
         entry(&[Action::FlagList], "agent-flagged sections"),
@@ -3171,8 +3172,7 @@ fn draw_jj_helpers_popup(
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!(
-                "This rewrites history in your repo. {} run · {} back",
-                keymap.hint(Action::PopupSelect),
+                "This rewrites history in your repo. enter run · {} back",
                 keymap.hint(Action::PopupClose)
             ),
             Style::default().fg(theme.negative),

@@ -81,15 +81,12 @@ open the terminal.
   were one ever to occur, is limited to the payload alphabet
   (hex/`rgb:/;#]` characters); those characters can trigger configured
   commands and mutate durable local review state (for example mark viewed,
-  accept a draft, or delete a walkthrough). **With the default keybindings**
-  leaked characters cannot mutate the code workspace: the only actions that
-  shell out (`summon-agent`, default `@`; the jj helper popup, default `!`)
-  sit outside the payload alphabet, and the jj helper confirm requires
-  Enter, which a payload can never contain. Users who rebind `summon-agent`
-  — a confirmation-free shell-out to the configured `[agent] command` — or
-  both `jj-helpers` and `popup-select` onto payload-alphabet keys
-  (hex digits, `r`, `g`, `i`, `:`, `/`, `;`, `#`, `]`) forfeit that
-  property and should prefer keys outside the alphabet.
+  accept a draft, or delete a walkthrough). Leaked payload characters can
+  **never mutate the code workspace, under any keybinding configuration**:
+  gander no longer launches agent processes (docs/decisions.md D9), and the
+  only shell-out left — the jj helper popup — requires a literal Enter press
+  on its final verbatim-command confirmation regardless of how
+  `popup-select` is bound, and an OSC payload can never contain Enter.
 - Fallback is always the historical dark look.
 
 ## Documented deltas from the original safety requirements

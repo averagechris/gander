@@ -1358,11 +1358,9 @@ fn run() -> color_eyre::Result<()> {
                     state_file: Some(state_path.clone()),
                     agent_overlay: Some(workspace_paths.overlay_file()),
                     acp_socket: Some(workspace_paths.instance_socket_file(std::process::id())),
-                    agent_log: Some(workspace_paths.agent_log_file()),
                     registry_dir: Some(workspace_paths.registry_dir.clone()),
                     workspace_root: Some(workspace_paths.workspace_root.clone()),
                 },
-                config.agent.clone(),
                 tour,
             )?;
             state = session.clone().into_state();
@@ -4137,7 +4135,6 @@ fn print_paths(
         paths.runtime_dir.join("acp-<pid>.sock").display()
     );
     println!("instance registry: {}", paths.registry_dir.display());
-    println!("agent log:        {}", paths.agent_log_file().display());
     if let Some(xdg_config) = crate::config::xdg_config_path() {
         println!(
             "user config:      {} ({})",

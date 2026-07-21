@@ -44,7 +44,6 @@ impl Eq for KeyPress {}
 pub(super) enum Action {
     Quit,
     Help,
-    SummonAgent,
     YankHandoff,
     MoveDown,
     MoveUp,
@@ -178,7 +177,6 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
         let mut bindings = Vec::new();
         add_bindings(&mut bindings, Action::Quit, &config.quit)?;
         add_bindings(&mut bindings, Action::Help, &config.help)?;
-        add_bindings(&mut bindings, Action::SummonAgent, &config.summon_agent)?;
         add_bindings(&mut bindings, Action::YankHandoff, &config.yank_handoff)?;
         add_bindings(&mut bindings, Action::MoveDown, &config.move_down)?;
         add_bindings(&mut bindings, Action::MoveUp, &config.move_up)?;
@@ -585,13 +583,13 @@ impl Action {
             KeyContext::AttentionGlance,
         ];
         match self {
-            Quit | SummonAgent | YankHandoff | MoveDown | MoveUp | ToggleFocus | CompareTrunk
-            | CompareParent | TargetChooser | RevsetInput | StackNext | StackPrevious
-            | OperationPicker | JjHelpers | ToggleAgentOrder | FlagList | OpenWork | Activity
-            | WalkthroughList | DraftList | NextUnviewed | PreviousUnviewed | NextComment
-            | PreviousComment | NextFile | PreviousFile | SpotlightNext | SpotlightPrevious
-            | FileSearch | ToggleFilePane | ViewOptions | Comment | CommentList
-            | CancelRangeComment | AttentionFocus | AttentionGlance => NORMAL,
+            Quit | YankHandoff | MoveDown | MoveUp | ToggleFocus | CompareTrunk | CompareParent
+            | TargetChooser | RevsetInput | StackNext | StackPrevious | OperationPicker
+            | JjHelpers | ToggleAgentOrder | FlagList | OpenWork | Activity | WalkthroughList
+            | DraftList | NextUnviewed | PreviousUnviewed | NextComment | PreviousComment
+            | NextFile | PreviousFile | SpotlightNext | SpotlightPrevious | FileSearch
+            | ToggleFilePane | ViewOptions | Comment | CommentList | CancelRangeComment
+            | AttentionFocus | AttentionGlance => NORMAL,
             Help => &[
                 KeyContext::NormalFiles,
                 KeyContext::NormalDiff,
@@ -1169,6 +1167,13 @@ mod tests {
     fn legacy_uppercase_t_has_no_default_action() {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         assert_eq!(keymap.action_for(&KeyEvent::from(KeyCode::Char('T'))), None);
+    }
+
+    #[test]
+    fn legacy_summon_at_sign_has_no_default_action() {
+        // docs/decisions.md D9: agent summoning was removed with the action.
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        assert_eq!(keymap.action_for(&KeyEvent::from(KeyCode::Char('@'))), None);
     }
 
     #[test]

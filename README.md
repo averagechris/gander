@@ -341,12 +341,10 @@ cycle-comment-channel = ["tab"]
 quit = ["q"]
 
 [agent]
-# Optional annotation identity for agent-authored drafts/replies.
+# Optional annotation identity for agent-authored drafts/replies. Gander
+# never spawns agents itself; harnesses drive it from the outside
+# (docs/harness-setup.md).
 name = "agent"
-# Optional: a shell command that summons a review agent (press @ in the TUI,
-# or set autostart). Agent-agnostic: any CLI that accepts a prompt works.
-command = "opencode run"
-autostart = false
 ```
 
 CLI `--ignore` values are appended to configured ignore globs. Use
@@ -492,7 +490,7 @@ useful when you want a config-driven save without shell redirection.
 Persistent state lives outside the repository, in a per-workspace
 directory under the XDG state dir (`~/.local/state/gander/<workspace-key>/`
 by default; `XDG_STATE_HOME` is respected). Ephemeral endpoints (the live
-ACP socket, agent logs) prefer `XDG_RUNTIME_DIR` when set. Run:
+ACP socket, instance registry) prefer `XDG_RUNTIME_DIR` when set. Run:
 
 ```sh
 gander paths
@@ -525,7 +523,6 @@ keymap; the footer only shows the everyday hints.
 | Key | Action |
 | --- | --- |
 | `?` | help overlay with the full keymap |
-| `@` | summon the configured review agent (`[agent] command`) |
 | Ctrl-y | copy the agent handoff to the clipboard; unchanged from prior releases, discoverable in `?`, and reports selected todo/draft counts |
 | `j` / Down | next file |
 | `k` / Up | previous file |
@@ -679,13 +676,10 @@ spawn `gander acp` see current viewed state, comments, and target instead
 of a startup snapshot. See [`docs/acp.md`](docs/acp.md) for the method
 reference.
 
-To pull an agent into the loop without leaving the review, configure
-`[agent] command` (any prompt-taking CLI: `opencode run`, `claude -p`,
-`opencode run --attach http://localhost:4096` to reuse a running server,
-...) and press `@` in the TUI, or set `autostart = true` to summon it on
-startup. gander hands the command a built-in review prompt (customizable
-via `[agent] prompt`), logs its output to the workspace agent log, announces
-its progress in the footer, and kills it when you quit.
+Gander never spawns or owns agent processes (docs/decisions.md D9): your
+harness owns the agent lifecycle and attaches to the review from the
+outside — run it in a split pane, point it at `gander mcp`, or script the
+CLI. See [`docs/harness-setup.md`](docs/harness-setup.md) for recipes.
 
 ## MCP server
 
@@ -728,7 +722,7 @@ opencode:
 ```
 
 When a review is large (thresholds under `[limits]`), the TUI nudges you
-that an agent can organize it: summon one with `@` or ask your harness to author
+that an agent harness can organize it: ask your harness to author
 durable walkthrough steps and attention regions. `Z` applies Focus in the normal
 stream, Alt-N/Alt-P follows Spotlight order, and Alt-G summarizes Skim folds.
 `gander tui --tour` is retained for scripts and maps to Focus at the first
@@ -743,7 +737,7 @@ on the next overlay save; ordering and flags remain intact. Recreate curation wi
 
 See [`docs/harness-setup.md`](docs/harness-setup.md) for full recipes:
 CLI-first automation, optional MCP registration for opencode/Claude Code/Codex,
-the split-pane workflow, and attach-to-running-server summon commands.
+and the split-pane workflow for attaching a harness to a live review.
 
 ## Architecture
 
