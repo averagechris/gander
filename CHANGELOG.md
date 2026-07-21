@@ -82,6 +82,12 @@
 
 ### Changed
 
+- Swapped the default bracket navigation pairs: `]` / `[` now jump to the
+  next/previous changed hunk and `}` / `{` to the next/previous symbol,
+  putting hunk-first review navigation on the easier unshifted keys. Restore
+  the old meaning with
+  `[keybindings] next-changed-hunk = ["}"]`, `previous-changed-hunk = ["{"]`,
+  `next-symbol = ["]"]`, `previous-symbol = ["["]`.
 - Removed the former full-screen focused-presentation phases, ephemeral overlay
   chunks/change briefs, their ACP/MCP/CLI compatibility and line-space APIs,
   and the legacy `T` key/config aliases. Durable walkthrough steps and attention
@@ -114,6 +120,18 @@
   `review/set_change_briefs`, and their unprefixed MCP names) now returns a
   migration hint pointing at durable walkthrough steps and attention regions
   instead of only a generic unknown-method error.
+- The TUI fold acknowledgement now routes its whole-file viewed effect through
+  the same shared attention viewed-effect service as CLI and MCP, so the
+  viewed-fingerprint insert, caught-up fingerprint normalization, and
+  changed-since-look freshness clearing happen in one place for every adapter,
+  guarded by a byte-identity drift test.
+- Gutter comment marks on rows whose anchor carries comments from multiple
+  channels now color by deliberate actionability priority (delegation >
+  collaboration > onboarding > note) instead of whichever comment happened to
+  be first.
+- Explicit skim-fold selectors now reject an empty or whitespace fold id
+  instead of prefix-matching (and silently bulk-acknowledging) every current
+  fold.
 - Channel inference now excludes empty changes (such as the empty working-copy
   commit on top of a reviewed stack) when reading the range's consistent jj
   author, so reviewing a teammate's work infers `collaboration` under the

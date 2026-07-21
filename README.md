@@ -433,6 +433,12 @@ See [docs/keybindings.md](docs/keybindings.md) for the complete action/context
 inventory, validation rules, aliases, modal defaults, and this example's
 collision analysis.
 
+The attention-stream defaults (`Alt-G` glance, `Alt-N`/`Alt-P` spotlight
+navigation, `Alt-Up`/`Alt-Down` salience overrides) need a terminal that
+delivers Alt. Stock macOS Terminal.app requires enabling "Use Option as Meta
+key"; docs/keybindings.md's "Alt keys and terminal compatibility" section has
+the setting and a tested non-Alt `[keybindings]` override.
+
 Print a non-interactive summary:
 
 ```sh

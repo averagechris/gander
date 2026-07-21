@@ -1544,6 +1544,44 @@ mod tests {
         KeyMap::try_from(&config).unwrap();
     }
 
+    // The exact `[keybindings]` override documented in docs/keybindings.md
+    // ("Alt keys and terminal compatibility") for terminals that never
+    // deliver Alt. If the default map grows a binding that collides with it,
+    // this fails and the docs must change with it.
+    #[test]
+    fn documented_alt_free_stream_override_is_collision_free() {
+        let config = KeybindingsConfig {
+            attention_glance: vec!["S".to_owned()],
+            spotlight_next: vec![")".to_owned()],
+            spotlight_previous: vec!["(".to_owned()],
+            attention_promote: vec!["K".to_owned()],
+            attention_demote: vec!["J".to_owned()],
+            ..KeybindingsConfig::default()
+        };
+
+        let keymap = KeyMap::try_from(&config).unwrap();
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('S'))),
+            Some(Action::AttentionGlance)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char(')'))),
+            Some(Action::SpotlightNext)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('('))),
+            Some(Action::SpotlightPrevious)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('K'))),
+            Some(Action::AttentionPromote)
+        );
+        assert_eq!(
+            keymap.action_for(&KeyEvent::from(KeyCode::Char('J'))),
+            Some(Action::AttentionDemote)
+        );
+    }
+
     #[test]
     fn effective_mode_hints_follow_overrides() {
         let config = KeybindingsConfig {

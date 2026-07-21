@@ -2327,6 +2327,37 @@ impl ReviewSession {
         self.ensure_selected_file_visible();
     }
 
+    /// Whole-file fold-acknowledge viewed effect.
+    ///
+    /// docs/attention.md requires one whole-file viewed-effect service across
+    /// every adapter. The durable `FileState` mutation — viewed fingerprint
+    /// insert plus caught-up fingerprint normalization — is performed by the
+    /// exact `attention::apply_whole_file_viewed_effects` call CLI and MCP
+    /// make, applied here to this session's persisted file records. The
+    /// in-memory session flags (viewed/caught-up plus the accumulated
+    /// `changed_since_look`/`changed_hunks` freshness clear) are then
+    /// projected through the TUI's single mark-viewed helper for the same
+    /// path set, so both effects happen in this one place and the persisted
+    /// outcome stays byte-identical to the CLI/MCP path.
+    pub(crate) fn apply_whole_file_viewed_effects(&mut self, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        let files = self
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let mut state = ReviewState {
+            files: std::mem::take(&mut self.persisted_files),
+            ..ReviewState::default()
+        };
+        crate::attention::apply_whole_file_viewed_effects(&mut state, &files, paths);
+        self.persisted_files = state.files;
+        let viewed = paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        self.mark_files_viewed_where(|file| viewed.contains(file.path.as_str()));
+    }
+
     /// Incremental re-review against a prior snapshot of the same target:
     /// files whose diff fingerprint is unchanged are marked caught-up unless
     /// already explicitly viewed; files

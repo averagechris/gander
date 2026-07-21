@@ -1203,14 +1203,9 @@ impl ReviewSession {
         let index = self.active_durable_session_index()?;
         let outcome =
             attention::acknowledge_skim_folds(&mut self.sessions[index], &files, selection).ok()?;
-        if !outcome.whole_files_viewed.is_empty() {
-            let whole_files = outcome
-                .whole_files_viewed
-                .iter()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            self.mark_files_viewed_where(|file| whole_files.contains(&file.path));
-        }
+        // Same shared whole-file viewed-effect service as CLI/MCP; see
+        // `ReviewSession::apply_whole_file_viewed_effects`.
+        self.apply_whole_file_viewed_effects(&outcome.whole_files_viewed);
         Some(outcome)
     }
 
@@ -2213,6 +2208,68 @@ mod tests {
         assert!(!session.files[1].viewed);
         let state = session.to_state();
         assert!(state.files["generated.rs"].is_viewed_fingerprint(&files[0].fingerprint));
+    }
+
+    #[test]
+    fn tui_fold_ack_file_state_mutation_is_byte_identical_to_shared_service() {
+        let mut session = session_with_diff(
+            "diff --git a/generated.rs b/generated.rs\n--- a/generated.rs\n+++ b/generated.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        attach_review(
+            &mut session,
+            crate::state::ReviewSession {
+                id: "drift-guard".into(),
+                attention_regions: vec![AttentionRegion {
+                    target: target_for_diff(&files, "generated.rs", None, None).unwrap(),
+                    salience: Salience::Skim,
+                    rationale: Some("generated churn".into()),
+                    source: SalienceSource::Heuristic,
+                }],
+                ..Default::default()
+            },
+        );
+
+        // Reference path: acknowledge on a snapshot exactly the way CLI and
+        // MCP do, through the shared attention service functions.
+        let mut expected = session.to_state();
+        let outcome = crate::attention::acknowledge_skim_folds(
+            &mut expected.sessions[0],
+            &files,
+            &attention::SkimSelection::AllCurrent,
+        )
+        .unwrap();
+        assert_eq!(outcome.whole_files_viewed, ["generated.rs"]);
+        crate::attention::apply_whole_file_viewed_effects(
+            &mut expected,
+            &files,
+            &outcome.whole_files_viewed,
+        );
+
+        // TUI path: acknowledge the selected fold in the stream.
+        session.stream_cursor = session
+            .review_stream()
+            .rows
+            .iter()
+            .position(|row| matches!(row.kind, StreamRowKind::SkimFold(_)))
+            .unwrap();
+        assert_eq!(
+            session.acknowledge_selected_skim_fold(),
+            SkimAcknowledgeResult::Acknowledged
+        );
+
+        // Progress timestamps legitimately differ; the persisted per-file
+        // viewed/caught-up records must not.
+        assert_eq!(session.to_state().files, expected.files);
+        assert_eq!(
+            session.persisted_files.get("generated.rs"),
+            expected.files.get("generated.rs"),
+            "the service mutation is applied to the TUI's persisted record directly"
+        );
     }
 
     #[test]

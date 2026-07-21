@@ -102,13 +102,20 @@ pub enum SkimSelection {
 
 impl SkimSelection {
     fn validate(&self) -> Result<()> {
-        let Self::Target {
-            path,
-            line,
-            end_line,
-        } = self
-        else {
-            return Ok(());
+        let (path, line, end_line) = match self {
+            Self::AllCurrent => return Ok(()),
+            // An empty id would prefix-match every fold through the
+            // `starts_with` selector below, silently turning an explicit
+            // single-fold request into a bulk acknowledgement.
+            Self::StableId(id) if id.trim().is_empty() => {
+                return Err(eyre!("skim fold id must not be empty"));
+            }
+            Self::StableId(_) => return Ok(()),
+            Self::Target {
+                path,
+                line,
+                end_line,
+            } => (path, line, end_line),
         };
         if path.trim().is_empty() {
             return Err(eyre!("skim target path must not be empty"));
@@ -480,8 +487,13 @@ pub fn acknowledge_skim_folds(
 }
 
 /// Apply the conservative whole-file side effect returned by skim
-/// acknowledgement. CLI and MCP both use this service; partial folds pass an
-/// empty path list and therefore cannot mark a file viewed.
+/// acknowledgement. This is the single whole-file viewed-effect service shared
+/// by every adapter (docs/attention.md): CLI and MCP call it against the
+/// persisted state directly, and the TUI routes its fold acknowledgement
+/// through the same call before projecting the outcome onto in-memory session
+/// flags. Partial folds pass an empty path list and therefore cannot mark a
+/// file viewed. Marking viewed also normalizes the caught-up fingerprint for
+/// the current diff content.
 pub fn apply_whole_file_viewed_effects(
     state: &mut ReviewState,
     files: &[FileDiff],
@@ -1647,6 +1659,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty.matched, 0, "explicit bulk on an empty set is a no-op");
+    }
+
+    #[test]
+    fn empty_stable_id_selector_is_rejected_not_prefix_matched_against_every_fold() {
+        let files = files();
+        let mut session = ReviewSession {
+            attention_regions: vec![region(
+                &files,
+                SalienceSource::Human,
+                Salience::Skim,
+                None,
+                None,
+            )],
+            ..Default::default()
+        };
+        for id in ["", "   "] {
+            let error = acknowledge_skim_folds(
+                &mut session,
+                &files,
+                &SkimSelection::StableId(id.to_owned()),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("skim fold id must not be empty"), "{error}");
+        }
+        assert!(
+            session.attention_progress.is_empty(),
+            "an empty id must not acknowledge anything"
+        );
     }
 
     #[test]

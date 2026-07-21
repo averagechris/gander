@@ -164,6 +164,37 @@ grapheme, so combining text and emoji clusters are never split.
 | `glance-peek` | Space | attention glance; opens the selected current fold in the stream and closes |
 | `glance-acknowledge` / `glance-acknowledge-all` | `a` / `A` | attention glance; stale entries remain inert |
 
+## Alt keys and terminal compatibility
+
+The stream attention defaults are Alt chords: `Alt-G` (`attention-glance`),
+`Alt-N` / `Alt-P` (`spotlight-next` / `spotlight-previous`), and `Alt-Up` /
+`Alt-Down` (`attention-promote` / `attention-demote`). `Alt-Left` /
+`Alt-Right` pane sizing and the `hunk` preset's Alt-H/J/K/L cluster use Alt
+too. Not every terminal delivers these: stock macOS Terminal.app treats
+Option as a compose key unless **Settings → Profiles → Keyboard → "Use Option
+as Meta key"** is enabled, and some other emulators or multiplexer
+configurations likewise swallow the Alt/Esc-prefix. If an Alt default does
+nothing, fix the terminal setting or rebind the five attention actions to
+plain keys.
+
+This override is collision-free against the complete default map (a keymap
+unit test loads it exactly as written):
+
+```toml
+[keybindings]
+attention-glance = ["S"]
+spotlight-next = [")"]
+spotlight-previous = ["("]
+attention-promote = ["K"]
+attention-demote = ["J"]
+```
+
+`S` is distinct from the lowercase `s` comment-state cycle, `(` and `)` are
+unbound punctuation echoing the `[`/`]` and `{`/`}` navigation pairs, and `K`
+/ `J` (promote up, demote down) are free in the normal diff context — the
+walkthrough-list `J`/`K` reorder keys and the comment-list `K` kind cycle
+live in disjoint popup contexts.
+
 ## Collision-free Colemak Mod-DH override
 
 This is a complete override for every binding affected by making Colemak-DH

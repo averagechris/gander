@@ -1305,12 +1305,29 @@ fn render_row_in_range(session: &ReviewSession, row: usize) -> bool {
     }
 }
 
+/// Gutter mark color for a commented row. When comments from more than one
+/// channel share the row's anchor, the most actionable channel deliberately
+/// wins: delegation > collaboration > onboarding > note. Delegation marks
+/// agent work to pick up, collaboration marks team-facing threads, onboarding
+/// is explanatory narration, and note is private — so the mark surfaces the
+/// strongest call to action rather than whichever comment happens to sort
+/// first.
 fn row_comment_channel(session: &ReviewSession, row: &DiffRow) -> Option<Channel> {
     let anchor = row.anchor.as_ref()?;
     session
         .comments_for_diff_row_anchor_details(anchor)
-        .first()
+        .iter()
         .map(|comment| comment.channel)
+        .max_by_key(|channel| gutter_channel_priority(*channel))
+}
+
+fn gutter_channel_priority(channel: Channel) -> u8 {
+    match channel {
+        Channel::Delegation => 3,
+        Channel::Collaboration => 2,
+        Channel::Onboarding => 1,
+        Channel::Note => 0,
+    }
 }
 
 fn append_comment_lines(
@@ -5533,6 +5550,52 @@ diff --git a/README.md b/README.md
                 render_tui_text(&session, &Mode::Normal, 100, 36)
             )
         );
+    }
+
+    #[test]
+    fn mixed_channel_gutter_mark_prefers_most_actionable_channel() {
+        let raw = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let commented_channel = |session: &ReviewSession| {
+            session
+                .diff_rows_for_selected_file()
+                .iter()
+                .find_map(|row| row_comment_channel(session, row))
+        };
+
+        // Ascending actionability: each more actionable comment takes over.
+        let mut session = snapshot_session(raw);
+        session.toggle_focus();
+        let row = session
+            .diff_rows_for_selected_file()
+            .iter()
+            .position(|row| row.new_lineno == Some(1))
+            .unwrap();
+        session.select_diff_row(row);
+        for channel in [
+            Channel::Note,
+            Channel::Onboarding,
+            Channel::Collaboration,
+            Channel::Delegation,
+        ] {
+            session.add_comment_in_channel(format!("{channel:?}"), channel);
+            assert_eq!(commented_channel(&session), Some(channel));
+        }
+
+        // Descending insertion order resolves identically: deliberate
+        // delegation > collaboration > onboarding > note priority decides the
+        // mark, never whichever comment happens to be first on the anchor.
+        let mut session = snapshot_session(raw);
+        session.toggle_focus();
+        session.select_diff_row(row);
+        for channel in [
+            Channel::Delegation,
+            Channel::Collaboration,
+            Channel::Onboarding,
+            Channel::Note,
+        ] {
+            session.add_comment_in_channel(format!("{channel:?}"), channel);
+            assert_eq!(commented_channel(&session), Some(Channel::Delegation));
+        }
     }
 
     #[test]
