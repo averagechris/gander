@@ -92,6 +92,19 @@
   deterministic id preservation, target normalization, and exact stack chapter
   validation, with atomic rejection of duplicate explicit or final step ids.
 
+### Fixed
+
+- Channel inference now excludes empty changes (such as the empty working-copy
+  commit on top of a reviewed stack) when reading the range's consistent jj
+  author, so reviewing a teammate's work infers `collaboration` under the
+  default `trunk()..@` target instead of silently falling back to `note`.
+- docs/theme.md now qualifies the OSC 11 containment claim precisely: leaked
+  payload characters cannot mutate the code workspace *with the default
+  keybindings*, and rebinding `summon-agent` (or both jj-helper popup keys)
+  onto payload-alphabet characters forfeits that property. Also documents
+  that replies later than the 8 s guard window dispatch ungated and that the
+  armed-window key-repeat delay can reach the 64-event cap, not one poll tick.
+
 ## v0.7.2 - 2026-07-12
 
 ### Fixed

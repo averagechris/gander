@@ -274,7 +274,11 @@ impl JjCommand {
             .arg("--ignore-working-copy")
             .arg("log")
             .arg("-r")
-            .arg(format!("{}..{}", target.base, target.rev))
+            // Exclude empty changes (for example the ubiquitous empty
+            // working-copy commit sitting on top of a reviewed stack) so
+            // channel inference sees only the changes that carry the reviewed
+            // work, per docs/annotations.md rule 4 ("every non-empty change").
+            .arg(format!("({}..{}) ~ empty()", target.base, target.rev))
             .arg("--no-graph")
             .arg("--color=never")
             .arg("--no-pager")
@@ -744,7 +748,11 @@ mod tests {
             );
             let args = fs::read_to_string(&args_path).unwrap();
             assert!(args.starts_with("--ignore-working-copy\n"));
-            assert!(args.contains("-r\nmain..feature\n"));
+            assert!(
+                args.contains("-r\n(main..feature) ~ empty()\n"),
+                "author inference must exclude empty changes such as the \
+                 working-copy commit: {args:?}"
+            );
             assert!(args.contains("author.name()"));
         }
     }
@@ -806,7 +814,7 @@ mod tests {
         JjCommand::target_author(&script, dir.path(), &target).unwrap();
         let args = fs::read_to_string(&args_path).unwrap();
         assert!(args.starts_with("--ignore-working-copy\n"));
-        assert!(args.contains("-r\ntrunk()..@\n"));
+        assert!(args.contains("-r\n(trunk()..@) ~ empty()\n"));
         assert!(args.contains("author.name()"));
     }
 

@@ -81,8 +81,15 @@ open the terminal.
   were one ever to occur, is limited to the payload alphabet
   (hex/`rgb:/;#]` characters); those characters can trigger configured
   commands and mutate durable local review state (for example mark viewed,
-  accept a draft, or delete a walkthrough), but cannot mutate the code
-  workspace.
+  accept a draft, or delete a walkthrough). **With the default keybindings**
+  leaked characters cannot mutate the code workspace: the only actions that
+  shell out (`summon-agent`, default `@`; the jj helper popup, default `!`)
+  sit outside the payload alphabet, and the jj helper confirm requires
+  Enter, which a payload can never contain. Users who rebind `summon-agent`
+  — a confirmation-free shell-out to the configured `[agent] command` — or
+  both `jj-helpers` and `popup-select` onto payload-alphabet keys
+  (hex digits, `r`, `g`, `i`, `:`, `/`, `;`, `#`, `]`) forfeit that
+  property and should prefer keys outside the alphabet.
 - Fallback is always the historical dark look.
 
 ## Documented deltas from the original safety requirements
@@ -108,16 +115,24 @@ input grammar). Rather than pursue technical purity, we accept these
    byte-level fragmentation; contiguous tails (the realistic case) are
    fully contained and PTY-tested.
 3. **Armed-window input quirks (≤8 s after a failed query only).**
-   Payload-alphabet keystrokes can be delayed by up to one 150 ms poll
-   tick; input that byte-for-byte forms an OSC payload terminated by
-   BEL/`Alt+\` is dropped; a user literally typing `Alt+']' 1 1 ;` loses
-   those keystrokes.
-4. **Split-after-ESC misclassification (upstream).** A reply fragmented
+   Payload-alphabet keystrokes are normally delayed by one 150 ms poll
+   tick; sustained payload-alphabet key repeat that never goes idle can
+   hold up to the 64-event cap (a couple of seconds at typical repeat
+   rates) before the overflow flush. Input that byte-for-byte forms an OSC
+   payload terminated by BEL/`Alt+\` is dropped; a user literally typing
+   `Alt+']' 1 1 ;` loses those keystrokes.
+4. **Replies later than the 8 s window dispatch ungated.** Once the guard
+   window expires it disarms; a pathologically late reply tail then reaches
+   the key handler unfiltered. Exposure is still confined to the payload
+   alphabet plus `Alt+']'` (unbound by default) and `Ctrl+G`
+   (cancel-range-comment), and requires a terminal that answers an OSC
+   query more than eight seconds late.
+5. **Split-after-ESC misclassification (upstream).** A reply fragmented
    immediately after its leading ESC makes the query library report
    "unsupported" (safe dark fallback). The guard stays armed for this
    outcome, so the late tail is contained (PTY-tested), but auto-detection
    yields dark instead of the true background color.
-5. **Query-window memory is time-bounded, not byte-capped.** An adversarial
+6. **Query-window memory is time-bounded, not byte-capped.** An adversarial
    terminal can make the query buffer input for up to its 1 s budget. The
    post-timeout guard side is capped at 64 held events.
 
