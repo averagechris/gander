@@ -820,10 +820,22 @@ impl KeybindingsConfig {
             cycle_comment_channel: keys(["tab"]),
         };
         if preset == KeybindingPresetConfig::Hunk {
+            config.scroll_down = keys(["space", "f", "pagedown", "d"]);
+            config.scroll_up = keys(["b", "pageup", "u"]);
+            config.target_chooser = keys(["alt-b"]);
+            config.next_comment = keys(["}", "m"]);
+            config.previous_comment = keys(["{", "M"]);
+            config.next_symbol = keys(["alt-]"]);
+            config.previous_symbol = keys(["alt-["]);
             config.next_changed_hunk = keys(["alt-j", "]"]);
             config.previous_changed_hunk = keys(["alt-k", "["]);
             config.next_file = keys(["alt-l", "."]);
             config.previous_file = keys(["alt-h", ","]);
+            config.cycle_viewed_filter = keys(["alt-f"]);
+            config.toggle_fold = keys([]);
+            config.toggle_diff_wrap = keys(["w"]);
+            config.toggle_file_pane = keys(["s"]);
+            config.cycle_comment_state = keys(["S"]);
         }
         config
     }

@@ -1686,6 +1686,7 @@ fn run() -> color_eyre::Result<()> {
             ) = mcp_ingredients.expect("captured above for the mcp command");
             let session_repo = repo.clone();
             let initial_comment_state = config.comments.initial_state.into();
+            let default_comment_channel = config.comments.default_channel;
             let agent_identity = config.agent_identity();
             let factory_config = config.clone();
             crate::mcp::run(
@@ -1715,6 +1716,7 @@ fn run() -> color_eyre::Result<()> {
                     generated_policy,
                     ignore_globs,
                     initial_comment_state,
+                    default_comment_channel,
                     agent_identity,
                 },
             )?;

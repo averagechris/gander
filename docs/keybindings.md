@@ -23,9 +23,25 @@ the layer that selected the final preset; each explicit array replaces that
 action's whole list. Immutable safety fallbacks are appended after the
 effective map and still participate in collision validation.
 
-The `hunk` preset keeps the Gander punctuation bindings and adds an Alt
-navigation cluster: Alt-J / Alt-K move to the next / previous changed hunk,
-while Alt-L / Alt-H move to the next / previous file.
+The `hunk` preset adopts hunkdiff's less/vim-style review keys where Gander has
+equivalent actions, while keeping Gander meanings for hunk features that do not
+exist here (layouts, line numbers, theme selection, editor launch, metadata).
+The complete delta from the default map is listed below.
+
+| Field | `hunk` preset | Notes |
+| --- | --- | --- |
+| `target-chooser` | Alt-B | Home for the action displaced from `b`. |
+| `scroll-down` | Space, `f`, PageDown, `d` | Hunk paging plus Gander `d`; Space/`f` displace default fold/filter keys. |
+| `scroll-up` | `b`, PageUp, `u` | Hunk paging plus Gander `u`; `b` displaces target chooser. |
+| `next-changed-hunk` / `previous-changed-hunk` | Alt-J, `]` / Alt-K, `[` | Keeps Gander punctuation and adds hunk's Alt/Vim cluster. |
+| `next-file` / `previous-file` | Alt-L, `.` / Alt-H, `,` | Keeps Gander punctuation and adds hunk's Alt/Vim cluster. |
+| `next-comment` / `previous-comment` | `}`, `m` / `{`, `M` | Hunk comment navigation; Gander `m`/`M` homes remain. |
+| `next-symbol` / `previous-symbol` | Alt-] / Alt-[ | Symbols move off `{`/`}` to make room for comments. |
+| `toggle-file-pane` | `s` | Hunk sidebar key; displaces comment-state cycling. |
+| `toggle-diff-wrap` | `w` | Hunk wrap key; displaces Gander's file-pane toggle, now on `s`. |
+| `cycle-comment-state` | `S` | Home for the action displaced from `s`. |
+| `cycle-viewed-filter` | Alt-F | Home for the action displaced from `f`. |
+| `toggle-fold` | unbound | Space becomes page-down. Left/Right/Enter fold/view bindings remain, which is sufficient for tree folding. |
 
 ## Key syntax and safety bindings
 
@@ -96,14 +112,14 @@ remains effective.
 | `toggle-focus` | Tab | normal |
 | `diff-top` / `diff-bottom` | `g` / `G` | normal diff |
 | `compare-trunk` / `compare-parent` | `t` / `p` | normal |
-| `target-chooser` / `revset-input` | `b` / `R` | normal |
+| `target-chooser` / `revset-input` | `b` / `R` (`hunk` target chooser: Alt-B) | normal |
 | `stack-next` / `stack-previous` | `>` / `<` | normal |
 | `operation-picker` / `jj-helpers` | `I` / `!` | normal |
 | `next-unviewed` / `previous-unviewed` | `n` / `N` | normal |
-| `next-comment` / `previous-comment` | `m` / `M` | normal |
+| `next-comment` / `previous-comment` | `m` / `M` (`hunk`: `}`, `m` / `{`, `M`) | normal |
 | `file-search` | `/` | normal |
 | `symbol-outline` | `o` | normal diff |
-| `next-symbol` / `previous-symbol` | `}` / `{` | normal diff |
+| `next-symbol` / `previous-symbol` | `}` / `{` (`hunk`: Alt-] / Alt-[) | normal diff |
 | `next-changed-hunk` / `previous-changed-hunk` | `]` / `[` (`hunk`: Alt-J, `]` / Alt-K, `[`) | normal diff |
 | `next-file` / `previous-file` | `.` / `,` (`hunk`: Alt-L, `.` / Alt-H, `,`) | normal |
 | `spotlight-next` / `spotlight-previous` | Alt-N / Alt-P | normal |
@@ -112,17 +128,17 @@ remains effective.
 
 | Field | Default | Effective context |
 | --- | --- | --- |
-| `scroll-down` / `scroll-up` | `d`, PageDown / `u`, PageUp | normal diff |
+| `scroll-down` / `scroll-up` | `d`, PageDown / `u`, PageUp (`hunk`: Space, `f`, PageDown, `d` / `b`, PageUp, `u`) | normal diff |
 | `scroll-diff-left` / `scroll-diff-right` | Shift-Left / Shift-Right | normal diff |
 | `mark-viewed` / `toggle-viewed` / `mark-all-viewed` | Enter / `v` / `a` | normal (`a` only acknowledges a selected skim fold in stream diff context; ordinary stream rows no-op) |
-| `toggle-generated` / `cycle-viewed-filter` | `h` / `f` | normal |
-| `toggle-fold` | Space | normal files; selected skim fold in normal diff |
+| `toggle-generated` / `cycle-viewed-filter` | `h` / `f` (`hunk`: Alt-F) | normal |
+| `toggle-fold` | Space (`hunk`: unbound; Left/Right/Enter tree controls remain) | normal files; selected skim fold in normal diff |
 | `collapse-fold` / `expand-fold` | Left / Right | normal files |
 | `toggle-context-fold` | `z` | normal diff |
 | `expand-context` / `expand-context-all` / `collapse-context` | `+` / `=` / `-` | normal diff |
 | `view-options` | `V` | normal |
-| `toggle-word-highlight` / `toggle-line-background` / `toggle-gutter-bar` / `toggle-diff-wrap` | unbound | normal diff |
-| `toggle-file-pane` / `toggle-diff-view` | `w` / `\|` | normal / normal diff |
+| `toggle-word-highlight` / `toggle-line-background` / `toggle-gutter-bar` / `toggle-diff-wrap` | unbound (`hunk` wrap: `w`) | normal diff |
+| `toggle-file-pane` / `toggle-diff-view` | `w` / `\|` (`hunk` file pane: `s`) | normal / normal diff |
 | `widen-file-pane` / `narrow-file-pane` | Alt-Right / Alt-Left | normal diff |
 | `attention-promote` / `attention-demote` | Alt-Up / Alt-Down | normal diff |
 | `attention-focus` / `attention-glance` | `Z` / Alt-G | normal; Focus is an ephemeral preset, glance is a popup |
@@ -138,7 +154,7 @@ remains effective.
 | --- | --- | --- |
 | `range-comment` / `cancel-range-comment` | `r` / Ctrl-G, Esc | normal diff / normal |
 | `comment` | `c` | normal |
-| `cycle-comment-state` / `edit-comment` / `delete-comment` | `s` / `e` / `x` | normal and comment list |
+| `cycle-comment-state` / `edit-comment` / `delete-comment` | `s` / `e` / `x` (`hunk` cycle state: `S`) | normal and comment list |
 | `comment-list` | `C` | normal |
 | `comment-list-new-general` | `n` | comment list; the complete gesture is `C`, then `n` |
 | `comment-list-ready` | `R` | comment list |

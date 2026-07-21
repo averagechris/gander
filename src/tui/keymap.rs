@@ -1048,6 +1048,35 @@ mod tests {
             ),
             Some(Action::NextFile)
         );
+        assert_eq!(
+            keymap.action_for_context(KeyContext::NormalFiles, &KeyEvent::from(KeyCode::Left)),
+            Some(Action::CollapseFold)
+        );
+        assert_eq!(
+            keymap.action_for_context(KeyContext::NormalFiles, &KeyEvent::from(KeyCode::Right)),
+            Some(Action::ExpandFold)
+        );
+    }
+
+    #[test]
+    fn hunk_preset_binding_set_is_intentional() {
+        let config = KeybindingsConfig::preset(crate::config::KeybindingPresetConfig::Hunk);
+        assert_eq!(config.target_chooser, ["alt-b"]);
+        assert_eq!(config.scroll_down, ["space", "f", "pagedown", "d"]);
+        assert_eq!(config.scroll_up, ["b", "pageup", "u"]);
+        assert_eq!(config.next_changed_hunk, ["alt-j", "]"]);
+        assert_eq!(config.previous_changed_hunk, ["alt-k", "["]);
+        assert_eq!(config.next_file, ["alt-l", "."]);
+        assert_eq!(config.previous_file, ["alt-h", ","]);
+        assert_eq!(config.next_comment, ["}", "m"]);
+        assert_eq!(config.previous_comment, ["{", "M"]);
+        assert_eq!(config.next_symbol, ["alt-]"]);
+        assert_eq!(config.previous_symbol, ["alt-["]);
+        assert_eq!(config.toggle_file_pane, ["s"]);
+        assert_eq!(config.toggle_diff_wrap, ["w"]);
+        assert_eq!(config.cycle_viewed_filter, ["alt-f"]);
+        assert_eq!(config.cycle_comment_state, ["S"]);
+        assert!(config.toggle_fold.is_empty());
     }
 
     #[test]

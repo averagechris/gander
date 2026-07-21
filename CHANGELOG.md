@@ -88,6 +88,9 @@
 
 ### Changed
 
+- The `hunk` keybinding preset now covers hunkdiff paging, sidebar, wrap, and
+  comment-navigation conventions while preserving displaced Gander actions on
+  `S`, Alt-F, Alt-[, and Alt-].
 - Removed agent summoning: gander never spawns or owns agent processes
   (docs/decisions.md D9); harnesses run agents themselves and drive gander
   through the CLI, MCP, or ACP. The `@`/`summon-agent` action, the
@@ -123,6 +126,9 @@
 
 ### Fixed
 
+- MCP `comment_add` now honors `[comments].default-channel` between an explicit
+  `channel` parameter and the state-derived fallback, matching CLI
+  `comments add` channel and todo-coercion semantics.
 - `comments ready --all-drafts` (CLI, TUI, and the MCP bulk mode) now readies
   only human-authored drafts. Agent-authored onboarding drafts awaiting human
   triage are left untouched and reported as skipped instead of being silently

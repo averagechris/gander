@@ -2,7 +2,7 @@
 source: src/tui/render.rs
 expression: rendered
 ---
- ? help  alt-j hunk  alt-l file  c comment  V view  Z focus  alt-g glance  w pane  q quit
+ ? help  alt-j hunk  alt-l file  c comment  V view  Z focus  alt-g glance  s pane  q quit
 ┌files──────────────────────────┐┌diff───────────────────────────────────────────────────────────────────────┐
 │• mod     a.rs                 ││a.rs  +1 -1                                                                │
 │                               ││@@ -1 +1 @@                                                                │
@@ -21,4 +21,4 @@ expression: rendered
 │                               ││                                                                           │
 └───────────────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
 1 files (0/1 viewed, 0 generated/noisy), +1/-1, 0 comments · following @
-trunk()..@ · focus files · j/k move · space fold · f filter · / search · n/N unviewed · enter viewed · tab dif
+trunk()..@ · focus files · j/k move · ? fold · alt-f filter · / search · n/N unviewed · enter viewed · tab dif

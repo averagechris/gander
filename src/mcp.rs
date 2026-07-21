@@ -52,6 +52,7 @@ pub struct GanderMcp {
     generated_policy: GeneratedPolicy,
     ignore_globs: Vec<String>,
     initial_comment_state: CommentState,
+    default_comment_channel: Option<Channel>,
     agent_identity: Identity,
     snapshot: mpsc::Sender<SnapshotRequest>,
     tool_router: ToolRouter<Self>,
@@ -68,6 +69,7 @@ pub struct GanderMcpParams {
     pub generated_policy: GeneratedPolicy,
     pub ignore_globs: Vec<String>,
     pub initial_comment_state: CommentState,
+    pub default_comment_channel: Option<Channel>,
     pub agent_identity: Identity,
 }
 
@@ -431,6 +433,7 @@ impl GanderMcp {
             generated_policy: params.generated_policy,
             ignore_globs: params.ignore_globs,
             initial_comment_state: params.initial_comment_state,
+            default_comment_channel: params.default_comment_channel,
             agent_identity: params.agent_identity,
             snapshot: sender,
             tool_router: Self::tool_router(),
@@ -712,7 +715,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review comment. Equivalent to `gander comments add` (including `--channel`), except the CLI-only `[comments].default-channel` config fallback is not consulted; external additions merge into a running TUI."
+        description = "Add a durable review comment. Equivalent to `gander comments add`, including `--channel`, `[comments].default-channel`, state-derived channel fallback, todo coercion, and live TUI merging."
     )]
     fn comment_add(
         &self,
@@ -754,10 +757,10 @@ impl GanderMcp {
                 .state
                 .map(Into::into)
                 .unwrap_or(this.initial_comment_state);
-            // Same channel semantics as CLI `comments add --channel`: an
-            // explicit channel wins, otherwise the state-derived default;
-            // a non-actionable channel demotes a todo to a private draft.
-            let channel = params.channel.unwrap_or({
+            // Same channel semantics as CLI `comments add`: an explicit
+            // channel wins, then `[comments].default-channel`, then the
+            // state-derived default; a non-actionable channel demotes a todo.
+            let channel = params.channel.or(this.default_comment_channel).unwrap_or({
                 if initial_state == CommentState::Todo {
                     Channel::Delegation
                 } else {
@@ -1997,6 +2000,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity::agent(),
             },
         )
@@ -2072,6 +2076,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity::agent(),
             },
         )
@@ -2534,6 +2539,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity {
                     kind: crate::state::AuthorKind::Agent,
                     name: "MCP Bot".into(),
@@ -2610,6 +2616,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity::agent(),
             },
         )
@@ -2842,6 +2849,34 @@ mod tests {
         assert_eq!(state.comments[0].state, CommentState::Draft);
         assert_eq!(state.comments[1].channel, Channel::Collaboration);
         assert_eq!(state.comments[1].state, CommentState::Todo);
+    }
+
+    #[test]
+    fn comment_add_omitted_channel_uses_configured_default_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = server(dir.path());
+        server.default_comment_channel = Some(Channel::Collaboration);
+
+        let added = result_json(
+            &server
+                .comment_add(Parameters(CommentAddParams {
+                    path: Some("src/app.rs".into()),
+                    general: None,
+                    line: Some(1),
+                    end_line: None,
+                    body: "use configured default".to_owned(),
+                    kind: None,
+                    action: None,
+                    state: None,
+                    channel: None,
+                }))
+                .unwrap(),
+        );
+
+        assert_eq!(added["channel"], "collaboration");
+        assert_eq!(added["state"], "todo");
+        let state = ReviewState::load_or_default(&server.state_path).unwrap();
+        assert_eq!(state.comments[0].channel, Channel::Collaboration);
     }
 
     #[test]
@@ -3411,6 +3446,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity::agent(),
             },
         )
@@ -3498,6 +3534,7 @@ mod tests {
                 generated_policy: GeneratedPolicy::default(),
                 ignore_globs: Vec::new(),
                 initial_comment_state: CommentState::Todo,
+                default_comment_channel: None,
                 agent_identity: Identity::agent(),
             },
         )
