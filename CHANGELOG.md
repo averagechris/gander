@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Changed diff-pane Enter to a configurable guided review advance: it
+  acknowledges a current skim fold, then moves without wrapping to the next
+  Spotlight while preserving Focus and leaving ordinary files unviewed.
 
 ## v0.8.0 - 2026-07-22
 

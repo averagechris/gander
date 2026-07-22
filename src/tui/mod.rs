@@ -2344,6 +2344,7 @@ fn handle_normal_action(
             | Action::PreviousFile
             | Action::SpotlightNext
             | Action::SpotlightPrevious
+            | Action::AdvanceReview
             | Action::AttentionPromote
             | Action::AttentionDemote
             | Action::MarkViewed
@@ -2374,6 +2375,7 @@ fn handle_normal_action(
                 | Action::MarkViewed
                 | Action::SpotlightNext
                 | Action::SpotlightPrevious
+                | Action::AdvanceReview
                 | Action::AttentionPromote
                 | Action::AttentionDemote
         ) || matches!(action, Action::MoveDown | Action::MoveUp));
@@ -2586,6 +2588,24 @@ fn handle_normal_action(
                 tui_state
                     .diff_viewport
                     .place_cursor(session, current_diff_inner(session, tui_state));
+            }
+        }
+        Action::AdvanceReview => {
+            if session.stream_mode && session.focus == Focus::Diff {
+                let _ = session.acknowledge_selected_skim_fold();
+            }
+            if let Some((step_id, part)) = session.advance_review_spotlight() {
+                if tui_state.attention_focus.is_some() {
+                    repin_exact_spotlight_narration(session, tui_state, &step_id, part);
+                }
+                tui_state
+                    .diff_viewport
+                    .place_cursor(session, current_diff_inner(session, tui_state));
+            } else {
+                tui_state.notice = Some(UiNotice {
+                    level: UiNoticeLevel::Info,
+                    message: "review tour complete".to_owned(),
+                });
             }
         }
         Action::AttentionPromote => {
@@ -5590,14 +5610,39 @@ mod tests {
         };
         tui_state.enter_attention_focus(&mut session);
 
+        assert!(!session.files[0].viewed);
         handle_normal_action(
-            Action::SpotlightNext,
+            Action::AdvanceReview,
             &mut session,
             &mut mode,
             &loader,
             &mut tui_state,
         )
         .unwrap();
+        assert_eq!(
+            tui_state.diff_viewport.selected_annotation_source(&session),
+            Some(annotation_card::AnnotationSource::Walkthrough {
+                step_id: "second-card".into(),
+                part: 0,
+            })
+        );
+        assert!(!session.files[0].viewed);
+        assert!(tui_state.attention_focus.is_some());
+        handle_normal_action(
+            Action::AdvanceReview,
+            &mut session,
+            &mut mode,
+            &loader,
+            &mut tui_state,
+        )
+        .unwrap();
+        assert_eq!(
+            tui_state
+                .notice
+                .as_ref()
+                .map(|notice| notice.message.as_str()),
+            Some("review tour complete")
+        );
         assert_eq!(
             tui_state.diff_viewport.selected_annotation_source(&session),
             Some(annotation_card::AnnotationSource::Walkthrough {

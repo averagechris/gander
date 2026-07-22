@@ -1263,6 +1263,43 @@ impl ReviewSession {
         self.jump_to_spotlight_index(next)
     }
 
+    /// Advance through Spotlight order without wrapping at the end of the tour.
+    pub(crate) fn advance_review_spotlight(&mut self) -> Option<(String, usize)> {
+        let stream = self.review_stream();
+        let current_target = stream
+            .rows
+            .get(self.stream_cursor)
+            .and_then(|row| row.anchor.as_ref())
+            .and_then(target_from_anchor);
+        let current_index = current_target.and_then(|target| {
+            stream.spotlights.iter().position(|candidate| {
+                coverage_intersects_target(&candidate.progress_target, &target)
+            })
+        });
+        let next = current_index.map_or_else(
+            || {
+                stream
+                    .spotlights
+                    .iter()
+                    .position(|spotlight| {
+                        stream.rows.iter().enumerate().any(|(row_index, row)| {
+                            row_index > self.stream_cursor
+                                && row.anchor.as_ref().is_some_and(|anchor| {
+                                    target_overlaps_anchor(&spotlight.target, anchor)
+                                })
+                        })
+                    })
+                    .unwrap_or(stream.spotlights.len())
+            },
+            |index| index + 1,
+        );
+        if next >= stream.spotlights.len() {
+            return None;
+        }
+        drop(stream);
+        self.jump_to_spotlight_index(next)
+    }
+
     /// Jump to one zero-based durable/effective Spotlight in stream order.
     /// Presenter and static tour adapters use the same normal-stream landing
     /// path as Alt-N/Alt-P; no separate presentation coordinate system exists.

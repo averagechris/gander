@@ -123,6 +123,7 @@ remains effective.
 | `next-changed-hunk` / `previous-changed-hunk` | `]` / `[` (`hunk`: Alt-J, `]` / Alt-K, `[`) | normal diff |
 | `next-file` / `previous-file` | `.` / `,` (`hunk`: Alt-L, `.` / Alt-H, `,`) | normal |
 | `spotlight-next` / `spotlight-previous` | Alt-N / Alt-P | normal |
+| `advance-review` | Enter | normal diff |
 
 ### Review, diff, and agent actions
 
@@ -130,7 +131,7 @@ remains effective.
 | --- | --- | --- |
 | `scroll-down` / `scroll-up` | `d`, PageDown / `u`, PageUp (`hunk`: Space, `f`, PageDown, `d` / `b`, PageUp, `u`) | normal diff |
 | `scroll-diff-left` / `scroll-diff-right` | Shift-Left / Shift-Right | normal diff |
-| `mark-viewed` / `toggle-viewed` / `mark-all-viewed` | Enter / `v` / `a` | normal (`a` only acknowledges a selected skim fold in stream diff context; ordinary stream rows no-op) |
+| `mark-viewed` / `toggle-viewed` / `mark-all-viewed` | Enter / `v` / `a` | normal files / normal / normal (`a` only acknowledges a selected skim fold in stream diff context; ordinary stream rows no-op) |
 | `toggle-generated` / `cycle-viewed-filter` | `h` / `f` (`hunk`: Alt-F) | normal |
 | `toggle-fold` | Space (`hunk`: unbound; Left/Right/Enter tree controls remain) | normal files; selected skim fold in normal diff |
 | `collapse-fold` / `expand-fold` | Left / Right | normal files |
@@ -209,6 +210,14 @@ as Meta key"** is enabled, and some other emulators or multiplexer
 configurations likewise swallow the Alt/Esc-prefix. If an Alt default does
 nothing, fix the terminal setting or rebind the five attention actions to
 plain keys.
+
+In the diff pane, Enter (`advance-review`) acknowledges the current skim fold
+when applicable, then advances without wrapping to the next Spotlight. It does
+not mark Spotlight, Supporting, or ordinary diff rows viewed; at the final stop
+it stays put and reports `review tour complete`. Focus uses the same action,
+remains active, and pins the destination narration. In the files pane, Enter
+retains the existing mark-viewed-and-next-unviewed behavior. Alt-N/Alt-P retain
+their wrapping Spotlight navigation.
 
 This override is collision-free against the complete default map (a keymap
 unit test loads it exactly as written):

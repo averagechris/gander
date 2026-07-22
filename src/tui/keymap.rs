@@ -94,6 +94,7 @@ pub(super) enum Action {
     GlanceAcknowledgeAll,
     SpotlightNext,
     SpotlightPrevious,
+    AdvanceReview,
     ScrollDown,
     ScrollUp,
     ScrollDiffLeft,
@@ -298,6 +299,7 @@ impl TryFrom<&KeybindingsConfig> for KeyMap {
             Action::SpotlightPrevious,
             &config.spotlight_previous,
         )?;
+        add_bindings(&mut bindings, Action::AdvanceReview, &config.advance_review)?;
         add_bindings(&mut bindings, Action::ScrollDown, &config.scroll_down)?;
         add_bindings(&mut bindings, Action::ScrollUp, &config.scroll_up)?;
         add_bindings(
@@ -622,10 +624,10 @@ impl Action {
             | WidenFilePane
             | NarrowFilePane
             | AttentionPromote
-            | AttentionDemote => DIFF,
-            MarkViewed | ToggleViewed | MarkAllViewed | ToggleGenerated | CycleViewedFilter => {
-                NORMAL
-            }
+            | AttentionDemote
+            | AdvanceReview => DIFF,
+            MarkViewed => FILES,
+            ToggleViewed | MarkAllViewed | ToggleGenerated | CycleViewedFilter => NORMAL,
             ToggleFold => NORMAL,
             CollapseFold | ExpandFold => FILES,
             CycleCommentState | EditComment | DeleteComment => &[
@@ -1159,6 +1161,19 @@ mod tests {
     #[test]
     fn default_stream_attention_keys_match_human_decisions() {
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let enter = KeyEvent::from(KeyCode::Enter);
+        assert_eq!(
+            keymap.normal_action_for(&enter, false),
+            Some(Action::MarkViewed)
+        );
+        assert_eq!(
+            keymap.normal_action_for(&enter, true),
+            Some(Action::AdvanceReview)
+        );
+        assert_eq!(
+            keymap.popup_action_for(KeyContext::OperationPicker, &enter),
+            Some(Action::PopupSelect)
+        );
         assert_eq!(
             keymap.action_for(&KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
             Some(Action::AttentionPromote)

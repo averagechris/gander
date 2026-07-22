@@ -350,6 +350,7 @@ pub struct KeybindingsConfig {
     pub glance_acknowledge_all: Vec<String>,
     pub spotlight_next: Vec<String>,
     pub spotlight_previous: Vec<String>,
+    pub advance_review: Vec<String>,
     pub scroll_down: Vec<String>,
     pub scroll_up: Vec<String>,
     pub scroll_diff_left: Vec<String>,
@@ -627,6 +628,7 @@ struct KeybindingsConfigPatch {
     glance_acknowledge_all: Option<Vec<String>>,
     spotlight_next: Option<Vec<String>>,
     spotlight_previous: Option<Vec<String>>,
+    advance_review: Option<Vec<String>>,
     scroll_down: Option<Vec<String>>,
     scroll_up: Option<Vec<String>>,
     scroll_diff_left: Option<Vec<String>>,
@@ -768,6 +770,7 @@ impl KeybindingsConfig {
             glance_acknowledge_all: keys(["A"]),
             spotlight_next: keys(["alt-n"]),
             spotlight_previous: keys(["alt-p"]),
+            advance_review: keys(["enter"]),
             scroll_down: keys(["d", "pagedown"]),
             scroll_up: keys(["u", "pageup"]),
             scroll_diff_left: keys(["shift-left"]),
@@ -1117,6 +1120,7 @@ impl KeybindingsConfig {
         );
         apply_optional(&mut self.spotlight_next, patch.spotlight_next);
         apply_optional(&mut self.spotlight_previous, patch.spotlight_previous);
+        apply_optional(&mut self.advance_review, patch.advance_review);
         apply_optional(&mut self.scroll_down, patch.scroll_down);
         apply_optional(&mut self.scroll_up, patch.scroll_up);
         apply_optional(&mut self.scroll_diff_left, patch.scroll_diff_left);
