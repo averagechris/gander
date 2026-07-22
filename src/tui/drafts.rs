@@ -115,17 +115,18 @@ mod tests {
             .add_agent_draft("a.rs".into(), Some(1), "active".into())
             .unwrap();
         session.comments[0].id = "active".into();
-        session.sessions.push(crate::state::ReviewSession {
+        let foreign = crate::state::ReviewSession {
             id: "foreign-session".into(),
             target: crate::state::ReviewTarget {
-                repo: Some(crate::review::canonical_repo_identity(&session.repo)),
+                repo: Some(session.canonical_repo().to_owned()),
                 base: Some(session.target.base.clone()),
                 revision: Some("other".into()),
                 ..Default::default()
             },
             status: crate::state::ReviewSessionStatus::Open,
             ..Default::default()
-        });
+        };
+        session.durable_sessions_mut().push(foreign);
         session.comments.push(Comment {
             id: "foreign".into(),
             session_id: Some("foreign-session".into()),

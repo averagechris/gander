@@ -62,12 +62,7 @@ impl OpenWorkListState {
 }
 
 fn open_work_rows(session: &ReviewSession) -> Vec<OpenWorkRow> {
-    let durable = review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    );
+    let durable = session.active_durable_session();
     let mut rows = Vec::new();
     let mut nested_comment_ids = BTreeSet::new();
 
@@ -145,7 +140,7 @@ mod tests {
         session.comments[2].state = CommentState::Draft;
         let durable_id = session.comments[0].session_id.clone().unwrap();
         let durable = session
-            .sessions
+            .durable_sessions_mut()
             .iter_mut()
             .find(|durable| durable.id == durable_id)
             .unwrap();
@@ -206,11 +201,11 @@ mod tests {
     #[test]
     fn open_work_requires_matching_repo_identity() {
         let mut session = open_work_session();
-        let mut wrong = session.sessions[0].clone();
+        let mut wrong = session.durable_sessions()[0].clone();
         wrong.id = "wrong-repo".into();
         wrong.target.repo = Some("/other-repo".into());
         wrong.action_items[0].title = "Wrong repo action".into();
-        session.sessions.insert(0, wrong);
+        session.durable_sessions_mut().insert(0, wrong);
 
         let state = OpenWorkListState::new(&session);
 
@@ -240,7 +235,7 @@ mod tests {
     #[test]
     fn todo_feedback_remains_visible_without_a_durable_session() {
         let mut session = open_work_session();
-        session.sessions.clear();
+        session.durable_sessions_mut().clear();
         session
             .comments
             .retain(|comment| comment.id == "independent-todo");

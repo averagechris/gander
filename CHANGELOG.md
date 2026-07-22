@@ -4,11 +4,22 @@
 
 ### Changed
 
+- Made per-keystroke TUI work O(visible window) instead of O(session) on
+  large reviews: the stream-projection cache now validates with monotonic
+  generation counters bumped at every mutation seam instead of hashing
+  session content per access, repo-identity canonicalization and
+  active-session lookup are resolved once per session load instead of per
+  frame, and autosave gates on a durable-state generation before serializing
+  anything.
 - Flipped the default TUI quit artifact behavior to stay quiet: durable review
   state is the handoff, and agents should read it via CLI/MCP after the human
   finishes. Restore the previous stdout dump with `[artifact] on-tui-quit = "stdout"`.
 
 ### Added
+
+- Added opt-in TUI frame-time instrumentation: set `GANDER_FRAME_LOG=<path>`
+  to append per-event `handle_us=<n> draw_us=<n>` lines; zero overhead when
+  unset. See the debugging note in `docs/cli.md`.
 
 - Made the optional menu bar mouse-interactive: clicking a title opens a
   dropdown of related actions with their live key hints, hovering switches

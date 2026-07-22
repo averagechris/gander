@@ -192,9 +192,11 @@ struct TuiState {
     launch_target: Option<ReviewTarget>,
     diff_drag: Option<DiffDrag>,
     notice: Option<UiNotice>,
-    /// Fingerprint of the last autosaved files/comments payload, used to skip
-    /// redundant writes between events.
-    last_autosave: Option<String>,
+    /// Durable-state generation at the last autosave. Autosave compares this
+    /// against [`ReviewSession::durable_state_generation`] and skips every
+    /// serialization/fingerprint/stat step when nothing durable changed, so
+    /// an unchanged session costs O(1) per event.
+    last_autosave_generation: Option<u64>,
     /// Modification time of the agent overlay at the last poll, so agent
     /// suggestions written mid-session are picked up without reloading on
     /// every tick.
@@ -251,7 +253,7 @@ impl Default for TuiState {
             launch_target: None,
             diff_drag: None,
             notice: None,
-            last_autosave: None,
+            last_autosave_generation: None,
             overlay_mtime: None,
             state_mtime: None,
             state_tombstones: ReviewStateTombstones::default(),
@@ -687,11 +689,11 @@ pub fn run(
     let mut terminal_lifecycle = TerminalLifecycle::new(&mut terminal);
     let mut mode = Mode::Normal;
 
-    // Seed the autosave fingerprint so an unchanged session does not trigger
+    // Seed the autosave generation so an unchanged session does not trigger
     // a write on the first event.
     let mut tui_state = TuiState {
         launch_target: Some(session.target.clone()),
-        last_autosave: Some(state_fingerprint(session)),
+        last_autosave_generation: Some(session.durable_state_generation()),
         agent_overlay_path: agent_overlay_path.clone(),
         state_mtime: state_path.as_deref().and_then(state_file_mtime),
         terminal_size: initial_terminal_size,
@@ -990,6 +992,10 @@ fn run_loop(
     if let Some(overlay_path) = agent_overlay_path {
         maybe_reload_agent_overlay(session, overlay_path, tui_state, review_loader, false);
     }
+    // Opt-in frame-time instrumentation (`GANDER_FRAME_LOG=<path>`): appends
+    // one line per handled event batch with handle+draw microseconds. When
+    // the variable is unset this is a single `None` check per frame.
+    let mut frame_log = FrameLog::from_env();
     // Large-change nudge: on a big review with no agent structure yet,
     // point at the collaboration affordances instead of leaving the human
     // to grind through the file list alone.
@@ -1051,6 +1057,7 @@ fn run_loop(
             }
         }
 
+        let draw_started = frame_log.as_ref().map(|_| std::time::Instant::now());
         terminal.draw(|frame| {
             draw(
                 frame,
@@ -1061,6 +1068,11 @@ fn run_loop(
                 tui_state.notice.as_ref(),
             )
         })?;
+        if let Some(log) = frame_log.as_mut()
+            && let Some(started) = draw_started
+        {
+            log.record_draw(started.elapsed());
+        }
 
         let admitted = if event::poll(Duration::from_millis(150))? {
             // Route every event through the OSC tail guard (a no-op unless
@@ -1104,6 +1116,7 @@ fn run_loop(
             held
         };
 
+        let handle_started = frame_log.as_ref().map(|_| std::time::Instant::now());
         let mut quit = false;
         for event in admitted {
             match event {
@@ -1174,8 +1187,53 @@ fn run_loop(
         if let Some(state_path) = state_path {
             autosave_state(session, state_path, tui_state);
         }
+        if let Some(log) = frame_log.as_mut()
+            && let Some(started) = handle_started
+        {
+            log.record_handle(started.elapsed());
+        }
     }
     Ok(())
+}
+
+/// Opt-in per-event frame-time log (`GANDER_FRAME_LOG=<path>`). Each handled
+/// event batch appends `handle_us=<n> draw_us=<n>`, where `handle_us` covers
+/// input dispatch through autosave and `draw_us` is the terminal draw that
+/// rendered the result. Zero overhead when the variable is unset.
+struct FrameLog {
+    file: std::fs::File,
+    pending_handle_us: Option<u128>,
+}
+
+impl FrameLog {
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("GANDER_FRAME_LOG")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|file| Self {
+                file,
+                pending_handle_us: None,
+            })
+    }
+
+    fn record_handle(&mut self, elapsed: std::time::Duration) {
+        self.pending_handle_us = Some(elapsed.as_micros());
+    }
+
+    fn record_draw(&mut self, elapsed: std::time::Duration) {
+        use std::io::Write as _;
+        let Some(handle_us) = self.pending_handle_us.take() else {
+            return;
+        };
+        let _ = writeln!(
+            self.file,
+            "handle_us={handle_us} draw_us={}",
+            elapsed.as_micros()
+        );
+    }
 }
 
 fn resize_event_observed_size(
@@ -1359,7 +1417,7 @@ fn maybe_reload_review_state(
             );
             reconcile_present_spotlight(session, tui_state);
             tui_state.state_mtime = mtime;
-            tui_state.last_autosave = Some(state_fingerprint(session));
+            tui_state.last_autosave_generation = Some(session.durable_state_generation());
             if notify && added_comments > 0 {
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
@@ -2003,15 +2061,12 @@ fn reapply_agent_overlay(
         .ok();
 }
 
-/// Cheap change-detection payload for every durable TUI mutation, excluding
-/// only volatile metadata such as `saved_at`. Session-level attention,
-/// walkthrough, action-item, disposition, and lifecycle edits must never be
-/// skipped merely because no file/comment changed in the same event.
-fn state_fingerprint(session: &ReviewSession) -> String {
-    let state = session.to_state();
-    serde_json::to_string(&(&state.files, &state.comments, &state.sessions)).unwrap_or_default()
-}
-
+/// Durable-state persistence is generation-gated: every durable TUI mutation
+/// seam (viewed marks, comments, session-level attention, walkthrough,
+/// action-item, disposition, and lifecycle edits) bumps
+/// [`ReviewSession::durable_state_generation`], and autosave skips all work
+/// when the generation is unchanged. Serializing session-scale state per
+/// keystroke to detect changes is a bug.
 fn autosave_state(session: &mut ReviewSession, state_path: &Path, tui_state: &mut TuiState) {
     if let Err(error) = persist_review_state(session, state_path, tui_state) {
         tui_state.notice = Some(UiNotice {
@@ -2026,11 +2081,11 @@ fn persist_review_state(
     state_path: &Path,
     tui_state: &mut TuiState,
 ) -> Result<()> {
-    let fingerprint = state_fingerprint(session);
-    let disk_mtime = state_file_mtime(state_path);
-    if tui_state.last_autosave.as_deref() == Some(fingerprint.as_str())
-        && disk_mtime == tui_state.state_mtime
-    {
+    // Generation gate: when no durable mutation seam fired since the last
+    // persist, skip without serializing, fingerprinting, or touching the
+    // filesystem. External writers are handled by the idle-tick reload path
+    // (`maybe_reload_review_state`), which is mtime-gated.
+    if tui_state.last_autosave_generation == Some(session.durable_state_generation()) {
         return Ok(());
     }
     let transition = tui_state
@@ -2046,7 +2101,7 @@ fn persist_review_state(
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
-    tui_state.last_autosave = Some(state_fingerprint(session));
+    tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(())
 }
 
@@ -2073,7 +2128,7 @@ fn apply_acp_review_mutation(
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
-    tui_state.last_autosave = Some(state_fingerprint(session));
+    tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(result)
 }
 
@@ -2984,22 +3039,18 @@ fn repin_exact_spotlight_narration(
     step_id: &str,
     part: usize,
 ) {
-    let target = review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
-    .into_iter()
-    .flat_map(|durable| durable.walkthroughs.iter())
-    .flat_map(|walkthrough| walkthrough.steps.iter())
-    .find(|step| step.id == step_id)
-    .and_then(|step| {
-        std::iter::once(&step.target)
-            .chain(step.extra_targets.iter())
-            .nth(part)
-            .cloned()
-    });
+    let target = session
+        .active_durable_session()
+        .into_iter()
+        .flat_map(|durable| durable.walkthroughs.iter())
+        .flat_map(|walkthrough| walkthrough.steps.iter())
+        .find(|step| step.id == step_id)
+        .and_then(|step| {
+            std::iter::once(&step.target)
+                .chain(step.extra_targets.iter())
+                .nth(part)
+                .cloned()
+        });
     if let Some(owner) = target
         .as_ref()
         .and_then(|target| session.stream_walkthrough_card_owner(target))
@@ -3066,19 +3117,7 @@ fn core_navigation_placement(placement: NavigationPlacement) -> NavigationViewpo
 }
 
 fn ensure_tui_review_session(session: &mut ReviewSession) -> &mut crate::state::ReviewSession {
-    let mut state = ReviewState {
-        sessions: std::mem::take(&mut session.sessions),
-        ..ReviewState::default()
-    };
-    let spec = review::SessionTargetSpec {
-        repo: Some(review::canonical_repo_identity(&session.repo)),
-        base: Some(session.target.base.clone()),
-        revision: Some(session.target.rev.clone()),
-        revset: None,
-    };
-    let id = review::ensure_session(&mut state, &spec, None).id.clone();
-    session.sessions = state.sessions;
-    session.sessions.iter_mut().find(|s| s.id == id).unwrap()
+    session.ensure_active_durable_session_mut()
 }
 
 fn walkthrough_target_from_selection(
@@ -3089,7 +3128,7 @@ fn walkthrough_target_from_selection(
         .or_else(|| session.selected_line_anchor())?;
     let line = anchor.line()?;
     Some(crate::state::ReviewTarget {
-        repo: Some(review::canonical_repo_identity(&session.repo)),
+        repo: Some(session.canonical_repo().to_owned()),
         base: Some(session.target.base.clone()),
         revision: Some(session.target.rev.clone()),
         file: Some(anchor.path().to_owned()),
@@ -3307,6 +3346,10 @@ fn load_change_diffs_for_stack(
             session.change_diffs.push((change.change_id.clone(), diff));
         }
     }
+    // Stack chapters and their per-change diffs feed the stream projection;
+    // they are not observable through the cheap cache key, so bump the
+    // generation at this mutation seam.
+    session.touch_stream_inputs();
 }
 
 fn reload_stream_chapter_metadata(review_loader: &ReviewLoader<'_>, session: &mut ReviewSession) {
@@ -3935,18 +3978,14 @@ fn selected_onboarding_target(session: &ReviewSession, tui_state: &TuiState) -> 
             });
         }
         if let Some(step_id) = source.walkthrough_step_id() {
-            return review::active_session_for_loaded_review(
-                &session.sessions,
-                &session.repo,
-                &session.target.base,
-                &session.target.rev,
-            )
-            .into_iter()
-            .flat_map(|durable| durable.walkthroughs.iter())
-            .flat_map(|walkthrough| walkthrough.steps.iter())
-            .find(|step| step.id == step_id)
-            .and_then(|step| step.author.as_ref())
-            .is_some_and(|author| author.kind == AuthorKind::Agent);
+            return session
+                .active_durable_session()
+                .into_iter()
+                .flat_map(|durable| durable.walkthroughs.iter())
+                .flat_map(|walkthrough| walkthrough.steps.iter())
+                .find(|step| step.id == step_id)
+                .and_then(|step| step.author.as_ref())
+                .is_some_and(|author| author.kind == AuthorKind::Agent);
         }
         return false;
     }
@@ -3963,13 +4002,9 @@ fn inferred_comment_channel(
     onboarding_target: bool,
     thread_channel: Option<Channel>,
 ) -> Channel {
-    let active_session_id = review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
-    .map(|durable| durable.id.as_str());
+    let active_session_id = session
+        .active_durable_session()
+        .map(|durable| durable.id.as_str());
     let has_agent_annotation = session.comments.iter().any(|comment| {
         comment.author.kind == AuthorKind::Agent
             && active_session_id.map_or(comment.session_id.is_none(), |session_id| {
@@ -4319,7 +4354,7 @@ fn enter_open_work_row(
             .map(core_navigation_placement);
     }
     let linked_comment = session
-        .sessions
+        .durable_sessions()
         .iter()
         .flat_map(|durable| durable.action_items.iter())
         .find(|item| item.id == *id)
@@ -4421,7 +4456,7 @@ fn handle_walkthrough_list_key(
             }
             Action::WalkthroughDelete => {
                 if let Some(id) = list.selected_step_id().map(str::to_owned) {
-                    if let Some(durable) = session.sessions.iter_mut().find(|s| {
+                    if let Some(durable) = session.durable_sessions_mut().iter_mut().find(|s| {
                         s.walkthroughs
                             .iter()
                             .any(|w| w.steps.iter().any(|step| step.id == id))
@@ -4454,7 +4489,7 @@ fn selected_walkthrough_step<'a>(
 ) -> Option<&'a WalkthroughStep> {
     let id = list.selected_step_id()?;
     session
-        .sessions
+        .durable_sessions()
         .iter()
         .flat_map(|s| &s.walkthroughs)
         .flat_map(|w| &w.steps)
@@ -4469,7 +4504,7 @@ fn move_selected_walkthrough_step(
     let Some(id) = list.selected_step_id().map(str::to_owned) else {
         return;
     };
-    for durable in &mut session.sessions {
+    for durable in session.durable_sessions_mut() {
         for walkthrough in &durable.walkthroughs {
             if let Some(index) = walkthrough.steps.iter().position(|step| step.id == id) {
                 let to = (index as isize + delta).clamp(0, walkthrough.steps.len() as isize - 1)
@@ -5069,8 +5104,8 @@ mod tests {
         };
         durable.target.base = Some(session.target.base.clone());
         durable.target.revision = Some(session.target.rev.clone());
-        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
-        session.sessions.push(durable);
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        session.durable_sessions_mut().push(durable);
         session.stream_mode = true;
         session
     }
@@ -5090,13 +5125,14 @@ mod tests {
             target: crate::attention::target_for_diff(&files, "a.rs", Some(line), None).unwrap(),
             ..Default::default()
         };
-        session.sessions[0].attention_regions.clear();
-        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+        session.durable_sessions_mut()[0].attention_regions.clear();
+        session.durable_sessions_mut()[0].walkthroughs = vec![crate::state::Walkthrough {
             id: "presentation".into(),
             steps: vec![step("first", 1), step("second", 3)],
             ..Default::default()
         }];
-        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        crate::attention::sync_agent_attention(&mut session.durable_sessions_mut()[0], &files)
+            .unwrap();
         session
     }
 
@@ -5278,26 +5314,35 @@ mod tests {
             .iter()
             .map(|file| file.diff.clone())
             .collect::<Vec<_>>();
-        session.sessions[0].walkthroughs[0].steps.insert(
-            0,
-            WalkthroughStep {
-                id: "inserted".into(),
-                author: Some(crate::state::Identity::agent()),
-                title: Some("inserted".into()),
-                target: crate::attention::target_for_diff(&files, "a.rs", Some(2), None).unwrap(),
-                ..Default::default()
-            },
-        );
-        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        session.durable_sessions_mut()[0].walkthroughs[0]
+            .steps
+            .insert(
+                0,
+                WalkthroughStep {
+                    id: "inserted".into(),
+                    author: Some(crate::state::Identity::agent()),
+                    title: Some("inserted".into()),
+                    target: crate::attention::target_for_diff(&files, "a.rs", Some(2), None)
+                        .unwrap(),
+                    ..Default::default()
+                },
+            );
+        crate::attention::sync_agent_attention(&mut session.durable_sessions_mut()[0], &files)
+            .unwrap();
         assert!(reconcile_present_spotlight(&mut session, &mut tui_state));
         let presentation = tui_state.presentation.as_ref().unwrap();
         assert_eq!(presentation.identity.step_id, "second");
         assert_eq!(presentation.index, 2);
         assert!(!presentation.stale);
 
-        let second = session.sessions[0].walkthroughs[0].steps.remove(2);
-        session.sessions[0].walkthroughs[0].steps.insert(0, second);
-        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        let second = session.durable_sessions_mut()[0].walkthroughs[0]
+            .steps
+            .remove(2);
+        session.durable_sessions_mut()[0].walkthroughs[0]
+            .steps
+            .insert(0, second);
+        crate::attention::sync_agent_attention(&mut session.durable_sessions_mut()[0], &files)
+            .unwrap();
         assert!(reconcile_present_spotlight(&mut session, &mut tui_state));
         let presentation = tui_state.presentation.as_ref().unwrap();
         assert_eq!(presentation.identity.step_id, "second");
@@ -5316,10 +5361,11 @@ mod tests {
             .iter()
             .map(|file| file.diff.clone())
             .collect::<Vec<_>>();
-        session.sessions[0].walkthroughs[0]
+        session.durable_sessions_mut()[0].walkthroughs[0]
             .steps
             .retain(|step| step.id != "second");
-        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        crate::attention::sync_agent_attention(&mut session.durable_sessions_mut()[0], &files)
+            .unwrap();
 
         assert!(!reconcile_present_spotlight(&mut session, &mut tui_state));
         let presentation = tui_state.presentation.as_ref().unwrap();
@@ -5343,8 +5389,8 @@ mod tests {
         start_stream_presentation(&mut session, &mut tui_state).unwrap();
         goto_present_spotlight(&mut session, &mut tui_state, 1).unwrap();
         let selected_anchor = session.selected_stream_row().unwrap().anchor;
-        stale_fingerprint(&mut session.sessions[0].walkthroughs[0].steps[1].target);
-        stale_fingerprint(&mut session.sessions[0].attention_regions[1].target);
+        stale_fingerprint(&mut session.durable_sessions_mut()[0].walkthroughs[0].steps[1].target);
+        stale_fingerprint(&mut session.durable_sessions_mut()[0].attention_regions[1].target);
 
         assert!(!reconcile_present_spotlight(&mut session, &mut tui_state));
         assert!(tui_state.presentation.as_ref().unwrap().stale);
@@ -5487,7 +5533,7 @@ mod tests {
             .collect::<Vec<_>>();
         let first = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
         let second = crate::attention::target_for_diff(&files, "a.rs", Some(3), None).unwrap();
-        session.sessions[0].attention_regions = vec![
+        session.durable_sessions_mut()[0].attention_regions = vec![
             AttentionRegion {
                 target: first.clone(),
                 salience: Salience::Spotlight,
@@ -5501,7 +5547,7 @@ mod tests {
                 source: SalienceSource::Human,
             },
         ];
-        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+        session.durable_sessions_mut()[0].walkthroughs = vec![crate::state::Walkthrough {
             id: "walk".into(),
             steps: vec![
                 WalkthroughStep {
@@ -5691,12 +5737,14 @@ mod tests {
             .iter()
             .map(|file| file.diff.clone())
             .collect::<Vec<_>>();
-        session.sessions[0].attention_regions.push(AttentionRegion {
-            target: crate::attention::target_for_diff(&files, "b.rs", None, None).unwrap(),
-            salience: Salience::Skim,
-            rationale: Some("lockfile churn".into()),
-            source: SalienceSource::Human,
-        });
+        session.durable_sessions_mut()[0]
+            .attention_regions
+            .push(AttentionRegion {
+                target: crate::attention::target_for_diff(&files, "b.rs", None, None).unwrap(),
+                salience: Salience::Skim,
+                rationale: Some("lockfile churn".into()),
+                source: SalienceSource::Human,
+            });
         let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
         let mut board = GlanceBoardState::new(&session);
         assert_eq!(board.rows.len(), 2);
@@ -5749,16 +5797,22 @@ mod tests {
     fn glance_selection_tracks_unique_stale_identity_across_reordering() {
         let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
         let mut session = attention_session(raw, "a.rs", Salience::Skim);
-        session.sessions[0].attention_regions[0].target.anchor = None;
-        let mut agent = session.sessions[0].attention_regions[0].clone();
+        session.durable_sessions_mut()[0].attention_regions[0]
+            .target
+            .anchor = None;
+        let mut agent = session.durable_sessions()[0].attention_regions[0].clone();
         agent.source = SalienceSource::Agent;
-        session.sessions[0].attention_regions.push(agent);
+        session.durable_sessions_mut()[0]
+            .attention_regions
+            .push(agent);
         let mut board = GlanceBoardState::new(&session);
         assert_eq!(board.rows.len(), 2);
         board.selected = 1;
         let selected = board.selected().unwrap().id.clone();
 
-        session.sessions[0].attention_regions.reverse();
+        session.durable_sessions_mut()[0]
+            .attention_regions
+            .reverse();
         board.refresh(&session);
         assert_eq!(board.selected().unwrap().id, selected);
     }
@@ -5784,8 +5838,8 @@ mod tests {
         };
         durable.target.base = Some(session.target.base.clone());
         durable.target.revision = Some(session.target.rev.clone());
-        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
-        session.sessions.push(durable);
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        session.durable_sessions_mut().push(durable);
         session.stream_mode = true;
         session.focus = Focus::Diff;
         let backend = MockJjBackend::with_diff(Ok(raw.into()));
@@ -5839,7 +5893,7 @@ mod tests {
         .unwrap();
         assert!(session.files[0].viewed);
         assert!(!session.files[1].viewed);
-        assert_eq!(session.sessions[0].attention_progress.len(), 1);
+        assert_eq!(session.durable_sessions()[0].attention_progress.len(), 1);
 
         session.stream_mode = false;
         session
@@ -6298,7 +6352,7 @@ mod tests {
         session.comments[1].id = "second".into();
         let durable_id = session.comments[0].session_id.clone().unwrap();
         session
-            .sessions
+            .durable_sessions_mut()
             .iter_mut()
             .find(|durable| durable.id == durable_id)
             .unwrap()
@@ -6664,7 +6718,9 @@ mod tests {
                 source: crate::state::SalienceSource::Agent,
             });
         let owner = session
-            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .selected_walkthrough_card_owner(
+                &session.durable_sessions()[0].walkthroughs[0].steps[0].target,
+            )
             .unwrap();
         session.select_diff_row(owner);
         let tui_state = TuiState::default();
@@ -6686,10 +6742,11 @@ mod tests {
             Channel::Delegation
         );
 
-        session.sessions[0].walkthroughs[0].steps[0].author = Some(crate::state::Identity {
-            kind: AuthorKind::Human,
-            name: "Ada".into(),
-        });
+        session.durable_sessions_mut()[0].walkthroughs[0].steps[0].author =
+            Some(crate::state::Identity {
+                kind: AuthorKind::Human,
+                name: "Ada".into(),
+            });
         assert!(!selected_onboarding_target(&session, &tui_state));
         assert_eq!(
             inferred_comment_channel(
@@ -6700,7 +6757,7 @@ mod tests {
             ),
             Channel::Note
         );
-        session.sessions[0].walkthroughs[0].steps[0].author = None;
+        session.durable_sessions_mut()[0].walkthroughs[0].steps[0].author = None;
         assert!(!selected_onboarding_target(&session, &tui_state));
     }
 
@@ -6721,7 +6778,7 @@ mod tests {
             .unwrap();
         session.select_diff_row(row);
         add_walkthrough_step_from_selection(&mut session).unwrap();
-        let durable = &session.sessions[0];
+        let durable = &session.durable_sessions()[0];
         let step = &durable.walkthroughs[0].steps[0];
         assert_eq!(step.author.as_ref().unwrap().name, "Configured Human");
         assert!(step.target.anchor.is_some());
@@ -7199,7 +7256,7 @@ mod tests {
 "#,
         );
         let mut tui_state = TuiState {
-            last_autosave: Some(state_fingerprint(&session)),
+            last_autosave_generation: Some(session.durable_state_generation()),
             ..TuiState::default()
         };
 
@@ -7216,44 +7273,138 @@ mod tests {
         assert_eq!(saved.comments.len(), 1);
         assert!(tui_state.notice.is_none());
 
-        // Unchanged session: fingerprint short-circuits the write.
+        // Unchanged session: the generation gate short-circuits the write.
         let modified_before = std::fs::metadata(&state_path).unwrap().modified().unwrap();
         autosave_state(&mut session, &state_path, &mut tui_state);
         let modified_after = std::fs::metadata(&state_path).unwrap().modified().unwrap();
         assert_eq!(modified_before, modified_after);
     }
 
+    /// N key events over an unchanged session must perform zero
+    /// session-scale work: no stream-projection rebuilds, no durable-state
+    /// snapshots (autosave serialization), no filesystem canonicalization of
+    /// the repo identity, and no line-fingerprint re-derivation. Guards the
+    /// generation-counter cache discipline against reintroducing
+    /// O(session)-per-keystroke regressions.
     #[test]
-    fn autosave_fingerprint_tracks_all_mutable_durable_session_fields() {
+    fn key_storm_over_unchanged_session_does_no_session_scale_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,5 +1,5 @@\n one\n two\n-old\n+new\n four\n five\n";
+        let mut session = attention_session(raw, "a.rs", Salience::Supporting);
+        let backend = MockJjBackend::with_diff(Ok(String::new()));
+        let loader = ReviewLoader {
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            jj: &backend,
+        };
+        let keymap = KeyMap::try_from(&KeybindingsConfig::default()).unwrap();
+        let mut mode = Mode::Normal;
+        let mut tui_state = TuiState {
+            last_autosave_generation: Some(session.durable_state_generation()),
+            terminal_size: ratatui::prelude::Size::new(220, 60),
+            ..TuiState::default()
+        };
+        let inner = Rect::new(0, 0, 220, 58);
+        let storm = ['j', 'j', 'j', 'k'];
+        let press =
+            |key: char, session: &mut ReviewSession, mode: &mut Mode, tui_state: &mut TuiState| {
+                handle_key_event(
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    session,
+                    mode,
+                    &keymap,
+                    &loader,
+                    tui_state,
+                )
+                .unwrap();
+                // What a draw would consume: the stream projection plus the
+                // measured viewport layout (annotation scope, cards, geometry).
+                let _ = session.review_stream_rows();
+                let _ = tui_state.diff_viewport.measure(
+                    session,
+                    inner,
+                    render::diff_split_is_active(session, inner),
+                );
+                autosave_state(session, &state_path, tui_state);
+            };
+
+        // Warm every cache with one full round before sampling counters.
+        for key in storm {
+            press(key, &mut session, &mut mode, &mut tui_state);
+        }
+
+        let canonical_resolutions = crate::review::canonical_repo_resolutions();
+        let snapshots = session.state_snapshot_count();
+        let builds = session.stream_projection_build_count();
+        let fingerprints = crate::anchor::line_fingerprint_derivations();
+
+        for _ in 0..20 {
+            for key in storm {
+                press(key, &mut session, &mut mode, &mut tui_state);
+            }
+        }
+
+        assert_eq!(
+            crate::review::canonical_repo_resolutions(),
+            canonical_resolutions,
+            "key events must not canonicalize the repo path (fs access per keystroke)"
+        );
+        assert_eq!(
+            session.state_snapshot_count(),
+            snapshots,
+            "key events over an unchanged session must not snapshot durable state"
+        );
+        assert_eq!(
+            session.stream_projection_build_count(),
+            builds,
+            "key events over an unchanged session must not rebuild the stream projection"
+        );
+        assert_eq!(
+            crate::anchor::line_fingerprint_derivations(),
+            fingerprints,
+            "key events must not re-derive line fingerprints"
+        );
+        assert!(
+            !state_path.exists(),
+            "an unchanged session must not autosave"
+        );
+    }
+
+    #[test]
+    fn autosave_generation_tracks_all_mutable_durable_session_fields() {
         let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
         let mut session = attention_session(raw, "a.rs", Salience::Skim);
-        let mut previous = state_fingerprint(&session);
-        session.sessions[0].title = Some("Review title".into());
-        let next = state_fingerprint(&session);
+        let mut previous = session.durable_state_generation();
+        session.durable_sessions_mut()[0].title = Some("Review title".into());
+        let next = session.durable_state_generation();
         assert_ne!(previous, next);
         previous = next;
 
-        session.sessions[0]
+        session.durable_sessions_mut()[0]
             .walkthroughs
             .push(crate::state::Walkthrough {
                 id: "walk".into(),
                 ..Default::default()
             });
-        let next = state_fingerprint(&session);
+        let next = session.durable_state_generation();
         assert_ne!(previous, next);
         previous = next;
 
-        session.sessions[0].action_items.push(ActionItem {
-            id: "item".into(),
-            title: "Check behavior".into(),
-            ..Default::default()
-        });
-        let next = state_fingerprint(&session);
+        session.durable_sessions_mut()[0]
+            .action_items
+            .push(ActionItem {
+                id: "item".into(),
+                title: "Check behavior".into(),
+                ..Default::default()
+            });
+        let next = session.durable_state_generation();
         assert_ne!(previous, next);
         previous = next;
 
-        session.sessions[0].disposition = Some(crate::state::ReviewDisposition::Approve);
-        let next = state_fingerprint(&session);
+        session.durable_sessions_mut()[0].disposition =
+            Some(crate::state::ReviewDisposition::Approve);
+        let next = session.durable_state_generation();
         assert_ne!(previous, next);
     }
 
@@ -7300,14 +7451,14 @@ mod tests {
         };
         durable.target.base = Some(session.target.base.clone());
         durable.target.revision = Some(session.target.rev.clone());
-        durable.target.repo = Some(review::canonical_repo_identity(&session.repo));
-        session.sessions.push(durable);
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        session.durable_sessions_mut().push(durable);
         session.stream_mode = true;
         session.focus = Focus::Diff;
         let baseline = session.to_state();
         let mut tui_state = TuiState {
             terminal_size: ratatui::prelude::Size::new(100, 24),
-            last_autosave: Some(state_fingerprint(&session)),
+            last_autosave_generation: Some(session.durable_state_generation()),
             ..TuiState::default()
         };
 
@@ -7403,7 +7554,7 @@ mod tests {
 "#,
         );
         let mut tui_state = TuiState {
-            last_autosave: Some(state_fingerprint(&session)),
+            last_autosave_generation: Some(session.durable_state_generation()),
             ..TuiState::default()
         };
         session.toggle_viewed();
@@ -7756,7 +7907,7 @@ mod tests {
             .apply_review_state(crate::state::ReviewState::load_or_default(&state_path).unwrap());
         let mut tui_state = TuiState {
             state_mtime: state_file_mtime(&state_path),
-            last_autosave: Some(state_fingerprint(&session)),
+            last_autosave_generation: Some(session.durable_state_generation()),
             ..TuiState::default()
         };
 
@@ -10432,8 +10583,8 @@ diff --git a/b.rs b/b.rs
         let configured_agent = session.agent_identity.clone();
         let first = crate::attention::target_for_diff(&files, "a.txt", Some(1), None).unwrap();
         let second = crate::attention::target_for_diff(&files, "a.txt", Some(2), None).unwrap();
-        session.sessions[0].attention_regions.clear();
-        session.sessions[0].walkthroughs = vec![crate::state::Walkthrough {
+        session.durable_sessions_mut()[0].attention_regions.clear();
+        session.durable_sessions_mut()[0].walkthroughs = vec![crate::state::Walkthrough {
             id: "guided".into(),
             steps: vec![WalkthroughStep {
                 id: "guided-lines".into(),
@@ -10452,9 +10603,10 @@ diff --git a/b.rs b/b.rs
             }],
             ..Default::default()
         }];
-        crate::attention::sync_agent_attention(&mut session.sessions[0], &files).unwrap();
+        crate::attention::sync_agent_attention(&mut session.durable_sessions_mut()[0], &files)
+            .unwrap();
         let durable = review::active_session_for_loaded_review(
-            &session.sessions,
+            session.durable_sessions(),
             &session.repo,
             &session.target.base,
             &session.target.rev,
@@ -10637,7 +10789,7 @@ diff --git a/b.rs b/b.rs
             .map(|file| file.diff.clone())
             .collect::<Vec<_>>();
         let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
-        session.sessions[0]
+        session.durable_sessions_mut()[0]
             .walkthroughs
             .push(crate::state::Walkthrough {
                 id: "walk".into(),

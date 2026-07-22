@@ -5561,7 +5561,7 @@ mod tests {
         )
         .unwrap();
         session.comments = state.comments;
-        session.sessions = state.sessions;
+        *session.durable_sessions_mut() = state.sessions;
 
         let json = crate::artifact::render_artifact_with_profile(
             &session,
@@ -5671,7 +5671,7 @@ mod tests {
         )
         .unwrap();
         session.comments = state.comments;
-        session.sessions = state.sessions;
+        *session.durable_sessions_mut() = state.sessions;
 
         let json = crate::artifact::render_artifact_with_profile(
             &session,

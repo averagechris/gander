@@ -22,12 +22,9 @@ pub use stream::{
     StreamRow, StreamRowKind,
 };
 
-#[cfg(test)]
 use crate::state::ReviewSessionStatus;
-#[cfg(test)]
-use std::cell::Cell;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     rc::Rc,
@@ -78,7 +75,12 @@ pub struct ReviewSession {
     pub files: Vec<ReviewFile>,
     persisted_files: BTreeMap<String, FileState>,
     pub comments: Vec<Comment>,
-    pub sessions: Vec<crate::state::ReviewSession>,
+    /// Durable review sessions loaded from the state file. Private on
+    /// purpose: every mutation must pass through
+    /// [`Self::durable_sessions_mut`] (or an internal seam that calls
+    /// [`Self::touch_durable_review`]) so the stream cache and autosave
+    /// generations observe the change without hashing session content.
+    durable_sessions: Vec<crate::state::ReviewSession>,
     /// Configured lifecycle state for newly accepted durable comments.
     pub comment_initial_state: CommentState,
     pub comment_default_channel: Option<Channel>,
@@ -149,13 +151,35 @@ pub struct ReviewSession {
     /// current stream viewport. All other files stay on cheap parsed-diff
     /// structural rows.
     stream_materialized_files: RefCell<BTreeSet<usize>>,
-    stream_cache: RefCell<Option<(u64, Rc<ReviewStream>)>>,
+    stream_cache: RefCell<Option<(stream::StreamCacheKey, Rc<ReviewStream>)>>,
+    /// Monotonic generation covering every stream-projection input that the
+    /// cheap scalar cache key cannot observe directly: the file set and
+    /// fingerprints, force-render marks, skim-fold peeks, durable sessions
+    /// (attention regions/progress, walkthroughs), stack changes, and
+    /// per-change diffs. Bumped explicitly at each mutation seam via
+    /// [`Self::touch_stream_inputs`]; cache validation is a u64 compare
+    /// instead of hashing session-scale content per access.
+    stream_generation: Cell<u64>,
+    /// Monotonic generation covering durable review state (viewed marks,
+    /// comments, durable sessions). Autosave gates on it before serializing
+    /// or fingerprinting anything, so an unchanged session costs nothing per
+    /// keystroke. Bumped via [`Self::touch_durable_state`].
+    durable_generation: Cell<u64>,
+    /// Canonical (filesystem-resolved) repo identity, computed once at
+    /// construction. Per-frame session lookups must use this instead of
+    /// re-canonicalizing (`getattrlist`) on every access.
+    canonical_repo: String,
     /// Memoized cheap structural stream rows per file, keyed by the file's
     /// diff fingerprint. Structural rows depend only on parsed diff content,
     /// so entries self-invalidate when a refresh changes the fingerprint.
     structural_rows_cache: RefCell<StructuralRowsCache>,
     #[cfg(test)]
     stream_projection_builds: Cell<usize>,
+    /// Test-only count of [`Self::to_state`] snapshots (session-scale clone +
+    /// serialize precursor). Regression tests assert deltas to prove key
+    /// events over an unchanged session never snapshot durable state.
+    #[cfg(test)]
+    state_snapshots: Cell<usize>,
     selected_comment_id: Option<String>,
     /// Per-gap context expansion state, keyed by `(path, gap id)`.
     /// Session-only; joins the rows-cache key via [`Self::expansion_epoch`]
@@ -865,6 +889,7 @@ impl ReviewSession {
             sessions,
             ..
         } = state;
+        let canonical_repo = review::canonical_repo_identity(&repo);
         let mut session = Self {
             repo,
             target,
@@ -890,7 +915,7 @@ impl ReviewSession {
                 .collect(),
             persisted_files: files,
             comments,
-            sessions,
+            durable_sessions: sessions,
             comment_initial_state,
             comment_default_channel,
             human_identity,
@@ -926,9 +951,14 @@ impl ReviewSession {
             expanded_skim_folds: BTreeSet::new(),
             stream_materialized_files: RefCell::new(BTreeSet::new()),
             stream_cache: RefCell::new(None),
+            stream_generation: Cell::new(0),
+            durable_generation: Cell::new(0),
+            canonical_repo,
             structural_rows_cache: RefCell::new(BTreeMap::new()),
             #[cfg(test)]
             stream_projection_builds: Cell::new(0),
+            #[cfg(test)]
+            state_snapshots: Cell::new(0),
             selected_comment_id: None,
             context_expansion: BTreeMap::new(),
             file_contents: BTreeMap::new(),
@@ -969,6 +999,11 @@ impl ReviewSession {
 
     fn replace_diff_without_comment_refresh(&mut self, target: ReviewTarget, diff: DiffSet) {
         let stream_mode = self.stream_mode;
+        // Reconstruction resets the generation counters; carry them forward
+        // (plus one) so TUI-side caches keyed on the old generations cannot
+        // collide with the fresh session.
+        let stream_generation = self.stream_generation.get().wrapping_add(1);
+        let durable_generation = self.durable_generation.get().wrapping_add(1);
         let mut state = self.to_state();
         state.meta = ReviewStateMeta::default();
         *self = Self::new_with_options(
@@ -997,6 +1032,8 @@ impl ReviewSession {
             },
         );
         self.stream_mode = stream_mode;
+        self.stream_generation.set(stream_generation);
+        self.durable_generation.set(durable_generation);
     }
 
     /// Like [`Self::replace_diff`], but for background refreshes of the
@@ -1322,6 +1359,7 @@ impl ReviewSession {
         if !self.force_rendered.remove(&path) {
             self.force_rendered.insert(path);
         }
+        self.touch_stream_inputs();
         self.diff_cursor = 0;
         self.diff_scroll = 0;
         self.ensure_diff_cursor_commentable();
@@ -1347,9 +1385,98 @@ impl ReviewSession {
         state.normalize_legacy_file_state();
         self.persisted_files = state.files;
         self.comments = state.comments;
-        self.sessions = state.sessions;
+        self.durable_sessions = state.sessions;
+        self.touch_durable_review();
         self.apply_state_files();
         self.ensure_selected_file_visible();
+    }
+
+    /// Durable review sessions loaded alongside this review (read-only).
+    pub fn durable_sessions(&self) -> &[crate::state::ReviewSession] {
+        &self.durable_sessions
+    }
+
+    /// Mutable access to the durable review sessions. Acquiring this bumps
+    /// the stream and durable generations: attention regions, progress, and
+    /// walkthroughs feed the stream projection, and every durable edit must
+    /// reach autosave. Do not call this on per-keystroke read paths — use
+    /// [`Self::durable_sessions`] or [`Self::active_durable_session`].
+    pub fn durable_sessions_mut(&mut self) -> &mut Vec<crate::state::ReviewSession> {
+        self.touch_durable_review();
+        &mut self.durable_sessions
+    }
+
+    /// Canonical (filesystem-resolved) repo identity, computed once at
+    /// construction so per-frame lookups never touch the filesystem.
+    pub fn canonical_repo(&self) -> &str {
+        &self.canonical_repo
+    }
+
+    /// The open durable session for this loaded review, resolved against the
+    /// cached canonical repo identity. Equivalent to
+    /// [`review::active_session_for_loaded_review`] but with zero filesystem
+    /// work, so it is safe on per-frame/per-keystroke paths.
+    pub fn active_durable_session(&self) -> Option<&crate::state::ReviewSession> {
+        let repo = self.canonical_repo.as_str();
+        self.durable_sessions.iter().find(|session| {
+            session.status == ReviewSessionStatus::Open
+                && session.target.repo.as_deref() == Some(repo)
+                && session.target.base.as_deref() == Some(self.target.base.as_str())
+                && session.target.revision.as_deref() == Some(self.target.rev.as_str())
+        })
+    }
+
+    /// Mutable variant of [`Self::active_durable_session`]; bumps both
+    /// generations like [`Self::durable_sessions_mut`]. Returns `None` when
+    /// no open durable session matches this loaded review; use
+    /// [`Self::ensure_active_durable_session_mut`] to create one.
+    #[allow(dead_code)]
+    pub fn active_durable_session_mut(&mut self) -> Option<&mut crate::state::ReviewSession> {
+        let index = self.active_durable_session_index()?;
+        self.touch_durable_review();
+        Some(&mut self.durable_sessions[index])
+    }
+
+    pub(crate) fn active_durable_session_index(&self) -> Option<usize> {
+        let repo = self.canonical_repo.as_str();
+        self.durable_sessions.iter().position(|session| {
+            session.status == ReviewSessionStatus::Open
+                && session.target.repo.as_deref() == Some(repo)
+                && session.target.base.as_deref() == Some(self.target.base.as_str())
+                && session.target.revision.as_deref() == Some(self.target.rev.as_str())
+        })
+    }
+
+    /// Record that a stream-projection input changed (files, force-render
+    /// marks, skim folds, stack changes, change diffs, durable sessions).
+    /// The next [`Self::review_stream`] access rebuilds the projection.
+    pub fn touch_stream_inputs(&self) {
+        self.stream_generation
+            .set(self.stream_generation.get().wrapping_add(1));
+    }
+
+    /// Record that durable review state changed (viewed marks, comments,
+    /// durable sessions) so the next autosave pass persists it.
+    pub fn touch_durable_state(&self) {
+        self.durable_generation
+            .set(self.durable_generation.get().wrapping_add(1));
+    }
+
+    /// Combined seam for durable-session mutations, which feed both the
+    /// stream projection and autosave.
+    pub fn touch_durable_review(&self) {
+        self.touch_stream_inputs();
+        self.touch_durable_state();
+    }
+
+    /// Current durable-state generation; autosave compares it against the
+    /// generation it last persisted before doing any serialization work.
+    pub fn durable_state_generation(&self) -> u64 {
+        self.durable_generation.get()
+    }
+
+    pub(crate) fn stream_inputs_generation(&self) -> u64 {
+        self.stream_generation.get()
     }
 
     pub fn selected_file(&self) -> Option<&ReviewFile> {
@@ -1456,6 +1583,7 @@ impl ReviewSession {
         };
         self.fold_context = true;
         self.expanded_skim_folds.clear();
+        self.touch_stream_inputs();
         if !self.context_expansion.is_empty() {
             self.context_expansion.clear();
             self.expansion_epoch = self.expansion_epoch.wrapping_add(1);
@@ -1470,6 +1598,7 @@ impl ReviewSession {
         self.fold_context = snapshot.fold_context;
         self.expanded_skim_folds = snapshot.expanded_skim_folds;
         self.context_expansion = snapshot.context_expansion;
+        self.touch_stream_inputs();
         if expansion_changed {
             self.expansion_epoch = self.expansion_epoch.wrapping_add(1);
             self.rows_cache.borrow_mut().clear();
@@ -1777,7 +1906,7 @@ impl ReviewSession {
             return 0;
         }
         let session_index = self.ensure_active_review_session_index();
-        let session_id = self.sessions[session_index].id.clone();
+        let session_id = self.durable_sessions[session_index].id.clone();
         let now = chrono::Utc::now();
         let mut folded = 0;
         for draft in pending {
@@ -1814,20 +1943,17 @@ impl ReviewSession {
             folded += 1;
         }
         if folded > 0 {
-            self.sessions[session_index].updated_at = Some(now);
+            self.durable_sessions[session_index].updated_at = Some(now);
         }
         folded
     }
 
     /// Durable agent-authored comments still awaiting human triage.
     pub fn pending_agent_drafts(&self) -> Vec<Comment> {
-        let Some(active_session_id) = review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        )
-        .map(|session| session.id.as_str()) else {
+        let Some(active_session_id) = self
+            .active_durable_session()
+            .map(|session| session.id.as_str())
+        else {
             return Vec::new();
         };
         self.comments
@@ -1859,7 +1985,7 @@ impl ReviewSession {
         self.select_file_revealed(file_index);
         let index = self.ensure_active_review_session_index();
         review::edit_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             &draft.id,
             review::CommentEdits {
@@ -1875,7 +2001,7 @@ impl ReviewSession {
             Channel::Note => CommentState::Draft,
         };
         let accepted = review::set_comment_state(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             &draft.id,
             accepted_state,
@@ -1931,13 +2057,7 @@ impl ReviewSession {
     /// `None` when the change is small, nudging is disabled, or an agent
     /// already structured the review.
     pub fn large_change_nudge(&self) -> Option<String> {
-        let has_walkthrough = review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        )
-        .is_some_and(|session| {
+        let has_walkthrough = self.active_durable_session().is_some_and(|session| {
             session
                 .walkthroughs
                 .iter()
@@ -2279,6 +2399,7 @@ impl ReviewSession {
     }
 
     pub fn toggle_viewed(&mut self) {
+        self.touch_durable_state();
         if let Some(file) = self.selected_file_mut() {
             file.viewed = !file.viewed;
             file.caught_up = false;
@@ -2292,6 +2413,7 @@ impl ReviewSession {
     }
 
     pub fn mark_selected_viewed(&mut self) {
+        self.touch_durable_state();
         let selected = self.selected;
         let next = self.next_unviewed_index(1, Some(selected));
         if let Some(file) = self.selected_file_mut() {
@@ -2309,6 +2431,7 @@ impl ReviewSession {
     }
 
     pub fn mark_all_viewed(&mut self) {
+        self.touch_durable_state();
         for file in &mut self.files {
             file.viewed = true;
             file.caught_up = false;
@@ -2321,6 +2444,7 @@ impl ReviewSession {
     }
 
     pub fn mark_files_viewed_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
+        self.touch_durable_state();
         for file in &mut self.files {
             if predicate(file) {
                 file.viewed = true;
@@ -2361,6 +2485,7 @@ impl ReviewSession {
         };
         crate::attention::apply_whole_file_viewed_effects(&mut state, &files, paths);
         self.persisted_files = state.files;
+        self.touch_durable_state();
         let viewed = paths.iter().map(String::as_str).collect::<BTreeSet<_>>();
         self.mark_files_viewed_where(|file| viewed.contains(file.path.as_str()));
     }
@@ -2379,6 +2504,7 @@ impl ReviewSession {
         let mut caught_up = 0;
         let mut already_viewed = 0;
         let mut changed = 0;
+        self.touch_durable_state();
         for file in &mut self.files {
             if prior_fingerprints.get(&file.path) == Some(&file.fingerprint) {
                 if file.viewed {
@@ -3093,7 +3219,7 @@ impl ReviewSession {
     ) -> bool {
         let index = self.ensure_active_review_session_index();
         review::edit_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             id,
             review::CommentEdits {
@@ -3110,9 +3236,14 @@ impl ReviewSession {
         let comment = self.comments.iter_mut().find(|comment| comment.id == id)?;
         let next = comment.state.next();
         let index = self.ensure_active_review_session_index();
-        review::set_comment_state(&mut self.sessions[index], &mut self.comments, id, next)
-            .ok()
-            .map(|comment| comment.state)
+        review::set_comment_state(
+            &mut self.durable_sessions[index],
+            &mut self.comments,
+            id,
+            next,
+        )
+        .ok()
+        .map(|comment| comment.state)
     }
 
     /// Advance a comment's action intent (none -> fix -> explain -> test -> follow-up -> none).
@@ -3132,7 +3263,7 @@ impl ReviewSession {
         };
         let index = self.ensure_active_review_session_index();
         review::edit_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             id,
             review::CommentEdits {
@@ -3155,7 +3286,7 @@ impl ReviewSession {
         };
         let index = self.ensure_active_review_session_index();
         review::edit_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             id,
             review::CommentEdits {
@@ -3177,8 +3308,12 @@ impl ReviewSession {
 
     pub fn delete_comment(&mut self, id: &str) -> bool {
         let session_index = self.ensure_active_review_session_index();
-        if review::delete_comment(&mut self.sessions[session_index], &mut self.comments, id)
-            .is_err()
+        if review::delete_comment(
+            &mut self.durable_sessions[session_index],
+            &mut self.comments,
+            id,
+        )
+        .is_err()
         {
             return false;
         }
@@ -3242,14 +3377,14 @@ impl ReviewSession {
         channel: Channel,
     ) -> bool {
         let index = self.ensure_active_review_session_index();
-        let session_id = self.sessions[index].id.clone();
+        let session_id = self.durable_sessions[index].id.clone();
         let observation = crate::provenance::CommentObservation::new(
             self.provenance_snapshot(index),
             Some(anchor.clone()),
         );
         let state = self.initial_state_for_channel(channel);
         review::add_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             review::NewComment {
                 session_id,
@@ -3302,7 +3437,7 @@ impl ReviewSession {
         body: String,
     ) -> color_eyre::eyre::Result<Comment> {
         let target = review::SessionTargetSpec {
-            repo: Some(review::canonical_repo_identity(&self.repo)),
+            repo: Some(self.canonical_repo.clone()),
             base: Some(self.target.base.clone()),
             revision: Some(self.target.rev.clone()),
             revset: Some(self.target.to_string()),
@@ -3359,12 +3494,12 @@ impl ReviewSession {
 
     pub fn add_general_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
         let index = self.ensure_active_review_session_index();
-        let session_id = self.sessions[index].id.clone();
+        let session_id = self.durable_sessions[index].id.clone();
         let observation =
             crate::provenance::CommentObservation::new(self.provenance_snapshot(index), None);
         let state = self.initial_state_for_channel(channel);
         review::add_comment(
-            &mut self.sessions[index],
+            &mut self.durable_sessions[index],
             &mut self.comments,
             review::NewComment {
                 session_id,
@@ -3393,7 +3528,7 @@ impl ReviewSession {
     }
 
     fn provenance_snapshot(&self, session_index: usize) -> crate::provenance::SnapshotEvidence {
-        let durable = &self.sessions[session_index];
+        let durable = &self.durable_sessions[session_index];
         crate::provenance::SnapshotEvidence::capture(
             chrono::Utc::now(),
             durable.id.clone(),
@@ -3404,37 +3539,42 @@ impl ReviewSession {
 
     pub fn ready_all_draft_comments(&mut self) -> review::ReadyCommentsResult {
         let index = self.ensure_active_review_session_index();
-        review::ready_all_drafts(&mut self.sessions[index], &mut self.comments).unwrap_or_default()
+        review::ready_all_drafts(&mut self.durable_sessions[index], &mut self.comments)
+            .unwrap_or_default()
     }
 
     fn ensure_active_review_session_index(&mut self) -> usize {
-        if let Some(id) = review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        )
-        .map(|session| session.id.clone())
-            && let Some(index) = self.sessions.iter().position(|session| session.id == id)
-        {
+        // Callers acquire this index to mutate the durable session (and
+        // usually comments alongside); bump the generations once here so
+        // every such seam invalidates the stream cache and reaches autosave.
+        self.touch_durable_review();
+        if let Some(index) = self.active_durable_session_index() {
             return index;
         }
         let mut state = ReviewState {
-            sessions: std::mem::take(&mut self.sessions),
+            sessions: std::mem::take(&mut self.durable_sessions),
             ..ReviewState::default()
         };
         let spec = review::SessionTargetSpec {
-            repo: Some(review::canonical_repo_identity(&self.repo)),
+            repo: Some(self.canonical_repo.clone()),
             base: Some(self.target.base.clone()),
             revision: Some(self.target.rev.clone()),
             revset: None,
         };
         let id = review::ensure_session(&mut state, &spec, None).id.clone();
-        self.sessions = state.sessions;
-        self.sessions
+        self.durable_sessions = state.sessions;
+        self.durable_sessions
             .iter()
             .position(|session| session.id == id)
             .expect("ensured session must exist")
+    }
+
+    /// The open durable session for this loaded review, creating one when
+    /// none exists yet. Mutation seam: bumps the stream and durable
+    /// generations like [`Self::durable_sessions_mut`].
+    pub fn ensure_active_durable_session_mut(&mut self) -> &mut crate::state::ReviewSession {
+        let index = self.ensure_active_review_session_index();
+        &mut self.durable_sessions[index]
     }
 
     fn current_comment_index(&self) -> Option<usize> {
@@ -3512,15 +3652,27 @@ impl ReviewSession {
         self.to_state()
     }
 
+    /// Test-only count of session-scale durable-state snapshots; see
+    /// [`Self::to_state`].
+    #[cfg(test)]
+    pub fn state_snapshot_count(&self) -> usize {
+        self.state_snapshots.get()
+    }
+
     /// Snapshot the persistable review state (viewed marks and comments)
     /// without consuming the session, so the TUI can autosave mid-session.
+    /// Session-scale work: clones every file record, comment, and durable
+    /// session. Per-keystroke paths must gate on
+    /// [`Self::durable_state_generation`] before calling this.
     pub fn to_state(&self) -> ReviewState {
+        #[cfg(test)]
+        self.state_snapshots.set(self.state_snapshots.get() + 1);
         ReviewState {
             meta: ReviewStateMeta {
                 version: REVIEW_STATE_SCHEMA_VERSION,
                 base: Some(self.target.base.clone()),
                 revision: Some(self.target.rev.clone()),
-                repo: Some(review::canonical_repo_identity(&self.repo)),
+                repo: Some(self.canonical_repo.clone()),
                 saved_at: Some(Utc::now()),
             },
             files: {
@@ -3549,7 +3701,7 @@ impl ReviewSession {
                 files
             },
             comments: self.comments.clone(),
-            sessions: self.sessions.clone(),
+            sessions: self.durable_sessions.clone(),
         }
     }
 
@@ -3860,13 +4012,13 @@ diff --git a/a/before.rs b/a/before.rs
 
         session.add_file_comment("right repo".into());
 
-        assert_eq!(session.sessions.len(), 2);
+        assert_eq!(session.durable_sessions().len(), 2);
         assert_ne!(
             session.comments[0].session_id.as_deref(),
             Some("wrong-repo")
         );
         let owner = session
-            .sessions
+            .durable_sessions()
             .iter()
             .find(|durable| durable.id == session.comments[0].session_id.as_deref().unwrap())
             .unwrap();
@@ -6193,7 +6345,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         let index = session.ensure_active_review_session_index();
         crate::review::add_walkthrough_step(
-            &mut session.sessions[index],
+            &mut session.durable_sessions_mut()[index],
             crate::state::WalkthroughStep {
                 title: Some("core".into()),
                 ..Default::default()

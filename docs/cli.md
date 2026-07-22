@@ -426,6 +426,15 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 last-writer-wins during external-state merge; region identity and effective
 resolution are deterministic within the winning map.
 
+### Debugging TUI responsiveness
+
+Set `GANDER_FRAME_LOG=<path>` before launching `gander tui` to append one
+line per handled input batch: `handle_us=<n> draw_us=<n>` (event dispatch
+through autosave, then the terminal draw that rendered the result). The log
+is opt-in and has zero overhead when the variable is unset. Use it to spot
+interactive-latency regressions on large reviews, e.g.
+`GANDER_FRAME_LOG=/tmp/frames.log gander tui`.
+
 ## Export/import and state utilities
 
 ```sh

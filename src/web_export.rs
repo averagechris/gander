@@ -38,7 +38,7 @@ pub fn render_html_with_profile_and_attention_files(
     let projected_team_session = team.then(|| {
         let mut projected = session.clone();
         projected.comments = state.comments.clone();
-        projected.sessions = state.sessions.clone();
+        *projected.durable_sessions_mut() = state.sessions.clone();
         projected
     });
     let team_artifact = projected_team_session

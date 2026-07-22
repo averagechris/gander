@@ -48,13 +48,9 @@ fn rows(session: &ReviewSession) -> Vec<SkimFoldSummary> {
         .iter()
         .map(|file| file.diff.clone())
         .collect::<Vec<_>>();
-    let durable = crate::review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
-    .cloned()
-    .unwrap_or_default();
+    let durable = session
+        .active_durable_session()
+        .cloned()
+        .unwrap_or_default();
     attention::list_skim_folds(&durable, &files, true)
 }

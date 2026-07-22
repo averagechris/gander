@@ -1149,14 +1149,10 @@ fn selected_path(session: &ReviewSession) -> Option<String> {
 }
 
 fn annotation_scope(session: &ReviewSession) -> String {
-    let durable = crate::review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
-    .map(|review| review.id.as_str())
-    .unwrap_or("legacy");
+    let durable = session
+        .active_durable_session()
+        .map(|review| review.id.as_str())
+        .unwrap_or("legacy");
     format!(
         "{}|{}|{}|{}",
         durable,

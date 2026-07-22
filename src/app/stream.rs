@@ -6,7 +6,6 @@
 //! conservatively without treating changed code as acknowledged.
 
 use std::collections::{BTreeSet, HashMap};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
 use sha2::{Digest, Sha256};
@@ -22,6 +21,34 @@ use crate::{
 };
 
 use super::{DiffRow, DiffRowKind, ReviewSession};
+
+/// Cache key for the memoized stream projection. Every field is either a
+/// monotonic generation counter (bumped explicitly at each mutation seam) or
+/// a small view-option scalar compared by value. See
+/// [`ReviewSession::stream_cache_key`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct StreamCacheKey {
+    stream_generation: u64,
+    expansion_epoch: u64,
+    fold_context: bool,
+    word_highlight: bool,
+    max_diff_lines: usize,
+    syntax: crate::syntax::SyntaxConfig,
+}
+
+impl StreamCacheKey {
+    /// True when the cached projection is still valid for `session`. This is
+    /// a handful of scalar compares (plus one small config equality); it must
+    /// never hash or walk session-scale content.
+    fn matches(&self, session: &ReviewSession) -> bool {
+        self.stream_generation == session.stream_inputs_generation()
+            && self.expansion_epoch == session.expansion_epoch
+            && self.fold_context == session.fold_context
+            && self.word_highlight == session.diff_cues.word_highlight
+            && self.max_diff_lines == session.max_diff_lines
+            && self.syntax == session.syntax
+    }
+}
 
 fn structural_rows(file: &super::ReviewFile) -> Vec<DiffRow> {
     let mut rows = vec![structural_row(
@@ -697,102 +724,41 @@ impl ReviewSession {
         Rc::clone(&self.review_stream().render_rows)
     }
 
-    fn stream_signature(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
-        self.fold_context.hash(&mut hash);
-        self.diff_cues.word_highlight.hash(&mut hash);
-        self.syntax.hash(&mut hash);
-        self.expansion_epoch.hash(&mut hash);
-        self.max_diff_lines.hash(&mut hash);
-        for file in &self.files {
-            file.path.hash(&mut hash);
-            file.fingerprint.hash(&mut hash);
-            self.force_rendered.contains(&file.path).hash(&mut hash);
+    /// Cheap cache key for the memoized stream projection. Everything here is
+    /// either a monotonic generation counter (bumped explicitly at each
+    /// mutation seam — see [`ReviewSession::touch_stream_inputs`]) or a small
+    /// scalar/config compared by value. Validating a cache hit must never
+    /// hash or walk session-scale content: per-keystroke cost is O(key), not
+    /// O(session).
+    fn stream_cache_key(&self) -> StreamCacheKey {
+        StreamCacheKey {
+            stream_generation: self.stream_inputs_generation(),
+            expansion_epoch: self.expansion_epoch,
+            fold_context: self.fold_context,
+            word_highlight: self.diff_cues.word_highlight,
+            max_diff_lines: self.max_diff_lines,
+            syntax: self.syntax.clone(),
         }
-        for fold in &self.expanded_skim_folds {
-            fold.hash(&mut hash);
-        }
-        for file_index in self.stream_materialized_files.borrow().iter() {
-            file_index.hash(&mut hash);
-        }
-        if let Some(session) = crate::review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        ) {
-            session.id.hash(&mut hash);
-            for region in &session.attention_regions {
-                hash_target(&region.target, &mut hash);
-                (region.salience as u8).hash(&mut hash);
-                (region.source as u8).hash(&mut hash);
-                region.rationale.hash(&mut hash);
-            }
-            for progress in &session.attention_progress {
-                (progress.kind as u8).hash(&mut hash);
-                progress.fingerprint.hash(&mut hash);
-                for member in &progress.target.members {
-                    member.file.hash(&mut hash);
-                    member.line.hash(&mut hash);
-                    member.end_line.hash(&mut hash);
-                }
-            }
-            for step in session
-                .walkthroughs
-                .iter()
-                .flat_map(|walkthrough| walkthrough.steps.iter())
-            {
-                step.id.hash(&mut hash);
-                hash_target(&step.target, &mut hash);
-                for target in &step.extra_targets {
-                    hash_target(target, &mut hash);
-                }
-                step.change_id.hash(&mut hash);
-                step.title.hash(&mut hash);
-                step.body.hash(&mut hash);
-                step.why.hash(&mut hash);
-                (step.kind as u8).hash(&mut hash);
-                (step.importance as u8).hash(&mut hash);
-            }
-        }
-        for change in &self.stack_changes {
-            change.change_id.hash(&mut hash);
-            change.bookmarks.hash(&mut hash);
-            change.description.hash(&mut hash);
-        }
-        for (change_id, diff) in &self.change_diffs {
-            change_id.hash(&mut hash);
-            for file in &diff.files {
-                file.path.hash(&mut hash);
-                file.fingerprint.hash(&mut hash);
-            }
-        }
-        hash.finish()
     }
 
     pub fn review_stream(&self) -> Rc<ReviewStream> {
-        let signature = self.stream_signature();
-        if let Some((cached_signature, stream)) = self.stream_cache.borrow().as_ref()
-            && *cached_signature == signature
+        if let Some((cached_key, stream)) = self.stream_cache.borrow().as_ref()
+            && cached_key.matches(self)
         {
             return Rc::clone(stream);
         }
+        let key = self.stream_cache_key();
         let stream = Rc::new(self.build_review_stream());
         #[cfg(test)]
         self.stream_projection_builds
             .set(self.stream_projection_builds.get() + 1);
-        *self.stream_cache.borrow_mut() = Some((signature, Rc::clone(&stream)));
+        *self.stream_cache.borrow_mut() = Some((key, Rc::clone(&stream)));
         stream
     }
 
     fn build_review_stream(&self) -> ReviewStream {
         let diff_files = self.files.iter().map(|file| &file.diff).collect::<Vec<_>>();
-        let durable = crate::review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        );
+        let durable = self.active_durable_session();
         // One staleness pass for the whole projection; every row query below
         // resolves against the same precomputed effective attention map.
         let resolver =
@@ -1194,6 +1160,9 @@ impl ReviewSession {
             self.expanded_skim_folds.insert(fold.id);
             true
         };
+        // Peeked folds change the stream projection but not any cache-key
+        // scalar; bump the generation explicitly.
+        self.touch_stream_inputs();
         Some(expanded)
     }
 
@@ -1249,7 +1218,13 @@ impl ReviewSession {
             .collect::<Vec<_>>();
         let index = self.active_durable_session_index()?;
         let outcome =
-            attention::acknowledge_skim_folds(&mut self.sessions[index], &files, selection).ok()?;
+            attention::acknowledge_skim_folds(&mut self.durable_sessions[index], &files, selection)
+                .ok()?;
+        if outcome.acknowledged > 0 {
+            // Direct durable-session mutation seam: acknowledged folds change
+            // both the stream projection and persisted attention progress.
+            self.touch_durable_review();
+        }
         // Same shared whole-file viewed-effect service as CLI/MCP; see
         // `ReviewSession::apply_whole_file_viewed_effects`.
         self.apply_whole_file_viewed_effects(&outcome.whole_files_viewed);
@@ -1363,14 +1338,14 @@ impl ReviewSession {
             };
             let result = if promote {
                 attention::promote_human_attention_refs(
-                    &mut self.sessions[index],
+                    &mut self.durable_sessions[index],
                     target,
                     None,
                     &files,
                 )
             } else {
                 attention::demote_human_attention_refs(
-                    &mut self.sessions[index],
+                    &mut self.durable_sessions[index],
                     target,
                     None,
                     &files,
@@ -1379,6 +1354,9 @@ impl ReviewSession {
             changed |= result.is_ok();
         }
         if changed {
+            // Direct durable-session mutation seam: salience edits feed the
+            // stream projection, and the reanchor below must observe them.
+            self.touch_durable_review();
             self.reanchor_stream_cursor(&row.id);
         }
         changed
@@ -1412,26 +1390,19 @@ impl ReviewSession {
         };
         let files = self.files.iter().map(|file| &file.diff).collect::<Vec<_>>();
         let progress_target = spotlight.progress_target.clone();
-        if let Some(index) = self.active_durable_session_index() {
-            let _ = attention::record_attention_progress_refs(
-                &mut self.sessions[index],
+        if let Some(index) = self.active_durable_session_index()
+            && attention::record_attention_progress_refs(
+                &mut self.durable_sessions[index],
                 progress_target,
                 AttentionProgressKind::SpotlightVisited,
                 &files,
-            );
+            )
+            .is_ok_and(|recorded| recorded)
+        {
+            // Direct durable-session mutation seam: newly recorded progress
+            // must reach both the stream projection and autosave.
+            self.touch_durable_review();
         }
-    }
-
-    fn active_durable_session_index(&self) -> Option<usize> {
-        let id = crate::review::active_session_for_loaded_review(
-            &self.sessions,
-            &self.repo,
-            &self.target.base,
-            &self.target.rev,
-        )?
-        .id
-        .clone();
-        self.sessions.iter().position(|session| session.id == id)
     }
 }
 
@@ -1645,28 +1616,6 @@ fn target_from_anchor(anchor: &CommentAnchor) -> Option<StateReviewTarget> {
         anchor: Some(anchor.clone()),
         ..Default::default()
     })
-}
-
-fn hash_target(target: &StateReviewTarget, hash: &mut impl Hasher) {
-    target.file.hash(hash);
-    target.line.hash(hash);
-    target.end_line.hash(hash);
-    if let Some(anchor) = target.anchor.as_ref() {
-        anchor.path().hash(hash);
-        anchor.line().hash(hash);
-        anchor.end_line().hash(hash);
-        match anchor {
-            CommentAnchor::File {
-                diff_fingerprint, ..
-            }
-            | CommentAnchor::Line {
-                diff_fingerprint, ..
-            }
-            | CommentAnchor::Range {
-                diff_fingerprint, ..
-            } => diff_fingerprint.hash(hash),
-        }
-    }
 }
 
 fn spotlight_targets(
@@ -1937,11 +1886,11 @@ mod tests {
     fn attach_review(session: &mut ReviewSession, mut review: crate::state::ReviewSession) {
         review.target.base = Some(session.target.base.clone());
         review.target.revision = Some(session.target.rev.clone());
-        review.target.repo = Some(crate::review::canonical_repo_identity(&session.repo));
+        review.target.repo = Some(session.canonical_repo().to_owned());
         if review.id.is_empty() {
             review.id = "review".into();
         }
-        session.sessions.push(review);
+        session.durable_sessions_mut().push(review);
     }
 
     fn reshaping_file_diff(path: &str, suffix: usize) -> String {
@@ -2030,7 +1979,7 @@ mod tests {
         assert_eq!(stream.rows[0].member_file_indexes, [0, 1]);
         let unavailable = fold.clone();
         drop(stream);
-        session.sessions.clear();
+        session.durable_sessions_mut().clear();
         assert_eq!(
             session.acknowledge_skim_fold(unavailable),
             SkimAcknowledgeResult::Unavailable
@@ -2238,7 +2187,7 @@ mod tests {
             SkimAcknowledgeResult::Acknowledged
         );
         assert!(!session.files[0].viewed);
-        assert_eq!(session.sessions[0].attention_progress.len(), 1);
+        assert_eq!(session.durable_sessions()[0].attention_progress.len(), 1);
         assert_eq!(
             session.coverage(),
             Coverage {
@@ -2380,7 +2329,7 @@ mod tests {
         assert!(matches!(expanded.rows[0].kind, StreamRowKind::SkimFold(_)));
         assert_eq!(session.toggle_selected_skim_fold(), Some(false));
         assert_eq!(session.review_stream().rows.len(), collapsed);
-        assert!(session.sessions[0].attention_progress.is_empty());
+        assert!(session.durable_sessions()[0].attention_progress.is_empty());
     }
 
     #[test]

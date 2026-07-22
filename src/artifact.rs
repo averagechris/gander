@@ -602,12 +602,7 @@ pub fn render_handoff_markdown(
 }
 
 fn active_durable_session(session: &ReviewSession) -> Option<&crate::state::ReviewSession> {
-    crate::review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
+    session.active_durable_session()
 }
 
 fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bool {
@@ -1843,7 +1838,7 @@ mod tests {
         };
         let current = crate::attention::progress_fingerprint(&target, &files).unwrap();
         let active = session
-            .sessions
+            .durable_sessions_mut()
             .iter_mut()
             .find(|review| review.id == "active")
             .unwrap();
@@ -1957,7 +1952,8 @@ mod tests {
     #[test]
     fn team_profile_only_exports_collaboration_todo_resolved_without_private_leaks() {
         let mut session = fixture();
-        session.sessions[0].disposition = Some(crate::state::ReviewDisposition::RequestChanges);
+        session.durable_sessions_mut()[0].disposition =
+            Some(crate::state::ReviewDisposition::RequestChanges);
         // Private per-file viewed progress that must not ship to the team.
         session.files[0].viewed = true;
         for comment in &mut session.comments {
@@ -2076,7 +2072,7 @@ mod tests {
             comment_ids: vec!["linked".into()],
             ..Default::default()
         };
-        session.sessions[0].action_items.push(closed);
+        session.durable_sessions_mut()[0].action_items.push(closed);
 
         let value: serde_json::Value = serde_json::from_str(
             &render_artifact_with_profile(&session, ArtifactFormat::Json, ArtifactProfile::Agent)
@@ -2158,13 +2154,15 @@ mod tests {
     #[test]
     fn only_open_excludes_closed_history_and_non_todo_comments() {
         let mut session = fixture();
-        session.sessions[0].action_items.push(ActionItem {
-            id: "closed".into(),
-            title: "closed history".into(),
-            status: ActionItemStatus::Closed,
-            disposition: Some(ClosedDisposition::Completed),
-            ..Default::default()
-        });
+        session.durable_sessions_mut()[0]
+            .action_items
+            .push(ActionItem {
+                id: "closed".into(),
+                title: "closed history".into(),
+                status: ActionItemStatus::Closed,
+                disposition: Some(ClosedDisposition::Completed),
+                ..Default::default()
+            });
         let value: serde_json::Value = serde_json::from_str(
             &render_artifact_with_options(
                 &session,
@@ -2199,12 +2197,12 @@ mod tests {
     #[test]
     fn artifact_active_session_requires_matching_repo_identity() {
         let mut session = fixture();
-        let mut wrong = session.sessions[0].clone();
+        let mut wrong = session.durable_sessions()[0].clone();
         wrong.id = "wrong-repo".into();
         wrong.target.repo = Some("/other-repo".into());
         wrong.title = Some("Wrong repo".into());
         wrong.action_items[0].title = "wrong repo action".into();
-        session.sessions.insert(0, wrong);
+        session.durable_sessions_mut().insert(0, wrong);
 
         let value: serde_json::Value =
             serde_json::from_str(&render_artifact(&session, ArtifactFormat::Json).unwrap())
@@ -2497,7 +2495,7 @@ mod tests {
         let snapshot = crate::provenance::SnapshotEvidence::capture(
             chrono::DateTime::UNIX_EPOCH,
             "active",
-            session.sessions[0].target.clone(),
+            session.durable_sessions()[0].target.clone(),
             session.files.iter().map(|file| &file.diff),
         );
         let observation = crate::provenance::CommentObservation::new(

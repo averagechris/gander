@@ -1,6 +1,6 @@
 //! Durable walkthrough-step popup state.
 
-use crate::{app::ReviewSession, review};
+use crate::app::ReviewSession;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct WalkthroughListState {
@@ -48,17 +48,13 @@ impl WalkthroughListState {
 }
 
 fn walkthrough_step_ids(session: &ReviewSession) -> Vec<String> {
-    review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    )
-    .into_iter()
-    .flat_map(|durable| durable.walkthroughs.iter())
-    .flat_map(|walkthrough| walkthrough.steps.iter())
-    .map(|step| step.id.clone())
-    .collect()
+    session
+        .active_durable_session()
+        .into_iter()
+        .flat_map(|durable| durable.walkthroughs.iter())
+        .flat_map(|walkthrough| walkthrough.steps.iter())
+        .map(|step| step.id.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -90,7 +86,7 @@ mod tests {
         list.move_selection(1);
         assert_eq!(list.selected, 1);
         let id = list.selected_step_id().unwrap().to_owned();
-        let durable = session.sessions.first_mut().unwrap();
+        let durable = session.durable_sessions_mut().first_mut().unwrap();
         review::remove_walkthrough_step(durable, &id).unwrap();
         list.refresh(&session);
         assert_eq!(list.step_ids.len(), 1);
@@ -118,7 +114,8 @@ mod tests {
         );
         let mut list = WalkthroughListState::new(&session);
         list.selected = 1;
-        review::move_walkthrough_step(session.sessions.first_mut().unwrap(), "b", 0).unwrap();
+        review::move_walkthrough_step(session.durable_sessions_mut().first_mut().unwrap(), "b", 0)
+            .unwrap();
         list.refresh(&session);
         assert_eq!(list.selected_step_id(), Some("b"));
     }

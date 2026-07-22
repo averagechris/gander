@@ -213,7 +213,24 @@ fn target_matches(actual: &ReviewTarget, spec: &SessionTargetSpec) -> bool {
     actual.repo == spec.repo && actual.base == spec.base && actual.revision == spec.revision
 }
 
+#[cfg(test)]
+thread_local! {
+    static CANONICAL_REPO_RESOLUTIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only visibility into how many filesystem canonicalization calls this
+/// thread has performed. Regression tests assert deltas of this counter to
+/// prove per-keystroke paths never re-resolve the repo identity (a
+/// `getattrlist` storm on large reviews).
+#[cfg(test)]
+pub fn canonical_repo_resolutions() -> usize {
+    CANONICAL_REPO_RESOLUTIONS.with(std::cell::Cell::get)
+}
+
 pub fn canonical_repo_identity(repo: &Path) -> String {
+    #[cfg(test)]
+    CANONICAL_REPO_RESOLUTIONS.with(|count| count.set(count.get() + 1));
     repo.canonicalize()
         .unwrap_or_else(|_| repo.to_path_buf())
         .display()

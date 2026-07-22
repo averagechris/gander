@@ -1043,12 +1043,7 @@ fn for_each_effective_walkthrough_card(
     session: &ReviewSession,
     mut visit: impl FnMut(&crate::state::WalkthroughStep, &ReviewTarget, usize, usize, Option<String>),
 ) {
-    let Some(durable) = crate::review::active_session_for_loaded_review(
-        &session.sessions,
-        &session.repo,
-        &session.target.base,
-        &session.target.rev,
-    ) else {
+    let Some(durable) = session.active_durable_session() else {
         return;
     };
     let files = session
@@ -4233,7 +4228,7 @@ fn draw_walkthrough_list_popup(
     let mut lines = Vec::new();
     for (index, id) in list.step_ids.iter().enumerate() {
         let Some(step) = session
-            .sessions
+            .durable_sessions()
             .iter()
             .flat_map(|s| &s.walkthroughs)
             .flat_map(|w| &w.steps)
@@ -4637,8 +4632,8 @@ mod tests {
         };
         durable.target.base = Some(session.target.base.clone());
         durable.target.revision = Some(session.target.rev.clone());
-        durable.target.repo = Some(crate::review::canonical_repo_identity(&session.repo));
-        session.sessions.push(durable);
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        session.durable_sessions_mut().push(durable);
         session.stack_changes.push(JjChangeSummary {
             change_id: "abc123".into(),
             bookmarks: "feature/stream".into(),
@@ -4695,8 +4690,8 @@ mod tests {
         };
         durable.target.base = Some(session.target.base.clone());
         durable.target.revision = Some(session.target.rev.clone());
-        durable.target.repo = Some(crate::review::canonical_repo_identity(&session.repo));
-        session.sessions.push(durable);
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        session.durable_sessions_mut().push(durable);
         session.stream_mode = true;
         let mode = Mode::AttentionGlance(super::super::GlanceBoardState::new(&session));
         insta::assert_snapshot!(
@@ -5828,7 +5823,7 @@ diff --git a/README.md b/README.md
         session.comments[2].channel = Channel::Collaboration;
         let durable_id = session.comments[1].session_id.clone().unwrap();
         session
-            .sessions
+            .durable_sessions_mut()
             .iter_mut()
             .find(|durable| durable.id == durable_id)
             .unwrap()
@@ -7835,7 +7830,9 @@ diff --git a/README.md b/README.md
             source: SalienceSource::Agent,
         });
         let owner = session
-            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .selected_walkthrough_card_owner(
+                &session.durable_sessions()[0].walkthroughs[0].steps[0].target,
+            )
             .unwrap();
         session.select_diff_row(owner);
         let state = TuiState::default();
@@ -7909,7 +7906,9 @@ diff --git a/README.md b/README.md
             source: SalienceSource::Agent,
         });
         let owner = session
-            .selected_walkthrough_card_owner(&session.sessions[0].walkthroughs[0].steps[0].target)
+            .selected_walkthrough_card_owner(
+                &session.durable_sessions()[0].walkthroughs[0].steps[0].target,
+            )
             .unwrap();
         session.select_diff_row(owner);
         let state = TuiState::default();
