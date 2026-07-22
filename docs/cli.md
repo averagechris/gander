@@ -402,7 +402,7 @@ stream rows/cards. Focus keeps comments, search, folds, retargeting, and other
 normal review actions available.
 
 ```sh
-gander drafts list|add [--file <spec>]|remove --id <id>
+gander drafts list|add [--file <spec>]|remove --id <id-or-unique-prefix>
 ```
 
 Drafts remain a supported CLI surface, now backed by durable agent-authored

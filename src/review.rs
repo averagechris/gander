@@ -374,6 +374,7 @@ pub fn add_comment(
         state: new.state,
         author: new.author,
         channel: new.channel,
+        source_comment_id: None,
         replies: Vec::new(),
         created_at: now,
         updated_at: Some(now),

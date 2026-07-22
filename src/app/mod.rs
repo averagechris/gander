@@ -1935,6 +1935,7 @@ impl ReviewSession {
                 state: CommentState::Draft,
                 author: self.agent_identity.clone(),
                 channel: Channel::Onboarding,
+                source_comment_id: None,
                 replies: Vec::new(),
                 created_at: now,
                 updated_at: Some(now),
@@ -3333,12 +3334,27 @@ impl ReviewSession {
         self.add_comment_in_channel(body, channel);
     }
 
+    #[cfg(test)]
     pub fn add_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
+        self.add_comment_in_channel_linked(body, channel, None)
+    }
+
+    pub fn add_comment_in_channel_linked(
+        &mut self,
+        body: String,
+        channel: Channel,
+        source_comment_id: Option<String>,
+    ) -> bool {
         match self.focus {
-            Focus::Files => self.add_file_comment_in_channel(body, channel),
+            Focus::Files => self.add_file_comment_with_source(body, channel, source_comment_id),
             Focus::Diff => {
                 if let Some(anchor) = self.selected_comment_anchor() {
-                    let added = self.add_comment_with_anchor_and_channel(body, anchor, channel);
+                    let added = self.add_comment_with_anchor_channel_and_source(
+                        body,
+                        anchor,
+                        channel,
+                        source_comment_id,
+                    );
                     self.clear_diff_range_selection();
                     added
                 } else {
@@ -3358,7 +3374,17 @@ impl ReviewSession {
         self.add_file_comment_in_channel(body, channel);
     }
 
+    #[cfg(test)]
     pub fn add_file_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
+        self.add_file_comment_with_source(body, channel, None)
+    }
+
+    fn add_file_comment_with_source(
+        &mut self,
+        body: String,
+        channel: Channel,
+        source_comment_id: Option<String>,
+    ) -> bool {
         let Some(file) = self.selected_file() else {
             return false;
         };
@@ -3367,14 +3393,15 @@ impl ReviewSession {
             old_path: file.old_path.clone(),
             diff_fingerprint: file.fingerprint.clone(),
         };
-        self.add_comment_with_anchor_and_channel(body, anchor, channel)
+        self.add_comment_with_anchor_channel_and_source(body, anchor, channel, source_comment_id)
     }
 
-    pub fn add_comment_with_anchor_and_channel(
+    fn add_comment_with_anchor_channel_and_source(
         &mut self,
         body: String,
         anchor: CommentAnchor,
         channel: Channel,
+        source_comment_id: Option<String>,
     ) -> bool {
         let index = self.ensure_active_review_session_index();
         let session_id = self.durable_sessions[index].id.clone();
@@ -3383,7 +3410,7 @@ impl ReviewSession {
             Some(anchor.clone()),
         );
         let state = self.initial_state_for_channel(channel);
-        review::add_comment(
+        let added = review::add_comment(
             &mut self.durable_sessions[index],
             &mut self.comments,
             review::NewComment {
@@ -3405,8 +3432,21 @@ impl ReviewSession {
                 author: self.human_identity.clone(),
                 channel,
             },
-        )
-        .is_ok()
+        );
+        match added {
+            Ok(comment) => {
+                if let Some(source_comment_id) = source_comment_id
+                    && let Some(saved) = self
+                        .comments
+                        .iter_mut()
+                        .find(|saved| saved.id == comment.id)
+                {
+                    saved.source_comment_id = Some(source_comment_id);
+                }
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Add an agent-authored durable draft for TUI triage. This is the shared

@@ -10,6 +10,8 @@ Users or external harnesses prepare the workspace and can post/export results;
 Gander focuses on review sessions, comments, optional durable action items,
 walkthroughs, TUI/CLI
 automation, and optional MCP access over the same core logic.
+The [architecture map](docs/architecture.md) points to the stream, attention,
+annotation, rendering, and adapter modules.
 
 ![gander demo: reviewing a jj change, marking files viewed, leaving a range comment, and exporting a review artifact](docs/demo.gif)
 

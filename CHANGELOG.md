@@ -2,12 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- Added durable `source_comment_id` linkage from delegation requests composed
+  on onboarding comments, preserved across state, CLI/MCP, and artifacts.
+- Added a concise architecture map for the review stream, attention and
+  generation caches, annotation identity/channels, and card rendering.
+
+### Changed
+
 - Changed diff-pane Enter to a configurable guided review advance: it
   acknowledges a current skim fold, then moves without wrapping to the next
   Spotlight while preserving Focus and leaving ordinary files unviewed.
 - Kept large-file visits responsive by sharing cached tree-sitter results
   instead of cloning their per-line projection, and removed annotation-input
   vector cloning from the steady-state layout cache identity path.
+- `gander drafts remove --id` now accepts unique UUID prefixes and rejects
+  unknown or ambiguous selectors atomically.
+- Hardened OSC/PTY input-order coverage against heavily loaded Nix sandbox
+  runners without reducing the asserted event sequence.
+- Refreshed the published HTML example from a compact v0.8 review stream.
 
 ## v0.8.0 - 2026-07-22
 

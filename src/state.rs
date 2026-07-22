@@ -185,6 +185,9 @@ pub struct Comment {
     pub state: CommentState,
     pub author: Identity,
     pub channel: Channel,
+    /// Exact onboarding comment that prompted this delegation request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_comment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<CommentReply>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -208,6 +211,7 @@ impl Default for Comment {
             state: CommentState::default(),
             author: Identity::default(),
             channel: Channel::default(),
+            source_comment_id: None,
             replies: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: None,
@@ -349,6 +353,8 @@ struct CompatibleComment {
     #[serde(default)]
     channel: Option<Channel>,
     #[serde(default)]
+    source_comment_id: Option<String>,
+    #[serde(default)]
     replies: Vec<CommentReply>,
     created_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]
@@ -379,6 +385,7 @@ impl<'de> Deserialize<'de> for Comment {
             state: compatible.state,
             author: compatible.author.unwrap_or_default(),
             channel,
+            source_comment_id: compatible.source_comment_id,
             replies: compatible.replies,
             created_at: compatible.created_at,
             updated_at: compatible.updated_at,
@@ -2414,5 +2421,25 @@ mod tests {
             ..Default::default()
         };
         assert!(state.save(&dir.path().join("state.json")).is_err());
+    }
+
+    #[test]
+    fn source_comment_link_is_additive_and_round_trips() {
+        let linked = Comment {
+            id: "delegation".into(),
+            body: "please change this".into(),
+            channel: Channel::Delegation,
+            source_comment_id: Some("onboarding".into()),
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&linked).unwrap();
+        assert!(json.contains(r#""source_comment_id":"onboarding""#));
+        assert_eq!(serde_json::from_str::<Comment>(&json).unwrap(), linked);
+
+        let mut legacy: serde_json::Value = serde_json::from_str(&json).unwrap();
+        legacy.as_object_mut().unwrap().remove("source_comment_id");
+        let loaded: Comment = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.source_comment_id, None);
     }
 }

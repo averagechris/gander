@@ -339,7 +339,7 @@ Status: complete.
 
 Deferred follow-up (not part of M17 completion):
 
-- [ ] add exact durable source-comment linkage for delegation requests created
+- [x] add exact durable source-comment linkage for delegation requests created
   from onboarding annotations; M17 only preserves the source annotation and
   co-locates the new delegation comment on the same anchor
 

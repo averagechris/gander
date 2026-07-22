@@ -3989,14 +3989,37 @@ fn handle_draft_list_key(
 }
 
 fn selected_onboarding_target(session: &ReviewSession, tui_state: &TuiState) -> bool {
+    selected_onboarding_comment_id(session, tui_state).is_some()
+        || selected_agent_walkthrough_target(session, tui_state)
+}
+
+fn selected_onboarding_comment_id(session: &ReviewSession, tui_state: &TuiState) -> Option<String> {
     if let Some(source) = tui_state.diff_viewport.selected_annotation_source(session) {
         if let Some(comment_id) = source.comment_id() {
-            return session.comments.iter().any(|comment| {
-                comment.id == comment_id
-                    && comment.author.kind == AuthorKind::Agent
-                    && comment.channel == Channel::Onboarding
-            });
+            return session
+                .comments
+                .iter()
+                .find(|comment| {
+                    comment.id == comment_id
+                        && comment.author.kind == AuthorKind::Agent
+                        && comment.channel == Channel::Onboarding
+                })
+                .map(|comment| comment.id.clone());
         }
+        return None;
+    }
+    session
+        .selected_comment()
+        .filter(|comment| {
+            comment.author.kind == AuthorKind::Agent
+                && comment.channel == Channel::Onboarding
+                && session.selected_comment_card_owner(comment) == Some(session.diff_cursor)
+        })
+        .map(|comment| comment.id.clone())
+}
+
+fn selected_agent_walkthrough_target(session: &ReviewSession, tui_state: &TuiState) -> bool {
+    if let Some(source) = tui_state.diff_viewport.selected_annotation_source(session) {
         if let Some(step_id) = source.walkthrough_step_id() {
             return session
                 .active_durable_session()
@@ -4009,11 +4032,7 @@ fn selected_onboarding_target(session: &ReviewSession, tui_state: &TuiState) -> 
         }
         return false;
     }
-    session.selected_comment().is_some_and(|comment| {
-        comment.author.kind == AuthorKind::Agent
-            && comment.channel == Channel::Onboarding
-            && session.selected_comment_card_owner(comment) == Some(session.diff_cursor)
-    })
+    false
 }
 
 fn inferred_comment_channel(
@@ -4663,7 +4682,12 @@ fn handle_comment_action(
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
             let saved = match target {
-                CommentInputTarget::New => session.add_comment_in_channel(body, channel),
+                CommentInputTarget::New => {
+                    let source_comment_id = (channel == Channel::Delegation)
+                        .then(|| selected_onboarding_comment_id(session, tui_state))
+                        .flatten();
+                    session.add_comment_in_channel_linked(body, channel, source_comment_id)
+                }
                 CommentInputTarget::NewGeneral => {
                     session.add_general_comment_in_channel(body, channel)
                 }
@@ -6727,6 +6751,14 @@ mod tests {
             .unwrap();
         assert_eq!(request.channel, Channel::Delegation);
         assert_eq!(request.anchor, original.anchor);
+        assert_eq!(
+            request.source_comment_id.as_deref(),
+            Some(onboarding.id.as_str())
+        );
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["source_comment_id"],
+            onboarding.id
+        );
     }
 
     #[test]

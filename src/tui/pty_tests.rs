@@ -31,12 +31,12 @@ use std::{
 };
 
 /// Hard cap for any single child probe.
-const CHILD_DEADLINE: Duration = Duration::from_secs(15);
+const CHILD_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a child listens for events after detection.
 // Parallel suites can briefly starve the parent while a child is already in
 // its event loop (notably large projection tests). Keep this below the hard
 // child deadline but long enough that synchronization events are not dropped.
-const EVENT_WINDOW_MS: u64 = 10_000;
+const EVENT_WINDOW_MS: u64 = 20_000;
 
 const QUERY: &[u8] = b"\x1b]11;?";
 const DA1_QUERY: &[u8] = b"\x1b[c";

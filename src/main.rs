@@ -349,7 +349,7 @@ enum DraftsCommand {
         #[arg(short, long)]
         file: Option<PathBuf>,
     },
-    /// Remove drafts by id. Repeat --id for multiple drafts.
+    /// Remove drafts by id or unique id prefix. Repeat --id for multiple drafts.
     Remove {
         #[arg(long = "id", required = true)]
         ids: Vec<String>,
@@ -3262,25 +3262,36 @@ fn handle_drafts_command(
             let Some(active_session_id) = active_session_id else {
                 return Err(user_error("no active review session"));
             };
-            let unknown = ids
+            let drafts = state
+                .comments
                 .iter()
-                .filter(|id| {
-                    !state.comments.iter().any(|comment| {
-                        &comment.id == *id
-                            && comment.belongs_to_session(&active_session_id)
-                            && comment.author.kind == crate::state::AuthorKind::Agent
-                            && comment.state == CommentState::Draft
-                    })
+                .filter(|comment| {
+                    comment.belongs_to_session(&active_session_id)
+                        && comment.author.kind == crate::state::AuthorKind::Agent
+                        && comment.state == CommentState::Draft
                 })
-                .cloned()
                 .collect::<Vec<_>>();
-            if !unknown.is_empty() {
-                return Err(user_error(format!(
-                    "unknown draft id(s): {}",
-                    unknown.join(", ")
-                )));
+            let mut resolved_ids = Vec::with_capacity(ids.len());
+            for selector in ids {
+                let matches = drafts
+                    .iter()
+                    .filter(|draft| draft.id.starts_with(&selector))
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [draft] => resolved_ids.push(draft.id.clone()),
+                    [] => return Err(user_error(format!("unknown draft id `{selector}`"))),
+                    _ => {
+                        return Err(user_error(format!(
+                            "ambiguous draft id prefix `{selector}`"
+                        )));
+                    }
+                }
             }
-            state.comments.retain(|comment| !ids.contains(&comment.id));
+            resolved_ids.sort();
+            resolved_ids.dedup();
+            state
+                .comments
+                .retain(|comment| !resolved_ids.contains(&comment.id));
             state.save(state_path)?;
             let remaining = state
                 .comments
@@ -3291,7 +3302,7 @@ fn handle_drafts_command(
                         && comment.state == CommentState::Draft
                 })
                 .count();
-            println!("Removed {}; remaining {remaining}", ids.len());
+            println!("Removed {}; remaining {remaining}", resolved_ids.len());
         }
     }
     Ok(())
@@ -4524,7 +4535,10 @@ mod tests {
         assert_eq!(state.comments[0].state, CommentState::Draft);
         assert_eq!(state.comments[0].channel, Channel::Onboarding);
         assert_eq!(state.comments[0].author, Identity::agent());
-        let id = state.comments[0].id.clone();
+        state.comments[0].id = "abcdef12-0000-0000-0000-000000000000".into();
+        let mut colliding = state.comments[0].clone();
+        colliding.id = "abcdef12-ffff-ffff-ffff-ffffffffffff".into();
+        state.comments.push(colliding);
 
         let error = handle_drafts_command(
             DraftsCommand::Remove {
@@ -4537,10 +4551,29 @@ mod tests {
             &Config::default(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("unknown draft id(s): missing"));
+        assert!(error.to_string().contains("unknown draft id `missing`"));
+
+        let error = handle_drafts_command(
+            DraftsCommand::Remove {
+                ids: vec!["abcdef12".to_owned()],
+            },
+            &session,
+            &session.repo,
+            &mut state,
+            &state_path,
+            &Config::default(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ambiguous draft id prefix `abcdef12`")
+        );
 
         handle_drafts_command(
-            DraftsCommand::Remove { ids: vec![id] },
+            DraftsCommand::Remove {
+                ids: vec!["abcdef12-0".to_owned()],
+            },
             &session,
             &session.repo,
             &mut state,
@@ -4548,7 +4581,8 @@ mod tests {
             &Config::default(),
         )
         .unwrap();
-        assert!(state.comments.is_empty());
+        assert_eq!(state.comments.len(), 1);
+        assert_eq!(state.comments[0].id, "abcdef12-ffff-ffff-ffff-ffffffffffff");
     }
 
     #[test]

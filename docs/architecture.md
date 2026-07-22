@@ -1,0 +1,58 @@
+# Architecture map
+
+Gander reads jj-visible code and writes review state. The CLI, TUI, MCP server,
+and exporters are adapters around the same durable model and review services;
+none of them fetches from or posts to a forge.
+
+## Review stream
+
+- `src/app/` loads a target and combines parsed diffs with durable
+  `ReviewState`/`ReviewSession` data.
+- `src/app/stream.rs` projects that combined model into the cross-file stream:
+  chapter headers, file and diff rows, folds, and annotation-card owners.
+- `src/tui/viewport.rs` owns stable row selection, scrolling, transitions, and
+  restoration across reprojections. `src/tui/mod.rs` coordinates input,
+  refresh, autosave, and projection invalidation.
+
+## Attention and generation caches
+
+- `src/attention.rs` resolves effective salience and acknowledgement from
+  durable regions, generated-file heuristics, and fingerprints. Human
+  overrides outrank agent curation, which outranks heuristics; stale evidence
+  remains visible but does not count toward current coverage.
+- `src/app/` owns monotonic durable and projection generations. Mutation seams
+  bump the relevant generation; stream and owner-lookup caches validate those
+  counters rather than hashing the session each frame.
+- `src/app/stream.rs` materializes expensive syntax/folding rows only for the
+  bounded visible window. Callers must mutate through the established service
+  or app seams so cache invalidation remains correct.
+
+## Channels and identity
+
+- `src/state.rs` defines `Identity`, annotation `Channel`, comments, replies,
+  anchors, and serde-compatible durable state.
+- `src/review.rs` is the shared mutation and selector service used by CLI and
+  MCP adapters; `src/config.rs` supplies configured human/agent identities and
+  channel defaults.
+- Channel inference and TUI composition live in `src/tui/mod.rs`. Publication
+  boundaries are enforced by artifact profiles, not merely by presentation.
+  See [annotations.md](annotations.md) for the lifecycle and privacy contract.
+
+## Annotation cards and output
+
+- `src/tui/annotation_card.rs` projects comments, drafts, and walkthrough
+  narration into one card view model; `src/tui/render.rs` renders that model
+  with the shared channel color language.
+- `src/artifact.rs` builds JSON/Markdown review artifacts from durable state;
+  `src/web_export.rs` renders the self-contained HTML form. `src/delegation.rs`
+  builds the narrower external-harness work packet.
+- `src/main.rs` and `src/mcp.rs` should remain thin adapters over the same core
+  operations. A new MCP or TUI capability requires a scriptable CLI equivalent.
+
+## Change guide
+
+Persisted fields start in `src/state.rs` with serde defaults, then flow through
+`src/review.rs`, artifacts, CLI/MCP adapters, and tests. Stream-visible changes
+also need an explicit generation bump and projection/card coverage. Keep review
+state writes separate from code-workspace mutation, as required by
+[vision.md](vision.md).

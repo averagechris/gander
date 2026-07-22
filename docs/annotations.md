@@ -46,12 +46,13 @@ Kind, state, action intent, anchors, and replies are unchanged and orthogonal.
 | Collaboration | teammate / future forge plugin    | draft → todo → resolved          | `gander export --profile team`                 |
 | Note          | the reviewer only                 | freeform                         | never leaves the machine                       |
 
-Threads do not mix channels. Today, composing a request from an onboarding
-card creates a new delegation comment co-located on the same anchor and leaves
-the onboarding comment unchanged. Exact durable source-comment linkage is
-deferred: the current schema does not record which onboarding comment prompted
-the delegation request. A post-M17 follow-up is tracked in the roadmap rather
-than adding a premature linkage field here.
+Threads do not mix channels. Composing a request from an onboarding comment
+creates a new delegation comment co-located on the same anchor, leaves the
+onboarding comment unchanged, and records its exact id in
+`source_comment_id`. The additive, serde-defaulted link survives state reloads
+and appears unchanged on CLI, MCP, and artifact comment projections. Agent
+walkthrough narration has no source comment id, so requests composed there
+remain co-located without inventing a cross-type identifier.
 
 ## Ergonomics
 
