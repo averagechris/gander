@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.8.0 - 2026-07-22
+
 ### Changed
 
 - Made per-keystroke TUI work O(visible window) instead of O(session) on
@@ -191,7 +194,6 @@
   onto payload-alphabet characters forfeits that property. Also documents
   that replies later than the 8 s guard window dispatch ungated and that the
   armed-window key-repeat delay can reach the 64-event cap, not one poll tick.
-
 ## v0.7.2 - 2026-07-12
 
 ### Fixed
