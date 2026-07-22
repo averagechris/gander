@@ -77,11 +77,14 @@ Type "c"
 Sleep 1s
 Type "lowercasing is a behavior change; keep the README note and tests in sync"
 Sleep 1.6s
+# Cycle the editor's annotation channel chip before saving the comment.
+Tab
+Sleep 1s
 Ctrl+S
 Sleep 2s
 
-# Cycle the comment action, then open the tasks popup for actionable follow-up.
-Type "a"
+# Cycle the saved comment state, then open the tasks popup for actionable follow-up.
+Type "s"
 Sleep 900ms
 Type "X"
 Sleep 2s
@@ -110,6 +113,9 @@ Sleep 1.2s
 Type "a"
 Sleep 1.5s
 
-# Quit; the review artifact (with our comment) prints to stdout.
+# Quit quietly, then dump the review artifact on demand through the CLI.
 Type "q"
+Sleep 1.5s
+Type "gander export markdown | head -n 12"
+Enter
 Sleep 4.5s
