@@ -5,6 +5,9 @@
 - Changed diff-pane Enter to a configurable guided review advance: it
   acknowledges a current skim fold, then moves without wrapping to the next
   Spotlight while preserving Focus and leaving ordinary files unviewed.
+- Kept large-file visits responsive by sharing cached tree-sitter results
+  instead of cloning their per-line projection, and removed annotation-input
+  vector cloning from the steady-state layout cache identity path.
 
 ## v0.8.0 - 2026-07-22
 

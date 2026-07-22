@@ -1,7 +1,7 @@
 //! Per-file syntax highlighting cache keyed by diff fingerprint and syntax
 //! config, so tree-sitter runs at most once per file/config combination.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, rc::Rc};
 
 use crate::{
     diff::DiffLineKind,
@@ -74,7 +74,7 @@ impl ReviewSession {
         new_line_indices: &[(usize, usize)],
         old_source: &str,
         old_line_indices: &[(usize, usize)],
-    ) -> SyntaxFileCache {
+    ) -> Rc<SyntaxFileCache> {
         let key = SyntaxCacheKey::for_file(self, file);
         if let Some(cached) = self.syntax_cache.borrow().get(&key).cloned() {
             return cached;
@@ -86,7 +86,7 @@ impl ReviewSession {
             syntax_highlights_by_diff_line(&file.path, old_source, old_line_indices, &self.syntax);
 
         let symbol_spans = crate::syntax::symbol_spans(&file.path, new_source, &self.syntax);
-        let computed = SyntaxFileCache {
+        let computed = Rc::new(SyntaxFileCache {
             summary: crate::syntax::summarize_with_config(&file.path, new_source, &self.syntax),
             new_lines,
             old_lines,
@@ -94,8 +94,10 @@ impl ReviewSession {
             old_status,
             changed_symbols: changed_symbols(file, &symbol_spans, new_line_indices),
             symbol_spans,
-        };
-        self.syntax_cache.borrow_mut().insert(key, computed.clone());
+        });
+        self.syntax_cache
+            .borrow_mut()
+            .insert(key, Rc::clone(&computed));
         computed
     }
 }

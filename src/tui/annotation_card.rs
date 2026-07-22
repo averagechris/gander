@@ -65,7 +65,7 @@ pub(super) struct AnnotationReply {
     body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum AnnotationSource {
     Comment { id: String },
     Walkthrough { step_id: String, part: usize },

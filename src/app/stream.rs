@@ -1969,11 +1969,11 @@ mod tests {
         );
         session.syntax_cache.borrow_mut().insert(
             syntax_key,
-            super::super::syntax_cache::SyntaxFileCache {
+            Rc::new(super::super::syntax_cache::SyntaxFileCache {
                 new_status: super::super::syntax_cache::SyntaxCacheStatus::Failed,
                 old_status: super::super::syntax_cache::SyntaxCacheStatus::Failed,
                 ..Default::default()
-            },
+            }),
         );
     }
 

@@ -759,7 +759,7 @@ pub(super) struct MeasuredDiffLayout {
 
 /// Cheap selected-file signature used before a layout cache hit. It owns no
 /// reply/artifact payloads; visible text is hashed in place from durable state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub(super) struct AnnotationLayoutInput {
     pub(super) changed_hunks: Vec<usize>,
     cards: Vec<AnnotationCardSignature>,
@@ -788,7 +788,7 @@ impl AnnotationLayoutInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AnnotationCardSignature {
     owner: usize,
     source: AnnotationSource,

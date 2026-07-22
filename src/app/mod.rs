@@ -192,7 +192,7 @@ pub struct ReviewSession {
     /// Bumped whenever expansion state or fetched contents change so cached
     /// diff rows rebuild.
     expansion_epoch: u64,
-    syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, SyntaxFileCache>>,
+    syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, Rc<SyntaxFileCache>>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
     /// context-fold flag), rebuilt only when the diff fingerprint, syntax
     /// config, or fold mode changes.
@@ -3854,6 +3854,31 @@ diff --git a/README.md b/README.md
             diff,
             ReviewState::default(),
         )
+    }
+
+    #[test]
+    fn syntax_cache_hits_share_large_per_line_projection() {
+        let session = session();
+        let file = &session.files[0];
+        let (new_source, new_indices) = syntax_source(file, SyntaxSide::New);
+        let (old_source, old_indices) = syntax_source(file, SyntaxSide::Old);
+
+        let first = session.syntax_cache_for_file(
+            file,
+            &new_source,
+            &new_indices,
+            &old_source,
+            &old_indices,
+        );
+        let second = session.syntax_cache_for_file(
+            file,
+            &new_source,
+            &new_indices,
+            &old_source,
+            &old_indices,
+        );
+
+        assert!(Rc::ptr_eq(&first, &second));
     }
 
     #[test]

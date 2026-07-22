@@ -17,7 +17,7 @@
       pkgs = import nixpkgs {inherit system;};
       inherit (pkgs) lib;
       cargoToml = lib.importTOML ./Cargo.toml;
-      nativeBuildInputs = with pkgs; [pkg-config];
+      nativeBuildInputs = with pkgs; [expect jujutsu pkg-config];
       buildInputs = with pkgs; lib.optionals stdenv.isDarwin [apple-sdk_15];
 
       gander = pkgs.rustPlatform.buildRustPackage {

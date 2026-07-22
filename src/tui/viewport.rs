@@ -9,6 +9,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    hash::{DefaultHasher, Hash, Hasher},
     rc::Rc,
 };
 
@@ -34,7 +35,7 @@ struct LayoutIdentity {
     width: u16,
     split_active: bool,
     soft_wrap: bool,
-    annotations: AnnotationLayoutInput,
+    annotations_hash: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -274,12 +275,14 @@ impl DiffViewportController {
             .retain(|card| card.scope == scope && annotation_input.contains_source(&card.source));
         let selected_annotation =
             self.revalidate_selected_annotation_with_input(session, &scope, &annotation_input);
+        let mut annotation_hasher = DefaultHasher::new();
+        annotation_input.hash(&mut annotation_hasher);
         let identity = LayoutIdentity {
             rows_ptr: Rc::as_ptr(&rows) as usize,
             width: inner.width,
             split_active,
             soft_wrap: session.diff_cues.soft_wrap,
-            annotations: annotation_input.clone(),
+            annotations_hash: annotation_hasher.finish(),
         };
         if let Some(cached) = self.cache.borrow().entry.as_ref()
             && cached.identity == identity
