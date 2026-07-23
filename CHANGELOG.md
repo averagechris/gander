@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+
+## v0.8.1 - 2026-07-23
+
 ### Added
 
 - Added durable `source_comment_id` linkage from delegation requests composed
@@ -22,7 +25,6 @@
 - Hardened OSC/PTY input-order coverage against heavily loaded Nix sandbox
   runners without reducing the asserted event sequence.
 - Refreshed the published HTML example from a compact v0.8 review stream.
-
 ## v0.8.0 - 2026-07-22
 
 ### Changed
