@@ -14,6 +14,9 @@
 - Added M16 web theming: shared ThemeSlots CSS tokens for both schemes, a
   system/light/dark header toggle with pre-paint persistence, and optional
   `[web] extra-css` loading after embedded styles.
+- Added M16 Phase 3a web liveness: coalesced durable-state, overlay, and
+  disciplined jj watching with monotonic surgical SSE region patches,
+  keepalives, bounded backpressure, and generation-aware reconnect recovery.
 
 ## v0.8.1 - 2026-07-23
 

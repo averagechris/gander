@@ -1,8 +1,8 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 2 implemented (secure standalone peer
-plus the shared-projection reading experience and lazy regions); watch/SSE
-patches, browser presentation, and review actions remain phased work.
+Design for milestone 16. Status: Phase 3a implemented (secure standalone peer,
+shared-projection reader, lazy regions, and durable SSE liveness); browser
+presentation and review actions remain phased work.
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -82,6 +82,24 @@ folds, footer/coverage). The client swaps those regions in place; a dropped
 SSE connection reconnects and requests a full re-render. Fingerprint-guarded
 durability semantics (viewed state, acknowledgements, stale regions) are
 identical to the TUI because they are computed by the same core.
+
+Phase 3a polls files every 250 ms and jj every two seconds. Bursts coalesce at
+the poll boundary. Each effective projection change increments a server-owned
+monotonic generation and emits one `state` event (`id` is that generation):
+
+```json
+{"generation":43,"full":false,"order":["chapter-…","file-…"],"patches":[{"id":"coverage","guided":"<div …>","full":"<div …>","remove":false},{"id":"file-old","guided":null,"full":null,"remove":true}]}
+```
+
+Stable patch ids include `overview`, `coverage`, `file-tree`, `footer`, and the
+shared reading-region ids. `order` is the canonical stream order so additions
+and moves do not require a page render. The initial EventSource query supplies
+`generation`; on automatic reconnect the browser's `Last-Event-ID` is
+authoritative because EventSource retains its original query string. An absent,
+stale, ahead, or broadcast-lagged cursor receives a `full: true` projection
+patch set (still region swaps, not a whole-page response). The stream sends a
+15-second comment keepalive, uses bounded per-client and broadcast queues, and
+drops its forwarding task as soon as the client disconnects.
 
 Concurrent instances (a TUI and a web server on one workspace) mirror each
 other through durable-state watching, the same way a TUI mirrors external CLI
@@ -289,14 +307,15 @@ on the change. Budgets, asserted where practical:
 | `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
 
-Phase 2 exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
-/fragment/<region>` lazy rendering, and a lifecycle-only `GET /events` notice.
+Phase 3a exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
+/fragment/<region>` lazy rendering, and the long-lived generation protocol on
+`GET /events`.
 Every route passes through one centralized guard enforcing the exact bound
 `Host`, absent-or-exact-same `Origin`, and capability token; unknown paths are
 guarded too. Fragment ids are stable projection-region ids and requests carry
 the projection generation, so unknown ids return 404 and stale generations
-return 409 rather than silently substituting content. Stream patches and action
-endpoints remain later phases. Guided skim regions never serialize their hidden
+return 409 rather than silently substituting content. Action endpoints remain
+later phases. Guided skim regions never serialize their hidden
 rows into the initial page (including search metadata); switching to full mode
 requests those rows explicitly, preserving both the all-lines contract and the
 compact first paint for huge generated changes.
@@ -308,6 +327,9 @@ The live server uses Axum 0.8 with default features disabled and only
 dependency added for M16 Phase 1; assets and templates remain embedded Rust
 strings, and the existing Tokio, serde_json, and UUID facilities provide the
 runtime, protocol values, and ephemeral capability token.
+Phase 3a names the already-transitive `futures-core` package directly only for
+the standard `Stream` trait required by Axum's SSE body; it adds no package or
+runtime implementation.
 Cargo-deny grants BSD-3-Clause only to Axum's exact `matchit 0.8.4` transitive
 dependency; upgrades must revisit that crate-scoped exception.
 

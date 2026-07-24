@@ -1,28 +1,33 @@
 //! Standalone loopback web peer.
 //!
 //! The browser is a renderer over the app-owned reading projection. This
-//! phase is read-only: live patching, presentation broadcast, and review
+//! phase is read-only from the browser: durable state and jj changes are
+//! projected into surgical SSE patches. Presentation broadcast and review
 //! mutations intentionally remain outside the HTTP surface.
 
 use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{Arc, Mutex, RwLock},
+    task::{Context as TaskContext, Poll},
+    time::{Duration, SystemTime},
 };
 
 use axum::{
     Router,
-    body::Body,
     extract::{Path, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::get,
 };
 use chrono::Utc;
 use color_eyre::eyre::{Context, Result};
+use futures_core::Stream;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -33,6 +38,8 @@ use crate::{
         ReadingRegion, ReadingRegionKind, ReviewSession,
     },
     config::ThemeConfig,
+    diff::DiffSet,
+    generated::GeneratedMatcher,
     jj::JjBackend,
     registry::{InstanceInfo, InstanceRegistration},
     state::{AuthorKind, Channel, ReviewState, ReviewStateTombstones, Salience},
@@ -42,6 +49,10 @@ use crate::{
 const COMPONENT_CSS: &str = include_str!("web.css");
 const COMPONENT_JS: &str = include_str!("web.js");
 const INITIAL_REGION_WINDOW: usize = 4;
+const WATCH_TICK: Duration = Duration::from_millis(250);
+const REPO_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
+const SSE_BROADCAST_CAPACITY: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderMode {
@@ -57,6 +68,9 @@ pub(crate) struct WebParams {
     pub registry_dir: PathBuf,
     pub workspace_root: PathBuf,
     pub acp_jj: Box<dyn JjBackend + Send>,
+    pub watch_jj: Option<Box<dyn JjBackend + Send>>,
+    pub ignore_globs: Vec<String>,
+    pub generated_matcher: GeneratedMatcher,
     pub port: u16,
     pub no_open: bool,
     pub theme: ThemeConfig,
@@ -73,19 +87,190 @@ struct HttpState {
     rev: Arc<str>,
     target: Arc<str>,
     theme_css: Arc<str>,
-    review: Arc<WebReview>,
+    review: Arc<RwLock<WebReview>>,
+    events: tokio::sync::broadcast::Sender<Arc<ProjectionEvent>>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     extra_css: Option<Arc<str>>,
     registration: Arc<Mutex<InstanceRegistration>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WebReview {
     projection: ReadingProjection,
     files: Vec<WebFile>,
     generation: u64,
+    target: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+struct RegionPatch {
+    id: String,
+    guided: Option<String>,
+    full: Option<String>,
+    remove: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionEvent {
+    generation: u64,
+    full: bool,
+    patches: Vec<RegionPatch>,
+    order: Vec<String>,
+}
+
+struct ReceiverStream<T> {
+    receiver: tokio::sync::mpsc::Receiver<T>,
+}
+
+impl<T> Stream for ReceiverStream<T> {
+    type Item = std::result::Result<T, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(cx).map(|item| item.map(Ok))
+    }
+}
+
+struct WebWatcher {
+    state_path: PathBuf,
+    overlay_path: PathBuf,
+    state_mtime: Option<SystemTime>,
+    overlay_mtime: Option<SystemTime>,
+    repo_fingerprint: Option<String>,
+    last_repo_poll: Option<std::time::Instant>,
+    jj: Box<dyn JjBackend + Send>,
+    ignore_globs: Vec<String>,
+    generated_matcher: GeneratedMatcher,
+}
+
+impl WebWatcher {
+    fn new(params: &mut WebParams) -> Self {
+        Self {
+            state_path: params.state_path.clone(),
+            overlay_path: params.overlay_path.clone(),
+            state_mtime: file_mtime(&params.state_path),
+            overlay_mtime: file_mtime(&params.overlay_path),
+            repo_fingerprint: None,
+            last_repo_poll: None,
+            jj: params
+                .watch_jj
+                .take()
+                .expect("web watcher backend is present"),
+            ignore_globs: params.ignore_globs.clone(),
+            generated_matcher: params.generated_matcher.clone(),
+        }
+    }
+
+    fn poll_files(&mut self, session: &mut ReviewSession, baseline: &mut ReviewState) {
+        let state_mtime = file_mtime(&self.state_path);
+        if state_mtime.is_some()
+            && state_mtime != self.state_mtime
+            && let Ok(external) = ReviewState::load_or_default(&self.state_path)
+        {
+            let merged = ReviewState::merge_changes_since(
+                external,
+                baseline,
+                session.to_state(),
+                &ReviewStateTombstones::default(),
+            );
+            session.apply_review_state(merged.clone());
+            *baseline = merged;
+            self.state_mtime = state_mtime;
+        }
+
+        let overlay_mtime = file_mtime(&self.overlay_path);
+        if overlay_mtime.is_some()
+            && overlay_mtime != self.overlay_mtime
+            && let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&self.overlay_path)
+        {
+            session.apply_agent_overlay(&overlay);
+            // Overlay ordering/flags feed the stream but predate explicit
+            // generation invalidation at this seam.
+            session.touch_stream_inputs();
+            self.overlay_mtime = overlay_mtime;
+        }
+    }
+
+    fn poll_repo(&mut self, session: &mut ReviewSession) {
+        let now = std::time::Instant::now();
+        if self
+            .last_repo_poll
+            .is_some_and(|last| now.duration_since(last) < REPO_POLL_INTERVAL)
+        {
+            return;
+        }
+        self.last_repo_poll = Some(now);
+        // Exactly one deliberate snapshot per repo poll. Every operation after
+        // this call is implemented by JjBackend's --ignore-working-copy reads.
+        if self.jj.snapshot_working_copy(&session.repo).is_err() {
+            return;
+        }
+        let Ok(fingerprint) = self.jj.change_fingerprint(&session.repo, &session.target) else {
+            return;
+        };
+        let changed = self
+            .repo_fingerprint
+            .as_ref()
+            .is_some_and(|previous| previous != &fingerprint);
+        self.repo_fingerprint = Some(fingerprint);
+        if changed {
+            let _ = self.reload_target(session);
+        }
+    }
+
+    fn reload_target(&self, session: &mut ReviewSession) -> Result<()> {
+        let target = session.target.clone();
+        let raw = self.jj.diff(&session.repo, &target)?;
+        let mut diff = DiffSet::parse(&raw)?;
+        diff.apply_ignores(&self.ignore_globs)?;
+        session.replace_diff_preserving_view(target.clone(), diff);
+        session.set_target_author(
+            self.jj
+                .target_author(&session.repo, &target)
+                .unwrap_or_default(),
+        );
+        session.annotate_generated_where(|file| {
+            self.generated_matcher.is_match(&file.path)
+                || crate::generated::diff_content_looks_generated(&file.diff)
+        });
+        reload_chapter_metadata(self.jj.as_ref(), session);
+        if let Ok(overlay) = crate::agent::AgentOverlay::load_or_default(&self.overlay_path) {
+            session.apply_agent_overlay(&overlay);
+            session.touch_stream_inputs();
+        }
+        Ok(())
+    }
+}
+
+fn file_mtime(path: &std::path::Path) -> Option<SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
+fn reload_chapter_metadata(jj: &dyn JjBackend, session: &mut ReviewSession) {
+    let stack = jj
+        .stack_changes(&session.repo, &session.target)
+        .unwrap_or_default();
+    session.stack_changes = stack.clone();
+    session.change_diffs.clear();
+    for change in stack {
+        let target = crate::jj::ReviewTarget::new(
+            format!("{}-", change.change_id),
+            change.change_id.clone(),
+        );
+        if let Ok(raw) = jj.diff(&session.repo, &target)
+            && let Ok(diff) = DiffSet::parse(&raw)
+        {
+            session.change_diffs.push((change.change_id, diff));
+        }
+    }
+    session.touch_stream_inputs();
+}
+
+#[derive(Debug, Clone)]
 struct WebFile {
     path: String,
     additions: usize,
@@ -114,6 +299,7 @@ impl WebReview {
             projection,
             files,
             generation: session.stream_inputs_generation(),
+            target: session.target.to_string(),
         }
     }
 
@@ -123,6 +309,148 @@ impl WebReview {
             .iter()
             .find(|region| region.id == id)
     }
+}
+
+fn publish_projection(state: &HttpState, session: &ReviewSession) {
+    // Projection and rendering happen before the short write-lock section.
+    // HTTP handlers therefore never wait on jj reads or stream materialization.
+    let mut next = WebReview::from_session(session);
+    let current = match state.review.read() {
+        Ok(current) => current.clone(),
+        Err(_) => return,
+    };
+    next.generation = current.generation;
+    if diff_projection(&current, &next).patches.is_empty() {
+        return;
+    }
+    next.generation = current.generation.saturating_add(1);
+    let event = diff_projection(&current, &next);
+    let Ok(mut stored) = state.review.write() else {
+        return;
+    };
+    *stored = next;
+    drop(stored);
+    let _ = state.events.send(Arc::new(event));
+}
+
+fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
+    let previous_regions = rendered_projection(previous);
+    let next_regions = rendered_projection(next);
+    let mut patches = Vec::new();
+    for (id, (guided, full)) in &next_regions {
+        if previous_regions.get(id) != Some(&(guided.clone(), full.clone())) {
+            patches.push(RegionPatch {
+                id: id.clone(),
+                guided: Some(guided.clone()),
+                full: Some(full.clone()),
+                remove: false,
+            });
+        }
+    }
+    for id in previous_regions.keys() {
+        if !next_regions.contains_key(id) {
+            patches.push(RegionPatch {
+                id: id.clone(),
+                guided: None,
+                full: None,
+                remove: true,
+            });
+        }
+    }
+    ProjectionEvent {
+        generation: next.generation,
+        full: false,
+        patches,
+        order: next
+            .projection
+            .regions
+            .iter()
+            .map(|region| region.id.clone())
+            .collect(),
+    }
+}
+
+fn rendered_projection(review: &WebReview) -> std::collections::BTreeMap<String, (String, String)> {
+    let mut regions = std::collections::BTreeMap::new();
+    regions.insert(
+        "overview".into(),
+        (render_overview(review), render_overview(review)),
+    );
+    regions.insert(
+        "coverage".into(),
+        (render_coverage(review), render_coverage(review)),
+    );
+    regions.insert(
+        "file-tree".into(),
+        (render_file_tree_html(review), render_file_tree_html(review)),
+    );
+    regions.insert(
+        "footer".into(),
+        (render_footer(review), render_footer(review)),
+    );
+    for region in &review.projection.regions {
+        regions.insert(
+            region.id.clone(),
+            (
+                render_region(region, true, RenderMode::Guided),
+                render_region(region, true, RenderMode::Full),
+            ),
+        );
+    }
+    regions
+}
+
+fn full_projection_event(state: &HttpState) -> Arc<ProjectionEvent> {
+    let review = state
+        .review
+        .read()
+        .expect("web projection lock poisoned")
+        .clone();
+    let patches = rendered_projection(&review)
+        .into_iter()
+        .map(|(id, (guided, full))| RegionPatch {
+            id,
+            guided: Some(guided),
+            full: Some(full),
+            remove: false,
+        })
+        .collect();
+    Arc::new(ProjectionEvent {
+        generation: review.generation,
+        full: true,
+        patches,
+        order: review
+            .projection
+            .regions
+            .iter()
+            .map(|region| region.id.clone())
+            .collect(),
+    })
+}
+
+fn sse_state_event(event: &ProjectionEvent) -> SseEvent {
+    let patches = event
+        .patches
+        .iter()
+        .map(|patch| {
+            json!({
+                "id": patch.id,
+                "guided": patch.guided,
+                "full": patch.full,
+                "remove": patch.remove,
+            })
+        })
+        .collect::<Vec<_>>();
+    SseEvent::default()
+        .event("state")
+        .id(event.generation.to_string())
+        .json_data(json!({
+            "generation": event.generation,
+            "full": event.full,
+            "patches": patches,
+            "order": event.order,
+        }))
+        .expect("projection event is JSON serializable")
 }
 
 pub(crate) fn run(params: WebParams) -> Result<()> {
@@ -142,6 +470,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     .with_context(|| format!("failed to bind 127.0.0.1:{}", params.port))?;
     let address = listener.local_addr()?;
     debug_assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut watcher = WebWatcher::new(&mut params);
 
     let mut bridge = AcpBridge::bind(
         params.socket_path.clone(),
@@ -163,7 +492,10 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         },
     )?;
 
-    let review = Arc::new(WebReview::from_session(&params.session));
+    let initial_review = WebReview::from_session(&params.session);
+    let review = Arc::new(RwLock::new(initial_review));
+    let (events, _) = tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY);
+    let (stream_shutdown_tx, stream_shutdown_rx) = tokio::sync::watch::channel(false);
     let token = uuid::Uuid::new_v4().to_string();
     let host = format!("127.0.0.1:{}", address.port());
     let origin = format!("http://{host}");
@@ -178,6 +510,8 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         target: Arc::from(params.session.target.to_string()),
         theme_css: Arc::from(render_theme_css(&params.theme)),
         review,
+        events,
+        shutdown: stream_shutdown_rx,
         extra_css: params
             .extra_css
             .as_deref()
@@ -198,6 +532,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
+        let _ = stream_shutdown_tx.send(true);
         let _ = shutdown_tx.send(());
     });
     let server = async move {
@@ -210,7 +545,8 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     tokio::pin!(server);
 
     let mut baseline = params.session.to_state();
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    let mut tick = tokio::time::interval(WATCH_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             result = &mut server => {
@@ -218,12 +554,18 @@ async fn run_async(mut params: WebParams) -> Result<()> {
                 break;
             }
             _ = tick.tick() => {
+                let before = params.session.stream_inputs_generation();
                 process_acp_requests(
                     &mut bridge,
                     &mut params.session,
                     &params.state_path,
                     &mut baseline,
                 );
+                watcher.poll_files(&mut params.session, &mut baseline);
+                watcher.poll_repo(&mut params.session);
+                if params.session.stream_inputs_generation() != before {
+                    publish_projection(&http_state, &params.session);
+                }
             }
         }
     }
@@ -369,11 +711,21 @@ async fn fragment(
         Some("guided") | None => RenderMode::Guided,
         Some(_) => return (StatusCode::BAD_REQUEST, "unknown fragment mode").into_response(),
     };
-    let region = match lookup_fragment(&state.review, &region, requested_generation) {
-        Ok(region) => region,
+    let review = match state.review.read() {
+        Ok(review) => review.clone(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "review projection unavailable",
+            )
+                .into_response();
+        }
+    };
+    let region = match lookup_fragment(&review, &region, requested_generation) {
+        Ok(region) => region.clone(),
         Err(error) => return error.into_response(),
     };
-    Html(render_region(region, true, mode)).into_response()
+    Html(render_region(&region, true, mode)).into_response()
 }
 
 fn lookup_fragment<'a>(
@@ -403,15 +755,54 @@ async fn extra_stylesheet(State(state): State<HttpState>) -> Response {
     }
 }
 
-async fn events() -> impl IntoResponse {
-    let body = "event: notice\ndata: {\"phase\":2,\"status\":\"ready\",\"live\":false}\n\n";
-    (
-        [
-            (header::CONTENT_TYPE, "text/event-stream"),
-            (header::CONNECTION, "keep-alive"),
-        ],
-        Body::from(body),
-    )
+async fn events(State(state): State<HttpState>, request: Request) -> Response {
+    let query_generation = query_value(request.uri().query(), "generation")
+        .and_then(|value| value.parse::<u64>().ok());
+    let header_generation = request
+        .headers()
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    // EventSource keeps the original query string while adding Last-Event-ID
+    // on reconnect, so the header is authoritative once present.
+    let client_generation = header_generation.or(query_generation);
+    let mut receiver = state.events.subscribe();
+    let (sender, body_receiver) = tokio::sync::mpsc::channel(1);
+    let state_for_stream = state.clone();
+    let mut shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        let current = full_projection_event(&state_for_stream);
+        if client_generation != Some(current.generation)
+            && sender.send(sse_state_event(&current)).await.is_err()
+        {
+            return;
+        }
+        loop {
+            let received = tokio::select! {
+                _ = shutdown.changed() => break,
+                received = receiver.recv() => received,
+            };
+            match received {
+                Ok(event) => {
+                    if sender.send(sse_state_event(&event)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    let recovery = full_projection_event(&state_for_stream);
+                    if sender.send(sse_state_event(&recovery)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    Sse::new(ReceiverStream {
+        receiver: body_receiver,
+    })
+    .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE).text("gander"))
+    .into_response()
 }
 
 async fn not_found() -> impl IntoResponse {
@@ -419,7 +810,12 @@ async fn not_found() -> impl IntoResponse {
 }
 
 fn render_shell(state: &HttpState) -> String {
-    let review = &state.review;
+    let review = state
+        .review
+        .read()
+        .expect("web projection lock poisoned")
+        .clone();
+    let review = &review;
     let projection = &review.projection;
     let mut out = String::from(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Gander review</title><script>",
@@ -444,11 +840,57 @@ fn render_shell(state: &HttpState) -> String {
     );
     escape_to(&mut out, &state.target);
     out.push_str("</strong></div><div class=\"controls\"><label class=\"search\">Search <input id=\"review-search\" type=\"search\" placeholder=\"File, code, or comment\"></label><button class=\"theme-toggle\" type=\"button\" data-theme-toggle aria-label=\"Cycle color scheme\">Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
-    render_file_tree(&mut out, review);
-    out.push_str("<main><section class=\"attention-map\" aria-labelledby=\"attention-title\"><p class=\"eyebrow\">Attention map</p><h1 id=\"attention-title\">");
+    out.push_str(&render_file_tree_html(review));
+    out.push_str("<main>");
+    out.push_str(&render_overview_with_target(review, &state.target));
+    out.push_str("<section id=\"review-stream\" class=\"review-stream\" aria-label=\"Shared review stream\"><div class=\"stream-heading\"><div><p class=\"eyebrow\">Shared projection</p><h2>Review stream</h2></div><p class=\"guided-only\">Skims stay compact; spotlights carry narration.</p><p class=\"full-only\">Every file and line is visible. Salience remains in the margin.</p></div>");
+    for (index, region) in projection.regions.iter().enumerate() {
+        if index < INITIAL_REGION_WINDOW || matches!(region.kind, ReadingRegionKind::Chapter(_)) {
+            out.push_str(&render_region(region, false, RenderMode::Guided));
+        } else {
+            out.push_str("<section id=\"");
+            escape_to(&mut out, &region.id);
+            out.push_str("\" class=\"region region-skeleton\" data-region=\"");
+            escape_to(&mut out, &region.id);
+            out.push_str("\"><div class=\"skeleton-label\"><strong>");
+            escape_to(&mut out, &region_label(region));
+            out.push_str("</strong><span>");
+            escape_to(&mut out, &region.member_paths.join(", "));
+            out.push_str("</span></div><div class=\"skeleton-lines\" aria-hidden=\"true\"></div><noscript><p>JavaScript is required only to load this offscreen region.</p></noscript></section>");
+        }
+    }
+    out.push_str("</section>");
+    out.push_str(&render_footer(review));
+    out.push_str("</main></div><script src=\"/assets/app.js?token=");
+    escape_to(&mut out, &state.token);
+    out.push_str("\" defer></script><script>");
+    out.push_str(THEME_CONTROL_SCRIPT);
+    out.push_str("</script></body></html>");
+    out
+}
+
+fn metric(out: &mut String, label: &str, value: usize, detail: &str) {
+    out.push_str("<div class=\"metric\"><span>");
+    escape_to(out, label);
+    out.push_str("</span><strong>");
+    out.push_str(&value.to_string());
+    out.push_str("</strong><small>");
+    escape_to(out, detail);
+    out.push_str("</small></div>");
+}
+
+fn render_overview(review: &WebReview) -> String {
+    render_overview_with_target(review, &review.target)
+}
+
+fn render_overview_with_target(review: &WebReview, target: &str) -> String {
+    let projection = &review.projection;
+    let mut out = String::from(
+        "<section id=\"overview\" data-patch-id=\"overview\" class=\"attention-map\" aria-labelledby=\"attention-title\"><p class=\"eyebrow\">Attention map</p><h1 id=\"attention-title\">",
+    );
     escape_to(&mut out, &projection.summary);
     out.push_str("</h1><p class=\"meta\">Target <code>");
-    escape_to(&mut out, &state.target);
+    escape_to(&mut out, target);
     out.push_str("</code></p><div class=\"metrics\">");
     metric(
         &mut out,
@@ -462,12 +904,7 @@ fn render_shell(state: &HttpState) -> String {
         projection.skim_count,
         &format!("{} files", projection.skim_files),
     );
-    metric(
-        &mut out,
-        "Coverage",
-        projection.coverage.covered,
-        &format!("of {} attention units", projection.coverage.total),
-    );
+    out.push_str(&render_coverage(review));
     metric(
         &mut out,
         "Files",
@@ -484,8 +921,7 @@ fn render_shell(state: &HttpState) -> String {
         );
         for (index, chapter) in projection.chapters.iter().enumerate() {
             out.push_str("<li><a href=\"#");
-            let region = projection.regions.iter().find(|region| matches!(&region.kind, ReadingRegionKind::Chapter(candidate) if candidate == chapter));
-            if let Some(region) = region {
+            if let Some(region) = projection.regions.iter().find(|region| matches!(&region.kind, ReadingRegionKind::Chapter(candidate) if candidate == chapter)) {
                 escape_to(&mut out, &region.id);
             }
             out.push_str("\"><span>");
@@ -506,57 +942,47 @@ fn render_shell(state: &HttpState) -> String {
     if projection.has_walkthrough {
         out.push_str("<a class=\"primary-action\" href=\"#review-stream\">Start guided tour</a>");
     }
-    out.push_str("</section><section id=\"review-stream\" class=\"review-stream\" aria-label=\"Shared review stream\"><div class=\"stream-heading\"><div><p class=\"eyebrow\">Shared projection</p><h2>Review stream</h2></div><p class=\"guided-only\">Skims stay compact; spotlights carry narration.</p><p class=\"full-only\">Every file and line is visible. Salience remains in the margin.</p></div>");
-    for (index, region) in projection.regions.iter().enumerate() {
-        if index < INITIAL_REGION_WINDOW || matches!(region.kind, ReadingRegionKind::Chapter(_)) {
-            out.push_str(&render_region(region, false, RenderMode::Guided));
-        } else {
-            out.push_str("<section id=\"");
-            escape_to(&mut out, &region.id);
-            out.push_str("\" class=\"region region-skeleton\" data-region=\"");
-            escape_to(&mut out, &region.id);
-            out.push_str("\"><div class=\"skeleton-label\"><strong>");
-            escape_to(&mut out, &region_label(region));
-            out.push_str("</strong><span>");
-            escape_to(&mut out, &region.member_paths.join(", "));
-            out.push_str("</span></div><div class=\"skeleton-lines\" aria-hidden=\"true\"></div><noscript><p>JavaScript is required only to load this offscreen region.</p></noscript></section>");
-        }
-    }
-    out.push_str("</section></main></div><script src=\"/assets/app.js?token=");
-    escape_to(&mut out, &state.token);
-    out.push_str("\" defer></script><script>");
-    out.push_str(THEME_CONTROL_SCRIPT);
-    out.push_str("</script></body></html>");
+    out.push_str("</section>");
     out
 }
 
-fn metric(out: &mut String, label: &str, value: usize, detail: &str) {
-    out.push_str("<div class=\"metric\"><span>");
-    escape_to(out, label);
-    out.push_str("</span><strong>");
-    out.push_str(&value.to_string());
-    out.push_str("</strong><small>");
-    escape_to(out, detail);
-    out.push_str("</small></div>");
+fn render_coverage(review: &WebReview) -> String {
+    let mut out = String::from(
+        "<div id=\"coverage\" data-patch-id=\"coverage\" class=\"metric\"><span>Coverage</span><strong>",
+    );
+    out.push_str(&review.projection.coverage.covered.to_string());
+    out.push_str("</strong><small>of ");
+    out.push_str(&review.projection.coverage.total.to_string());
+    out.push_str(" attention units</small></div>");
+    out
 }
 
-fn render_file_tree(out: &mut String, review: &WebReview) {
-    out.push_str("<aside class=\"file-tree full-only\" aria-label=\"Files\"><h2>Files</h2><p class=\"meta\">Traditional review</p><ul>");
+fn render_footer(review: &WebReview) -> String {
+    format!(
+        "<footer id=\"footer\" data-patch-id=\"footer\" class=\"meta\">Generation {} · coverage {}/{}</footer>",
+        review.generation, review.projection.coverage.covered, review.projection.coverage.total
+    )
+}
+
+fn render_file_tree_html(review: &WebReview) -> String {
+    let mut out = String::from(
+        "<aside id=\"file-tree\" data-patch-id=\"file-tree\" class=\"file-tree full-only\" aria-label=\"Files\"><h2>Files</h2><p class=\"meta\">Traditional review</p><ul>",
+    );
     for file in &review.files {
         out.push_str("<li data-search=\"");
-        escape_to(out, &file.path.to_lowercase());
+        escape_to(&mut out, &file.path.to_lowercase());
         out.push_str("\"><label><input type=\"checkbox\" disabled ");
         if file.viewed {
             out.push_str("checked ");
         }
         out.push_str("aria-label=\"Viewed: ");
-        escape_to(out, &file.path);
+        escape_to(&mut out, &file.path);
         out.push_str("\"><a href=\"#");
         if let Some(region) = &file.region_id {
-            escape_to(out, region);
+            escape_to(&mut out, region);
         }
         out.push_str("\">");
-        escape_to(out, &file.path);
+        escape_to(&mut out, &file.path);
         out.push_str("</a></label><small>+");
         out.push_str(&file.additions.to_string());
         out.push_str(" −");
@@ -567,6 +993,7 @@ fn render_file_tree(out: &mut String, review: &WebReview) {
         out.push_str("</small></li>");
     }
     out.push_str("</ul></aside>");
+    out
 }
 
 fn render_region(region: &ReadingRegion, fragment: bool, mode: RenderMode) -> String {
@@ -1078,7 +1505,12 @@ mod tests {
     use crate::{
         app::{ChapterHeader, Coverage, DiffRow, ReadingRow, SkimFold},
         diff::DiffLineKind,
+        jj::{JjChangeSummary, JjOperationSummary, ReviewTarget, TargetAuthor},
         state::{AttentionProgressTarget, Comment},
+    };
+    use std::{
+        path::Path as FsPath,
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     fn row(id: &str, path: &str, text: &str, salience: Salience) -> ReadingRow {
@@ -1227,6 +1659,7 @@ mod tests {
             },
             files,
             generation: 42,
+            target: "main..@".into(),
         }
     }
 
@@ -1257,10 +1690,242 @@ mod tests {
             rev: Arc::from("@"),
             target: Arc::from("main..@"),
             theme_css: Arc::from(render_theme_css(&ThemeConfig::default())),
-            review: Arc::new(review),
+            review: Arc::new(RwLock::new(review)),
+            events: tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY).0,
+            shutdown: tokio::sync::watch::channel(false).1,
             extra_css: None,
             registration: Arc::new(Mutex::new(registration)),
         }
+    }
+
+    #[test]
+    fn projection_diff_is_monotonic_surgical_and_carries_removals() {
+        let previous = review_fixture();
+        let mut next = review_fixture();
+        next.generation = previous.generation + 1;
+        next.projection.coverage.covered += 1;
+        next.projection.regions.remove(1);
+        let event = diff_projection(&previous, &next);
+        assert_eq!(event.generation, 43);
+        assert!(!event.full);
+        assert!(
+            event
+                .patches
+                .iter()
+                .any(|patch| patch.id == "coverage" && !patch.remove)
+        );
+        assert!(
+            event
+                .patches
+                .iter()
+                .any(|patch| patch.id == "overview" && !patch.remove)
+        );
+        assert!(
+            event
+                .patches
+                .iter()
+                .any(|patch| patch.id == "footer" && !patch.remove)
+        );
+        assert!(
+            event
+                .patches
+                .iter()
+                .any(|patch| patch.id == "file-core" && patch.remove)
+        );
+        assert!(
+            !event
+                .patches
+                .iter()
+                .any(|patch| patch.id == "fold-generated")
+        );
+    }
+
+    #[test]
+    fn full_projection_recovers_absent_or_dropped_generation() {
+        let state = http_state(review_fixture());
+        let event = full_projection_event(&state);
+        assert!(event.full);
+        assert_eq!(event.generation, 42);
+        assert!(event.patches.iter().any(|patch| patch.id == "overview"));
+        assert!(event.patches.iter().any(|patch| patch.id == "footer"));
+        assert!(event.patches.iter().any(|patch| patch.id == "file-core"));
+        assert_eq!(event.order.first().map(String::as_str), Some("chapter-one"));
+    }
+
+    #[derive(Default)]
+    struct JjCounts {
+        snapshots: AtomicUsize,
+        fingerprints: AtomicUsize,
+        diffs: AtomicUsize,
+        operations: AtomicUsize,
+    }
+
+    struct WatchJj {
+        counts: Arc<JjCounts>,
+        fingerprint: Arc<Mutex<String>>,
+        diff: String,
+    }
+
+    impl JjBackend for WatchJj {
+        fn diff(&self, _repo: &FsPath, _target: &ReviewTarget) -> Result<String> {
+            self.counts.diffs.fetch_add(1, Ordering::SeqCst);
+            Ok(self.diff.clone())
+        }
+        fn change_summaries(&self, _repo: &FsPath) -> Result<Vec<JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+        fn stack_changes(
+            &self,
+            _repo: &FsPath,
+            _target: &ReviewTarget,
+        ) -> Result<Vec<JjChangeSummary>> {
+            Ok(Vec::new())
+        }
+        fn target_author(&self, _repo: &FsPath, _target: &ReviewTarget) -> Result<TargetAuthor> {
+            Ok(TargetAuthor::default())
+        }
+        fn snapshot_working_copy(&self, _repo: &FsPath) -> Result<()> {
+            self.counts.snapshots.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn change_fingerprint(&self, _repo: &FsPath, _target: &ReviewTarget) -> Result<String> {
+            self.counts.fingerprints.fetch_add(1, Ordering::SeqCst);
+            Ok(self.fingerprint.lock().unwrap().clone())
+        }
+        fn operations(&self, _repo: &FsPath) -> Result<Vec<JjOperationSummary>> {
+            self.counts.operations.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        fn diff_at_operation(
+            &self,
+            _repo: &FsPath,
+            _target: &ReviewTarget,
+            _operation_id: &str,
+        ) -> Result<String> {
+            Ok(String::new())
+        }
+        fn file_contents(&self, _repo: &FsPath, _rev: &str, _path: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        fn run_command(&self, _repo: &FsPath, _args: &[String]) -> Result<String> {
+            panic!("watcher must not mutate jj")
+        }
+    }
+
+    #[test]
+    fn repo_watcher_has_one_snapshot_point_and_read_only_refresh_reads() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(raw).unwrap(),
+            ReviewState::default(),
+        );
+        let counts = Arc::new(JjCounts::default());
+        let fingerprint = Arc::new(Mutex::new("one".to_owned()));
+        let dir = tempfile::tempdir().unwrap();
+        let mut watcher = WebWatcher {
+            state_path: dir.path().join("state.json"),
+            overlay_path: dir.path().join("agent.json"),
+            state_mtime: None,
+            overlay_mtime: None,
+            repo_fingerprint: None,
+            last_repo_poll: None,
+            jj: Box::new(WatchJj {
+                counts: counts.clone(),
+                fingerprint: fingerprint.clone(),
+                diff: raw.into(),
+            }),
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+        };
+        watcher.poll_repo(&mut session);
+        *fingerprint.lock().unwrap() = "two".into();
+        watcher.last_repo_poll = None;
+        watcher.poll_repo(&mut session);
+        assert_eq!(counts.snapshots.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.fingerprints.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.diffs.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.operations.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn durable_state_and_overlay_invalidate_the_shared_projection() {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(raw).unwrap(),
+            ReviewState::default(),
+        );
+        let mut baseline = session.to_state();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let overlay_path = dir.path().join("agent.json");
+        let mut external = baseline.clone();
+        external.comments.push(Comment {
+            id: "external".into(),
+            path: Some("a.rs".into()),
+            line: Some(1),
+            body: "from the TUI".into(),
+            ..Comment::default()
+        });
+        external.save(&state_path).unwrap();
+        let counts = Arc::new(JjCounts::default());
+        let mut watcher = WebWatcher {
+            state_path,
+            overlay_path,
+            state_mtime: None,
+            overlay_mtime: None,
+            repo_fingerprint: None,
+            last_repo_poll: None,
+            jj: Box::new(WatchJj {
+                counts,
+                fingerprint: Arc::new(Mutex::new(String::new())),
+                diff: raw.into(),
+            }),
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+        };
+        let before = session.stream_inputs_generation();
+        watcher.poll_files(&mut session, &mut baseline);
+        assert!(session.stream_inputs_generation() > before);
+        assert!(
+            session
+                .comments
+                .iter()
+                .any(|comment| comment.id == "external")
+        );
+        let after_state = session.stream_inputs_generation();
+        crate::agent::AgentOverlay {
+            version: crate::agent::AGENT_OVERLAY_VERSION,
+            ordering: vec!["b.rs".into(), "a.rs".into()],
+            ..Default::default()
+        }
+        .save(&watcher.overlay_path)
+        .unwrap();
+        watcher.poll_files(&mut session, &mut baseline);
+        assert!(session.stream_inputs_generation() > after_state);
+    }
+
+    #[test]
+    fn sse_backpressure_is_bounded_and_keepalive_is_configured() {
+        assert_eq!(SSE_BROADCAST_CAPACITY, 16);
+        assert_eq!(SSE_KEEPALIVE, Duration::from_secs(15));
+        let (sender, mut receiver) = tokio::sync::broadcast::channel::<usize>(1);
+        sender.send(1).unwrap();
+        sender.send(2).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(matches!(
+                receiver.recv().await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(1))
+            ));
+            assert_eq!(receiver.recv().await.unwrap(), 2);
+        });
     }
 
     #[test]
@@ -1386,7 +2051,12 @@ mod tests {
         assert!(!html.contains("version = 99"));
         assert!(html.contains("data-full-loaded=\"false\""));
         let full_fold = render_region(
-            state.review.region("fold-generated").unwrap(),
+            state
+                .review
+                .read()
+                .unwrap()
+                .region("fold-generated")
+                .unwrap(),
             true,
             RenderMode::Full,
         );
@@ -1410,7 +2080,7 @@ mod tests {
             html.len()
         );
         let fragment = render_region(
-            state.review.region("file-6").unwrap(),
+            state.review.read().unwrap().region("file-6").unwrap(),
             true,
             RenderMode::Guided,
         );

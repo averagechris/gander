@@ -307,9 +307,9 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: in progress. Phase 2 adds the shared-projection guided/full reading
-experience and lazy stable-region rendering; liveness, presentation, and
-review mutations remain future phases.
+Status: in progress. Phase 3a adds generation-keyed surgical SSE liveness over
+durable state, overlay, and disciplined jj refresh; presentation and review
+mutations remain future phases.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -317,7 +317,7 @@ review mutations remain future phases.
 - [x] server-rendered stream view over the shared projection
   (`src/app/stream.rs`): chapters, skim folds, spotlight narration cards,
   annotation cards; assets embedded, no JS toolchain
-- [ ] liveness: watch durable state/overlay + read-only jj refresh, push
+- [x] liveness: watch durable state/overlay + read-only jj refresh, push
   generation-keyed region patches to browsers over SSE
 - [x] attention-first landing (summary, chapters, coverage, start-guided-tour)
   with a one-control switch to full traditional review

@@ -75,7 +75,12 @@ none of them fetches from or posts to a forge.
   generation-checked stable-region fragments. The traditional mode expands the
   same shared folds through explicit full-mode fragments rather than resolving
   salience independently; guided responses do not embed hidden skim lines.
-  Later
+  Phase 3a's coalescing watcher applies the same merge-aware durable-state and
+  overlay reload semantics as the TUI, and gives every jj poll exactly one
+  deliberate snapshot followed only by `--ignore-working-copy` reads. It
+  projects and renders outside the short shared-projection lock, diffs stable
+  overview/coverage/footer/stream regions, and publishes bounded SSE updates;
+  lagged or stale clients recover with a full region set. Later
   mutations must call `src/review.rs` rather than acquiring browser-specific
   domain logic.
 

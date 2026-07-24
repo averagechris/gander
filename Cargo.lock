@@ -824,6 +824,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "crossterm",
+ "futures-core",
  "globset",
  "insta",
  "libc",
