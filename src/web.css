@@ -57,6 +57,7 @@ main { min-width: 0; padding: 1.5rem; }
 .skim-fold { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: .7rem; align-items: center; padding: .75rem .9rem; color: var(--muted); }
 .skim-fold strong { color: var(--foreground); }
 .salience-chip, .badge { border: 1px solid var(--subtle); border-radius: 99rem; padding: .1rem .45rem; color: var(--muted); font-size: .72rem; }
+.theme-toggle { color: var(--foreground); background: var(--surface); border: 1px solid var(--subtle); border-radius: .5rem; padding: .55rem .8rem; }
 .annotation { max-width: 54rem; margin: 1rem clamp(.6rem, 5vw, 5rem); padding: 1rem 1.1rem; border: 1px solid var(--subtle); border-left: .3rem solid var(--accent); border-radius: .7rem; background: var(--background); box-shadow: 0 .35rem 1.2rem var(--shadow); font: .95rem/1.6 ui-sans-serif, system-ui, sans-serif; }
 .annotation header { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; color: var(--muted); font-size: .78rem; }
 .annotation h4 { margin: .65rem 0 .25rem; font-size: 1.08rem; }

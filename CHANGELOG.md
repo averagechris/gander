@@ -11,6 +11,9 @@
   and graceful endpoint cleanup.
 - Added the M16 Phase 2 attention-first web reader over the shared review-stream
   projection, with peer guided/full modes and lazy token-gated stable regions.
+- Added M16 web theming: shared ThemeSlots CSS tokens for both schemes, a
+  system/light/dark header toggle with pre-paint persistence, and optional
+  `[web] extra-css` loading after embedded styles.
 
 ## v0.8.1 - 2026-07-23
 

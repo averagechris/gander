@@ -47,6 +47,9 @@ This repo is intentionally early, but the first vertical slice is in place:
   walkthrough steps over the shared CLI/MCP/TUI review core
 - exposes scriptable CLI groups for `reviews`, `files`, `hunks`, `comments`,
   `action-items`, and `walkthrough`; see [docs/cli.md](docs/cli.md)
+- offers `gander web`, an optional token-guarded loopback SSR peer whose theme
+  uses the same named palettes and `[theme.palette.dark|light]` overrides as
+  the TUI; `[web] extra-css = "path"` loads a local user stylesheet last
 - exports review artifacts as JSON, Markdown, or self-contained HTML, including an agent profile
   with raw hunks and comment excerpts (`--profile agent`)
 - reviews arbitrary revsets (`R`), steps through stacks change-by-change

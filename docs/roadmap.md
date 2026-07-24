@@ -334,7 +334,7 @@ review mutations remain future phases.
 - [x] built-in named theme palettes (gander default + common community
   palettes) selectable via `[theme] name` for TUI and web alike, with
   `[theme.palette.*]` overrides and a `gander themes list` CLI
-- [ ] light/dark/system toggle: `prefers-color-scheme` live-follow,
+- [x] light/dark/system toggle: `prefers-color-scheme` live-follow,
   localStorage persistence, no first-paint flash
 - [ ] performance budgets: server-rendered first paint, windowed stream with
   structural skeleton + on-demand fragments, optimistic mutations reconciled

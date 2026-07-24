@@ -29,6 +29,15 @@ pub struct Config {
     pub comments: CommentsConfig,
     pub theme: ThemeConfig,
     pub ui: UiConfig,
+    pub web: WebConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct WebConfig {
+    /// Optional local user stylesheet loaded after Gander's embedded theme and
+    /// component CSS. This is intentionally the only web asset read from disk.
+    pub extra_css: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

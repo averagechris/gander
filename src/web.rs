@@ -5,6 +5,7 @@
 //! mutations intentionally remain outside the HTTP surface.
 
 use std::{
+    fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -59,6 +60,7 @@ pub(crate) struct WebParams {
     pub port: u16,
     pub no_open: bool,
     pub theme: ThemeConfig,
+    pub extra_css: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -72,6 +74,7 @@ struct HttpState {
     target: Arc<str>,
     theme_css: Arc<str>,
     review: Arc<WebReview>,
+    extra_css: Option<Arc<str>>,
     registration: Arc<Mutex<InstanceRegistration>>,
 }
 
@@ -175,6 +178,12 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         target: Arc::from(params.session.target.to_string()),
         theme_css: Arc::from(render_theme_css(&params.theme)),
         review,
+        extra_css: params
+            .extra_css
+            .as_deref()
+            .map(read_extra_css)
+            .transpose()?
+            .map(Arc::from),
         registration: Arc::new(Mutex::new(registration)),
     };
     let app = router(http_state.clone());
@@ -233,6 +242,7 @@ fn router(state: HttpState) -> Router {
         .route("/assets/app.css", get(stylesheet))
         .route("/assets/app.js", get(script))
         .route("/fragment/{region}", get(fragment))
+        .route("/assets/extra.css", get(extra_stylesheet))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -382,6 +392,17 @@ fn lookup_fragment<'a>(
         .ok_or((StatusCode::NOT_FOUND, "unknown review region"))
 }
 
+async fn extra_stylesheet(State(state): State<HttpState>) -> Response {
+    match state.extra_css.as_deref() {
+        Some(css) => (
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            css.to_string(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 async fn events() -> impl IntoResponse {
     let body = "event: notice\ndata: {\"phase\":2,\"status\":\"ready\",\"live\":false}\n\n";
     (
@@ -401,12 +422,20 @@ fn render_shell(state: &HttpState) -> String {
     let review = &state.review;
     let projection = &review.projection;
     let mut out = String::from(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Gander review</title><style>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Gander review</title><script>",
     );
+    out.push_str(PREPAINT_SCRIPT);
+    out.push_str("</script><style>");
     out.push_str(&state.theme_css);
     out.push_str("</style><link rel=\"stylesheet\" href=\"/assets/app.css?token=");
     escape_to(&mut out, &state.token);
-    out.push_str("\"></head><body data-mode=\"guided\" data-token=\"");
+    out.push_str("\">");
+    if state.extra_css.is_some() {
+        out.push_str("<link rel=\"stylesheet\" href=\"/assets/extra.css?token=");
+        escape_to(&mut out, &state.token);
+        out.push_str("\">");
+    }
+    out.push_str("</head><body data-mode=\"guided\" data-token=\"");
     escape_to(&mut out, &state.token);
     out.push_str("\" data-generation=\"");
     out.push_str(&review.generation.to_string());
@@ -414,7 +443,7 @@ fn render_shell(state: &HttpState) -> String {
         "\"><header class=\"topbar\"><div><p class=\"eyebrow\">Gander local review</p><strong>",
     );
     escape_to(&mut out, &state.target);
-    out.push_str("</strong></div><div class=\"controls\"><label class=\"search\">Search <input id=\"review-search\" type=\"search\" placeholder=\"File, code, or comment\"></label><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
+    out.push_str("</strong></div><div class=\"controls\"><label class=\"search\">Search <input id=\"review-search\" type=\"search\" placeholder=\"File, code, or comment\"></label><button class=\"theme-toggle\" type=\"button\" data-theme-toggle aria-label=\"Cycle color scheme\">Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
     render_file_tree(&mut out, review);
     out.push_str("<main><section class=\"attention-map\" aria-labelledby=\"attention-title\"><p class=\"eyebrow\">Attention map</p><h1 id=\"attention-title\">");
     escape_to(&mut out, &projection.summary);
@@ -495,7 +524,9 @@ fn render_shell(state: &HttpState) -> String {
     }
     out.push_str("</section></main></div><script src=\"/assets/app.js?token=");
     escape_to(&mut out, &state.token);
-    out.push_str("\" defer></script></body></html>");
+    out.push_str("\" defer></script><script>");
+    out.push_str(THEME_CONTROL_SCRIPT);
+    out.push_str("</script></body></html>");
     out
 }
 
@@ -990,32 +1021,52 @@ fn render_theme_css(config: &ThemeConfig) -> String {
     let light = ThemeSlots::derive(light_palette, light_palette.background);
     let dark = ThemeSlots::derive(dark_palette, dark_palette.background);
     format!(
-        ":root{{{}}}@media(prefers-color-scheme:dark){{:root{{{}}}}}",
+        ":root,[data-color-scheme=light]{{color-scheme:light;{}}}@media(prefers-color-scheme:dark){{:root{{color-scheme:dark;{}}}}}[data-color-scheme=dark]{{color-scheme:dark;{}}}",
         slot_tokens(light_palette.background, light),
+        slot_tokens(dark_palette.background, dark),
         slot_tokens(dark_palette.background, dark),
     )
 }
 
 fn slot_tokens(background: Rgb, slots: ThemeSlots) -> String {
     format!(
-        "--background:{};--foreground:{};--muted:{};--subtle:{};--accent:{};--surface:{};--warning:{};--info:{};--detail:{};--positive:{};--negative:{};--range-bg:{};--added-line-bg:{};--removed-line-bg:{};--shadow:{};",
+        "--background:{};--foreground:{};--muted:{};--subtle:{};--accent:{};--warning:{};--info:{};--detail:{};--secondary:{};--positive:{};--negative:{};--surface:{};--range-bg:{};--added-line-bg:{};--removed-line-bg:{};--shadow:{};--added-word-fg:{};--added-word-bg:{};--removed-word-fg:{};--removed-word-bg:{};--gutter-added-fg:{};--gutter-removed-fg:{};",
         css_rgb(background),
         css_rgb(slots.foreground),
         css_rgb(slots.muted),
         css_rgb(slots.subtle),
         css_rgb(slots.accent),
-        css_rgb(slots.selection_bg),
         css_rgb(slots.warning),
         css_rgb(slots.info),
         css_rgb(slots.detail),
+        css_rgb(slots.secondary),
         css_rgb(slots.positive),
         css_rgb(slots.negative),
+        css_rgb(slots.selection_bg),
         css_rgb(slots.range_bg),
         css_rgb(slots.added_line_bg),
         css_rgb(slots.removed_line_bg),
         css_rgb(slots.range_bg),
+        css_rgb(slots.added_word_fg),
+        css_rgb(slots.added_word_bg),
+        css_rgb(slots.removed_word_fg),
+        css_rgb(slots.removed_word_bg),
+        css_rgb(slots.gutter_added_fg),
+        css_rgb(slots.gutter_removed_fg),
     )
 }
+
+fn read_extra_css(path: &std::path::Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read [web] extra-css stylesheet at {}",
+            path.display()
+        )
+    })
+}
+
+const PREPAINT_SCRIPT: &str = "(()=>{try{let m=localStorage.getItem('gander.colorScheme');if(m==='light'||m==='dark')document.documentElement.dataset.colorScheme=m;}catch(e){}})();";
+const THEME_CONTROL_SCRIPT: &str = "(()=>{let k='gander.colorScheme',o=['system','light','dark'],q=matchMedia('(prefers-color-scheme: dark)'),b=document.querySelector('[data-theme-toggle]'),l=document.querySelector('[data-theme-label]');function g(){try{return localStorage.getItem(k)||'system'}catch(e){return 'system'}}function s(m){document.documentElement.dataset.colorScheme=(m==='light'||m==='dark')?m:'';if(l)l.textContent=m}function set(m){try{m==='system'?localStorage.removeItem(k):localStorage.setItem(k,m)}catch(e){}s(m)}if(b)b.addEventListener('click',()=>set(o[(o.indexOf(g())+1)%o.length]));q.addEventListener&&q.addEventListener('change',()=>{if(g()==='system')s('system')});s(g())})();";
 
 fn css_rgb(rgb: Rgb) -> String {
     format!("rgb({} {} {})", rgb.r, rgb.g, rgb.b)
@@ -1207,6 +1258,7 @@ mod tests {
             target: Arc::from("main..@"),
             theme_css: Arc::from(render_theme_css(&ThemeConfig::default())),
             review: Arc::new(review),
+            extra_css: None,
             registration: Arc::new(Mutex::new(registration)),
         }
     }
@@ -1388,8 +1440,7 @@ mod tests {
 
     #[test]
     fn component_css_uses_only_theme_tokens_for_colors() {
-        assert!(!COMPONENT_CSS.contains('#'));
-        assert!(!COMPONENT_CSS.contains("rgb("));
+        assert_no_literal_colors("component css", COMPONENT_CSS);
         assert!(COMPONENT_CSS.contains("var(--foreground)"));
     }
 
@@ -1397,7 +1448,66 @@ mod tests {
     fn theme_css_emits_independent_light_and_dark_slots() {
         let css = render_theme_css(&ThemeConfig::default());
         assert!(css.contains("prefers-color-scheme:dark"));
+        assert!(css.contains("[data-color-scheme=light]"));
+        assert!(css.contains("[data-color-scheme=dark]"));
         assert!(css.contains("--background:rgb("));
         assert!(css.contains("--accent:rgb("));
+        assert!(css.contains("--gutter-removed-fg:rgb("));
+    }
+
+    #[test]
+    fn theme_css_honors_named_palette_and_scheme_overrides() {
+        let mut config = ThemeConfig {
+            name: "gruvbox".to_owned(),
+            ..ThemeConfig::default()
+        };
+        config.palette.light.background = Some(Rgb::new(1, 2, 3));
+        config.palette.dark.background = Some(Rgb::new(4, 5, 6));
+        let css = render_theme_css(&config);
+        assert!(css.contains("--background:rgb(1 2 3)"));
+        assert!(css.contains("--background:rgb(4 5 6)"));
+    }
+
+    #[test]
+    fn shell_links_token_guarded_assets_and_extra_css_last() {
+        let mut state = sample_state();
+        state.token = Arc::from("secret");
+        state.extra_css = Some(Arc::from(".custom{color:var(--accent)}"));
+        let html = render_shell(&state);
+        assert!(
+            html.find("/assets/app.css?token=secret") < html.find("/assets/extra.css?token=secret")
+        );
+        assert!(html.find(PREPAINT_SCRIPT) < html.find("<style>").unwrap());
+        assert!(html.contains("data-theme-toggle"));
+        assert!(html.contains("id=\"review-stream\""));
+    }
+
+    #[test]
+    fn theme_control_scripts_contract_stays_tiny_and_handwritten() {
+        assert!(PREPAINT_SCRIPT.contains("localStorage.getItem('gander.colorScheme')"));
+        assert!(PREPAINT_SCRIPT.contains("document.documentElement.dataset.colorScheme=m"));
+        assert!(THEME_CONTROL_SCRIPT.contains("['system','light','dark']"));
+        assert!(THEME_CONTROL_SCRIPT.contains("matchMedia('(prefers-color-scheme: dark)')"));
+        assert!(THEME_CONTROL_SCRIPT.contains("addEventListener('change'"));
+        assert!(THEME_CONTROL_SCRIPT.contains("localStorage.setItem(k,m)"));
+        assert_no_literal_colors("inline theme scripts", PREPAINT_SCRIPT);
+        assert_no_literal_colors("inline theme scripts", THEME_CONTROL_SCRIPT);
+    }
+
+    #[test]
+    fn extra_css_read_error_names_config_key_and_path() {
+        let path = std::path::Path::new("/definitely/missing/gander-extra.css");
+        let error = read_extra_css(path).unwrap_err().to_string();
+        assert!(error.contains("[web] extra-css"));
+        assert!(error.contains("/definitely/missing/gander-extra.css"));
+    }
+
+    fn assert_no_literal_colors(label: &str, css_or_script: &str) {
+        for needle in ["#", "rgb(", "rgba(", "hsl(", "hsla("] {
+            assert!(
+                !css_or_script.contains(needle),
+                "{label} contains literal color marker {needle}"
+            );
+        }
     }
 }

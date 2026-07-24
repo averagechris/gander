@@ -233,7 +233,9 @@ contract for free.
   served; switching is one attribute flip.
 - **Escape hatch.** An optional user stylesheet (`[web] extra-css = "path"`)
   is loaded last for power users. The custom-property tokens are the stable
-  theming contract; DOM structure and class names are not.
+  theming contract; DOM structure and class names are not. Gander still embeds
+  its own assets; this configured stylesheet is the only intentional local file
+  read by the web server, and failures include the path and config key.
 
 ## Performance budgets
 

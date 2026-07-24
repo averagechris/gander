@@ -1482,6 +1482,7 @@ fn run() -> color_eyre::Result<()> {
                 port,
                 no_open,
                 theme: config.theme,
+                extra_css: config.web.extra_css,
             })?;
         }
         Command::Tour { command } => match command {
