@@ -26,210 +26,16 @@
 
 use std::time::Duration;
 
+use crate::theme::{
+    BasePalette, FOREGROUND_CONTRAST, MUTED_CONTRAST, SurfaceConstraint, TEXT_CONTRAST, TextSlots,
+    ThemeKind, ThemeSlots, blend, guarded_surface, highlight_constraints, kind_for_background,
+    satisfies,
+};
+pub(crate) use crate::theme::{Rgb, contrast_ratio};
 use ratatui::style::{Color, Modifier, Style};
 
-/// Contrast target for primary foreground text (WCAG AAA normal text).
-const FOREGROUND_CONTRAST: f64 = 7.0;
-/// Contrast target for standard chrome text slots (WCAG AA normal text).
-const TEXT_CONTRAST: f64 = 4.5;
-/// Contrast target for deliberately de-emphasized text and gutter bars
-/// (WCAG AA large-text/graphics level).
-const MUTED_CONTRAST: f64 = 3.0;
-/// Contrast target for colored semantic text sitting on *transient*
-/// highlight surfaces (cursor row, active range). 4.5:1 for every colored
-/// slot is unattainable there: a slot at its own 4.5:1 floor against the
-/// base background has zero headroom left for any brighter surface, so
-/// requiring it would erase the highlight entirely. 3.0:1 is the WCAG
-/// 1.4.11 non-text minimum; the full per-combination contract is
-/// documented in docs/theme.md.
-const HIGHLIGHT_TEXT_CONTRAST: f64 = 3.0;
-
-/// An 8-bit RGB color used for theme math.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Rgb {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-}
-
-impl Rgb {
-    pub(crate) const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    const fn hex(value: u32) -> Self {
-        Self {
-            r: (value >> 16) as u8,
-            g: (value >> 8) as u8,
-            b: value as u8,
-        }
-    }
-
-    fn color(self) -> Color {
-        Color::Rgb(self.r, self.g, self.b)
-    }
-}
-
-/// WCAG 2.x relative luminance of an sRGB color, in `0.0..=1.0`.
-pub(crate) fn relative_luminance(color: Rgb) -> f64 {
-    fn channel(value: u8) -> f64 {
-        let c = f64::from(value) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
-/// WCAG contrast ratio between two colors, in `1.0..=21.0`.
-pub(crate) fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
-    let la = relative_luminance(a);
-    let lb = relative_luminance(b);
-    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
-    (hi + 0.05) / (lo + 0.05)
-}
-
-/// Linear per-channel blend: `alpha` of `top` over `bottom`.
-pub(crate) fn blend(top: Rgb, bottom: Rgb, alpha: f64) -> Rgb {
-    let alpha = alpha.clamp(0.0, 1.0);
-    let mix = |t: u8, b: u8| -> u8 {
-        (f64::from(t) * alpha + f64::from(b) * (1.0 - alpha)).round() as u8
-    };
-    Rgb::new(
-        mix(top.r, bottom.r),
-        mix(top.g, bottom.g),
-        mix(top.b, bottom.b),
-    )
-}
-
-const BLACK: Rgb = Rgb::new(0, 0, 0);
-const WHITE: Rgb = Rgb::new(255, 255, 255);
-
-/// Repair `candidate` until it reaches `min` contrast against `background`.
-///
-/// The repair endpoint is chosen as an anchor that can actually meet the
-/// target (black or white), not the palette foreground: against a
-/// middle-gray background only one polarity may be able to reach the
-/// requested ratio. The candidate is blended toward that endpoint in
-/// 1/64 steps until the *rounded 8-bit* result meets the target, so the
-/// guarantee holds for the color that is really emitted.
-pub(crate) fn guard_contrast(candidate: Rgb, background: Rgb, min: f64) -> Rgb {
-    if contrast_ratio(candidate, background) >= min {
-        return candidate;
-    }
-    let white_ratio = contrast_ratio(WHITE, background);
-    let black_ratio = contrast_ratio(BLACK, background);
-    let endpoint = if white_ratio >= min && black_ratio >= min {
-        // Both work: keep the candidate's polarity relative to the background.
-        if relative_luminance(candidate) >= relative_luminance(background) {
-            WHITE
-        } else {
-            BLACK
-        }
-    } else if white_ratio >= black_ratio {
-        WHITE
-    } else {
-        BLACK
-    };
-    for step in 1..=64u32 {
-        let repaired = blend(endpoint, candidate, f64::from(step) / 64.0);
-        if contrast_ratio(repaired, background) >= min {
-            return repaired;
-        }
-    }
-    endpoint
-}
-
-/// A readability constraint on a surface: this (final output space) text
-/// color must keep at least this ratio on top of it.
-type SurfaceConstraint = (Rgb, f64);
-
-fn satisfies(surface: Rgb, constraints: &[SurfaceConstraint]) -> bool {
-    constraints
-        .iter()
-        .all(|(text, min)| contrast_ratio(*text, surface) >= *min)
-}
-
-/// A tinted surface: `alpha` of `hue` over `background`, pulled back toward
-/// the background until every text color that renders on it keeps its
-/// required contrast. The base background always satisfies the constraints
-/// (each text slot is guarded against it at a target at least as strict),
-/// so the fallback is sound.
-fn guarded_surface(
-    hue: Rgb,
-    background: Rgb,
-    alpha: f64,
-    constraints: &[SurfaceConstraint],
-) -> Rgb {
-    let surface = blend(hue, background, alpha);
-    if satisfies(surface, constraints) {
-        return surface;
-    }
-    for step in 1..=64u32 {
-        let softened = blend(background, surface, f64::from(step) / 64.0);
-        if satisfies(softened, constraints) {
-            return softened;
-        }
-    }
-    background
-}
-
-/// Light or dark presentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ThemeKind {
-    Dark,
-    Light,
-}
-
-/// The small base palette every chrome slot is derived from.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BasePalette {
-    pub background: Rgb,
-    pub foreground: Rgb,
-    pub accent: Rgb,
-    pub positive: Rgb,
-    pub negative: Rgb,
-    pub info: Rgb,
-}
-
-impl BasePalette {
-    pub(crate) fn for_kind(kind: ThemeKind) -> Self {
-        match kind {
-            ThemeKind::Dark => Self {
-                background: Rgb::hex(0x0d1117),
-                foreground: Rgb::hex(0xe6edf3),
-                accent: Rgb::hex(0xd29922),
-                positive: Rgb::hex(0x3fb950),
-                negative: Rgb::hex(0xf85149),
-                info: Rgb::hex(0x58a6ff),
-            },
-            ThemeKind::Light => Self {
-                background: Rgb::hex(0xffffff),
-                foreground: Rgb::hex(0x1f2328),
-                accent: Rgb::hex(0x9a6700),
-                positive: Rgb::hex(0x1a7f37),
-                negative: Rgb::hex(0xcf222e),
-                info: Rgb::hex(0x0969da),
-            },
-        }
-    }
-}
-
-/// Luminance boundary between "dark background" and "light background".
-///
-/// This is the crossover point where black text starts providing more WCAG
-/// contrast than white text: `(L + 0.05) / 0.05 == 1.05 / (L + 0.05)`,
-/// i.e. `L = sqrt(0.05 * 1.05) - 0.05 ≈ 0.1791`.
-const LIGHT_BACKGROUND_LUMINANCE: f64 = 0.179;
-
-fn kind_for_background(background: Rgb) -> ThemeKind {
-    if relative_luminance(background) > LIGHT_BACKGROUND_LUMINANCE {
-        ThemeKind::Light
-    } else {
-        ThemeKind::Dark
-    }
+fn color(rgb: Rgb) -> Color {
+    Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
 
 /// The derived theme with every semantic chrome slot resolved to a final
@@ -329,51 +135,29 @@ impl AppTheme {
         };
         let bg = contrast_background;
 
-        // Text slots (RGB space first).
-        let foreground = guard_contrast(palette.foreground, bg, FOREGROUND_CONTRAST);
-        let subtle = guard_contrast(blend(foreground, bg, 0.72), bg, TEXT_CONTRAST);
-        let muted = guard_contrast(blend(foreground, bg, 0.50), bg, MUTED_CONTRAST);
-        let accent = guard_contrast(palette.accent, bg, TEXT_CONTRAST);
-        let warning = guard_contrast(
-            blend(palette.accent, palette.negative, 0.45),
-            bg,
-            TEXT_CONTRAST,
-        );
-        let info = guard_contrast(palette.info, bg, TEXT_CONTRAST);
-        let detail = guard_contrast(
-            blend(palette.info, palette.positive, 0.5),
-            bg,
-            TEXT_CONTRAST,
-        );
-        let secondary = guard_contrast(
-            blend(palette.negative, palette.info, 0.5),
-            bg,
-            TEXT_CONTRAST,
-        );
-        let positive = guard_contrast(palette.positive, bg, TEXT_CONTRAST);
-        let negative = guard_contrast(palette.negative, bg, TEXT_CONTRAST);
+        let slots = ThemeSlots::derive(palette, bg);
 
         // Final text colors first: in indexed mode the colors that actually
         // sit on surfaces are the quantized ones, so surface constraints
         // must be built from the final output space.
         let text = |rgb: Rgb, min: f64| -> (Color, Rgb) {
             if truecolor {
-                (rgb.color(), rgb)
+                (color(rgb), rgb)
             } else {
                 let index = nearest_contrasting_indexed(rgb, bg, min);
                 (Color::Indexed(index), xterm_rgb(index))
             }
         };
-        let (foreground_color, foreground_final) = text(foreground, FOREGROUND_CONTRAST);
-        let (muted_color, muted_final) = text(muted, MUTED_CONTRAST);
-        let (subtle_color, subtle_final) = text(subtle, TEXT_CONTRAST);
-        let (accent_color, accent_final) = text(accent, TEXT_CONTRAST);
-        let (warning_color, warning_final) = text(warning, TEXT_CONTRAST);
-        let (info_color, info_final) = text(info, TEXT_CONTRAST);
-        let (detail_color, detail_final) = text(detail, TEXT_CONTRAST);
-        let (secondary_color, secondary_final) = text(secondary, TEXT_CONTRAST);
-        let (positive_color, positive_final) = text(positive, TEXT_CONTRAST);
-        let (negative_color, negative_final) = text(negative, TEXT_CONTRAST);
+        let (foreground_color, foreground_final) = text(slots.foreground, FOREGROUND_CONTRAST);
+        let (muted_color, muted_final) = text(slots.muted, MUTED_CONTRAST);
+        let (subtle_color, subtle_final) = text(slots.subtle, TEXT_CONTRAST);
+        let (accent_color, accent_final) = text(slots.accent, TEXT_CONTRAST);
+        let (warning_color, warning_final) = text(slots.warning, TEXT_CONTRAST);
+        let (info_color, info_final) = text(slots.info, TEXT_CONTRAST);
+        let (detail_color, detail_final) = text(slots.detail, TEXT_CONTRAST);
+        let (secondary_color, secondary_final) = text(slots.secondary, TEXT_CONTRAST);
+        let (positive_color, positive_final) = text(slots.positive, TEXT_CONTRAST);
+        let (negative_color, negative_final) = text(slots.negative, TEXT_CONTRAST);
 
         // Per-combination surface constraints (contract in docs/theme.md):
         // persistent diff-line surfaces guarantee AA (4.5:1) for the primary
@@ -383,18 +167,18 @@ impl AppTheme {
         // (3.0:1) for every colored slot and muted text that can appear
         // there. Word emphasis renders its text in the primary foreground,
         // so its surface only needs the foreground guarantee.
-        let highlight_constraints = [
-            (foreground_final, TEXT_CONTRAST),
-            (subtle_final, TEXT_CONTRAST),
-            (muted_final, HIGHLIGHT_TEXT_CONTRAST),
-            (accent_final, HIGHLIGHT_TEXT_CONTRAST),
-            (warning_final, HIGHLIGHT_TEXT_CONTRAST),
-            (info_final, HIGHLIGHT_TEXT_CONTRAST),
-            (detail_final, HIGHLIGHT_TEXT_CONTRAST),
-            (secondary_final, HIGHLIGHT_TEXT_CONTRAST),
-            (positive_final, HIGHLIGHT_TEXT_CONTRAST),
-            (negative_final, HIGHLIGHT_TEXT_CONTRAST),
-        ];
+        let highlight_constraints = highlight_constraints(TextSlots {
+            foreground: foreground_final,
+            muted: muted_final,
+            subtle: subtle_final,
+            accent: accent_final,
+            warning: warning_final,
+            info: info_final,
+            detail: detail_final,
+            secondary: secondary_final,
+            positive: positive_final,
+            negative: negative_final,
+        });
         let added_line_constraints = [
             (foreground_final, TEXT_CONTRAST),
             (positive_final, TEXT_CONTRAST),
@@ -408,22 +192,20 @@ impl AppTheme {
         let surface = |hue: Rgb, alpha: f64, constraints: &[SurfaceConstraint]| -> Color {
             let derived = guarded_surface(hue, bg, alpha, constraints);
             if truecolor {
-                derived.color()
+                color(derived)
             } else {
                 Color::Indexed(quantize_surface(derived, bg, constraints))
             }
         };
-        let selection_bg = surface(foreground, 0.16, &highlight_constraints);
+        let selection_bg = surface(slots.foreground, 0.16, &highlight_constraints);
         let range_bg = surface(palette.info, 0.35, &highlight_constraints);
         let added_line_bg = surface(palette.positive, 0.15, &added_line_constraints);
         let removed_line_bg = surface(palette.negative, 0.15, &removed_line_constraints);
         let added_word_bg = surface(palette.positive, 0.40, &emphasis_constraints);
         let removed_word_bg = surface(palette.negative, 0.40, &emphasis_constraints);
-        let gutter_added = guard_contrast(palette.positive, bg, MUTED_CONTRAST);
-        let gutter_removed = guard_contrast(palette.negative, bg, MUTED_CONTRAST);
 
         let background = if truecolor {
-            palette.background.color()
+            color(palette.background)
         } else {
             Color::Indexed(nearest_indexed(palette.background))
         };
@@ -458,8 +240,8 @@ impl AppTheme {
                 .fg(foreground_color)
                 .add_modifier(Modifier::BOLD)
                 .bg(removed_word_bg),
-            gutter_added: Style::default().fg(text(gutter_added, MUTED_CONTRAST).0),
-            gutter_removed: Style::default().fg(text(gutter_removed, MUTED_CONTRAST).0),
+            gutter_added: Style::default().fg(text(slots.gutter_added_fg, MUTED_CONTRAST).0),
+            gutter_removed: Style::default().fg(text(slots.gutter_removed_fg, MUTED_CONTRAST).0),
         }
     }
 
@@ -746,6 +528,7 @@ pub(crate) fn detect_terminal_background(timeout: Duration) -> BackgroundDetecti
 mod tests {
     use super::*;
     use crate::config::ThemeModeConfig;
+    use crate::theme::{BLACK, HIGHLIGHT_TEXT_CONTRAST, WHITE};
 
     fn ratio(color: Color, against: Rgb) -> f64 {
         contrast_ratio(
@@ -821,44 +604,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn blend_is_exact_at_edges_and_midpoint() {
-        let a = Rgb::new(10, 200, 30);
-        let b = Rgb::new(240, 4, 90);
-        assert_eq!(blend(a, b, 0.0), b);
-        assert_eq!(blend(a, b, 1.0), a);
-        assert_eq!(blend(a, b, 0.5), Rgb::new(125, 102, 60));
-    }
-
-    #[test]
-    fn contrast_ratio_matches_wcag_reference_values() {
-        assert!((contrast_ratio(WHITE, BLACK) - 21.0).abs() < 1e-9);
-        assert!((contrast_ratio(BLACK, WHITE) - 21.0).abs() < 1e-9);
-        assert!((contrast_ratio(WHITE, WHITE) - 1.0).abs() < 1e-9);
-        // #808080 vs white: luminance 0.2158 → ratio ≈ 3.95.
-        let gray = Rgb::new(128, 128, 128);
-        assert!((contrast_ratio(gray, WHITE) - 3.9497).abs() < 1e-3);
-    }
-
-    #[test]
-    fn guard_contrast_picks_an_endpoint_that_can_meet_the_target() {
-        // Middle gray: white tops out at ~3.95, black reaches ~5.32. A 4.5
-        // target must repair toward black even for a light candidate.
-        let gray = Rgb::new(128, 128, 128);
-        let light_candidate = Rgb::new(200, 200, 200);
-        let repaired = guard_contrast(light_candidate, gray, 4.5);
-        assert!(
-            contrast_ratio(repaired, gray) >= 4.5,
-            "got {}",
-            contrast_ratio(repaired, gray)
-        );
-        assert!(relative_luminance(repaired) < relative_luminance(gray));
-
-        // Near-black candidate on black repairs upward.
-        let repaired = guard_contrast(Rgb::new(25, 25, 25), BLACK, 4.5);
-        assert!(contrast_ratio(repaired, BLACK) >= 4.5);
     }
 
     #[test]

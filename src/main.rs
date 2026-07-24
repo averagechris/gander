@@ -21,6 +21,7 @@ mod review;
 mod skills;
 mod state;
 mod syntax;
+mod theme;
 mod tui;
 mod walkthrough;
 mod web_export;

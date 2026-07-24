@@ -5,8 +5,9 @@ light/dark via OSC 11" (docs/roadmap.md, milestone 19). This page records
 both the **original requirements** and the **deltas we consciously accepted**
 after review, so nobody has to rediscover them adversarially. Configuration
 lives in the `[theme]` section (see the README config example); the
-implementation is `src/tui/theme.rs` (derivation, detection) and
-`src/tui/osc_guard.rs` (late-reply containment).
+implementation is `src/theme.rs` (shared palette→slot derivation),
+`src/tui/theme.rs` (terminal adapter and detection), and `src/tui/osc_guard.rs`
+(late-reply containment).
 
 ## What the theme guarantees
 
@@ -35,7 +36,7 @@ its own 4.5:1 floor against the base background has zero headroom left for
 any brighter surface, so demanding AA for every slot on every surface would
 force all surfaces down to the plain background and erase the highlights.
 The **actual, tested contract** (asserted in the final output color space,
-after quantization, in `src/tui/theme.rs` tests and the rendered-buffer test
+after quantization, in `src/theme.rs` / `src/tui/theme.rs` tests and the rendered-buffer test
 `rendered_diff_output_meets_the_documented_contrast_contract` in
 `src/tui/render.rs`) is:
 
@@ -143,9 +144,9 @@ API extension), tracked as future work under milestone 19.
 - Requirements: docs/roadmap.md, milestone 19 (first two items).
 - Config reference: README `[theme]` and `[diff.theme]` sections.
 - Diff-cue derivation details: docs/focused-diff-ux.md §"Config".
-- Implementation: `src/tui/theme.rs`, `src/tui/osc_guard.rs`,
+- Implementation: `src/theme.rs`, `src/tui/theme.rs`, `src/tui/osc_guard.rs`,
   `src/tui/pty_tests.rs` (production-path PTY scenarios).
-- Web reuse (M16, designed): the palette→slot derivation factors into a
-  shared core; the web UI serves the slots as CSS custom-property tokens
+- Web reuse (M16, designed): the palette→slot derivation now lives in a shared
+  core; the web UI serves the slots as CSS custom-property tokens
   with built-in named palettes and a system/light/dark toggle. See
   docs/web.md §Theming.

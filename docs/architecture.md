@@ -43,6 +43,8 @@ none of them fetches from or posts to a forge.
 - `src/tui/annotation_card.rs` projects comments, drafts, and walkthrough
   narration into one card view model; `src/tui/render.rs` renders that model
   with the shared channel color language.
+- `src/theme.rs` derives UI-toolkit-agnostic RGB theme slots; `src/tui/theme.rs`
+  adapts them to ratatui styles, terminal background detection, and xterm-256.
 - `src/artifact.rs` builds JSON/Markdown review artifacts from durable state;
   `src/web_export.rs` renders the self-contained HTML form. `src/delegation.rs`
   builds the narrower external-harness work packet.

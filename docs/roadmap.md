@@ -326,9 +326,10 @@ Status: designed, future.
 - [ ] full review parity mutations via the same review services: viewed,
   fold acknowledge, comment add/edit/state/triage, salience promote/demote
 - [ ] loopback-only bind + per-session capability token + Origin/Host checks
-- [ ] shared derived-theme core: factor the M19 palette→slot derivation out
-  of `src/tui/theme.rs`; web emits it as per-scheme CSS custom-property
-  tokens; component CSS references tokens only (no literal colors)
+- [x] shared derived-theme core: factor the M19 palette→slot derivation out
+  of `src/tui/theme.rs`
+- [ ] web emits derived theme slots as per-scheme CSS custom-property tokens;
+  component CSS references tokens only (no literal colors)
 - [ ] built-in named theme palettes (gander default + common community
   palettes) selectable via `[theme] name` for TUI and web alike, with
   `[theme.palette.*]` overrides and a `gander themes list` CLI
