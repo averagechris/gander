@@ -300,6 +300,8 @@ The live server uses Axum 0.8 with default features disabled and only
 dependency added for M16 Phase 1; assets and templates remain embedded Rust
 strings, and the existing Tokio, serde_json, and UUID facilities provide the
 runtime, protocol values, and ephemeral capability token.
+Cargo-deny grants BSD-3-Clause only to Axum's exact `matchit 0.8.4` transitive
+dependency; upgrades must revisit that crate-scoped exception.
 
 The ACP socket surface is unchanged; `present/*` and `review/current_focus`
 gain a web-backed implementation. Anything new that proves useful must land in

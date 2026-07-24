@@ -9,6 +9,9 @@ allow = [
   "Unicode-3.0",
   "Zlib",
 ]
+# Axum 0.8.9 pulls this exact router release under MIT AND BSD-3-Clause.
+# Keep BSD scoped here so a matchit upgrade or another BSD crate requires review.
+exceptions = [{ crate = "matchit@0.8.4", allow = ["BSD-3-Clause"] }]
 confidence-threshold = 0.8
 
 [bans]
