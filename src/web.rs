@@ -1,9 +1,10 @@
 //! Standalone loopback web peer.
 //!
 //! The browser is a renderer over the app-owned reading projection. This
-//! phase is read-only from the browser: durable state and jj changes are
-//! projected into surgical SSE patches. Presentation broadcast and review
-//! mutations intentionally remain outside the HTTP surface.
+//! durable state and jj changes are projected into surgical SSE patches.
+//! The browser also reports ephemeral interaction state and renders the same
+//! socket-driven presentation commands as the TUI; durable browser mutations
+//! remain outside this phase.
 
 use std::{
     fs,
@@ -16,18 +17,19 @@ use std::{
 
 use axum::{
     Router,
-    extract::{Path, Request, State},
+    extract::{Json, Path, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
         Html, IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
-    routing::get,
+    routing::{get, post},
 };
 use chrono::Utc;
 use color_eyre::eyre::{Context, Result};
 use futures_core::Stream;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
@@ -53,6 +55,160 @@ const WATCH_TICK: Duration = Duration::from_millis(250);
 const REPO_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 const SSE_BROADCAST_CAPACITY: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpotlightIdentity {
+    step_id: String,
+    part: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebPresentationState {
+    identity: SpotlightIdentity,
+    index: usize,
+    stale: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PresentEvent {
+    sequence: u64,
+    command: &'static str,
+    status: Value,
+    target: Option<PresentTarget>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PresentTarget {
+    path: String,
+    line: Option<usize>,
+    end_line: Option<usize>,
+    region_id: Option<String>,
+    row_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WebInteractions {
+    next_sequence: u64,
+    next_connection: u64,
+    tabs: std::collections::BTreeMap<String, TabInteraction>,
+}
+
+#[derive(Debug, Clone)]
+struct TabInteraction {
+    sequence: u64,
+    connection: u64,
+    connected: bool,
+    focus: Option<BrowserFocus>,
+    busy: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct BrowserFocus {
+    path: Option<String>,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+    hunk_header: Option<String>,
+    pane: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InteractionReport {
+    tab_id: String,
+    #[serde(default)]
+    focus: Option<BrowserFocus>,
+    #[serde(default)]
+    busy: Option<String>,
+}
+
+impl WebInteractions {
+    fn connect(&mut self, tab_id: &str) -> Option<u64> {
+        if !valid_tab_id(tab_id) {
+            return None;
+        }
+        self.next_connection = self.next_connection.saturating_add(1);
+        let connection = self.next_connection;
+        self.tabs
+            .entry(tab_id.to_owned())
+            .and_modify(|tab| {
+                tab.connection = connection;
+                tab.connected = true;
+            })
+            .or_insert(TabInteraction {
+                sequence: 0,
+                connection,
+                connected: true,
+                focus: None,
+                busy: None,
+            });
+        Some(connection)
+    }
+
+    fn disconnect(&mut self, tab_id: &str, connection: u64) {
+        if self
+            .tabs
+            .get(tab_id)
+            .is_some_and(|tab| tab.connection == connection)
+        {
+            self.tabs.remove(tab_id);
+        }
+    }
+
+    fn report(&mut self, report: InteractionReport) -> Result<(), &'static str> {
+        if !valid_tab_id(&report.tab_id) {
+            return Err("invalid tab_id");
+        }
+        if report
+            .busy
+            .as_deref()
+            .is_some_and(|mode| !matches!(mode, "search" | "dialog" | "comment editor"))
+        {
+            return Err("invalid busy mode");
+        }
+        if report
+            .focus
+            .as_ref()
+            .is_some_and(|focus| !matches!(focus.pane.as_str(), "files" | "diff"))
+        {
+            return Err("invalid focus pane");
+        }
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.tabs
+            .entry(report.tab_id)
+            .and_modify(|tab| {
+                tab.sequence = self.next_sequence;
+                tab.connected = true;
+                tab.focus.clone_from(&report.focus);
+                tab.busy.clone_from(&report.busy);
+            })
+            .or_insert(TabInteraction {
+                sequence: self.next_sequence,
+                connection: 0,
+                connected: true,
+                focus: report.focus,
+                busy: report.busy,
+            });
+        Ok(())
+    }
+
+    /// Deterministic controlling-tab arbitration: greatest server-observed
+    /// input sequence wins, with tab id as an explicit tie-breaker.
+    fn controlling(&self) -> Option<(&str, &TabInteraction)> {
+        self.tabs
+            .iter()
+            .filter(|(_, tab)| tab.connected)
+            .max_by_key(|(id, tab)| (tab.sequence, id.as_str()))
+            .map(|(id, tab)| (id.as_str(), tab))
+    }
+}
+
+fn valid_tab_id(tab_id: &str) -> bool {
+    !tab_id.is_empty()
+        && tab_id.len() <= 128
+        && tab_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RenderMode {
@@ -89,6 +245,8 @@ struct HttpState {
     theme_css: Arc<str>,
     review: Arc<RwLock<WebReview>>,
     events: tokio::sync::broadcast::Sender<Arc<ProjectionEvent>>,
+    present_events: tokio::sync::watch::Receiver<Option<Arc<PresentEvent>>>,
+    interactions: Arc<Mutex<WebInteractions>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     extra_css: Option<Arc<str>>,
     registration: Arc<Mutex<InstanceRegistration>>,
@@ -218,6 +376,28 @@ impl WebWatcher {
         if changed {
             let _ = self.reload_target(session);
         }
+    }
+
+    fn reload_local_state(
+        &mut self,
+        session: &mut ReviewSession,
+        baseline: &mut ReviewState,
+    ) -> Result<()> {
+        let external = ReviewState::load_or_default(&self.state_path)?;
+        let merged = ReviewState::merge_changes_since(
+            external,
+            baseline,
+            session.to_state(),
+            &ReviewStateTombstones::default(),
+        );
+        session.apply_review_state(merged.clone());
+        *baseline = merged;
+        self.state_mtime = file_mtime(&self.state_path);
+        let overlay = crate::agent::AgentOverlay::load_or_default(&self.overlay_path)?;
+        session.apply_agent_overlay(&overlay);
+        session.touch_stream_inputs();
+        self.overlay_mtime = file_mtime(&self.overlay_path);
+        Ok(())
     }
 
     fn reload_target(&self, session: &mut ReviewSession) -> Result<()> {
@@ -453,6 +633,19 @@ fn sse_state_event(event: &ProjectionEvent) -> SseEvent {
         .expect("projection event is JSON serializable")
 }
 
+fn sse_present_event(event: &PresentEvent) -> SseEvent {
+    SseEvent::default()
+        .event("present")
+        .json_data(json!({
+            "sequence": event.sequence,
+            "command": event.command,
+            "status": event.status,
+            "target": event.target,
+            "note": event.note,
+        }))
+        .expect("presentation event is JSON serializable")
+}
+
 pub(crate) fn run(params: WebParams) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -495,6 +688,9 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     let initial_review = WebReview::from_session(&params.session);
     let review = Arc::new(RwLock::new(initial_review));
     let (events, _) = tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY);
+    // A watch channel deliberately retains only the newest presenter move.
+    // Fast agent driving therefore cannot queue a browser scroll storm.
+    let (present_tx, present_rx) = tokio::sync::watch::channel(None);
     let (stream_shutdown_tx, stream_shutdown_rx) = tokio::sync::watch::channel(false);
     let token = uuid::Uuid::new_v4().to_string();
     let host = format!("127.0.0.1:{}", address.port());
@@ -511,6 +707,8 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         theme_css: Arc::from(render_theme_css(&params.theme)),
         review,
         events,
+        present_events: present_rx,
+        interactions: Arc::new(Mutex::new(WebInteractions::default())),
         shutdown: stream_shutdown_rx,
         extra_css: params
             .extra_css
@@ -545,6 +743,8 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     tokio::pin!(server);
 
     let mut baseline = params.session.to_state();
+    let mut presentation = None;
+    let mut present_sequence = 0u64;
     let mut tick = tokio::time::interval(WATCH_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -560,9 +760,25 @@ async fn run_async(mut params: WebParams) -> Result<()> {
                     &mut params.session,
                     &params.state_path,
                     &mut baseline,
+                    &mut watcher,
+                    &mut presentation,
+                    &mut present_sequence,
+                    &present_tx,
+                    &http_state,
                 );
                 watcher.poll_files(&mut params.session, &mut baseline);
                 watcher.poll_repo(&mut params.session);
+                if reconcile_web_presentation(&params.session, &mut presentation) {
+                    publish_present_event(
+                        &params.session,
+                        &mut present_sequence,
+                        &present_tx,
+                        "sync",
+                        &presentation,
+                        None,
+                        None,
+                    );
+                }
                 if params.session.stream_inputs_generation() != before {
                     publish_projection(&http_state, &params.session);
                 }
@@ -581,6 +797,7 @@ fn router(state: HttpState) -> Router {
     Router::new()
         .route("/", get(shell))
         .route("/events", get(events))
+        .route("/interaction", post(interaction))
         .route("/assets/app.css", get(stylesheet))
         .route("/assets/app.js", get(script))
         .route("/fragment/{region}", get(fragment))
@@ -616,9 +833,6 @@ async fn security_guard(State(state): State<HttpState>, request: Request, next: 
         return (status, message).into_response();
     }
 
-    if let Ok(mut registration) = state.registration.lock() {
-        let _ = registration.record_input(&state.base, &state.rev, &state.summary);
-    }
     let mut response = next.run(request).await;
     response
         .headers_mut()
@@ -755,6 +969,24 @@ async fn extra_stylesheet(State(state): State<HttpState>) -> Response {
     }
 }
 
+async fn interaction(
+    State(state): State<HttpState>,
+    Json(report): Json<InteractionReport>,
+) -> Response {
+    let result = state
+        .interactions
+        .lock()
+        .map_err(|_| "interaction registry unavailable")
+        .and_then(|mut interactions| interactions.report(report));
+    if let Err(message) = result {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
+    if let Ok(mut registration) = state.registration.lock() {
+        let _ = registration.record_input(&state.base, &state.rev, &state.summary);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn events(State(state): State<HttpState>, request: Request) -> Response {
     let query_generation = query_value(request.uri().query(), "generation")
         .and_then(|value| value.parse::<u64>().ok());
@@ -766,9 +998,23 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
     // EventSource keeps the original query string while adding Last-Event-ID
     // on reconnect, so the header is authoritative once present.
     let client_generation = header_generation.or(query_generation);
+    let tab_id = query_value(request.uri().query(), "tab")
+        .filter(|tab_id| valid_tab_id(tab_id))
+        .map(str::to_owned);
+    let Some(tab_id) = tab_id else {
+        return (StatusCode::BAD_REQUEST, "missing or invalid tab id").into_response();
+    };
+    let connection = state
+        .interactions
+        .lock()
+        .ok()
+        .and_then(|mut interactions| interactions.connect(&tab_id))
+        .unwrap_or(0);
     let mut receiver = state.events.subscribe();
+    let mut present = state.present_events.clone();
     let (sender, body_receiver) = tokio::sync::mpsc::channel(1);
     let state_for_stream = state.clone();
+    let tab_for_stream = tab_id.clone();
     let mut shutdown = state.shutdown.clone();
     tokio::spawn(async move {
         let current = full_projection_event(&state_for_stream);
@@ -777,11 +1023,41 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
         {
             return;
         }
+        let initial_present = present.borrow_and_update().clone();
+        if let Some(event) = initial_present
+            && sender.send(sse_present_event(&event)).await.is_err()
+        {
+            if let Ok(mut interactions) = state_for_stream.interactions.lock() {
+                interactions.disconnect(&tab_for_stream, connection);
+            }
+            return;
+        }
+        let mut disconnected_check = tokio::time::interval(Duration::from_secs(1));
         loop {
             let received = tokio::select! {
-                _ = shutdown.changed() => break,
-                received = receiver.recv() => received,
+                _ = shutdown.changed() => None,
+                _ = disconnected_check.tick() => {
+                    if sender.is_closed() { None } else { continue }
+                },
+                changed = present.changed() => {
+                    if changed.is_err() {
+                        None
+                    } else {
+                        let event = present.borrow_and_update().clone();
+                        if let Some(event) = event {
+                            if sender.send(sse_present_event(&event)).await.is_err() {
+                                None
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+                received = receiver.recv() => Some(received),
             };
+            let Some(received) = received else { break };
             match received {
                 Ok(event) => {
                     if sender.send(sse_state_event(&event)).await.is_err() {
@@ -796,6 +1072,9 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
+        }
+        if let Ok(mut interactions) = state_for_stream.interactions.lock() {
+            interactions.disconnect(&tab_for_stream, connection);
         }
     });
     Sse::new(ReceiverStream {
@@ -839,7 +1118,7 @@ fn render_shell(state: &HttpState) -> String {
         "\"><header class=\"topbar\"><div><p class=\"eyebrow\">Gander local review</p><strong>",
     );
     escape_to(&mut out, &state.target);
-    out.push_str("</strong></div><div class=\"controls\"><label class=\"search\">Search <input id=\"review-search\" type=\"search\" placeholder=\"File, code, or comment\"></label><button class=\"theme-toggle\" type=\"button\" data-theme-toggle aria-label=\"Cycle color scheme\">Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
+    out.push_str("</strong></div><div class=\"controls\"><label class=\"search\">Search <input id=\"review-search\" type=\"search\" placeholder=\"File, code, or comment\"></label><button class=\"theme-toggle\" type=\"button\" data-theme-toggle aria-label=\"Cycle color scheme\">Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><aside id=\"presenter\" class=\"presenter\" hidden aria-live=\"polite\"><span id=\"presenter-status\">Following presenter</span><button id=\"presenter-rejoin\" type=\"button\" hidden>Following paused — rejoin</button><span id=\"presenter-edge\" class=\"presenter-edge\" hidden></span><p id=\"presenter-note\" class=\"presenter-note\" hidden></p></aside><div class=\"app-layout\">");
     out.push_str(&render_file_tree_html(review));
     out.push_str("<main>");
     out.push_str(&render_overview_with_target(review, &state.target));
@@ -1127,6 +1406,30 @@ fn render_diff_row(out: &mut String, row: &crate::app::ReadingRow) {
     escape_to(out, &dom_row_id(&row.id));
     out.push_str("\" data-path=\"");
     escape_to(out, row.path.as_deref().unwrap_or_default());
+    if let Some(crate::anchor::CommentAnchor::Line {
+        side,
+        old_line,
+        new_line,
+        hunk_header,
+        ..
+    }) = &row.anchor
+    {
+        out.push_str("\" data-side=\"");
+        out.push_str(match side {
+            crate::anchor::DiffSide::Old => "old",
+            crate::anchor::DiffSide::New => "new",
+        });
+        if let Some(line) = old_line {
+            out.push_str("\" data-old-line=\"");
+            out.push_str(&line.to_string());
+        }
+        if let Some(line) = new_line {
+            out.push_str("\" data-new-line=\"");
+            out.push_str(&line.to_string());
+        }
+        out.push_str("\" data-hunk=\"");
+        escape_to(out, hunk_header);
+    }
     out.push_str("\"><span class=\"salience-margin\" aria-label=\"");
     escape_to(
         out,
@@ -1192,6 +1495,11 @@ fn render_annotation(out: &mut String, annotation: &ReadingAnnotation) {
             part,
             rationale,
         } => {
+            out.push_str("<span hidden data-step-id=\"");
+            escape_to(out, &step.id);
+            out.push_str("\" data-step-part=\"");
+            out.push_str(&part.to_string());
+            out.push_str("\"></span>");
             out.push_str("<span>");
             if let Some(author) = &step.author {
                 escape_to(out, author_label(author.kind));
@@ -1348,12 +1656,19 @@ fn escape_to(out: &mut String, value: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_acp_requests(
     bridge: &mut AcpBridge,
     session: &mut ReviewSession,
     state_path: &std::path::Path,
     baseline: &mut ReviewState,
+    watcher: &mut WebWatcher,
+    presentation: &mut Option<WebPresentationState>,
+    present_sequence: &mut u64,
+    present_tx: &tokio::sync::watch::Sender<Option<Arc<PresentEvent>>>,
+    state: &HttpState,
 ) {
+    apply_controlling_focus(session, &state.interactions);
     let (_, _, commands, mutations) = bridge.drain_ui_commands(session);
     for request in mutations {
         let result = crate::tui::persist_acp_review_mutation(
@@ -1371,58 +1686,408 @@ fn process_acp_requests(
     }
     for request in commands {
         let command = request.command.clone();
-        request.respond(apply_present_skeleton(command, session));
+        let result = apply_web_present_command(
+            command.clone(),
+            session,
+            watcher,
+            baseline,
+            presentation,
+            &state.interactions,
+        );
+        if let Err((-32001, message)) = &result {
+            publish_present_event(
+                session,
+                present_sequence,
+                present_tx,
+                "pending",
+                presentation,
+                None,
+                Some(format!("Presenter waiting: {message}")),
+            );
+        } else if result.is_ok() && !matches!(command, PresentCommand::Status) {
+            let (label, explicit_target, note) = match command {
+                PresentCommand::Start => ("start", None, None),
+                PresentCommand::End => ("end", None, None),
+                PresentCommand::Next => ("next", None, None),
+                PresentCommand::Prev => ("prev", None, None),
+                PresentCommand::GotoIndex(_) | PresentCommand::GotoStep(_) => ("goto", None, None),
+                PresentCommand::Focus {
+                    path,
+                    line,
+                    end_line,
+                    note,
+                } => (
+                    "focus",
+                    Some(resolve_present_target(
+                        session,
+                        &path,
+                        Some(line),
+                        Some(end_line.unwrap_or(line)),
+                    )),
+                    note,
+                ),
+                PresentCommand::Reload => ("reload", None, None),
+                PresentCommand::Status => unreachable!(),
+            };
+            publish_present_event(
+                session,
+                present_sequence,
+                present_tx,
+                label,
+                presentation,
+                explicit_target.flatten(),
+                note,
+            );
+        }
+        request.respond(result);
     }
 }
 
-fn apply_present_skeleton(
+fn apply_web_present_command(
     command: PresentCommand,
     session: &mut ReviewSession,
+    watcher: &mut WebWatcher,
+    baseline: &mut ReviewState,
+    presentation: &mut Option<WebPresentationState>,
+    interactions: &Arc<Mutex<WebInteractions>>,
 ) -> std::result::Result<Value, (i64, String)> {
+    if let Some(mode) = interactions
+        .lock()
+        .ok()
+        .and_then(|tabs| tabs.controlling().and_then(|(_, tab)| tab.busy.clone()))
+    {
+        return Err((-32001, format!("user is busy: {mode}")));
+    }
     match command {
+        PresentCommand::Status => Ok(web_present_status(session, presentation)),
+        PresentCommand::Start => {
+            if presentation.is_none() {
+                if session.spotlight_count() == 0 {
+                    return Err((
+                        -32002,
+                        "nothing to present — no current Spotlight regions; author a durable walkthrough and attention map".to_owned(),
+                    ));
+                }
+                let (step_id, part) = session
+                    .jump_to_spotlight_index(0)
+                    .ok_or_else(|| (-32002, "first Spotlight is unavailable".to_owned()))?;
+                *presentation = Some(WebPresentationState {
+                    identity: SpotlightIdentity { step_id, part },
+                    index: 0,
+                    stale: false,
+                });
+            }
+            Ok(web_present_status(session, presentation))
+        }
+        PresentCommand::End => {
+            *presentation = None;
+            Ok(web_present_status(session, presentation))
+        }
+        PresentCommand::Next => {
+            let current = presentation
+                .as_ref()
+                .ok_or_else(|| (-32002, "presentation is not active".to_owned()))?;
+            if current.stale {
+                return Err((
+                    -32002,
+                    "current Spotlight is stale; use present/goto to choose a current target"
+                        .to_owned(),
+                ));
+            }
+            let target = (current.index + 1).min(session.spotlight_count().saturating_sub(1));
+            goto_web_spotlight(session, presentation, target)?;
+            Ok(web_present_status(session, presentation))
+        }
+        PresentCommand::Prev => {
+            let current = presentation
+                .as_ref()
+                .ok_or_else(|| (-32002, "presentation is not active".to_owned()))?;
+            if current.stale {
+                return Err((
+                    -32002,
+                    "current Spotlight is stale; use present/goto to choose a current target"
+                        .to_owned(),
+                ));
+            }
+            let target = current.index.saturating_sub(1);
+            goto_web_spotlight(session, presentation, target)?;
+            Ok(web_present_status(session, presentation))
+        }
+        PresentCommand::GotoIndex(index) => {
+            if presentation.is_none() {
+                return Err((-32002, "presentation is not active".to_owned()));
+            }
+            if index >= session.spotlight_count() {
+                return Err((-32602, format!("slide index {index} out of range")));
+            }
+            goto_web_spotlight(session, presentation, index)?;
+            Ok(web_present_status(session, presentation))
+        }
+        PresentCommand::GotoStep(step_id) => {
+            if presentation.is_none() {
+                return Err((-32002, "presentation is not active".to_owned()));
+            }
+            let index = session
+                .spotlight_index_for_step(&step_id)
+                .ok_or_else(|| (-32602, format!("unknown step_id: {step_id}")))?;
+            goto_web_spotlight(session, presentation, index)?;
+            Ok(web_present_status(session, presentation))
+        }
         PresentCommand::Focus {
             path,
             line,
             end_line,
             ..
         } => {
-            if !session.files.iter().any(|file| file.path == path) {
-                return Err((-32602, format!("path is not in the diff: {path}")));
-            }
-            let requested_end = end_line.unwrap_or(line);
-            let row = session
-                .review_stream()
-                .rows
-                .iter()
-                .enumerate()
-                .find_map(|(index, row)| {
-                    (row.path.as_deref() == Some(path.as_str())
-                        && row
-                            .anchor
-                            .as_ref()
-                            .and_then(crate::anchor::CommentAnchor::line)
-                            .is_some_and(|anchor| line <= anchor && anchor <= requested_end))
-                    .then_some(index)
-                });
-            let Some(row) = row else {
-                return Err((
-                    -32602,
-                    format!("location is not in the diff: {path}:{line}"),
-                ));
-            };
+            let row = validate_focus_target(session, &path, line, end_line)?;
             session.select_stream_row(row, true);
             session.focus = Focus::Diff;
-            Ok(json!({ "ok": true, "path": path, "line": line, "end_line": end_line, "phase": 1 }))
+            Ok(json!({ "ok": true, "path": path, "line": line, "end_line": end_line }))
         }
-        PresentCommand::Reload => Ok(json!({ "active": false, "phase": 1, "reloaded": true })),
-        PresentCommand::Status
-        | PresentCommand::Start
-        | PresentCommand::End
-        | PresentCommand::Next
-        | PresentCommand::Prev
-        | PresentCommand::GotoIndex(_)
-        | PresentCommand::GotoStep(_) => Ok(json!({ "active": false, "phase": 1 })),
+        PresentCommand::Reload => {
+            watcher
+                .reload_local_state(session, baseline)
+                .map_err(|error| (-32000, error.to_string()))?;
+            reconcile_web_presentation(session, presentation);
+            Ok(web_present_status(session, presentation))
+        }
     }
+}
+
+fn validate_focus_target(
+    session: &ReviewSession,
+    path: &str,
+    line: usize,
+    end_line: Option<usize>,
+) -> std::result::Result<usize, (i64, String)> {
+    if !session.files.iter().any(|file| file.path == path) {
+        return Err((-32602, format!("path is not in the diff: {path}")));
+    }
+    let requested_end = end_line.unwrap_or(line);
+    if requested_end < line {
+        return Err((
+            -32602,
+            "end_line must be greater than or equal to line".to_owned(),
+        ));
+    }
+    session
+        .review_stream()
+        .rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| {
+            (row.path.as_deref() == Some(path)
+                && row
+                    .anchor
+                    .as_ref()
+                    .and_then(crate::anchor::CommentAnchor::line)
+                    .is_some_and(|anchor| line <= anchor && anchor <= requested_end))
+            .then_some(index)
+        })
+        .ok_or_else(|| {
+            (
+                -32602,
+                format!("location is not in the diff: {path}:{line}"),
+            )
+        })
+}
+
+fn goto_web_spotlight(
+    session: &mut ReviewSession,
+    presentation: &mut Option<WebPresentationState>,
+    index: usize,
+) -> std::result::Result<(), (i64, String)> {
+    let (step_id, part) = session
+        .jump_to_spotlight_index(index)
+        .ok_or_else(|| (-32002, format!("Spotlight {index} is unavailable")))?;
+    *presentation = Some(WebPresentationState {
+        identity: SpotlightIdentity { step_id, part },
+        index,
+        stale: false,
+    });
+    Ok(())
+}
+
+fn reconcile_web_presentation(
+    session: &ReviewSession,
+    presentation: &mut Option<WebPresentationState>,
+) -> bool {
+    let Some(current) = presentation.as_mut() else {
+        return false;
+    };
+    match session.spotlight_index_for_identity(&current.identity.step_id, current.identity.part) {
+        Some(index) => {
+            let changed = current.index != index || current.stale;
+            current.index = index;
+            current.stale = false;
+            changed
+        }
+        None => {
+            let changed = !current.stale;
+            current.stale = true;
+            changed
+        }
+    }
+}
+
+fn web_present_status(
+    session: &ReviewSession,
+    presentation: &Option<WebPresentationState>,
+) -> Value {
+    let Some(presentation) = presentation else {
+        return json!({ "active": false });
+    };
+    let stream = session.review_stream();
+    let current = (!presentation.stale)
+        .then(|| stream.spotlights.get(presentation.index))
+        .flatten()
+        .filter(|spotlight| {
+            spotlight.step_id == presentation.identity.step_id
+                && spotlight.part == presentation.identity.part
+        });
+    json!({
+        "active": true,
+        "slide_index": presentation.index,
+        "slide_count": stream.spotlights.len(),
+        "view": "focus",
+        "current": current.map(|spotlight| json!({
+            "step_id": spotlight.step_id,
+            "part": spotlight.part,
+            "path": spotlight.target.file,
+            "line": spotlight.target.line,
+            "end_line": spotlight.target.end_line,
+            "stale": false,
+        })).unwrap_or_else(|| json!({
+            "step_id": presentation.identity.step_id,
+            "part": presentation.identity.part,
+            "path": null,
+            "line": null,
+            "end_line": null,
+            "stale": true,
+        })),
+    })
+}
+
+fn publish_present_event(
+    session: &ReviewSession,
+    sequence: &mut u64,
+    sender: &tokio::sync::watch::Sender<Option<Arc<PresentEvent>>>,
+    command: &'static str,
+    presentation: &Option<WebPresentationState>,
+    explicit_target: Option<PresentTarget>,
+    note: Option<String>,
+) {
+    *sequence = sequence.saturating_add(1);
+    let target = explicit_target.or_else(|| presentation_target(session, presentation));
+    sender.send_replace(Some(Arc::new(PresentEvent {
+        sequence: *sequence,
+        command,
+        status: web_present_status(session, presentation),
+        target,
+        note,
+    })));
+}
+
+fn presentation_target(
+    session: &ReviewSession,
+    presentation: &Option<WebPresentationState>,
+) -> Option<PresentTarget> {
+    let current = presentation.as_ref().filter(|current| !current.stale)?;
+    let stream = session.review_stream();
+    let spotlight = stream.spotlights.get(current.index)?.clone();
+    if spotlight.step_id != current.identity.step_id || spotlight.part != current.identity.part {
+        return None;
+    }
+    resolve_present_target(
+        session,
+        spotlight.target.file.as_deref()?,
+        spotlight.target.line,
+        spotlight.target.end_line.or(spotlight.target.line),
+    )
+}
+
+fn resolve_present_target(
+    session: &ReviewSession,
+    path: &str,
+    line: Option<usize>,
+    end_line: Option<usize>,
+) -> Option<PresentTarget> {
+    let projection = session.reading_projection();
+    let mut chosen = None;
+    for region in &projection.regions {
+        for row in &region.rows {
+            if row.path.as_deref() != Some(path) {
+                continue;
+            }
+            let anchor_line = row
+                .anchor
+                .as_ref()
+                .and_then(crate::anchor::CommentAnchor::line);
+            let matches = match (line, end_line, anchor_line) {
+                (Some(start), Some(end), Some(candidate)) => start <= candidate && candidate <= end,
+                (Some(start), None, Some(candidate)) => start == candidate,
+                (None, _, _) => true,
+                _ => false,
+            };
+            if matches {
+                chosen = Some((region.id.clone(), dom_row_id(&row.id)));
+                break;
+            }
+        }
+        if chosen.is_some() {
+            break;
+        }
+    }
+    Some(PresentTarget {
+        path: path.to_owned(),
+        line,
+        end_line,
+        region_id: chosen.as_ref().map(|(region, _)| region.clone()),
+        row_id: chosen.map(|(_, row)| row),
+    })
+}
+
+fn apply_controlling_focus(
+    session: &mut ReviewSession,
+    interactions: &Arc<Mutex<WebInteractions>>,
+) {
+    let focus = interactions
+        .lock()
+        .ok()
+        .and_then(|tabs| tabs.controlling().and_then(|(_, tab)| tab.focus.clone()));
+    let Some(focus) = focus else { return };
+    let stream = session.review_stream();
+    let row = stream.rows.iter().enumerate().find_map(|(index, row)| {
+        if row.path.as_deref() != focus.path.as_deref() {
+            return None;
+        }
+        let anchor = row.anchor.as_ref()?;
+        let matches = match anchor {
+            crate::anchor::CommentAnchor::Line {
+                old_line,
+                new_line,
+                hunk_header,
+                ..
+            } => {
+                focus.old_line.is_some_and(|line| Some(line) == *old_line)
+                    || focus.new_line.is_some_and(|line| Some(line) == *new_line)
+                    || (focus.old_line.is_none()
+                        && focus.new_line.is_none()
+                        && focus.hunk_header.as_deref() == Some(hunk_header.as_str()))
+            }
+            _ => focus.old_line.is_none() && focus.new_line.is_none(),
+        };
+        matches.then_some(index)
+    });
+    drop(stream);
+    if let Some(row) = row {
+        session.select_stream_row(row, true);
+    }
+    session.focus = if focus.pane == "files" {
+        Focus::Files
+    } else {
+        Focus::Diff
+    };
 }
 
 async fn wait_for_shutdown_signal() {
@@ -1506,7 +2171,7 @@ mod tests {
         app::{ChapterHeader, Coverage, DiffRow, ReadingRow, SkimFold},
         diff::DiffLineKind,
         jj::{JjChangeSummary, JjOperationSummary, ReviewTarget, TargetAuthor},
-        state::{AttentionProgressTarget, Comment},
+        state::{AttentionProgressTarget, Comment, Walkthrough, WalkthroughStep},
     };
     use std::{
         path::Path as FsPath,
@@ -1517,6 +2182,7 @@ mod tests {
         ReadingRow {
             id: id.into(),
             path: Some(path.into()),
+            anchor: None,
             salience: Some(salience),
             diff: Some(DiffRow {
                 old_lineno: None,
@@ -1599,6 +2265,7 @@ mod tests {
                     ReadingRow {
                         id: "shared-fold".into(),
                         path: Some("generated.lock".into()),
+                        anchor: None,
                         salience: Some(Salience::Skim),
                         diff: None,
                         annotations: Vec::new(),
@@ -1692,6 +2359,8 @@ mod tests {
             theme_css: Arc::from(render_theme_css(&ThemeConfig::default())),
             review: Arc::new(RwLock::new(review)),
             events: tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY).0,
+            present_events: tokio::sync::watch::channel(None).1,
+            interactions: Arc::new(Mutex::new(WebInteractions::default())),
             shutdown: tokio::sync::watch::channel(false).1,
             extra_css: None,
             registration: Arc::new(Mutex::new(registration)),
@@ -2178,6 +2847,463 @@ mod tests {
         assert!(THEME_CONTROL_SCRIPT.contains("localStorage.setItem(k,m)"));
         assert_no_literal_colors("inline theme scripts", PREPAINT_SCRIPT);
         assert_no_literal_colors("inline theme scripts", THEME_CONTROL_SCRIPT);
+    }
+
+    fn presentation_fixture() -> ReviewSession {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n-old_one\n+new_one\n-old_two\n+new_two\n-old_three\n+new_three\n";
+        let mut session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(raw).unwrap(),
+            ReviewState::default(),
+        );
+        session.syntax.enabled = false;
+        let files = session
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let step = |id: &str, line: usize| WalkthroughStep {
+            id: id.into(),
+            title: Some(id.into()),
+            target: crate::attention::target_for_diff(&files, "a.rs", Some(line), None).unwrap(),
+            ..WalkthroughStep::default()
+        };
+        let mut durable = crate::state::ReviewSession {
+            id: "web-presentation".into(),
+            walkthroughs: vec![Walkthrough {
+                id: "tour".into(),
+                steps: vec![step("first", 1), step("second", 3)],
+                ..Walkthrough::default()
+            }],
+            ..crate::state::ReviewSession::default()
+        };
+        durable.target.base = Some(session.target.base.clone());
+        durable.target.revision = Some(session.target.rev.clone());
+        durable.target.repo = Some(session.canonical_repo().to_owned());
+        crate::attention::sync_agent_attention(&mut durable, &files).unwrap();
+        session.durable_sessions_mut().push(durable);
+        session.stream_mode = true;
+        session
+    }
+
+    fn presentation_watcher(raw: &str) -> (WebWatcher, tempfile::TempDir, Arc<JjCounts>) {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = Arc::new(JjCounts::default());
+        (
+            WebWatcher {
+                state_path: dir.path().join("state.json"),
+                overlay_path: dir.path().join("agent.json"),
+                state_mtime: None,
+                overlay_mtime: None,
+                repo_fingerprint: None,
+                last_repo_poll: None,
+                jj: Box::new(WatchJj {
+                    counts: counts.clone(),
+                    fingerprint: Arc::new(Mutex::new("one".into())),
+                    diff: raw.into(),
+                }),
+                ignore_globs: Vec::new(),
+                generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+            },
+            dir,
+            counts,
+        )
+    }
+
+    #[test]
+    fn web_present_methods_match_tui_status_navigation_focus_and_reload_contract() {
+        let mut session = presentation_fixture();
+        let raw = session
+            .files
+            .iter()
+            .map(|file| file.diff.raw.clone())
+            .collect::<String>();
+        let (mut watcher, _dir, _) = presentation_watcher(&raw);
+        let mut baseline = session.to_state();
+        baseline.save(&watcher.state_path).unwrap();
+        crate::agent::AgentOverlay::default()
+            .save(&watcher.overlay_path)
+            .unwrap();
+        let interactions = Arc::new(Mutex::new(WebInteractions::default()));
+        let mut presentation = None;
+        let apply = |command,
+                     session: &mut ReviewSession,
+                     watcher: &mut WebWatcher,
+                     baseline: &mut ReviewState,
+                     presentation: &mut Option<WebPresentationState>| {
+            apply_web_present_command(
+                command,
+                session,
+                watcher,
+                baseline,
+                presentation,
+                &interactions,
+            )
+        };
+
+        assert_eq!(
+            apply(
+                PresentCommand::Status,
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut presentation,
+            )
+            .unwrap(),
+            json!({"active": false})
+        );
+        let started = apply(
+            PresentCommand::Start,
+            &mut session,
+            &mut watcher,
+            &mut baseline,
+            &mut presentation,
+        )
+        .unwrap();
+        assert_eq!(started["slide_index"], 0);
+        assert_eq!(started["slide_count"], 2);
+        assert_eq!(started["view"], "focus");
+        assert_eq!(started["current"]["step_id"], "first");
+        assert_eq!(started["current"]["part"], 0);
+        assert!(started.get("phase").is_none());
+
+        let next = apply(
+            PresentCommand::Next,
+            &mut session,
+            &mut watcher,
+            &mut baseline,
+            &mut presentation,
+        )
+        .unwrap();
+        assert_eq!(next["current"]["step_id"], "second");
+        let previous = apply(
+            PresentCommand::Prev,
+            &mut session,
+            &mut watcher,
+            &mut baseline,
+            &mut presentation,
+        )
+        .unwrap();
+        assert_eq!(previous["current"]["step_id"], "first");
+        assert_eq!(
+            apply(
+                PresentCommand::GotoIndex(1),
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut presentation
+            )
+            .unwrap()["slide_index"],
+            1
+        );
+        assert_eq!(
+            apply(
+                PresentCommand::GotoStep("first".into()),
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut presentation
+            )
+            .unwrap()["slide_index"],
+            0
+        );
+
+        let focused = apply(
+            PresentCommand::Focus {
+                path: "a.rs".into(),
+                line: 2,
+                end_line: Some(3),
+                note: Some("ephemeral".into()),
+            },
+            &mut session,
+            &mut watcher,
+            &mut baseline,
+            &mut presentation,
+        )
+        .unwrap();
+        assert_eq!(
+            focused,
+            json!({"ok":true,"path":"a.rs","line":2,"end_line":3})
+        );
+        assert_eq!(session.focus, Focus::Diff);
+
+        let reloaded = apply(
+            PresentCommand::Reload,
+            &mut session,
+            &mut watcher,
+            &mut baseline,
+            &mut presentation,
+        )
+        .unwrap();
+        assert!(reloaded["active"].as_bool().unwrap());
+        assert_eq!(reloaded["current"]["step_id"], "first");
+        assert_eq!(
+            apply(
+                PresentCommand::End,
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut presentation
+            )
+            .unwrap(),
+            json!({"active":false})
+        );
+    }
+
+    #[test]
+    fn web_present_rejects_inactive_invalid_and_stale_targets_without_moving() {
+        let mut session = presentation_fixture();
+        let (mut watcher, _dir, _) = presentation_watcher("");
+        let mut baseline = session.to_state();
+        let interactions = Arc::new(Mutex::new(WebInteractions::default()));
+        let mut presentation = None;
+        {
+            let mut apply = |command| {
+                apply_web_present_command(
+                    command,
+                    &mut session,
+                    &mut watcher,
+                    &mut baseline,
+                    &mut presentation,
+                    &interactions,
+                )
+            };
+            assert_eq!(apply(PresentCommand::Next).unwrap_err().0, -32002);
+            apply(PresentCommand::Start).unwrap();
+            assert_eq!(apply(PresentCommand::GotoIndex(99)).unwrap_err().0, -32602);
+            assert_eq!(
+                apply(PresentCommand::GotoStep("missing".into()))
+                    .unwrap_err()
+                    .0,
+                -32602
+            );
+            assert_eq!(
+                apply(PresentCommand::Focus {
+                    path: "missing.rs".into(),
+                    line: 1,
+                    end_line: None,
+                    note: None
+                })
+                .unwrap_err()
+                .0,
+                -32602
+            );
+            assert_eq!(
+                apply(PresentCommand::Focus {
+                    path: "a.rs".into(),
+                    line: 99,
+                    end_line: None,
+                    note: None
+                })
+                .unwrap_err()
+                .0,
+                -32602
+            );
+            assert_eq!(
+                apply(PresentCommand::Focus {
+                    path: "a.rs".into(),
+                    line: 3,
+                    end_line: Some(2),
+                    note: None
+                })
+                .unwrap_err()
+                .0,
+                -32602
+            );
+        }
+
+        let identity = presentation.as_ref().unwrap().identity.clone();
+        session.durable_sessions_mut()[0].walkthroughs.clear();
+        session.durable_sessions_mut()[0].attention_regions.clear();
+        assert!(reconcile_web_presentation(&session, &mut presentation));
+        let status = web_present_status(&session, &presentation);
+        assert!(status["current"]["stale"].as_bool().unwrap());
+        assert_eq!(status["current"]["step_id"], identity.step_id);
+        assert_eq!(status["current"]["part"], identity.part);
+        assert!(status["current"]["path"].is_null());
+        assert_eq!(
+            apply_web_present_command(
+                PresentCommand::Next,
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut presentation,
+                &interactions
+            )
+            .unwrap_err()
+            .0,
+            -32002
+        );
+    }
+
+    #[test]
+    fn most_recent_connected_tab_deterministically_controls_busy_and_current_focus() {
+        let mut tabs = WebInteractions::default();
+        tabs.report(InteractionReport {
+            tab_id: "tab-a".into(),
+            focus: Some(BrowserFocus {
+                path: Some("a.rs".into()),
+                old_line: None,
+                new_line: Some(1),
+                hunk_header: Some("@@ -1,3 +1,3 @@".into()),
+                pane: "diff".into(),
+            }),
+            busy: None,
+        })
+        .unwrap();
+        tabs.report(InteractionReport {
+            tab_id: "tab-b".into(),
+            focus: Some(BrowserFocus {
+                path: Some("a.rs".into()),
+                old_line: None,
+                new_line: Some(3),
+                hunk_header: Some("@@ -1,3 +1,3 @@".into()),
+                pane: "files".into(),
+            }),
+            busy: Some("search".into()),
+        })
+        .unwrap();
+        assert_eq!(tabs.controlling().unwrap().0, "tab-b");
+        let interactions = Arc::new(Mutex::new(tabs));
+        let mut session = presentation_fixture();
+        apply_controlling_focus(&mut session, &interactions);
+        assert_eq!(session.focus, Focus::Files);
+        assert_eq!(session.selected_line_anchor().unwrap().line(), Some(3));
+        let (mut watcher, _dir, _) = presentation_watcher("");
+        let mut baseline = session.to_state();
+        assert_eq!(
+            apply_web_present_command(
+                PresentCommand::Status,
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut None,
+                &interactions
+            )
+            .unwrap_err(),
+            (-32001, "user is busy: search".into())
+        );
+
+        let connection = interactions.lock().unwrap().tabs["tab-b"].connection;
+        interactions.lock().unwrap().disconnect("tab-b", connection);
+        apply_controlling_focus(&mut session, &interactions);
+        assert_eq!(session.focus, Focus::Diff);
+        assert_eq!(session.selected_line_anchor().unwrap().line(), Some(1));
+        assert!(
+            apply_web_present_command(
+                PresentCommand::Status,
+                &mut session,
+                &mut watcher,
+                &mut baseline,
+                &mut None,
+                &interactions
+            )
+            .is_ok()
+        );
+
+        let mut tied = WebInteractions::default();
+        tied.tabs.insert(
+            "a".into(),
+            TabInteraction {
+                sequence: 7,
+                connection: 1,
+                connected: true,
+                focus: None,
+                busy: None,
+            },
+        );
+        tied.tabs.insert(
+            "b".into(),
+            TabInteraction {
+                sequence: 7,
+                connection: 2,
+                connected: true,
+                focus: None,
+                busy: None,
+            },
+        );
+        assert_eq!(tied.controlling().unwrap().0, "b");
+    }
+
+    #[test]
+    fn presenter_watch_broadcasts_to_all_tabs_and_coalesces_bursts() {
+        let (sender, receiver_a) = tokio::sync::watch::channel::<Option<Arc<PresentEvent>>>(None);
+        let receiver_b = receiver_a.clone();
+        let event = |sequence| {
+            Arc::new(PresentEvent {
+                sequence,
+                command: "goto",
+                status: json!({"active":true}),
+                target: None,
+                note: None,
+            })
+        };
+        sender.send_replace(Some(event(1)));
+        sender.send_replace(Some(event(2)));
+        sender.send_replace(Some(event(3)));
+        assert_eq!(receiver_a.borrow().as_ref().unwrap().sequence, 3);
+        assert_eq!(receiver_b.borrow().as_ref().unwrap().sequence, 3);
+        let wire = sse_present_event(receiver_a.borrow().as_ref().unwrap());
+        assert!(format!("{wire:?}").contains("present"));
+    }
+
+    #[test]
+    fn browser_presentation_source_contract_covers_follow_human_priority_and_reduced_motion() {
+        for needle in [
+            "pauseFollow",
+            "rejoinFollow",
+            "presenter-edge",
+            "ganderPendingPresent",
+            "requestAnimationFrame",
+            "prefers-reduced-motion: reduce",
+            "behavior: reducedMotion.matches ? \"auto\" : \"smooth\"",
+            "reportInteraction(\"search\")",
+            "tab_id: tabId",
+        ] {
+            assert!(
+                COMPONENT_JS.contains(needle),
+                "missing browser contract: {needle}"
+            );
+        }
+        assert!(COMPONENT_CSS.contains(".present-target-static"));
+        assert!(COMPONENT_CSS.contains("@media (prefers-reduced-motion: reduce)"));
+        assert!(COMPONENT_CSS.contains(".present-expanded"));
+        assert!(render_shell(&http_state(review_fixture())).contains("Following paused — rejoin"));
+    }
+
+    #[test]
+    fn interaction_reports_are_bounded_validated_and_disconnect_cleanly() {
+        let mut tabs = WebInteractions::default();
+        assert!(
+            tabs.report(InteractionReport {
+                tab_id: "bad tab".into(),
+                focus: None,
+                busy: None
+            })
+            .is_err()
+        );
+        assert!(
+            tabs.report(InteractionReport {
+                tab_id: "ok".into(),
+                focus: None,
+                busy: Some("privileged-action".into())
+            })
+            .is_err()
+        );
+        let old_connection = tabs.connect("ok").unwrap();
+        assert_eq!(tabs.tabs.len(), 1);
+        let new_connection = tabs.connect("ok").unwrap();
+        tabs.disconnect("ok", old_connection);
+        assert_eq!(
+            tabs.tabs.len(),
+            1,
+            "an old SSE task cannot remove a reconnect"
+        );
+        tabs.disconnect("ok", new_connection);
+        assert!(tabs.tabs.is_empty());
+        assert!(valid_tab_id("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!valid_tab_id(&"x".repeat(129)));
     }
 
     #[test]

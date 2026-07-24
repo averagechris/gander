@@ -45,6 +45,10 @@ pub enum ReadingRegionKind {
 pub struct ReadingRow {
     pub id: String,
     pub path: Option<String>,
+    /// Canonical stream anchor retained for toolkit adapters that need to
+    /// report or navigate the exact visible line without reconstructing it
+    /// from rendered line numbers.
+    pub anchor: Option<crate::anchor::CommentAnchor>,
     pub salience: Option<Salience>,
     pub diff: Option<DiffRow>,
     pub annotations: Vec<ReadingAnnotation>,
@@ -213,6 +217,7 @@ fn reading_row(
     ReadingRow {
         id: row.id.clone(),
         path: row.path.clone(),
+        anchor: row.anchor.clone(),
         salience: row.salience,
         diff,
         annotations,

@@ -307,9 +307,9 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: in progress. Phase 3a adds generation-keyed surgical SSE liveness over
-durable state, overlay, and disciplined jj refresh; presentation and review
-mutations remain future phases.
+Status: in progress. Phase 3b adds coalesced agent-guided browser presentation,
+follow/pause UX, busy gating, and web-backed current focus over the unchanged
+live-instance socket; review mutations remain a future phase.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -321,7 +321,7 @@ mutations remain future phases.
   generation-keyed region patches to browsers over SSE
 - [x] attention-first landing (summary, chapters, coverage, start-guided-tour)
   with a one-control switch to full traditional review
-- [ ] `present/*` broadcast to connected tabs: scroll/highlight/ephemeral
+- [x] `present/*` broadcast to connected tabs: scroll/highlight/ephemeral
   notes, follow/unfollow (human always wins), busy gating parity
   (`user is busy: <mode>`), web-backed `current_focus`
 - [ ] full review parity mutations via the same review services: viewed,

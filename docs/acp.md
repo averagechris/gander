@@ -162,11 +162,11 @@ published Agent Client Protocol schema. The method set is versioned via
 
 `present/*` methods are only available through a live instance's per-instance
 ACP Unix socket. Snapshot ACP servers return a clear live-instance error. The
-owning UI loop applies these as typed commands. The Phase 1 web peer validates
-`present/focus` against the current diff and exposes skeleton status for the
-remaining methods; browser broadcast/follow behavior lands in a later M16
-phase. The TUI rejects commands while the human is in a modal/editor (`user is
-busy: <mode>`).
+owning UI loop applies these as typed commands. Both the TUI and web peer
+validate against the current shared stream. The web peer broadcasts ephemeral,
+coalesced `present` SSE events to every connected tab and uses the most recently
+active connected tab for busy/current-focus arbitration. Both peers reject
+commands while the human is in a modal/editor (`user is busy: <mode>`).
 
 - `present/status` → `{ "active": false }` or `{ "active": true,
   "slide_index": 0, "slide_count": 5, "view": "focus", "current":

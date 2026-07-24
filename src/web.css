@@ -36,6 +36,13 @@ main { min-width: 0; padding: 1.5rem; }
 .stream-heading h2 { margin: 0; }
 .stream-heading > p { color: var(--muted); }
 .region { content-visibility: auto; contain-intrinsic-size: auto 22rem; margin: .9rem 0; scroll-margin-top: 5rem; border: 1px solid var(--subtle); border-radius: .7rem; overflow: clip; background: var(--surface); }
+.presenter { position: fixed; z-index: 9; right: 1rem; bottom: 1rem; display: flex; max-width: min(32rem, calc(100vw - 2rem)); gap: .6rem; align-items: center; padding: .65rem .8rem; border: 1px solid var(--accent); border-radius: .65rem; background: var(--background); box-shadow: 0 .35rem 1.2rem var(--shadow); }
+.presenter-note { max-width: 24rem; margin: 0; padding-left: .65rem; border-left: .18rem solid var(--accent); white-space: pre-wrap; }
+.presenter-edge { color: var(--accent); font-weight: 700; cursor: pointer; }
+.present-target-static, .present-target { position: relative; outline: .18rem solid var(--accent); outline-offset: -.18rem; }
+.web-selected { outline: 1px solid var(--info); outline-offset: -1px; }
+body[data-mode="guided"] .skim-region.present-expanded .guided-only { display: none !important; }
+body[data-mode="guided"] .skim-region.present-expanded .full-only { display: block !important; }
 .chapter { padding: 1.2rem 1.4rem; border-left: .35rem solid var(--accent); }
 .chapter h2, .chapter p { margin: .2rem 0; }
 .file-header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; padding: .65rem .9rem; border-bottom: 1px solid var(--subtle); }
@@ -81,3 +88,5 @@ body[data-mode="guided"] .full-only, body[data-mode="full"] .guided-only { displ
 body[data-mode="guided"] .app-layout { grid-template-columns: minmax(0, 1fr); max-width: 86rem; }
 @media (max-width: 52rem) { .topbar, .controls, .stream-heading { align-items: stretch; flex-direction: column; } .search input { width: 100%; } .app-layout { display: block; } .file-tree { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--subtle); } .metrics { grid-template-columns: repeat(2, 1fr); } .diff-row { grid-template-columns: .25rem 2.4rem 2.4rem 1rem minmax(max-content, 1fr); } }
 @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+@media (prefers-reduced-motion: no-preference) { .present-target { animation: presenter-pulse .7s ease-out 1; } @keyframes presenter-pulse { 0% { outline-width: .5rem; } 100% { outline-width: .18rem; } } }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .present-target-static { animation: none; } }

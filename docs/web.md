@@ -1,8 +1,8 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 3a implemented (secure standalone peer,
-shared-projection reader, lazy regions, and durable SSE liveness); browser
-presentation and review actions remain phased work.
+Design for milestone 16. Status: Phase 3b implemented (secure standalone peer,
+shared-projection reader, lazy regions, durable SSE liveness, and agent-guided
+browser presentation); browser review actions remain phased work.
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -163,14 +163,24 @@ UI control.
   current diff and broadcast to connected browser tabs as SSE `present`
   events: scroll to a target, flash/pin a highlight range, show an ephemeral
   note callout, start/next/prev/goto/end over durable spotlights.
+- Presenter events carry the normal status schema plus a stable reading-region
+  and row target. A latest-value channel coalesces bursts before each tab's
+  bounded SSE forwarder, so navigation storms cannot build a scroll queue.
 - **Follow mode.** When a presentation starts, tabs follow the presenter by
   default. Manual scrolling breaks follow ("following paused — rejoin"), with
   the presenter's position kept visible as an edge indicator; one key/click
   snaps back. The human always wins.
-- **Busy gating.** If the human is mid-edit in a comment form, presentation
+- **Busy gating.** If the human is mid-edit in a browser editor/modal,
+  presentation
   commands do not yank the view: the server answers the agent with the
   existing `user is busy: <mode>` error and the client shows a pending
-  presenter indicator instead.
+  presenter indicator instead. Phase 3b reports the existing search editor;
+  Phase 4 comment forms plug into the same renderer-state field.
+- **Browser interaction.** Each tab reports its stable visible/selected stream
+  row (file, old/new line, hunk, pane) and current editing/modal state through a
+  guarded renderer endpoint. The most recently server-observed connected tab
+  controls `review/current_focus` and busy gating; tab id is the deterministic
+  tie-breaker. Reports heartbeat the existing instance registry.
 - **Ephemeral vs durable.** `present/focus` notes are transient callouts.
   Anything meant to persist — narration, walkthrough steps, attention
   regions, comments — flows through the durable CLI/MCP surfaces exactly as
@@ -304,6 +314,7 @@ on the change. Budgets, asserted where practical:
 | --- | --- |
 | `GET /` | server-rendered app shell (overview + stream) |
 | `GET /events` | SSE: `state` (generation + region patches), `present` (presenter events), `notice` |
+| `POST /interaction` | Ephemeral per-tab visible focus and busy report; updates live routing heartbeat |
 | `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
 

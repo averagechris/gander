@@ -17,6 +17,10 @@
 - Added M16 Phase 3a web liveness: coalesced durable-state, overlay, and
   disciplined jj watching with monotonic surgical SSE region patches,
   keepalives, bounded backpressure, and generation-aware reconnect recovery.
+- Added M16 Phase 3b agent-guided web presentation over the existing live ACP
+  socket: coalesced presenter SSE, follow/pause/rejoin UX, reduced-motion
+  behavior, deterministic multi-tab busy/focus arbitration, and web-backed
+  `review/current_focus`/instance input heartbeats.
 
 ## v0.8.1 - 2026-07-23
 
