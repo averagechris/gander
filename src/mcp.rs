@@ -1365,19 +1365,21 @@ impl GanderMcp {
         };
         let context = self.selected_review_context()?;
         let files = self.attention_files_for_context(&context);
-        let mut state = self.load_state()?;
-        let idx = self.ensure_session_index_for_context(&mut state, &context);
-        let outcome =
-            crate::attention::acknowledge_skim_folds(&mut state.sessions[idx], &files, &selection)
-                .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
-        crate::attention::apply_whole_file_viewed_effects(
-            &mut state,
-            &files,
-            &outcome.whole_files_viewed,
-        );
-        state
-            .save(&self.state_path)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+        let outcome = crate::review::mutate_state_file(&self.state_path, |state| {
+            let idx = self.ensure_session_index_for_context(state, &context);
+            let outcome = crate::attention::acknowledge_skim_folds(
+                &mut state.sessions[idx],
+                &files,
+                &selection,
+            )?;
+            crate::attention::apply_whole_file_viewed_effects(
+                state,
+                &files,
+                &outcome.whole_files_viewed,
+            );
+            Ok(outcome)
+        })
+        .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         json_result(to_value(outcome)?)
     }
 
@@ -1699,11 +1701,7 @@ impl GanderMcp {
         &self,
         f: impl FnOnce(&mut ReviewState, &Self) -> Result<T>,
     ) -> Result<CallToolResult, McpError> {
-        let mut state = self.load_state()?;
-        let value = f(&mut state, self)
-            .map_err(|error| McpError::internal_error(error.to_string(), None))?;
-        state
-            .save(&self.state_path)
+        let value = crate::review::mutate_state_file(&self.state_path, |state| f(state, self))
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         json_result(to_value(value)?)
     }

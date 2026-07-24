@@ -279,17 +279,16 @@ durable walkthrough/session state.
 
 ## Milestone 14: MCP parity adapter
 
-Status: complete for the parity adapter. Caveat: state-file tools load/save the
-persisted state directly, so avoid concurrent use with an active TUI that may
-later autosave an older in-memory snapshot.
+Status: complete. State-file mutations and live-instance autosaves share locked,
+merge-aware persistence, so concurrent CLI/MCP writers and live instances do
+not overwrite one another with stale snapshots.
 
 - [x] make `gander mcp` a thin adapter over the same core API used by the CLI
 - [x] retain live-instance routing and `current_focus` where useful
 - [x] document the CLI equivalent for each tool
 - [x] avoid making MCP the only or most capable automation path
-- [ ] route parity tools through the live TUI session (or add a state-reload
-  handshake) so state-file writes cannot race an active TUI autosave; until
-  then the documented guidance is to use them when no TUI is open
+- [x] add a locked, baseline-aware state merge handshake so parity-tool writes
+  cannot race an active live-instance autosave
 
 ## Milestone 15: static web walkthrough export
 
@@ -338,7 +337,7 @@ Status: designed, future.
 - [ ] performance budgets: server-rendered first paint, windowed stream with
   structural skeleton + on-demand fragments, optimistic mutations reconciled
   by generation, coalesced presenter events, perf smoke test in CI
-- [ ] fix the live-instance autosave race (backlog item 3) with merge-aware
+- [x] fix the live-instance autosave race (backlog item 3) with merge-aware
   saves or a reload handshake — required once two live instances coexist
 - [ ] converge `src/web_export.rs` static export with the live web templates
   so guides render identically live and exported
@@ -436,12 +435,11 @@ session can start here without re-deriving them:
 2. **Reviewer/author metadata** (M11). Comments/sessions/action items have no author
    field yet. Subsumed by milestone 17 (annotation channels,
    docs/annotations.md): author identity + channel land together.
-3. **MCP/CLI mutations vs live TUI autosave** (M14 unchecked box). Parity
-   tools and mutation CLI commands write the state file directly; an open TUI
-   holds state in memory and can autosave over those writes. Options: route
-   mutations through the live instance socket (registry already exists), or
-   make the TUI reload/merge state on external change (mtime watch). Caveat
-    is documented in docs/harness-setup.md until fixed.
+3. ~~**MCP/CLI mutations vs live TUI autosave** (M14).~~ Completed in M16
+   Phase 0a: short-lived writers use a locked read/mutate/save transaction and
+   each live instance saves only its delta from the last persisted baseline,
+   preserving concurrent additions, updates, deletions, and fingerprinted
+   viewed/attention progress.
 4. **Watch-mode jj snapshot footgun.** Live TUI refresh now runs read-only jj
    commands with `--ignore-working-copy` and has one explicit `jj util
    snapshot` point per poll, so gander does not fill the op log with

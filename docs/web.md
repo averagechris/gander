@@ -69,9 +69,12 @@ identical to the TUI because they are computed by the same core.
 
 Concurrent instances (a TUI and a web server on one workspace) mirror each
 other through durable-state watching, the same way a TUI mirrors external CLI
-writes today. The M14 autosave-race backlog item (roadmap item 3) becomes more
-pressing with two live instances and should be fixed with merge-aware saves or
-a reload handshake as part of this milestone.
+writes today. M16 Phase 0a completed the prerequisite M14 autosave-race fix:
+short-lived CLI/MCP/ACP mutations are locked transactions, while each live
+instance saves only changes since its last persisted baseline over the latest
+locked state. A stale instance therefore cannot replay unchanged comments,
+sessions, viewed marks, or fingerprinted attention progress over another
+writer.
 
 ## Reading experience: attention-first, full review always
 

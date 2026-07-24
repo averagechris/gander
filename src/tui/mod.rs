@@ -202,6 +202,10 @@ struct TuiState {
     /// every tick.
     overlay_mtime: Option<std::time::SystemTime>,
     state_mtime: Option<std::time::SystemTime>,
+    /// Exact durable snapshot this live instance last loaded or persisted.
+    /// Autosave computes a delta from this baseline instead of writing the
+    /// whole in-memory snapshot back over concurrent writers.
+    last_persisted_state: Option<ReviewState>,
     state_tombstones: ReviewStateTombstones,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
@@ -256,6 +260,7 @@ impl Default for TuiState {
             last_autosave_generation: None,
             overlay_mtime: None,
             state_mtime: None,
+            last_persisted_state: None,
             state_tombstones: ReviewStateTombstones::default(),
             agent_overlay_path: None,
             agent_contacted: false,
@@ -696,6 +701,7 @@ pub fn run(
         last_autosave_generation: Some(session.durable_state_generation()),
         agent_overlay_path: agent_overlay_path.clone(),
         state_mtime: state_path.as_deref().and_then(state_file_mtime),
+        last_persisted_state: Some(session.to_state()),
         terminal_size: initial_terminal_size,
         theme: app_theme,
         osc_guard,
@@ -1402,14 +1408,21 @@ fn maybe_reload_review_state(
                 .iter()
                 .map(|comment| comment.id.clone())
                 .collect();
-            let mut merged = session.to_state();
-            merged.merge_external(external, &tui_state.state_tombstones);
+            let local = session.to_state();
+            let fallback = ReviewState::default();
+            let base = tui_state.last_persisted_state.as_ref().unwrap_or(&fallback);
+            let merged = ReviewState::merge_changes_since(
+                external,
+                base,
+                local,
+                &tui_state.state_tombstones,
+            );
             let added_comments = merged
                 .comments
                 .iter()
                 .filter(|comment| !before_comments.contains(&comment.id))
                 .count();
-            session.apply_review_state(merged);
+            session.apply_review_state(merged.clone());
             tui_state.diff_viewport.finish_transition(
                 transition,
                 session,
@@ -1417,6 +1430,7 @@ fn maybe_reload_review_state(
             );
             reconcile_present_spotlight(session, tui_state);
             tui_state.state_mtime = mtime;
+            tui_state.last_persisted_state = Some(merged);
             tui_state.last_autosave_generation = Some(session.durable_state_generation());
             if notify && added_comments > 0 {
                 tui_state.notice = Some(UiNotice {
@@ -2091,16 +2105,20 @@ fn persist_review_state(
     let transition = tui_state
         .diff_viewport
         .transition_snapshot(session, current_diff_inner(session, tui_state));
-    let state = session
-        .to_state()
-        .merge_latest_and_save(state_path, &tui_state.state_tombstones)?;
-    session.apply_review_state(state);
+    let local = session.to_state();
+    let fallback = ReviewState::default();
+    let base = tui_state.last_persisted_state.as_ref().unwrap_or(&fallback);
+    let state =
+        crate::review::merge_live_state_file(state_path, base, local, &tui_state.state_tombstones)?;
+    session.apply_review_state(state.clone());
     tui_state.diff_viewport.finish_transition(
         transition,
         session,
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
+    tui_state.last_persisted_state = Some(state);
+    tui_state.state_tombstones = ReviewStateTombstones::default();
     tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(())
 }
@@ -2120,14 +2138,21 @@ fn apply_acp_review_mutation(
     let transition = tui_state
         .diff_viewport
         .transition_snapshot(session, current_diff_inner(session, tui_state));
-    let result =
-        persist_acp_review_mutation(mutation, session, state_path, &tui_state.state_tombstones)?;
+    let result = persist_acp_review_mutation(
+        mutation,
+        session,
+        state_path,
+        tui_state.last_persisted_state.as_ref(),
+        &tui_state.state_tombstones,
+    )?;
     tui_state.diff_viewport.finish_transition(
         transition,
         session,
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
+    tui_state.last_persisted_state = Some(session.to_state());
+    tui_state.state_tombstones = ReviewStateTombstones::default();
     tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(result)
 }
@@ -2137,6 +2162,7 @@ pub(crate) fn persist_acp_review_mutation(
     mutation: crate::acp::ReviewMutation,
     session: &mut ReviewSession,
     state_path: &Path,
+    baseline: Option<&ReviewState>,
     tombstones: &crate::state::ReviewStateTombstones,
 ) -> Result<serde_json::Value> {
     let before = session.to_state();
@@ -2146,10 +2172,13 @@ pub(crate) fn persist_acp_review_mutation(
             .map(|comment| serde_json::json!({ "id": comment.id }))
             .ok_or_else(|| color_eyre::eyre::eyre!("draft body must contain non-whitespace text")),
     }?;
-    let merged = match session
-        .to_state()
-        .merge_latest_and_save(state_path, tombstones)
-    {
+    let fallback = ReviewState::default();
+    let merged = match crate::review::merge_live_state_file(
+        state_path,
+        baseline.unwrap_or(&fallback),
+        session.to_state(),
+        tombstones,
+    ) {
         Ok(merged) => merged,
         Err(error) => {
             session.apply_review_state(before);

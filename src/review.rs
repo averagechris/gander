@@ -12,9 +12,47 @@ use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, ActionItem, ActionItemStatus, AuthorKind, Channel, ClosedDisposition, Comment,
     CommentKind, CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition,
-    ReviewSession, ReviewSessionStatus, ReviewState, ReviewTarget, StepKind, Walkthrough,
-    WalkthroughStep,
+    ReviewSession, ReviewSessionStatus, ReviewState, ReviewStateFileLock, ReviewStateTombstones,
+    ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
 };
+
+/// Hold the review-state transaction lock across a CLI read/mutate/save
+/// sequence. Long-lived live instances must instead use [`merge_live_state_file`]
+/// for each save.
+pub(crate) fn lock_state_file(path: &Path) -> Result<ReviewStateFileLock> {
+    ReviewStateFileLock::acquire(path)
+}
+
+/// Reload, mutate, and atomically save one review-state transaction.
+///
+/// CLI/MCP/ACP adapters use this seam so two short-lived writers cannot both
+/// mutate stale snapshots. The mutation is acknowledged only after durability.
+pub(crate) fn mutate_state_file<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut ReviewState) -> Result<T>,
+) -> Result<T> {
+    let _lock = lock_state_file(path)?;
+    let mut state = ReviewState::load_or_default(path)?;
+    let result = mutate(&mut state)?;
+    state.save(path)?;
+    Ok(result)
+}
+
+/// Merge a live instance's local delta over the latest locked disk snapshot.
+/// Unchanged values from `base` are omitted, preventing stale autosaves from
+/// overwriting writes made by another TUI, CLI, MCP, or future web instance.
+pub(crate) fn merge_live_state_file(
+    path: &Path,
+    base: &ReviewState,
+    local: ReviewState,
+    tombstones: &ReviewStateTombstones,
+) -> Result<ReviewState> {
+    let _lock = lock_state_file(path)?;
+    let latest = ReviewState::load_or_default(path)?;
+    let merged = ReviewState::merge_changes_since(latest, base, local, tombstones);
+    merged.save(path)?;
+    Ok(merged)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTargetSpec {
@@ -1414,6 +1452,119 @@ fn touch_at(session: &mut ReviewSession, now: chrono::DateTime<chrono::Utc>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_state_transactions_do_not_lose_additions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let workers = (0..8)
+            .map(|index| {
+                let path = path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    mutate_state_file(&path, |state| {
+                        // Widen the read/write race: without the transaction
+                        // lock every worker would save a one-comment snapshot.
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        state.comments.push(Comment {
+                            id: format!("comment-{index}"),
+                            body: format!("worker {index}"),
+                            ..Comment::default()
+                        });
+                        Ok(())
+                    })
+                    .unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let state = ReviewState::load_or_default(&path).unwrap();
+        assert_eq!(state.comments.len(), 8);
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn live_delta_saves_compose_and_do_not_resurrect_stale_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut base = ReviewState::default();
+        for name in ["a.rs", "b.rs"] {
+            base.files.insert(
+                name.into(),
+                crate::state::FileState {
+                    fingerprint: format!("{name}-fp"),
+                    ..Default::default()
+                },
+            );
+        }
+        base.comments.push(Comment {
+            id: "deleted-elsewhere".into(),
+            body: "stale".into(),
+            ..Comment::default()
+        });
+        base.save(&path).unwrap();
+
+        let mut first = base.clone();
+        first
+            .files
+            .get_mut("a.rs")
+            .unwrap()
+            .viewed_fingerprints
+            .extend(["a.rs-fp".into(), "independent-first-fingerprint".into()]);
+        let first_saved =
+            merge_live_state_file(&path, &base, first, &ReviewStateTombstones::default()).unwrap();
+
+        // An external CLI deletion lands after both live instances loaded.
+        mutate_state_file(&path, |state| {
+            state.comments.clear();
+            Ok(())
+        })
+        .unwrap();
+
+        let mut second = base.clone();
+        second
+            .files
+            .get_mut("a.rs")
+            .unwrap()
+            .viewed_fingerprints
+            .insert("independent-second-fingerprint".into());
+        second
+            .files
+            .get_mut("b.rs")
+            .unwrap()
+            .viewed_fingerprints
+            .insert("b.rs-fp".into());
+        let merged =
+            merge_live_state_file(&path, &base, second, &ReviewStateTombstones::default()).unwrap();
+
+        assert!(
+            first_saved.files["a.rs"]
+                .viewed_fingerprints
+                .contains("a.rs-fp")
+        );
+        assert!(merged.files["a.rs"].viewed_fingerprints.contains("a.rs-fp"));
+        assert!(
+            merged.files["a.rs"]
+                .viewed_fingerprints
+                .contains("independent-first-fingerprint")
+        );
+        assert!(
+            merged.files["a.rs"]
+                .viewed_fingerprints
+                .contains("independent-second-fingerprint")
+        );
+        assert!(merged.files["b.rs"].viewed_fingerprints.contains("b.rs-fp"));
+        assert!(
+            merged.comments.is_empty(),
+            "unchanged stale comments stay deleted"
+        );
+    }
+
     fn snapshot() -> crate::provenance::SnapshotEvidence {
         crate::provenance::SnapshotEvidence::capture(
             chrono::Utc::now(),

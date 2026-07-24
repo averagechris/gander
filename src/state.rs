@@ -1,7 +1,10 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
+    fs::{self, File, OpenOptions},
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use color_eyre::eyre::{Result, eyre};
@@ -903,13 +906,19 @@ impl ReviewState {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        let _lock = ReviewStateFileLock::acquire(path)?;
+        self.save_locked(path)
+    }
+
+    fn save_locked(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         // Write to a sibling temp file and rename so an interrupted save
         // cannot truncate or corrupt existing review state.
-        let mut tmp = path.to_path_buf();
-        tmp.set_extension("json.tmp");
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
         let mut persisted = self.clone();
         persisted.meta.version = REVIEW_STATE_SCHEMA_VERSION;
         persisted.normalize_action_items();
@@ -921,22 +930,464 @@ impl ReviewState {
         Ok(())
     }
 
-    /// Merge the latest on-disk state into a local session snapshot and save
-    /// the result atomically. This is the shared persistence boundary for TUI
-    /// and live-adapter mutations: local view state remains authoritative,
-    /// externally-added durable objects are retained, and tombstones prevent
-    /// deleted objects from being resurrected.
-    pub fn merge_latest_and_save(
-        mut self,
-        path: &Path,
+    /// Apply only changes made since `base` to the latest state on disk.
+    ///
+    /// This is the live-instance save handshake: unchanged stale fields are
+    /// never written back, while independently changed files and durable
+    /// objects compose. Explicit tombstones cover TUI deletions that occurred
+    /// before the baseline was refreshed.
+    pub(crate) fn merge_changes_since(
+        mut latest: Self,
+        base: &Self,
+        local: Self,
         tombstones: &ReviewStateTombstones,
-    ) -> Result<Self> {
-        if path.exists() {
-            let external = Self::load_or_default(path)?;
-            self.merge_external(external, tombstones);
+    ) -> Self {
+        latest.meta = local.meta.clone();
+
+        let file_paths = base
+            .files
+            .keys()
+            .chain(local.files.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for path in file_paths {
+            if base.files.get(&path) != local.files.get(&path) {
+                match (base.files.get(&path), local.files.get(&path)) {
+                    (Some(base), Some(local)) => {
+                        if let Some(current) = latest.files.get_mut(&path) {
+                            merge_file_changes(current, base, local);
+                        } else {
+                            latest.files.insert(path, local.clone());
+                        }
+                    }
+                    (None, Some(file)) => {
+                        latest.files.insert(path, file.clone());
+                    }
+                    (_, None) => {
+                        latest.files.remove(&path);
+                    }
+                }
+            }
         }
-        self.save(path)?;
-        Ok(self)
+
+        merge_changed_comments(&mut latest.comments, &base.comments, &local.comments);
+        merge_changed_sessions(&mut latest.sessions, &base.sessions, &local.sessions);
+        apply_tombstones(&mut latest, tombstones);
+        latest
+    }
+}
+
+fn merge_file_changes(current: &mut FileState, base: &FileState, local: &FileState) {
+    if local.fingerprint != base.fingerprint {
+        current.fingerprint = local.fingerprint.clone();
+    }
+    if local.viewed != base.viewed {
+        current.viewed = local.viewed;
+    }
+    for fingerprint in local
+        .viewed_fingerprints
+        .difference(&base.viewed_fingerprints)
+    {
+        current.viewed_fingerprints.insert(fingerprint.clone());
+    }
+    for fingerprint in base
+        .viewed_fingerprints
+        .difference(&local.viewed_fingerprints)
+    {
+        current.viewed_fingerprints.remove(fingerprint);
+    }
+    for fingerprint in local
+        .caught_up_fingerprints
+        .difference(&base.caught_up_fingerprints)
+    {
+        current.caught_up_fingerprints.insert(fingerprint.clone());
+    }
+    for fingerprint in base
+        .caught_up_fingerprints
+        .difference(&local.caught_up_fingerprints)
+    {
+        current.caught_up_fingerprints.remove(fingerprint);
+    }
+}
+
+thread_local! {
+    static HELD_STATE_LOCKS: RefCell<BTreeMap<PathBuf, usize>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+/// Crash-safe, process-wide advisory lock for one review-state file.
+///
+/// Unix releases `flock` automatically if a process exits. The lock is
+/// re-entrant on one thread so service transactions can call `ReviewState::save`.
+pub(crate) struct ReviewStateFileLock {
+    path: PathBuf,
+    #[cfg(unix)]
+    file: Option<File>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl ReviewStateFileLock {
+    pub(crate) fn acquire(state_path: &Path) -> Result<Self> {
+        let mut lock_path = state_path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        let nested = HELD_STATE_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(count) = held.get_mut(&lock_path) {
+                *count += 1;
+                true
+            } else {
+                false
+            }
+        });
+        if nested {
+            return Ok(Self {
+                path: lock_path,
+                #[cfg(unix)]
+                file: None,
+                _not_send: PhantomData,
+            });
+        }
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        #[cfg(unix)]
+        lock_file_exclusive(&file)?;
+        HELD_STATE_LOCKS.with(|held| {
+            held.borrow_mut().insert(lock_path.clone(), 1);
+        });
+        Ok(Self {
+            path: lock_path,
+            #[cfg(unix)]
+            file: Some(file),
+            _not_send: PhantomData,
+        })
+    }
+}
+
+impl Drop for ReviewStateFileLock {
+    fn drop(&mut self) {
+        let last = HELD_STATE_LOCKS.with(|held| {
+            let mut held = held.borrow_mut();
+            let Some(count) = held.get_mut(&self.path) else {
+                return false;
+            };
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.path);
+                true
+            } else {
+                false
+            }
+        });
+        #[cfg(unix)]
+        if last && let Some(file) = self.file.as_ref() {
+            unlock_file(file);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_file_exclusive(file: &File) -> Result<()> {
+    use std::{ffi::c_int, os::fd::AsRawFd};
+    unsafe extern "C" {
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+    // LOCK_EX is 2 on the Unix targets supported by the flake.
+    if unsafe { flock(file.as_raw_fd(), 2) } == -1 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn unlock_file(file: &File) {
+    use std::{ffi::c_int, os::fd::AsRawFd};
+    unsafe extern "C" {
+        fn flock(fd: c_int, operation: c_int) -> c_int;
+    }
+    // LOCK_UN is 8 on the Unix targets supported by the flake.
+    let _ = unsafe { flock(file.as_raw_fd(), 8) };
+}
+
+fn merge_changed_comments(latest: &mut Vec<Comment>, base: &[Comment], local: &[Comment]) {
+    for prior in base {
+        if !local.iter().any(|comment| comment.id == prior.id) {
+            latest.retain(|comment| comment.id != prior.id);
+        }
+    }
+    for changed in local {
+        let prior = base.iter().find(|comment| comment.id == changed.id);
+        if prior == Some(changed) {
+            continue;
+        }
+        match latest.iter_mut().find(|comment| comment.id == changed.id) {
+            Some(current) if prior.is_some_and(|prior| current != prior) => {
+                let mut candidate = changed.clone();
+                merge_comment_replies(&mut candidate, current);
+                merge_comment_observation(&mut candidate, current);
+                if prefer_external_by_updated_at(current.updated_at, candidate.updated_at) {
+                    *current = candidate;
+                } else {
+                    merge_comment_replies(current, &candidate);
+                    merge_comment_observation(current, &candidate);
+                }
+            }
+            Some(current) => *current = changed.clone(),
+            None => latest.push(changed.clone()),
+        }
+    }
+}
+
+fn merge_changed_sessions(
+    latest: &mut Vec<ReviewSession>,
+    base: &[ReviewSession],
+    local: &[ReviewSession],
+) {
+    for prior in base {
+        if !local.iter().any(|session| session.id == prior.id) {
+            latest.retain(|session| session.id != prior.id);
+        }
+    }
+    for changed in local {
+        let prior = base.iter().find(|session| session.id == changed.id);
+        if prior == Some(changed) {
+            continue;
+        }
+        let Some(prior) = prior else {
+            if let Some(current) = latest.iter_mut().find(|session| session.id == changed.id) {
+                let mut incoming = changed.clone();
+                merge_session_children(current, &mut incoming, &ReviewStateTombstones::default());
+                if prefer_external_by_updated_at(current.updated_at, incoming.updated_at) {
+                    *current = incoming;
+                }
+            } else {
+                latest.push(changed.clone());
+            }
+            continue;
+        };
+        if let Some(current) = latest.iter_mut().find(|session| session.id == changed.id) {
+            patch_session(current, prior, changed);
+        } else {
+            // The local instance changed this object after another writer
+            // deleted it. A deliberate local edit is newer than stale absence.
+            latest.push(changed.clone());
+        }
+    }
+}
+
+fn patch_session(current: &mut ReviewSession, base: &ReviewSession, local: &ReviewSession) {
+    let local_wins_conflict = prefer_external_by_updated_at(current.updated_at, local.updated_at);
+    if local.title != base.title && (current.title == base.title || local_wins_conflict) {
+        current.title = local.title.clone();
+    }
+    if local.target != base.target && (current.target == base.target || local_wins_conflict) {
+        current.target = local.target.clone();
+    }
+    if local.status != base.status && (current.status == base.status || local_wins_conflict) {
+        current.status = local.status;
+    }
+    if local.disposition != base.disposition
+        && (current.disposition == base.disposition || local_wins_conflict)
+    {
+        current.disposition = local.disposition;
+    }
+    if local.attention_regions != base.attention_regions {
+        merge_attention_region_changes(
+            &mut current.attention_regions,
+            &base.attention_regions,
+            &local.attention_regions,
+            local_wins_conflict,
+        );
+    }
+    for progress in &local.attention_progress {
+        if !base.attention_progress.contains(progress)
+            && !current.attention_progress.contains(progress)
+        {
+            current.attention_progress.push(progress.clone());
+        }
+    }
+    merge_changed_by_id(
+        &mut current.action_items,
+        &base.action_items,
+        &local.action_items,
+        |item| item.id.as_str(),
+        |item| item.updated_at,
+    );
+    merge_changed_walkthroughs(
+        &mut current.walkthroughs,
+        &base.walkthroughs,
+        &local.walkthroughs,
+    );
+    if local.created_at != base.created_at
+        && (current.created_at == base.created_at || local_wins_conflict)
+    {
+        current.created_at = local.created_at;
+    }
+    if local.updated_at != base.updated_at && local_wins_conflict {
+        current.updated_at = local.updated_at;
+    }
+}
+
+fn merge_changed_walkthroughs(
+    latest: &mut Vec<Walkthrough>,
+    base: &[Walkthrough],
+    local: &[Walkthrough],
+) {
+    for prior in base {
+        if !local.iter().any(|walkthrough| walkthrough.id == prior.id) {
+            latest.retain(|walkthrough| walkthrough.id != prior.id);
+        }
+    }
+    for changed in local {
+        let prior = base.iter().find(|walkthrough| walkthrough.id == changed.id);
+        if prior == Some(changed) {
+            continue;
+        }
+        match (prior, latest.iter_mut().find(|item| item.id == changed.id)) {
+            (Some(prior), Some(current)) => {
+                let local_wins_conflict =
+                    prefer_external_by_updated_at(current.updated_at, changed.updated_at);
+                if changed.title != prior.title
+                    && (current.title == prior.title || local_wins_conflict)
+                {
+                    current.title = changed.title.clone();
+                }
+                merge_changed_by_id(
+                    &mut current.steps,
+                    &prior.steps,
+                    &changed.steps,
+                    |step| step.id.as_str(),
+                    |step| step.updated_at,
+                );
+                if prior.steps.iter().map(|step| &step.id).collect::<Vec<_>>()
+                    != changed
+                        .steps
+                        .iter()
+                        .map(|step| &step.id)
+                        .collect::<Vec<_>>()
+                {
+                    reorder_by_local_ids(
+                        &mut current.steps,
+                        changed.steps.iter().map(|step| step.id.as_str()),
+                        |step| step.id.as_str(),
+                    );
+                }
+                if changed.updated_at != prior.updated_at && local_wins_conflict {
+                    current.updated_at = changed.updated_at;
+                }
+            }
+            (_, Some(current)) => {
+                if prefer_external_by_updated_at(current.updated_at, changed.updated_at) {
+                    *current = changed.clone();
+                }
+            }
+            (_, None) => latest.push(changed.clone()),
+        }
+    }
+}
+
+fn merge_attention_region_changes(
+    current: &mut Vec<AttentionRegion>,
+    base: &[AttentionRegion],
+    local: &[AttentionRegion],
+    local_wins_conflict: bool,
+) {
+    let same_identity = |left: &AttentionRegion, right: &AttentionRegion| {
+        left.source == right.source && left.target == right.target
+    };
+    for prior in base {
+        if !local.iter().any(|region| same_identity(region, prior)) {
+            current.retain(|region| {
+                !same_identity(region, prior) || region != prior && !local_wins_conflict
+            });
+        }
+    }
+    for changed in local {
+        let prior = base.iter().find(|region| same_identity(region, changed));
+        if prior == Some(changed) {
+            continue;
+        }
+        if let Some(existing) = current
+            .iter_mut()
+            .find(|region| same_identity(region, changed))
+        {
+            if prior.is_none_or(|prior| existing == prior || local_wins_conflict) {
+                *existing = changed.clone();
+            }
+        } else {
+            current.push(changed.clone());
+        }
+    }
+}
+
+fn reorder_by_local_ids<'a, T: Clone + 'a>(
+    current: &mut Vec<T>,
+    local_ids: impl Iterator<Item = &'a str>,
+    id: impl Fn(&T) -> &str,
+) {
+    let mut remaining = std::mem::take(current);
+    let mut reordered = Vec::with_capacity(remaining.len());
+    for local_id in local_ids {
+        if let Some(index) = remaining.iter().position(|item| id(item) == local_id) {
+            reordered.push(remaining.remove(index));
+        }
+    }
+    reordered.extend(remaining);
+    *current = reordered;
+}
+
+fn merge_changed_by_id<T, I, U>(latest: &mut Vec<T>, base: &[T], local: &[T], id: I, updated_at: U)
+where
+    T: Clone + PartialEq,
+    I: Fn(&T) -> &str,
+    U: Fn(&T) -> Option<chrono::DateTime<chrono::Utc>>,
+{
+    for prior in base {
+        if !local.iter().any(|item| id(item) == id(prior)) {
+            latest.retain(|item| id(item) != id(prior));
+        }
+    }
+    for changed in local {
+        let prior = base.iter().find(|item| id(item) == id(changed));
+        if prior == Some(changed) {
+            continue;
+        }
+        match latest.iter_mut().find(|item| id(item) == id(changed)) {
+            Some(current)
+                if prior.is_some_and(|prior| current != prior)
+                    && !prefer_external_by_updated_at(updated_at(current), updated_at(changed)) => {
+            }
+            Some(current) => *current = changed.clone(),
+            None => latest.push(changed.clone()),
+        }
+    }
+}
+
+fn apply_tombstones(state: &mut ReviewState, tombstones: &ReviewStateTombstones) {
+    state
+        .comments
+        .retain(|comment| !tombstones.comments.contains(&comment.id));
+    state
+        .sessions
+        .retain(|session| !tombstones.sessions.contains(&session.id));
+    for session in &mut state.sessions {
+        session
+            .action_items
+            .retain(|item| !tombstones.action_items.contains(&item.id));
+        session
+            .walkthroughs
+            .retain(|item| !tombstones.walkthroughs.contains(&item.id));
+        for walkthrough in &mut session.walkthroughs {
+            walkthrough
+                .steps
+                .retain(|step| !tombstones.walkthrough_steps.contains(&step.id));
+        }
     }
 }
 
@@ -955,18 +1406,21 @@ impl ReviewState {
     /// The TUI remains authoritative for file view-state and untimestamped
     /// conflicts, while externally-added durable objects are adopted so a
     /// later save cannot clobber writes from CLI/MCP processes.
+    #[cfg(test)]
     pub fn merge_external(&mut self, external: ReviewState, tombstones: &ReviewStateTombstones) {
         self.merge_external_files(external.files);
         merge_comments(&mut self.comments, external.comments, &tombstones.comments);
         self.merge_external_sessions(external.sessions, tombstones);
     }
 
+    #[cfg(test)]
     fn merge_external_files(&mut self, external: BTreeMap<String, FileState>) {
         for (path, external_file) in external {
             self.files.entry(path).or_insert(external_file);
         }
     }
 
+    #[cfg(test)]
     fn merge_external_sessions(
         &mut self,
         external: Vec<ReviewSession>,
@@ -1066,6 +1520,7 @@ fn prefer_external_by_updated_at(
     }
 }
 
+#[cfg(test)]
 fn merge_comments(local: &mut Vec<Comment>, external: Vec<Comment>, tombstones: &BTreeSet<String>) {
     for mut external_comment in external {
         if tombstones.contains(&external_comment.id) {

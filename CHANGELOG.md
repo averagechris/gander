@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed stale review-state autosaves across concurrent live instances and
+  CLI/MCP/ACP writers with locked transactions and baseline-aware delta merges.
 
 ## v0.8.1 - 2026-07-23
 

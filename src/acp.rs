@@ -135,10 +135,12 @@ impl AcpServer {
             .state_path
             .as_deref()
             .ok_or_else(|| "durable review state path unavailable".to_owned())?;
-        let mut latest = crate::state::ReviewState::load_or_default(state_path)
-            .map_err(|error| error.to_string())?;
-        let value = apply_review_mutation_to_state(&self.session, &mut latest, mutation)?;
-        latest.save(state_path).map_err(|error| error.to_string())?;
+        let (latest, value) = crate::review::mutate_state_file(state_path, |latest| {
+            let value = apply_review_mutation_to_state(&self.session, latest, mutation)
+                .map_err(|error| color_eyre::eyre::eyre!(error))?;
+            Ok((latest.clone(), value))
+        })
+        .map_err(|error| error.to_string())?;
         self.session.apply_review_state(latest);
         Ok(value)
     }
@@ -749,6 +751,7 @@ pub mod socket {
                     request.mutation.clone(),
                     session,
                     state_path,
+                    None,
                     &crate::state::ReviewStateTombstones::default(),
                 )
                 .map_err(|error| (-32000, error.to_string()));

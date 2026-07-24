@@ -99,14 +99,15 @@ primary implicit feedback; ordinary comments are not action items. Durable actio
 items are optional higher-level coordination objects and linked todo evidence is
 folded into its parent item.
 
-The CLI-parity state-file tools load and save the persisted review state
-directly, matching the corresponding `gander reviews`, `comments`, `action-items`,
-and `walkthrough` commands. They are safe to use beside a live TUI: the TUI
-watches the state file and merges external additions/updates before saving, so
-CLI-added comments, action items, and walkthrough steps survive TUI save/quit. Same-ID
-comment updates use the newer `updated_at` value for body/state metadata and
-union append-only replies by reply id; sessions, action items, walkthroughs, and
-walkthrough steps likewise prefer the newer timestamp.
+The CLI-parity state-file tools match the corresponding `gander reviews`,
+`comments`, `action-items`, and `walkthrough` commands through the same review
+services. They are safe beside one or more live instances: short-lived writers
+lock across reload/mutate/atomic-save, and live autosave applies only changes
+since that instance's last persisted baseline over the latest locked state.
+Independent viewed fingerprints, comments, action items, walkthrough steps, and
+attention progress compose; stale unchanged objects do not resurrect external
+deletions. Same-ID conflicts use the newer `updated_at`, while append-only
+replies and fingerprinted attention progress union by stable identity.
 
 ### MCP ⇄ CLI parity table
 

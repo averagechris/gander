@@ -85,8 +85,10 @@ Gander itself stays agent-agnostic — anything that can run `gander acp`
 
 Overlay suggestion methods persist the overlay atomically. Draft comments write
 durable review state. Live and standalone ACP acknowledge a draft only after its
-merge-aware atomic state save succeeds; read/error requests never rewrite review
-state. The TUI picks external durable changes up within one poll tick.
+merge-aware atomic state save succeeds; standalone writes participate in the
+same locked read/mutate/save transaction as CLI/MCP, and live writes merge only
+their baseline-relative delta. Read/error requests never rewrite review state.
+The TUI picks external durable changes up within one poll tick.
 
 | Method | Params | Effect |
 | --- | --- | --- |

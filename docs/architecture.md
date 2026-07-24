@@ -23,6 +23,12 @@ none of them fetches from or posts to a forge.
 - `src/app/` owns monotonic durable and projection generations. Mutation seams
   bump the relevant generation; stream and owner-lookup caches validate those
   counters rather than hashing the session each frame.
+- `src/review.rs` owns review-state file transaction seams. Short-lived
+  CLI/MCP/ACP writers lock across reload/mutate/atomic-save; live instances
+  retain a last-persisted baseline and merge only their changed fields over the
+  latest locked snapshot. Stable-id children merge independently, append-only
+  fingerprinted attention history unions, explicit deletions remain deleted,
+  and unchanged stale state is never replayed.
 - `src/app/stream.rs` materializes expensive syntax/folding rows only for the
   bounded visible window. Callers must mutate through the established service
   or app seams so cache invalidation remains correct.

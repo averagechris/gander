@@ -48,8 +48,9 @@ socket already exists and keeps MCP/CLI parity intact).
 **Refines.** D3 (the registry now has two live-instance kinds; presentation
 targeting by pid/most-recent input covers coexistence), D8 (`present/*`
 extends to web clients with identical semantics), D1 (durable-state watching
-is how concurrent live instances mirror each other — making the M14
-autosave-race fix a prerequisite).
+is how concurrent live instances mirror each other). The M14 autosave-race
+prerequisite landed in M16 Phase 0a as locked short-writer transactions plus a
+baseline-aware live-instance save handshake.
 
 ## D9 (2026-07): gander never spawns agents; harnesses own the agent lifecycle
 

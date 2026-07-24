@@ -1282,6 +1282,14 @@ fn run() -> color_eyre::Result<()> {
     }
 
     let state_path = cli.state.unwrap_or_else(|| workspace_paths.state_file());
+    // Short-lived CLI commands hold one transaction lock from load through
+    // their existing shared-service mutation and save. Live processes release
+    // it after startup and lock only individual merge-aware writes.
+    let live_command = matches!(
+        &command,
+        Command::Tui { .. } | Command::Acp | Command::Mcp | Command::Present { .. }
+    );
+    let mut state_lock = Some(review::lock_state_file(&state_path)?);
     let mut state = ReviewState::load_or_default(&state_path)?;
     let target_spec = session_target_spec(&repo, &target);
     if let Some(index) = state.sessions.iter().position(|review_session| {
@@ -1327,6 +1335,10 @@ fn run() -> color_eyre::Result<()> {
         )
     });
 
+    if live_command {
+        drop(state_lock.take());
+    }
+
     match command {
         Command::Tui {
             artifact_on_quit,
@@ -1364,8 +1376,10 @@ fn run() -> color_eyre::Result<()> {
                 },
                 tour,
             )?;
+            // The run loop flushes through the merge-aware live save before
+            // returning. Keep a final snapshot only for optional export; a
+            // second whole-state save here would reintroduce a stale window.
             state = session.clone().into_state();
-            state.save(&state_path)?;
             if let Some(request) = artifact_request {
                 // The TUI may have retargeted or refreshed after startup. Read
                 // the final target again with jj's --ignore-working-copy path
