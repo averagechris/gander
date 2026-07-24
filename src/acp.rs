@@ -48,11 +48,12 @@ pub fn is_present_method(method: &str) -> bool {
 }
 
 pub fn no_live_tui_error() -> String {
-    "present/* methods require a live TUI; start one with `gander tui` and retry".to_owned()
+    "present/* methods require a live instance; start `gander tui` or `gander web` and retry"
+        .to_owned()
 }
 
 /// Method dispatch plus overlay persistence, independent of transport and of
-/// who owns the session (snapshot or live TUI session).
+/// who owns the session (snapshot or live UI session).
 pub struct AcpHandler {
     overlay: AgentOverlay,
     overlay_path: PathBuf,
@@ -917,7 +918,7 @@ pub mod socket {
         }
     }
 
-    /// Bridge stdio to a live TUI socket: stdin lines go to the socket,
+    /// Bridge stdio to a live instance socket: stdin lines go to the socket,
     /// socket lines go to stdout. Returns when both sides close. Used by
     /// `gander acp` so agent-spawned servers reach the live session.
     pub fn bridge_stdio(socket_path: &Path) -> Result<()> {
@@ -1139,7 +1140,7 @@ diff --git a/README.md b/README.md
     }
 
     #[test]
-    fn snapshot_present_methods_return_no_live_tui_error() {
+    fn snapshot_present_methods_return_no_live_instance_error() {
         let (mut server, _dir) = server();
         let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "present/status" }).to_string();
 
@@ -1151,7 +1152,7 @@ diff --git a/README.md b/README.md
             response["error"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("require a live TUI")
+                .contains("require a live instance")
         );
     }
 

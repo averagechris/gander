@@ -438,6 +438,26 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 last-writer-wins during external-state merge; region identity and effective
 resolution are deterministic within the winning map.
 
+## Local web peer (Phase 1)
+
+```sh
+gander web [--port <port>] [--no-open]
+```
+
+`web` starts a standalone live instance on `127.0.0.1`. Port `0` (the
+default) asks the OS for a free port; `--port` pins it. The first stdout line is
+the usable URL including an ephemeral capability token. Gander currently does
+not auto-open a browser: open that URL manually, or pass `--no-open` to make
+the scripted intent explicit and suppress the explanatory stderr note.
+
+Every HTTP request—including `/events` and embedded assets—must carry the
+token query parameter, the exact printed `Host`, and either no `Origin` or the
+exact printed origin. The token is never stored. Phase 1 serves an embedded
+server-rendered lifecycle shell and SSE readiness notice; stream UI, browser
+presentation, and review action endpoints are later M16 phases. The process
+registers and hosts ACP exactly like the TUI, and SIGINT/SIGTERM gracefully
+remove its registry entry and Unix socket.
+
 ### Debugging TUI responsiveness
 
 Set `GANDER_FRAME_LOG=<path>` before launching `gander tui` to append one
@@ -458,6 +478,9 @@ gander mark-generated-viewed
 gander paths
 gander summary
 ```
+
+`gander paths` also reports the web bind convention and confirms that the web
+token is ephemeral; it never prints a current token.
 
 `handoff` is the one-shot actionable prompt for an implementer agent. Markdown
 defaults to action items first, walkthrough next, then reference hunks limited
@@ -554,8 +577,8 @@ gander acp
 ```
 
 Normal automation should use the CLI directly. `mcp` is optional typed/live harness integration, including CLI-parity state tools. `acp` is a low-level/internal line-delimited JSON-RPC bridge for debugging live-session curation: it
-bridges to a running TUI on the same workspace when one exists (announcing
-`bridged to live TUI session` vs `serving snapshot` on stderr, and a `mode`
+bridges to a running TUI or web peer on the same workspace when one exists
+(announcing `bridged to live session` vs `serving snapshot` on stderr, and a `mode`
 field in the `initialize` response). See `docs/acp.md`.
 
 ## Automation without MCP
@@ -597,8 +620,8 @@ gander present focus --path src/foo.rs --line 42 --end-line 60 --note "look here
 gander present reload                  # reload state and re-anchor presentation
 ```
 
-The command requires a live TUI (`gander tui`) and respects modal
-safety: if the human is typing a comment or using a popup, the TUI returns
+The command requires a live instance (`gander tui` or `gander web`). The TUI
+respects modal safety: if the human is typing a comment or using a popup, it returns
 `user is busy: <mode>` instead of moving the view. `present start` applies the
 Focus preset and drives the same durable Spotlight ordering as Alt-N/Alt-P in the
 normal stream. Explicit `present end` restores the prior view when presentation

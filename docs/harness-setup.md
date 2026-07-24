@@ -64,7 +64,7 @@ Use MCP when your harness benefits from typed tools and live `current_focus`.
 ## How routing works (why cwd matters)
 
 `gander mcp` is a stdio MCP server. On each tool call it looks up the
-instance registry for a **live gander TUI reviewing the current working
+instance registry for a **live gander TUI or web peer reviewing the current working
 directory** (one gander per workstream, docs/decisions.md D3) and bridges
 to its per-instance socket. That means:
 
@@ -73,11 +73,11 @@ to its per-instance socket. That means:
   `~/src/foo`;
 - several instances in the same workspace resolve to the most recently
   touched one (`last_input_at`);
-- without a running TUI, tools serve a snapshot loaded at startup — still
+- without a running live instance, tools serve a snapshot loaded at startup — still
   useful for headless review passes;
 - durable MCP comments/replies obtain provenance and anchors from that same
   selected live-or-snapshot session, including its active target; they do not
-  fall back to stale startup fingerprints when a live TUI is selected.
+  fall back to stale startup fingerprints when a live instance is selected.
 
 Current tools exposed: `review_summary`, `review_files`, `file_diff`, `comments`,
 `current_focus` (file/line/hunk the human is looking at right now),

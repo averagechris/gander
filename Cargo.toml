@@ -12,6 +12,12 @@ categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = [
+  "tokio",
+  "http1",
+  "json",
+  "query",
+] }
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5.51", features = ["derive", "env"] }
 color-eyre = "0.6.5"
@@ -41,6 +47,7 @@ tokio = { version = "1.52.3", features = [
   "macros",
   "io-std",
   "net",
+  "signal",
   "time",
 ] }
 toml = "0.8.23"

@@ -57,6 +57,19 @@ none of them fetches from or posts to a forge.
 - `src/main.rs` and `src/mcp.rs` should remain thin adapters over the same core
   operations. A new MCP or TUI capability requires a scriptable CLI equivalent.
 
+## Live instance adapters
+
+- `src/registry.rs` and `src/acp.rs::socket` are shared lifecycle plumbing for
+  both `gander tui` and `gander web`; each live process advertises the same
+  workspace/target/summary/socket/pid/heartbeat record and drains the same
+  typed ACP request loop.
+- `src/web.rs` is the M16 loopback HTTP adapter. Its centralized middleware
+  validates the per-process capability token, exact bound Host, and same-origin
+  Origin before every route (including SSE and assets). Phase 1 serves only an
+  embedded SSR lifecycle shell; later web projections must consume
+  `src/app/stream.rs`, and later mutations must call `src/review.rs` rather than
+  acquiring browser-specific domain logic.
+
 ## Change guide
 
 Persisted fields start in `src/state.rs` with serde defaults, then flow through

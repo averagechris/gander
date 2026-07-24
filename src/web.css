@@ -1,0 +1,36 @@
+html {
+  color-scheme: light dark;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+
+.eyebrow,
+.meta {
+  color: var(--muted);
+}
+
+.shell {
+  border: 1px solid var(--subtle);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  background: var(--surface);
+}
+
+a {
+  color: var(--accent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}

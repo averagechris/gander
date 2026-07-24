@@ -1,6 +1,8 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: designed, not yet implemented.
+Design for milestone 16. Status: Phase 1 implemented (secure standalone peer
+process and lifecycle shell); stream projection, browser presentation, and
+review actions remain phased work.
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -32,6 +34,20 @@ new kind of agent endpoint:
 - Browser interaction feeds `last_input_at` and `review/current_focus`, so a
   harness can answer "what am I looking at?" for the web view just as it does
   for the TUI.
+
+Phase 1 command contract:
+
+```sh
+gander web [--port <port>] [--no-open]
+```
+
+The process prints the complete capability-bearing URL on stdout. Browser
+auto-open is deliberately unavailable for now because Gander has no existing
+cross-platform, dependency-free opener convention; the default is to leave
+opening to the user, and `--no-open` suppresses the explanatory stderr note for
+scripts. The token exists only in process memory and the printed URL. `gander
+paths` reports the bind convention and existing socket/registry locations,
+never the token.
 
 The browser is a **renderer, not a second implementation**. The server
 projects the same review stream the TUI renders (`src/app/stream.rs`: chapter
@@ -270,6 +286,20 @@ on the change. Budgets, asserted where practical:
 | `GET /events` | SSE: `state` (generation + region patches), `present` (presenter events), `notice` |
 | `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
+
+Phase 1 exposes `GET /`, `GET /assets/app.css`, and a lifecycle-only `GET
+/events` notice. All three pass through one centralized guard enforcing the
+exact bound `Host`, absent-or-exact-same `Origin`, and capability token. Unknown
+paths are guarded too. Stream patches, fragments, and action endpoints are not
+implemented early.
+
+## Runtime dependency decision
+
+The live server uses Axum 0.8 with default features disabled and only
+`tokio`, `http1`, `json`, and `query`. This is the sole direct runtime
+dependency added for M16 Phase 1; assets and templates remain embedded Rust
+strings, and the existing Tokio, serde_json, and UUID facilities provide the
+runtime, protocol values, and ephemeral capability token.
 
 The ACP socket surface is unchanged; `present/*` and `review/current_focus`
 gain a web-backed implementation. Anything new that proves useful must land in

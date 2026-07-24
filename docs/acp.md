@@ -25,9 +25,9 @@ gander --base 'trunk()' --rev '@' acp
 Each request/response is one JSON object per line. Requests without an `id`
 are treated as notifications and get no response.
 
-## Live session over the TUI socket
+## Live session over an instance socket
 
-While the TUI runs it also hosts the same protocol on a per-instance Unix
+While the TUI or `gander web` runs it also hosts the same protocol on a per-instance Unix
 socket (`acp-<pid>.sock`) in the workspace's runtime directory
 (`gander paths` prints the pattern; Unix platforms only). Each instance
 also registers itself (workspace root, target, summary, socket, pid,
@@ -35,7 +35,7 @@ also registers itself (workspace root, target, summary, socket, pid,
 several reviews can run at once — one gander per workstream
 (docs/decisions.md D3). Requests answered there hit the
 **live** session: current viewed state, comments, and the active review
-target, and agent writes surface in the UI within one event-loop tick —
+target, and agent writes surface in the instance within one event-loop tick —
 no file polling latency.
 
 Two ways to reach it:
@@ -46,15 +46,13 @@ Two ways to reach it:
   reviewing the current workspace (most recently touched first) and
   transparently bridges stdio to it, so agent clients that spawn
   `gander acp` as a subprocess get the live session for free. Before serving,
-  `gander acp` writes a one-line stderr notice saying either
-  `gander acp: bridged to live TUI session (target <revset>)` or
-  `gander acp: serving snapshot (no live TUI for this workspace)`. Without a
-  running TUI it falls back to serving a snapshot loaded at startup.
+  `gander acp` writes a one-line stderr notice saying whether it bridged to a
+  live session or is serving a snapshot. Without a running TUI or web peer it
+  falls back to serving a snapshot loaded at startup.
 
-If the socket cannot be bound (say, a second gander TUI on the same
-workspace)
-the TUI shows a notice and collaboration degrades gracefully to the overlay
-file.
+If a TUI socket cannot be bound, the TUI shows a notice and collaboration
+degrades gracefully to the overlay file. Web startup fails rather than serving
+HTTP without its required peer socket.
 
 ## Bringing an agent to the session
 
@@ -162,10 +160,13 @@ published Agent Client Protocol schema. The method set is versioned via
 `initialize.version` and will grow toward spec compliance.
 ## Live presentation control (`present/*`)
 
-`present/*` methods are only available through a live TUI's per-instance ACP
-Unix socket. Snapshot ACP servers return a clear `present/* methods require a
-live TUI` error. The TUI applies these as typed UI commands between frames and
-rejects them while the human is in a modal/editor (`user is busy: <mode>`).
+`present/*` methods are only available through a live instance's per-instance
+ACP Unix socket. Snapshot ACP servers return a clear live-instance error. The
+owning UI loop applies these as typed commands. The Phase 1 web peer validates
+`present/focus` against the current diff and exposes skeleton status for the
+remaining methods; browser broadcast/follow behavior lands in a later M16
+phase. The TUI rejects commands while the human is in a modal/editor (`user is
+busy: <mode>`).
 
 - `present/status` → `{ "active": false }` or `{ "active": true,
   "slide_index": 0, "slide_count": 5, "view": "focus", "current":

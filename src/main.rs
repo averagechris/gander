@@ -24,6 +24,7 @@ mod syntax;
 mod theme;
 mod tui;
 mod walkthrough;
+mod web;
 mod web_export;
 
 use std::{
@@ -169,6 +170,15 @@ enum Command {
         #[arg(long)]
         tour: bool,
     },
+    /// Serve the local browser UI as a standalone live review instance.
+    Web {
+        /// Loopback TCP port. Defaults to a random free port.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Do not open a browser. This is currently the default behavior.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Render normal-stream Spotlight/Focus slides to plain terminal text.
     Tour {
         #[command(subcommand)]
@@ -248,14 +258,14 @@ enum Command {
     MarkGeneratedViewed,
     /// Low-level/internal ACP bridge for debugging live review integrations.
     Acp,
-    /// Drive stream Spotlight/Focus presentation in a live TUI (defaults to status).
+    /// Drive stream Spotlight/Focus presentation in a live instance (defaults to status).
     #[command(
-        after_help = "Examples:\n  gander present\n  gander present start\n  gander present next\n  gander present goto --index 3\n  gander present focus --path src/lib.rs --line 42 --end-line 60 --note 'look here'\n\nRequires a live TUI for this workspace; start one with `gander tui`. Presentation uses durable Spotlight ordering in the normal stream and applies Focus without removing review actions."
+        after_help = "Examples:\n  gander present\n  gander present start\n  gander present next\n  gander present goto --index 3\n  gander present focus --path src/lib.rs --line 42 --end-line 60 --note 'look here'\n\nRequires a live instance for this workspace; start `gander tui` or `gander web`. Presentation uses durable Spotlight ordering in the normal stream and applies Focus without removing review actions."
     )]
     Present {
         #[command(subcommand)]
         command: Option<PresentCommand>,
-        /// Target a specific live TUI instance by pid when several serve this workspace.
+        /// Target a specific live instance by pid when several serve this workspace.
         #[arg(long)]
         pid: Option<u32>,
     },
@@ -1305,7 +1315,11 @@ fn run() -> color_eyre::Result<()> {
     // it after startup and lock only individual merge-aware writes.
     let live_command = matches!(
         &command,
-        Command::Tui { .. } | Command::Acp | Command::Mcp | Command::Present { .. }
+        Command::Tui { .. }
+            | Command::Web { .. }
+            | Command::Acp
+            | Command::Mcp
+            | Command::Present { .. }
     );
     let mut state_lock = Some(review::lock_state_file(&state_path)?);
     let mut state = ReviewState::load_or_default(&state_path)?;
@@ -1455,6 +1469,20 @@ fn run() -> color_eyre::Result<()> {
                     session.files.len()
                 );
             }
+        }
+        Command::Web { port, no_open } => {
+            web::run(web::WebParams {
+                session,
+                overlay_path: workspace_paths.overlay_file(),
+                state_path,
+                socket_path: workspace_paths.instance_socket_file(std::process::id()),
+                registry_dir: workspace_paths.registry_dir.clone(),
+                workspace_root: workspace_paths.workspace_root.clone(),
+                acp_jj: Box::new(jj.clone()),
+                port,
+                no_open,
+                theme: config.theme,
+            })?;
         }
         Command::Tour { command } => match command {
             TourCommand::Render {
@@ -1654,7 +1682,7 @@ fn run() -> color_eyre::Result<()> {
             state.save(&state_path)?;
         }
         Command::Acp => {
-            // Prefer a live TUI session for this workspace (found through
+            // Prefer a live peer session for this workspace (found through
             // the instance registry): agents then see current viewed state,
             // comments, and target instead of this process's startup
             // snapshot. With several instances, the most recently touched
@@ -1666,17 +1694,17 @@ fn run() -> color_eyre::Result<()> {
             ) {
                 if instance.base != session.target.base || instance.rev != session.target.rev {
                     eprintln!(
-                        "warning: bridging to live TUI session reviewing {}..{}; requested {} ignored",
+                        "warning: bridging to live session reviewing {}..{}; requested {} ignored",
                         instance.base, instance.rev, session.target
                     );
                 }
                 eprintln!(
-                    "gander acp: bridged to live TUI session (target {})",
+                    "gander acp: bridged to live session (target {})",
                     session.target
                 );
                 return crate::acp::socket::bridge_stdio(&instance.socket_path);
             }
-            eprintln!("gander acp: serving snapshot (no live TUI for this workspace)");
+            eprintln!("gander acp: serving snapshot (no live instance for this workspace)");
             let overlay_path = workspace_paths.overlay_file();
             let mut server = crate::acp::AcpServer::new(session, overlay_path)?
                 .with_jj(Box::new(jj.clone()))
@@ -1688,7 +1716,7 @@ fn run() -> color_eyre::Result<()> {
         Command::Present { command, pid } => {
             #[cfg(not(unix))]
             {
-                color_eyre::eyre::bail!("gander present requires Unix sockets and a live TUI");
+                color_eyre::eyre::bail!("gander present requires Unix sockets and a live instance");
             }
             #[cfg(unix)]
             {
@@ -2948,7 +2976,7 @@ fn warn_if_live_session_target_differs(paths: &WorkspacePaths, session: &ReviewS
         && (instance.base != session.target.base || instance.rev != session.target.rev)
     {
         eprintln!(
-            "warning: live TUI session is reviewing {}..{}; this command is using {}",
+            "warning: live session is reviewing {}..{}; this command is using {}",
             instance.base, instance.rev, session.target
         );
     }
@@ -4058,11 +4086,15 @@ fn select_present_instance(
         return matches
             .into_iter()
             .find(|instance| instance.pid == pid)
-            .ok_or_else(|| user_error(format!("no live TUI with pid {pid} for this workspace")));
+            .ok_or_else(|| {
+                user_error(format!(
+                    "no live instance with pid {pid} for this workspace"
+                ))
+            });
     }
     match matches.as_slice() {
         [] => Err(user_error(
-            "no live TUI for this workspace; start one with `gander tui` and retry",
+            "no live instance for this workspace; start `gander tui` or `gander web` and retry",
         )),
         [one] => Ok(one.clone()),
         many => {
@@ -4077,7 +4109,7 @@ fn select_present_instance(
                 .collect::<Vec<_>>()
                 .join("\n");
             Err(user_error(format!(
-                "multiple live TUIs serve this workspace; pass --pid:\n{list}"
+                "multiple live instances serve this workspace; pass --pid:\n{list}"
             )))
         }
     }
@@ -4189,6 +4221,8 @@ fn print_paths(
         "acp socket:       {} (per instance)",
         paths.runtime_dir.join("acp-<pid>.sock").display()
     );
+    println!("web bind:         127.0.0.1:<random|--port>");
+    println!("web token:        ephemeral (printed URL only; never durable)");
     println!("instance registry: {}", paths.registry_dir.display());
     if let Some(xdg_config) = crate::config::xdg_config_path() {
         println!(

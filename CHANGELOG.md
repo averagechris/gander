@@ -6,6 +6,9 @@
   CLI/MCP/ACP writers with locked transactions and baseline-aware delta merges.
 - Added built-in named theme palette pairs, `[theme] name` and
   `[theme.palette.dark|light]` overrides, plus `gander themes list`.
+- Added the M16 Phase 1 `gander web` standalone peer with a loopback-only,
+  capability-guarded SSR shell/SSE lifecycle, shared registry and ACP socket,
+  and graceful endpoint cleanup.
 
 ## v0.8.1 - 2026-07-23
 

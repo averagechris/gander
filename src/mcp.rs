@@ -3,9 +3,9 @@
 //! An MCP stdio server implemented with the official Rust SDK (`rmcp`) as a
 //! thin adapter over the same [`crate::acp::AcpHandler`] dispatch that backs
 //! `gander acp`. Spawned in a workspace, each tool call routes to that
-//! workspace's live TUI instance through the instance registry
+//! workspace's live TUI or web instance through the instance registry
 //! (docs/decisions.md D3), so harnesses see current viewed state, comments,
-//! and focus; without a running TUI it falls back to a snapshot session
+//! and focus; without a running live instance it falls back to a snapshot session
 //! loaded at startup. Harnesses discover the typed tools natively — no wire
 //! protocol explained in a prompt.
 
@@ -531,7 +531,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Spotlight a path/line in the live TUI review view and optionally show a note"
+        description = "Spotlight a path/line in the live review view and optionally show a note"
     )]
     fn present_focus(
         &self,
@@ -715,7 +715,7 @@ impl GanderMcp {
     }
 
     #[tool(
-        description = "Add a durable review comment. Equivalent to `gander comments add`, including `--channel`, `[comments].default-channel`, state-derived channel fallback, todo coercion, and live TUI merging."
+        description = "Add a durable review comment. Equivalent to `gander comments add`, including `--channel`, `[comments].default-channel`, state-derived channel fallback, todo coercion, and live-instance merging."
     )]
     fn comment_add(
         &self,
@@ -1557,7 +1557,7 @@ impl GanderMcp {
             || instance.rev != self.target.revision.as_deref().unwrap_or_default()
         {
             eprintln!(
-                "warning: bridging to live TUI session reviewing {}..{}; requested {} ignored",
+                "warning: bridging to live session reviewing {}..{}; requested {} ignored",
                 instance.base,
                 instance.rev,
                 self.target.revset.as_deref().unwrap_or("requested target")
@@ -3391,7 +3391,7 @@ mod tests {
         let workspace = dir.path().canonicalize().unwrap();
         let socket_path = dir.path().join("acp-9.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
-        // A stand-in for a live TUI: the registry liveness probe connects
+        // A stand-in for a live instance: the registry liveness probe connects
         // and hangs up without sending anything, so accept until a
         // connection actually carries a request, then answer it.
         let responder = std::thread::spawn(move || {

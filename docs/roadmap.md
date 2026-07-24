@@ -307,9 +307,10 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: designed, future.
+Status: in progress. Phase 1 established the secure standalone peer process;
+the stream UI and interactive browser behavior remain future phases.
 
-- [ ] `gander web`: standalone peer instance — registers in the instance
+- [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
   `gander acp`/`gander mcp`/`gander present` route to it by cwd unchanged
 - [ ] server-rendered stream view over the shared projection
@@ -324,7 +325,7 @@ Status: designed, future.
   (`user is busy: <mode>`), web-backed `current_focus`
 - [ ] full review parity mutations via the same review services: viewed,
   fold acknowledge, comment add/edit/state/triage, salience promote/demote
-- [ ] loopback-only bind + per-session capability token + Origin/Host checks
+- [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`
 - [ ] web emits derived theme slots as per-scheme CSS custom-property tokens;
