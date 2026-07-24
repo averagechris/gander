@@ -156,7 +156,7 @@ API extension), tracked as future work under milestone 19.
 - Diff-cue derivation details: docs/focused-diff-ux.md §"Config".
 - Implementation: `src/theme.rs`, `src/tui/theme.rs`, `src/tui/osc_guard.rs`,
   `src/tui/pty_tests.rs` (production-path PTY scenarios).
-- Web reuse (M16, in progress): the palette→slot derivation now lives in a shared
-  core with built-in named palettes and config overrides; the web UI will serve
-  the slots as CSS custom-property tokens with a system/light/dark toggle. See
-  docs/web.md §Theming.
+- Web reuse (M16): the palette→slot derivation lives in a shared core with
+  built-in named palettes and config overrides; `gander web` and static HTML
+  exports serve the slots as CSS custom-property tokens with a system/light/dark
+  toggle. See docs/web.md §Theming.

@@ -24,7 +24,7 @@ In one sentence:
 new kind of agent endpoint:
 
 - It is its own process serving HTTP on `127.0.0.1` (random free port by
-  default, `--port` to pin; prints the URL and optionally opens the browser).
+  default, `--port` to pin; prints the URL and does not auto-open a browser).
 - It registers in the existing instance registry (workspace root, target,
   summary, socket path, pid, `last_input_at`) exactly like a TUI instance
   (docs/decisions.md D3), and hosts the same per-instance ACP Unix socket —
@@ -151,10 +151,13 @@ Everything the TUI can write, the web can write, through the same services:
 - follow walkthrough ordering (next/prev/goto over spotlights);
 - expand/collapse context and folds.
 
-Mutations POST to small action endpoints that map one-to-one onto review
-service calls and return the new generation; the SSE stream then patches every
-connected client, including a concurrently open TUI (via durable-state
-watching).
+Mutations POST to small action endpoints that map one-to-one onto the same
+review service calls exposed by the CLI (`files`/`mark-viewed`, `attention`,
+`comments`, `agent-drafts`, and `walkthrough`) and return the new generation;
+the SSE stream then patches every connected client, including a concurrently
+open TUI (via durable-state watching). These endpoints are the browser's guarded
+UI transport, not a new automation API; scripts should use the CLI/MCP/ACP
+surfaces over the same services.
 
 ## Agent-guided presentation over the web
 

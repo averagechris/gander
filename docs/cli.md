@@ -25,13 +25,27 @@ Most list commands and mutation echoes accept `--format <json|text>`. JSON is
 always the default (agent-stable); `text` prints compact aligned rows or a
 short human echo.
 
+## Interface parity quick map
+
+| Human/interface capability | Scriptable CLI equivalent |
+| --- | --- |
+| TUI review session | `gander tui` plus the read/write groups below |
+| Local web peer | `gander web [--port <port>] [--no-open]` for the human UI; durable writes still map to the CLI groups below |
+| Theme palette discovery | `gander themes list [--format json|text]` |
+| Web/TUI viewed state | `gander files list`, `gander mark-viewed`, `gander mark-generated-viewed` |
+| Web/TUI comments and draft triage | `gander comments ...`, `gander agent-drafts ...` |
+| Web/TUI attention, folds, and walkthrough navigation | `gander attention ...`, `gander walkthrough ...`, `gander present ...` for live ephemeral presentation |
+
+The web action endpoints are the browser transport for these same services; use
+the CLI/MCP/ACP surfaces for automation.
+
 ## Themes
 
 ```sh
 gander themes list [--format json|text]
 ```
 
-`themes list` is the scriptable palette contract for TUI and future web
+`themes list` is the scriptable palette contract for the TUI and web
 renderers. JSON returns `{ "themes": [{ "name": "gander", "aliases": [...] }, ...] }`.
 Canonical names are `gander`, `catppuccin`, `gruvbox`, `solarized`, `nord`,
 `tokyo-night`, and `dracula`; config also accepts documented aliases after
@@ -438,7 +452,7 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 last-writer-wins during external-state merge; region identity and effective
 resolution are deterministic within the winning map.
 
-## Local web peer (Phase 4 review parity)
+## Local web peer
 
 ```sh
 gander web [--port <port>] [--no-open]
@@ -458,17 +472,19 @@ files use cheap structural skeletons and token/generation-gated fragment loads.
 Guided mode renders shared chapters, folds, spotlight narration, and annotation
 cards. One control switches to the peer traditional mode with every file/line,
 file tree, search, viewed indicators, comment threads, and salience margins.
-Viewed state, exact skim acknowledgements, comments and replies, agent-draft
-triage, human salience overrides, and walkthrough visits use guarded
-`POST /actions/<verb>` calls over the same services as the commands documented
-above. Every body carries `expected_generation`; successful writes are durable
-before returning the new generation, then SSE reconciles every browser tab and
-concurrent TUI. Invalid schemas return 400, unknown selectors 404, and stale
-generations 409. The browser applies immediate feedback but preserves editor
-text and rolls back on validation, conflict, or network failure. Context,
-fold, and card expansion are browser-local. The process registers and hosts ACP
-exactly like the TUI, and SIGINT/SIGTERM gracefully remove its registry entry
-and Unix socket.
+Viewed state (`files`/`mark-viewed`), exact skim acknowledgements (`attention
+acknowledge`), comments and replies (`comments`), agent-draft triage
+(`agent-drafts`), human salience overrides (`attention set|clear`), and
+walkthrough visits (`walkthrough`) use guarded `POST /actions/<verb>` calls over
+the same services as those scriptable commands. The HTTP actions are browser UI
+transport, not a separate automation API. Every body carries
+`expected_generation`; successful writes are durable before returning the new
+generation, then SSE reconciles every browser tab and concurrent TUI. Invalid
+schemas return 400, unknown selectors 404, and stale generations 409. The
+browser applies immediate feedback but preserves editor text and rolls back on
+validation, conflict, or network failure. Context, fold, and card expansion are
+browser-local. The process registers and hosts ACP exactly like the TUI, and
+SIGINT/SIGTERM gracefully remove its registry entry and Unix socket.
 
 ### Debugging TUI responsiveness
 
@@ -521,7 +537,7 @@ while preserving foreign authors, channels, replies, and identities. Exported
 action items, walkthroughs, and private attention assignments are not restored
 by `gander import`.
 
-Humans read the durable review session directly in the TUI (and future web UI).
+Humans read the durable review session directly in the TUI or local web UI.
 Prompt handoff and delegate mode are outbound adapters for transferring work to
 an external agent or harness. Delegate mode emits an independently versioned
 `gander_delegation` packet for typed orchestration; it selects open work without

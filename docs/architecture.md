@@ -62,8 +62,10 @@ none of them fetches from or posts to a forge.
   `src/web_export.rs` profile-filters first, then embeds that renderer eagerly
   with local-only handwritten navigation; `src/delegation.rs` builds the
   narrower external-harness work packet.
-- `src/main.rs` and `src/mcp.rs` should remain thin adapters over the same core
-  operations. A new MCP or TUI capability requires a scriptable CLI equivalent.
+- `src/main.rs`, `src/mcp.rs`, and `src/web.rs` should remain thin adapters over
+  the same core operations. A new MCP, TUI, or web capability requires a
+  scriptable CLI equivalent; web action routes are browser transport for those
+  services, not an automation API fork.
 
 ## Live instance adapters
 
@@ -84,8 +86,8 @@ none of them fetches from or posts to a forge.
   deliberate snapshot followed only by `--ignore-working-copy` reads. It
   projects and renders outside the short shared-projection lock, diffs stable
   overview/coverage/footer/stream regions, and publishes bounded SSE updates;
-  lagged or stale clients recover with a full region set. Later
-  Phase 4 actions enter the live loop through a bounded command channel, check
+  lagged or stale clients recover with a full region set. Phase 4 actions enter
+  the live loop through a bounded command channel, check
   the projection generation, call `src/review.rs`/shared attention services,
   complete a baseline-aware locked atomic save, and only then return the new
   generation. It supplies live action/lazy-fragment capabilities to

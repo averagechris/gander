@@ -6,11 +6,10 @@
   CLI/MCP/ACP writers with locked transactions and baseline-aware delta merges.
 - Added built-in named theme palette pairs, `[theme] name` and
   `[theme.palette.dark|light]` overrides, plus `gander themes list`.
-- Added the M16 Phase 1 `gander web` standalone peer with a loopback-only,
-  capability-guarded SSR shell/SSE lifecycle, shared registry and ACP socket,
-  and graceful endpoint cleanup.
-- Added the M16 Phase 2 attention-first web reader over the shared review-stream
-  projection, with peer guided/full modes and lazy token-gated stable regions.
+- Added the M16 `gander web` standalone loopback peer: capability-guarded SSR,
+  attention-first and full review modes over the shared stream projection, lazy
+  token-gated regions, SSE liveness/reconnects, ACP presentation, guarded review
+  mutations over shared services, and graceful endpoint cleanup.
 - Added M16 web theming: shared ThemeSlots CSS tokens for both schemes, a
   system/light/dark header toggle with pre-paint persistence, and optional
   `[web] extra-css` loading after embedded styles.
