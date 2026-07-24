@@ -304,11 +304,43 @@ static review page; a pages-style hosted tour remains separate future work.
 
 ## Milestone 16: optional local web UI
 
-Status: future.
+Attention is the product: the web view is where harness-curated guides breathe,
+while a full every-line review stays equally first-class. Design:
+[docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-- [ ] add an interactive local browser UI only after the session core is stable
-- [ ] expose the same capabilities as the TUI/CLI where appropriate
-- [ ] preserve the no-code-mutation and forge-agnostic boundaries
+Status: designed, future.
+
+- [ ] `gander web`: standalone peer instance — registers in the instance
+  registry and hosts the per-instance ACP socket (including `present/*`), so
+  `gander acp`/`gander mcp`/`gander present` route to it by cwd unchanged
+- [ ] server-rendered stream view over the shared projection
+  (`src/app/stream.rs`): chapters, skim folds, spotlight narration cards,
+  annotation cards; assets embedded, no JS toolchain
+- [ ] liveness: watch durable state/overlay + read-only jj refresh, push
+  generation-keyed region patches to browsers over SSE
+- [ ] attention-first landing (summary, chapters, coverage, start-guided-tour)
+  with a one-control switch to full traditional review
+- [ ] `present/*` broadcast to connected tabs: scroll/highlight/ephemeral
+  notes, follow/unfollow (human always wins), busy gating parity
+  (`user is busy: <mode>`), web-backed `current_focus`
+- [ ] full review parity mutations via the same review services: viewed,
+  fold acknowledge, comment add/edit/state/triage, salience promote/demote
+- [ ] loopback-only bind + per-session capability token + Origin/Host checks
+- [ ] shared derived-theme core: factor the M19 palette→slot derivation out
+  of `src/tui/theme.rs`; web emits it as per-scheme CSS custom-property
+  tokens; component CSS references tokens only (no literal colors)
+- [ ] built-in named theme palettes (gander default + common community
+  palettes) selectable via `[theme] name` for TUI and web alike, with
+  `[theme.palette.*]` overrides and a `gander themes list` CLI
+- [ ] light/dark/system toggle: `prefers-color-scheme` live-follow,
+  localStorage persistence, no first-paint flash
+- [ ] performance budgets: server-rendered first paint, windowed stream with
+  structural skeleton + on-demand fragments, optimistic mutations reconciled
+  by generation, coalesced presenter events, perf smoke test in CI
+- [ ] fix the live-instance autosave race (backlog item 3) with merge-aware
+  saves or a reload handshake — required once two live instances coexist
+- [ ] converge `src/web_export.rs` static export with the live web templates
+  so guides render identically live and exported
 
 ## Milestone 17: annotation channels
 

@@ -4,6 +4,53 @@ Short ADR-style log of directional decisions. Newest first. Each entry
 records the decision, the reasoning, and what it supersedes, so future
 sessions (human or agent) can pick up implementation without relitigating.
 
+## D10 (2026-07): `gander web` is a peer live instance; the browser is a renderer
+
+**Decision.** The local web UI (milestone 16, docs/web.md) ships as
+`gander web`: a standalone process that registers in the instance registry
+and hosts the per-instance ACP socket exactly like a TUI instance, then
+serves a loopback-only, token-guarded HTTP UI. The server renders view
+models from the same stream projection the TUI uses and pushes
+generation-keyed patches over SSE; a small hand-written script handles
+scrolling, highlights, and follow mode — no SPA framework, no JS toolchain.
+Web mutations (viewed, acknowledge, comments, salience) call the same review
+services as the CLI/MCP/TUI. Theming reuses the M19 derived-theme core: the
+palette→slot derivation factors out of `src/tui/theme.rs`, the web serves
+the derived slots as per-scheme CSS custom-property tokens (component CSS
+references tokens only), built-in named palettes and `[theme]` config drive
+both renderers, and a system/light/dark toggle follows
+`prefers-color-scheme` — the web analog of OSC 11 auto-detection.
+
+Agents guide the web view through the existing surfaces, not a new one:
+`present/*` on the instance socket broadcasts to connected tabs
+(scroll/highlight/ephemeral notes) with follow/unfollow and the same
+`user is busy` gating, and the web instance feeds `current_focus` and
+`last_input_at` so harness chat can answer "what am I looking at?".
+Harness-built onboarding experiences are durable session data —
+walkthroughs, attention maps, onboarding annotations — never agent code
+executed by gander (D9 stands).
+
+**Why.** Attention is the product: the browser gives curated guides the
+typography and space a terminal cannot, and live agent-driven presentation
+("guide me through this change while we talk") needs a view agents can move
+in real time. Making the web server a peer instance means zero new
+agent-facing protocol — cwd routing, `gander present`, MCP tools, and CLI
+parity all hold by construction. Rendering server-side from the shared
+projection keeps one business logic (vision rule 3) and lets the static HTML
+export converge with the live templates.
+
+**Rejected.** Hosting the web server inside the TUI process (couples
+lifecycles; a browser-only session shouldn't require a terminal UI); an
+embedded SPA with a JS build toolchain (heavier nix build, second rendering
+implementation to keep honest); a new WebSocket agent protocol (the instance
+socket already exists and keeps MCP/CLI parity intact).
+
+**Refines.** D3 (the registry now has two live-instance kinds; presentation
+targeting by pid/most-recent input covers coexistence), D8 (`present/*`
+extends to web clients with identical semantics), D1 (durable-state watching
+is how concurrent live instances mirror each other — making the M14
+autosave-race fix a prerequisite).
+
 ## D9 (2026-07): gander never spawns agents; harnesses own the agent lifecycle
 
 **Decision.** Gander does not spawn, monitor, or kill agent processes.

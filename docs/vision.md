@@ -10,6 +10,14 @@ In one sentence:
 > Gander turns jj diffs into durable, guided, actionable review sessions for
 > humans and agents.
 
+The differentiating thesis is **attention economy**. Agents make code cheap;
+most of a change is boilerplate and glue. A review's job is to keep the
+reviewer's mental model current and let them critique intent, so gander's
+killer feature is spending reviewer attention where the mental-model delta
+is — attention maps, walkthroughs, narration, and agent-guided presentation —
+while a full, traditional every-line review remains equally first-class,
+never a degraded fallback.
+
 ## What Gander owns
 
 Gander should read code state and write review state.
@@ -157,8 +165,21 @@ gander walkthrough export
 
 ### M16: Optional local web UI
 
-- Add an interactive local browser UI only after the session model stabilizes.
-- Use the same core services and respect the no-code-mutation boundary.
+Design: [docs/web.md](web.md).
+
+- `gander web`: a standalone peer instance (registry + ACP socket, like the
+  TUI) serving a server-rendered, SSE-live browser view of the same review
+  stream on loopback.
+- Attention-first reading: land on the attention map, guided walkthrough flow,
+  coverage progress — with a full traditional every-line review as an equal
+  mode, not a fallback.
+- Agents guide the human's live web view through the existing `present/*`
+  surface (scroll, highlight, ephemeral notes) with follow/unfollow and busy
+  gating; harness-authored onboarding experiences are durable session data,
+  never agent code run by gander.
+- Full review parity mutations (viewed, acknowledge, comments, salience) over
+  the same core services; respect the no-code-mutation and forge-agnostic
+  boundaries.
 
 Milestones 17–19 predate M16 in build order; the numbers record when they
 were planned, not sequence.

@@ -1,0 +1,283 @@
+# Local web UI (`gander web`)
+
+Design for milestone 16. Status: designed, not yet implemented.
+
+Gander exists to spend reviewer attention where the mental-model delta is. In
+an age of abundant generated code, most of a change is boilerplate and glue;
+the review's job is to keep the reviewer's mental model current and give them
+the footing to critique intent. The web UI is the surface where that curation
+breathes: guided onboarding paths authored by agent harnesses, live
+agent-driven presentation, and an attention-first reading experience — while a
+full, traditional every-line review remains equally first-class.
+
+In one sentence:
+
+> `gander web` is a live, local, browser-rendered peer of the TUI that agents
+> can guide in real time through the same instance surface they already use.
+
+## Model
+
+`gander web` is a **standalone peer instance**, not a TUI feature and not a
+new kind of agent endpoint:
+
+- It is its own process serving HTTP on `127.0.0.1` (random free port by
+  default, `--port` to pin; prints the URL and optionally opens the browser).
+- It registers in the existing instance registry (workspace root, target,
+  summary, socket path, pid, `last_input_at`) exactly like a TUI instance
+  (docs/decisions.md D3), and hosts the same per-instance ACP Unix socket —
+  including `present/*` (D8).
+- `gander acp`, `gander mcp`, and `gander present` therefore route to a web
+  instance by cwd with zero new agent-facing protocol. Agents drive the web
+  view with the same commands that drive the TUI.
+- Browser interaction feeds `last_input_at` and `review/current_focus`, so a
+  harness can answer "what am I looking at?" for the web view just as it does
+  for the TUI.
+
+The browser is a **renderer, not a second implementation**. The server
+projects the same review stream the TUI renders (`src/app/stream.rs`: chapter
+headers, file rows, skim folds, spotlight narration cards, annotation cards)
+into server-rendered HTML view models, and pushes updates over SSE. Business
+logic lives only in the core services (vision design rule 3); web mutations
+call the same `src/review.rs` seams as the CLI/MCP. CLI parity (design rule 4)
+holds by construction because the web surface is a strict subset of existing
+core capabilities.
+
+No JS toolchain: assets are embedded in the binary, templates rendered in
+Rust, with a small hand-written script for scrolling, highlights, SSE
+handling, and follow mode. `src/web_export.rs` (static export) and the live
+web UI should converge on shared rendering so a guide authored once reads the
+same live, exported, and hosted-as-a-file.
+
+## Liveness
+
+The server observes the same inputs as TUI watch mode and pushes changes to
+connected browsers in roughly real time (one poll/event tick):
+
+- durable review state (`state.json`) and the agent overlay (`agent.json`)
+  via the state watcher;
+- the jj target via the existing read-only `--ignore-working-copy` refresh
+  discipline, with the same single deliberate snapshot point per poll
+  (roadmap backlog item 4 applies unchanged).
+
+Change delivery is generation-based: the server re-projects affected view
+models, bumps the projection generation, and emits an SSE `state` event
+carrying patch fragments keyed by stable region ids (file sections, cards,
+folds, footer/coverage). The client swaps those regions in place; a dropped
+SSE connection reconnects and requests a full re-render. Fingerprint-guarded
+durability semantics (viewed state, acknowledgements, stale regions) are
+identical to the TUI because they are computed by the same core.
+
+Concurrent instances (a TUI and a web server on one workspace) mirror each
+other through durable-state watching, the same way a TUI mirrors external CLI
+writes today. The M14 autosave-race backlog item (roadmap item 3) becomes more
+pressing with two live instances and should be fixed with merge-aware saves or
+a reload handshake as part of this milestone.
+
+## Reading experience: attention-first, full review always
+
+The landing view is the **attention map, not the file tree**: session
+summary, chapters, spotlight count, skim-fold totals, coverage progress, and a
+"start guided tour" affordance when a walkthrough exists. One click drops into
+the stream.
+
+The stream is the same one-diff-view contract as the TUI (docs/attention.md):
+
+- **Skim** regions render as one-line folds — expandable in place,
+  acknowledgeable with one key/click; whole-file folds mark viewed through the
+  existing fingerprint-guarded service.
+- **Supporting** regions render as a normal diff.
+- **Spotlight** regions render expanded with inline narration cards
+  (onboarding annotations: title, why, rationale, expandable artifacts),
+  where the web's typography and space can outclass the terminal.
+
+A **traditional full review is a peer mode, not a fallback**: every file,
+every line, file tree, search, viewed checkboxes, comment threads. Salience
+still tints the margins but nothing is folded unless asked. Switching between
+guided and full is one control and loses no state.
+
+## Full review parity (v1 mutations)
+
+Everything the TUI can write, the web can write, through the same services:
+
+- mark files viewed / unviewed;
+- acknowledge skim folds (single and bulk), with identical fold identity,
+  progress fingerprints, and stale-exclusion rules;
+- add, edit, reply to, and change the state of comments, with channel
+  inference and the channel color language (docs/annotations.md);
+- accept/discard agent draft comments (triage);
+- promote/demote salience on the region under the cursor (human overrides
+  outrank agent curation, as everywhere);
+- follow walkthrough ordering (next/prev/goto over spotlights);
+- expand/collapse context and folds.
+
+Mutations POST to small action endpoints that map one-to-one onto review
+service calls and return the new generation; the SSE stream then patches every
+connected client, including a concurrently open TUI (via durable-state
+watching).
+
+## Agent-guided presentation over the web
+
+This is the "ask my agent about the review and watch it guide me" flow. It
+extends D8 unchanged in spirit: presentation is ephemeral, socket-transported
+UI control.
+
+- `present/*` requests arriving on the web instance's ACP socket (from
+  `gander present`, MCP tools, or raw JSON-RPC) are validated against the
+  current diff and broadcast to connected browser tabs as SSE `present`
+  events: scroll to a target, flash/pin a highlight range, show an ephemeral
+  note callout, start/next/prev/goto/end over durable spotlights.
+- **Follow mode.** When a presentation starts, tabs follow the presenter by
+  default. Manual scrolling breaks follow ("following paused — rejoin"), with
+  the presenter's position kept visible as an edge indicator; one key/click
+  snaps back. The human always wins.
+- **Busy gating.** If the human is mid-edit in a comment form, presentation
+  commands do not yank the view: the server answers the agent with the
+  existing `user is busy: <mode>` error and the client shows a pending
+  presenter indicator instead.
+- **Ephemeral vs durable.** `present/focus` notes are transient callouts.
+  Anything meant to persist — narration, walkthrough steps, attention
+  regions, comments — flows through the durable CLI/MCP surfaces exactly as
+  today, and appears in the web view through normal state liveness.
+
+The intended composition is the split-screen harness workflow from
+docs/harness-setup.md with the browser in place of (or beside) the TUI: the
+human asks a question in the harness chat; the agent reads
+`review/current_focus`, answers in chat, and runs `gander present focus ...`
+to walk the human's web view through the relevant regions while it talks.
+
+## Catered guide and onboarding experiences
+
+Harness-built onboarding experiences are **data, not plugins** (D9 stands:
+gander never runs agent code and never spawns agents). A catered experience is
+a curated durable session:
+
+- a walkthrough (ordering over spotlights, narration, artifacts, chapters);
+- an attention map (spotlight/supporting/skim with rationales);
+- onboarding-channel annotations and draft comments;
+- optionally a live presenter driving `present/*` while the reader follows.
+
+The web UI's job is to render that curation as a coherent guided read:
+overview page, chapter navigation, coverage progress, and prev/next flow. An
+agent harness "builds an onboarding experience" purely by writing review state
+through the CLI/MCP — the same artifact renders in the TUI, the live web UI,
+and the static HTML export.
+
+## Look and feel
+
+The web UI should look like a considered modern tool, not a rendered
+terminal. Design language, pinned so implementation doesn't drift:
+
+- **Typography first.** A system UI stack for chrome and a good monospace
+  stack for code (no bundled webfonts; the binary stays lean). Generous line
+  height and measure in narration cards — prose deserves prose typography.
+- **Color is semantics, nothing else.** Chrome is quiet and neutral; color
+  appears only where it means something: diff add/remove, channel identity
+  (onboarding/delegation/collaboration/note), salience, presenter highlights.
+  This is the same discipline as the TUI's channel color language and it is
+  what makes the attention map legible.
+- **Cards and folds carry the hierarchy.** Narration/annotation cards get
+  subtle elevation and rounded corners; skim folds read as compact, calm
+  one-liners; spotlight regions get the space. No gradients-for-decoration,
+  no ornamental noise.
+- **Motion is meaning.** Smooth scroll for presenter navigation and a brief
+  highlight pulse on `present/focus` targets — and nothing else moves.
+  `prefers-reduced-motion` swaps smooth scroll for instant jumps and pulses
+  for static outlines.
+
+## Theming
+
+One derived theme core, two renderers. The M19 palette→slot derivation
+(docs/theme.md, `src/tui/theme.rs`) moves to a shared core module: a small
+base palette (background, foreground, accent, positive, negative, info) is
+expanded through the same contrast-guarded blending into semantic slots. The
+web server renders those slots as **CSS custom properties** — one token block
+per scheme (`[data-theme="dark"]`, `[data-theme="light"]`) — and all
+component CSS references tokens only. No literal colors in component styles,
+ever: that rule is what keeps the stylesheet themable and maintainable
+instead of spaghetti, and it means every theme inherits the WCAG contrast
+contract for free.
+
+- **Built-in themes.** A theme is just a named light/dark palette pair plus
+  an optional syntax theme, so shipping many is cheap. Gander ships its own
+  default pair plus common community palettes (e.g. Catppuccin, Gruvbox,
+  Solarized, Nord, Tokyo Night, Dracula), all derived through the same
+  contrast guards. `gander themes list` enumerates them (CLI parity).
+- **Configuration.** `[theme] name = "gruvbox"` selects a built-in for both
+  TUI and web; `[theme.palette.dark]`/`[theme.palette.light]` override
+  individual base-palette entries; `[syntax.theme]` keeps working unchanged.
+  Configure once, both renderers match.
+- **Light/dark/system toggle.** A header control cycles system → light →
+  dark. "System" follows `prefers-color-scheme` live (the web analog of the
+  TUI's OSC 11 auto-detection). The choice persists per browser in
+  localStorage; a tiny inline script applies it before first paint so there
+  is no flash of the wrong scheme. Both schemes' token blocks are always
+  served; switching is one attribute flip.
+- **Escape hatch.** An optional user stylesheet (`[web] extra-css = "path"`)
+  is loaded last for power users. The custom-property tokens are the stable
+  theming contract; DOM structure and class names are not.
+
+## Performance budgets
+
+Snappiness is an attention feature: every stall between intent and response
+burns the reviewer's focus, and gander's whole point is spending that focus
+on the change. Budgets, asserted where practical:
+
+- **First meaningful paint is server-rendered HTML** — the overview and the
+  visible stream window arrive in the initial response; no framework boot,
+  no client-side data fetch before content. Target: interactive on a normal
+  change in well under a second on localhost.
+- **Long diffs are windowed, like the TUI.** The initial document carries
+  full rendering for the near-viewport window plus a lightweight structural
+  skeleton for offscreen files (mirroring the stream's cheap structural
+  rows); scrolling fetches rendered fragments on demand. `content-visibility:
+  auto` keeps offscreen sections out of layout. A huge generated file must
+  never make the page heavy — it is a one-line fold with lazy expansion.
+- **Mutations feel instant.** Viewed marks, fold acknowledgements, and
+  comment saves apply optimistically in the client and reconcile against the
+  generation returned by the action endpoint; a conflict falls back to the
+  server's patch. Perceived interaction feedback within one frame.
+- **SSE patches are surgical.** Region-keyed swaps, no full-page re-renders,
+  no layout thrash outside the patched region. Presenter events coalesce so
+  a fast-driving agent cannot queue up a scroll storm.
+- **Measured, not vibes.** The demo-sized fixture gets a perf smoke test
+  (document size, time-to-render, patch-apply cost) so regressions show up
+  in CI rather than in reviewers' attention.
+
+## Security and boundaries
+
+- Loopback only. The server binds `127.0.0.1` and refuses non-loopback bind
+  addresses in v1; sharing is what artifact export is for.
+- A per-session capability token is generated at startup, embedded in the
+  printed URL, and required on every request including the SSE stream.
+  `Origin`/`Host` are validated to block DNS-rebinding and cross-origin
+  browser probes. Tokens are never written to durable state.
+- All product boundaries hold: gander reads code state and writes review
+  state. No forge fetching or posting, no code-workspace mutation, no agent
+  spawning, no chat UI. The web server adds no capability that lacks a CLI
+  equivalent.
+- The confirmed jj helper popup does not cross to the web in v1; mutating jj
+  helpers stay in the TUI where the literal-Enter confirmation model is
+  established.
+
+## Protocol sketch
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /` | server-rendered app shell (overview + stream) |
+| `GET /events` | SSE: `state` (generation + region patches), `present` (presenter events), `notice` |
+| `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
+| `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
+
+The ACP socket surface is unchanged; `present/*` and `review/current_focus`
+gain a web-backed implementation. Anything new that proves useful must land in
+the CLI first or simultaneously (design rule 4).
+
+## Non-goals (v1)
+
+- Hosting for anyone but the local user (no TLS, no auth beyond the token, no
+  non-loopback binding).
+- A JS build toolchain or SPA framework.
+- Web-initiated jj mutations, forge integration, or agent invocation.
+- Editing walkthrough/attention curation from the browser beyond
+  promote/demote — authoring stays CLI/MCP/TUI in v1.
+- Mobile-first layout (should degrade acceptably, not be designed for).
