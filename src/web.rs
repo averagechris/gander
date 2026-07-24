@@ -3,8 +3,8 @@
 //! The browser is a renderer over the app-owned reading projection. This
 //! durable state and jj changes are projected into surgical SSE patches.
 //! The browser also reports ephemeral interaction state and renders the same
-//! socket-driven presentation commands as the TUI; durable browser mutations
-//! remain outside this phase.
+//! socket-driven presentation commands as the TUI. Durable browser mutations
+//! are thin, generation-guarded adapters over the shared review services.
 
 use std::{
     fs,
@@ -39,12 +39,17 @@ use crate::{
         DiffRowKind, Focus, ReadingAnnotation, ReadingAnnotationSource, ReadingProjection,
         ReadingRegion, ReadingRegionKind, ReviewSession,
     },
+    attention::{self, SkimSelection},
     config::ThemeConfig,
-    diff::DiffSet,
+    diff::{DiffSet, FileDiff},
     generated::GeneratedMatcher,
     jj::JjBackend,
     registry::{InstanceInfo, InstanceRegistration},
-    state::{AuthorKind, Channel, ReviewState, ReviewStateTombstones, Salience},
+    review,
+    state::{
+        ActionIntent, AuthorKind, Channel, CommentKind, CommentState, ReviewState,
+        ReviewStateTombstones, Salience,
+    },
     theme::{Rgb, ThemeKind, ThemeSlots},
 };
 
@@ -250,6 +255,237 @@ struct HttpState {
     shutdown: tokio::sync::watch::Receiver<bool>,
     extra_css: Option<Arc<str>>,
     registration: Arc<Mutex<InstanceRegistration>>,
+    actions: tokio::sync::mpsc::Sender<ActionEnvelope>,
+}
+
+#[derive(Debug)]
+struct ActionEnvelope {
+    expected_generation: u64,
+    command: ActionCommand,
+    response: tokio::sync::oneshot::Sender<std::result::Result<ActionResult, ActionError>>,
+}
+
+#[derive(Debug)]
+enum ActionCommand {
+    FileViewed {
+        path: String,
+        viewed: bool,
+    },
+    Acknowledge {
+        selection: SkimSelection,
+    },
+    CommentAdd(CommentAddAction),
+    CommentEdit(CommentEditAction),
+    CommentReply(CommentReplyAction),
+    CommentState {
+        id: String,
+        state: CommentState,
+    },
+    DraftAccept {
+        id: String,
+        body: Option<String>,
+        channel: Option<Channel>,
+    },
+    DraftDiscard {
+        id: String,
+    },
+    Salience {
+        verb: SalienceVerb,
+        target: TargetAction,
+        salience: Option<Salience>,
+        rationale: Option<String>,
+    },
+    Walkthrough {
+        verb: WalkthroughVerb,
+        step_id: Option<String>,
+        part: Option<usize>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SalienceVerb {
+    Set,
+    Clear,
+    Promote,
+    Demote,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WalkthroughVerb {
+    Next,
+    Prev,
+    Goto,
+}
+
+#[derive(Debug, Serialize)]
+struct ActionResult {
+    generation: u64,
+    result: Value,
+}
+
+#[derive(Debug)]
+struct ActionError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ActionError {
+    fn bad(error: impl std::fmt::Display) -> Self {
+        let message = error.to_string();
+        let status = if message.starts_with("unknown ") || message.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        Self { status, message }
+    }
+    fn conflict(current: u64) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: format!("stale action generation; current generation is {current}"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GenerationAction {
+    expected_generation: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileViewedAction {
+    expected_generation: u64,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcknowledgeAction {
+    expected_generation: u64,
+    #[serde(default)]
+    fold_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetAction {
+    path: String,
+    #[serde(default)]
+    line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentAddAction {
+    expected_generation: u64,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    body: String,
+    #[serde(default)]
+    kind: Option<CommentKind>,
+    #[serde(default)]
+    action: Option<ActionIntent>,
+    #[serde(default)]
+    state: Option<CommentState>,
+    #[serde(default)]
+    channel: Option<Channel>,
+    #[serde(default)]
+    source_comment_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentEditAction {
+    expected_generation: u64,
+    id: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    kind: Option<Option<CommentKind>>,
+    #[serde(default, deserialize_with = "deserialize_optional_patch")]
+    action: Option<Option<ActionIntent>>,
+    #[serde(default)]
+    channel: Option<Channel>,
+}
+
+fn deserialize_optional_patch<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentReplyAction {
+    expected_generation: u64,
+    id: String,
+    body: String,
+    #[serde(default)]
+    resolve: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommentStateAction {
+    expected_generation: u64,
+    id: String,
+    state: CommentState,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftAcceptAction {
+    expected_generation: u64,
+    id: String,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    channel: Option<Channel>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdAction {
+    expected_generation: u64,
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SalienceAction {
+    expected_generation: u64,
+    target: TargetAction,
+    #[serde(default)]
+    salience: Option<Salience>,
+    #[serde(default)]
+    rationale: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalkthroughGotoAction {
+    expected_generation: u64,
+    step_id: String,
+    #[serde(default)]
+    part: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -513,6 +749,402 @@ fn publish_projection(state: &HttpState, session: &ReviewSession) {
     let _ = state.events.send(Arc::new(event));
 }
 
+fn session_files(session: &ReviewSession) -> Vec<FileDiff> {
+    session.files.iter().map(|file| file.diff.clone()).collect()
+}
+
+fn active_state_session_index(state: &mut ReviewState, session: &ReviewSession) -> usize {
+    let spec = review::SessionTargetSpec {
+        repo: Some(review::canonical_repo_identity(&session.repo)),
+        base: Some(session.target.base.clone()),
+        revision: Some(session.target.rev.clone()),
+        revset: Some(session.target.to_string()),
+    };
+    let id = review::ensure_session(state, &spec, None).id.clone();
+    state
+        .sessions
+        .iter()
+        .position(|candidate| candidate.id == id)
+        .expect("ensured session exists")
+}
+
+fn inferred_web_channel(
+    session: &ReviewSession,
+    state: &ReviewState,
+    session_id: &str,
+    onboarding_target: bool,
+) -> Channel {
+    let agent_attached = state.comments.iter().any(|comment| {
+        comment.belongs_to_session(session_id) && comment.author.kind == AuthorKind::Agent
+    });
+    review::infer_comment_channel(review::ChannelInferenceContext {
+        onboarding_target,
+        agent_attached,
+        configured_human_name: session.configured_human_name.as_deref(),
+        configured_human_email: session.configured_human_email.as_deref(),
+        target_author_name: session.target_author_name.as_deref(),
+        target_author_email: session.target_author_email.as_deref(),
+        fixed_default: session.comment_default_channel,
+        ..review::ChannelInferenceContext::default()
+    })
+}
+
+fn process_action(
+    expected_generation: u64,
+    command: ActionCommand,
+    session: &mut ReviewSession,
+    state_path: &std::path::Path,
+    baseline: &mut ReviewState,
+    watcher: &mut WebWatcher,
+    http: &HttpState,
+) -> std::result::Result<ActionResult, ActionError> {
+    let current = http
+        .review
+        .read()
+        .map_err(|_| ActionError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "review projection unavailable".into(),
+        })?
+        .generation;
+    if expected_generation != current {
+        return Err(ActionError::conflict(current));
+    }
+
+    let files = session_files(session);
+    let result: Value;
+    match command {
+        ActionCommand::Walkthrough {
+            verb,
+            step_id,
+            part,
+        } => {
+            let destination = match verb {
+                WalkthroughVerb::Next => session.jump_spotlight_with_identity(1),
+                WalkthroughVerb::Prev => session.jump_spotlight_with_identity(-1),
+                WalkthroughVerb::Goto => {
+                    let step_id = step_id.expect("goto has step id");
+                    let index = if let Some(part) = part {
+                        session.spotlight_index_for_identity(&step_id, part)
+                    } else {
+                        session.spotlight_index_for_step(&step_id)
+                    }
+                    .ok_or_else(|| {
+                        ActionError::bad(format!("unknown current walkthrough step `{step_id}`"))
+                    })?;
+                    session.jump_to_spotlight_index(index)
+                }
+            }
+            .ok_or_else(|| ActionError::bad("no current walkthrough spotlight"))?;
+            result = json!({"step_id": destination.0, "part": destination.1});
+        }
+        command => {
+            let mut state = session.to_state();
+            let session_index = active_state_session_index(&mut state, session);
+            match command {
+                ActionCommand::FileViewed { path, viewed } => {
+                    let file = files.iter().find(|file| file.path == path).ok_or_else(|| {
+                        ActionError::bad(format!("unknown current file `{path}`"))
+                    })?;
+                    review::set_file_viewed(&mut state, file, viewed);
+                    result =
+                        json!({"path": path, "viewed": viewed, "fingerprint": file.fingerprint});
+                }
+                ActionCommand::Acknowledge { selection } => {
+                    let outcome = attention::acknowledge_skim_folds(
+                        &mut state.sessions[session_index],
+                        &files,
+                        &selection,
+                    )
+                    .map_err(ActionError::bad)?;
+                    attention::apply_whole_file_viewed_effects(
+                        &mut state,
+                        &files,
+                        &outcome.whole_files_viewed,
+                    );
+                    result = serde_json::to_value(outcome).expect("acknowledgement serializes");
+                }
+                ActionCommand::CommentAdd(action) => {
+                    let source_id = action
+                        .source_comment_id
+                        .as_deref()
+                        .map(|source| review::resolve_comment_id(&state.comments, source))
+                        .transpose()
+                        .map_err(ActionError::bad)?;
+                    let source = source_id.as_deref().map(|source_id| {
+                        state
+                            .comments
+                            .iter()
+                            .find(|comment| comment.id == source_id)
+                            .expect("resolved source exists")
+                            .clone()
+                    });
+                    if let Some(source) = &source {
+                        if !source.belongs_to_session(&state.sessions[session_index].id) {
+                            return Err(ActionError::bad(
+                                "source comment belongs to another review session",
+                            ));
+                        }
+                        if source.author.kind != AuthorKind::Agent
+                            || source.channel != Channel::Onboarding
+                        {
+                            return Err(ActionError::bad(
+                                "source comment is not an agent onboarding annotation",
+                            ));
+                        }
+                    }
+                    let path = source
+                        .as_ref()
+                        .and_then(|source| source.path.clone())
+                        .or(action.path);
+                    let line = source
+                        .as_ref()
+                        .and_then(|source| source.line)
+                        .or(action.line);
+                    let end_line = source
+                        .as_ref()
+                        .and_then(|source| source.end_line)
+                        .or(action.end_line);
+                    if path.is_none() && (line.is_some() || end_line.is_some()) {
+                        return Err(ActionError::bad("comment line requires path"));
+                    }
+                    if line.is_none() && end_line.is_some() {
+                        return Err(ActionError::bad("comment end_line requires line"));
+                    }
+                    let anchor = match source.as_ref().and_then(|source| source.anchor.clone()) {
+                        Some(anchor) => Some(anchor),
+                        None => match path.as_deref() {
+                            Some(path) => {
+                                let file = files.iter().find(|file| file.path == path).ok_or_else(
+                                    || ActionError::bad(format!("unknown current file `{path}`")),
+                                )?;
+                                crate::anchor::comment_anchor_for_file_diff(file, line, end_line)
+                            }
+                            None => None,
+                        },
+                    };
+                    let onboarding_target = source.is_some();
+                    let channel = action.channel.unwrap_or_else(|| {
+                        inferred_web_channel(
+                            session,
+                            &state,
+                            &state.sessions[session_index].id,
+                            onboarding_target,
+                        )
+                    });
+                    let requested_state = action.state.unwrap_or(session.comment_initial_state);
+                    let comment_state =
+                        if requested_state == CommentState::Todo && !channel.permits_todo() {
+                            CommentState::Draft
+                        } else {
+                            requested_state
+                        };
+                    let snapshot = crate::provenance::SnapshotEvidence::capture(
+                        Utc::now(),
+                        state.sessions[session_index].id.clone(),
+                        state.sessions[session_index].target.clone(),
+                        files.iter(),
+                    );
+                    let observation =
+                        crate::provenance::CommentObservation::new(snapshot, anchor.clone());
+                    let new = review::NewComment {
+                        session_id: state.sessions[session_index].id.clone(),
+                        path,
+                        line,
+                        end_line,
+                        anchor,
+                        observation: Some(observation),
+                        body: action.body,
+                        kind: action.kind,
+                        action: action.action,
+                        state: comment_state,
+                        author: session.human_identity.clone(),
+                        channel,
+                    };
+                    let comment = review::add_comment(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        new,
+                    )
+                    .map_err(ActionError::bad)?;
+                    if let Some(source_id) = source_id {
+                        state
+                            .comments
+                            .iter_mut()
+                            .find(|saved| saved.id == comment.id)
+                            .expect("new comment exists")
+                            .source_comment_id = Some(source_id);
+                    }
+                    result = serde_json::to_value(
+                        state
+                            .comments
+                            .iter()
+                            .find(|saved| saved.id == comment.id)
+                            .expect("new comment exists"),
+                    )
+                    .expect("comment serializes");
+                }
+                ActionCommand::CommentEdit(action) => {
+                    let comment = review::edit_comment(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        &action.id,
+                        review::CommentEdits {
+                            body: action.body,
+                            kind: action.kind,
+                            action: action.action,
+                            channel: action.channel,
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = serde_json::to_value(comment).expect("comment serializes");
+                }
+                ActionCommand::CommentReply(action) => {
+                    let snapshot = crate::provenance::SnapshotEvidence::capture(
+                        Utc::now(),
+                        state.sessions[session_index].id.clone(),
+                        state.sessions[session_index].target.clone(),
+                        files.iter(),
+                    );
+                    let comment = review::reply_and_maybe_resolve_comment(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        &action.id,
+                        action.body,
+                        session.human_identity.clone(),
+                        action.resolve,
+                        snapshot,
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = serde_json::to_value(comment).expect("comment serializes");
+                }
+                ActionCommand::CommentState { id, state: next } => {
+                    let comment = review::set_comment_state(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        &id,
+                        next,
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = serde_json::to_value(comment).expect("comment serializes");
+                }
+                ActionCommand::DraftAccept { id, body, channel } => {
+                    let inferred = channel.unwrap_or_else(|| {
+                        inferred_web_channel(
+                            session,
+                            &state,
+                            &state.sessions[session_index].id,
+                            true,
+                        )
+                    });
+                    let comment = review::accept_agent_draft(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        &id,
+                        body,
+                        inferred,
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = serde_json::to_value(comment).expect("comment serializes");
+                }
+                ActionCommand::DraftDiscard { id } => {
+                    let comment = review::discard_agent_draft(
+                        &mut state.sessions[session_index],
+                        &mut state.comments,
+                        &id,
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = json!({"discarded": comment.id});
+                }
+                ActionCommand::Salience {
+                    verb,
+                    target,
+                    salience,
+                    rationale,
+                } => {
+                    let file = files
+                        .iter()
+                        .find(|file| file.path == target.path)
+                        .ok_or_else(|| {
+                            ActionError::bad(format!("unknown current file `{}`", target.path))
+                        })?;
+                    let durable_target = attention::target_for_file_diff(
+                        file,
+                        &target.path,
+                        target.line,
+                        target.end_line,
+                    )
+                    .map_err(ActionError::bad)?;
+                    result = match verb {
+                        SalienceVerb::Clear => {
+                            json!({"cleared": attention::clear_human_attention(&mut state.sessions[session_index], &durable_target)})
+                        }
+                        SalienceVerb::Set => serde_json::to_value(
+                            attention::set_human_attention(
+                                &mut state.sessions[session_index],
+                                durable_target,
+                                salience.ok_or_else(|| {
+                                    ActionError::bad("salience-set requires salience")
+                                })?,
+                                rationale,
+                            )
+                            .map_err(ActionError::bad)?,
+                        )
+                        .expect("attention serializes"),
+                        SalienceVerb::Promote => serde_json::to_value(
+                            attention::promote_human_attention(
+                                &mut state.sessions[session_index],
+                                durable_target,
+                                rationale,
+                                &files,
+                            )
+                            .map_err(ActionError::bad)?,
+                        )
+                        .expect("attention serializes"),
+                        SalienceVerb::Demote => serde_json::to_value(
+                            attention::demote_human_attention(
+                                &mut state.sessions[session_index],
+                                durable_target,
+                                rationale,
+                                &files,
+                            )
+                            .map_err(ActionError::bad)?,
+                        )
+                        .expect("attention serializes"),
+                    };
+                }
+                ActionCommand::Walkthrough { .. } => unreachable!(),
+            }
+            session.apply_review_state(state);
+        }
+    }
+
+    let local = session.to_state();
+    let merged = review::merge_live_state_file(
+        state_path,
+        baseline,
+        local,
+        &ReviewStateTombstones::default(),
+    )
+    .map_err(|error| ActionError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        message: format!("failed to save review action: {error}"),
+    })?;
+    session.apply_review_state(merged.clone());
+    *baseline = merged;
+    watcher.state_mtime = file_mtime(state_path);
+    publish_projection(http, session);
+    let generation = http
+        .review
+        .read()
+        .map_err(|_| ActionError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "review projection unavailable".into(),
+        })?
+        .generation;
+    Ok(ActionResult { generation, result })
+}
+
 fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
     let previous_regions = rendered_projection(previous);
     let next_regions = rendered_projection(next);
@@ -691,6 +1323,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     // A watch channel deliberately retains only the newest presenter move.
     // Fast agent driving therefore cannot queue a browser scroll storm.
     let (present_tx, present_rx) = tokio::sync::watch::channel(None);
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(16);
     let (stream_shutdown_tx, stream_shutdown_rx) = tokio::sync::watch::channel(false);
     let token = uuid::Uuid::new_v4().to_string();
     let host = format!("127.0.0.1:{}", address.port());
@@ -717,6 +1350,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
             .transpose()?
             .map(Arc::from),
         registration: Arc::new(Mutex::new(registration)),
+        actions: action_tx,
     };
     let app = router(http_state.clone());
 
@@ -783,6 +1417,18 @@ async fn run_async(mut params: WebParams) -> Result<()> {
                     publish_projection(&http_state, &params.session);
                 }
             }
+            Some(action) = action_rx.recv() => {
+                let result = process_action(
+                    action.expected_generation,
+                    action.command,
+                    &mut params.session,
+                    &params.state_path,
+                    &mut baseline,
+                    &mut watcher,
+                    &http_state,
+                );
+                let _ = action.response.send(result);
+            }
         }
     }
 
@@ -798,6 +1444,23 @@ fn router(state: HttpState) -> Router {
         .route("/", get(shell))
         .route("/events", get(events))
         .route("/interaction", post(interaction))
+        .route("/actions/file-viewed", post(file_viewed))
+        .route("/actions/file-unviewed", post(file_unviewed))
+        .route("/actions/skim-acknowledge", post(skim_acknowledge))
+        .route("/actions/skim-acknowledge-all", post(skim_acknowledge_all))
+        .route("/actions/comment-add", post(comment_add))
+        .route("/actions/comment-edit", post(comment_edit))
+        .route("/actions/comment-reply", post(comment_reply))
+        .route("/actions/comment-state", post(comment_state))
+        .route("/actions/draft-accept", post(draft_accept))
+        .route("/actions/draft-discard", post(draft_discard))
+        .route("/actions/salience-set", post(salience_set))
+        .route("/actions/salience-clear", post(salience_clear))
+        .route("/actions/salience-promote", post(salience_promote))
+        .route("/actions/salience-demote", post(salience_demote))
+        .route("/actions/walkthrough-next", post(walkthrough_next))
+        .route("/actions/walkthrough-prev", post(walkthrough_prev))
+        .route("/actions/walkthrough-goto", post(walkthrough_goto))
         .route("/assets/app.css", get(stylesheet))
         .route("/assets/app.js", get(script))
         .route("/fragment/{region}", get(fragment))
@@ -956,6 +1619,317 @@ fn lookup_fragment<'a>(
     review
         .region(region)
         .ok_or((StatusCode::NOT_FOUND, "unknown review region"))
+}
+
+fn json_bad(rejection: axum::extract::rejection::JsonRejection) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        format!("invalid action JSON: {rejection}"),
+    )
+        .into_response()
+}
+
+async fn submit_action(
+    state: HttpState,
+    expected_generation: u64,
+    command: ActionCommand,
+) -> Response {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if state
+        .actions
+        .send(ActionEnvelope {
+            expected_generation,
+            command,
+            response: sender,
+        })
+        .await
+        .is_err()
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "review action service unavailable",
+        )
+            .into_response();
+    }
+    match receiver.await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(error)) => (error.status, error.message).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "review action service stopped",
+        )
+            .into_response(),
+    }
+}
+
+async fn file_viewed(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<FileViewedAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::FileViewed {
+            path: payload.path,
+            viewed: true,
+        },
+    )
+    .await
+}
+
+async fn file_unviewed(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<FileViewedAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::FileViewed {
+            path: payload.path,
+            viewed: false,
+        },
+    )
+    .await
+}
+
+async fn skim_acknowledge(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<AcknowledgeAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    let selection = match (payload.fold_id, payload.path) {
+        (Some(id), None) => SkimSelection::StableId(id),
+        (None, Some(path)) => SkimSelection::Target {
+            path,
+            line: payload.line,
+            end_line: payload.end_line,
+        },
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "provide exactly one of fold_id or path",
+            )
+                .into_response();
+        }
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Acknowledge { selection },
+    )
+    .await
+}
+
+async fn skim_acknowledge_all(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<GenerationAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Acknowledge {
+            selection: SkimSelection::AllCurrent,
+        },
+    )
+    .await
+}
+
+async fn comment_add(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<CommentAddAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state.clone(),
+        payload.expected_generation,
+        ActionCommand::CommentAdd(payload),
+    )
+    .await
+}
+async fn comment_edit(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<CommentEditAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state.clone(),
+        payload.expected_generation,
+        ActionCommand::CommentEdit(payload),
+    )
+    .await
+}
+async fn comment_reply(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<CommentReplyAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state.clone(),
+        payload.expected_generation,
+        ActionCommand::CommentReply(payload),
+    )
+    .await
+}
+async fn comment_state(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<CommentStateAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::CommentState {
+            id: payload.id,
+            state: payload.state,
+        },
+    )
+    .await
+}
+async fn draft_accept(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<DraftAcceptAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::DraftAccept {
+            id: payload.id,
+            body: payload.body,
+            channel: payload.channel,
+        },
+    )
+    .await
+}
+async fn draft_discard(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<IdAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::DraftDiscard { id: payload.id },
+    )
+    .await
+}
+async fn salience_action(
+    state: HttpState,
+    payload: SalienceAction,
+    verb: SalienceVerb,
+) -> Response {
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Salience {
+            verb,
+            target: payload.target,
+            salience: payload.salience,
+            rationale: payload.rationale,
+        },
+    )
+    .await
+}
+macro_rules! salience_handler {
+    ($name:ident, $verb:expr) => {
+        async fn $name(
+            State(state): State<HttpState>,
+            payload: std::result::Result<
+                Json<SalienceAction>,
+                axum::extract::rejection::JsonRejection,
+            >,
+        ) -> Response {
+            let Ok(Json(payload)) = payload else {
+                return json_bad(payload.unwrap_err());
+            };
+            salience_action(state, payload, $verb).await
+        }
+    };
+}
+salience_handler!(salience_set, SalienceVerb::Set);
+salience_handler!(salience_clear, SalienceVerb::Clear);
+salience_handler!(salience_promote, SalienceVerb::Promote);
+salience_handler!(salience_demote, SalienceVerb::Demote);
+
+async fn walkthrough_next(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<GenerationAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Walkthrough {
+            verb: WalkthroughVerb::Next,
+            step_id: None,
+            part: None,
+        },
+    )
+    .await
+}
+async fn walkthrough_prev(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<GenerationAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Walkthrough {
+            verb: WalkthroughVerb::Prev,
+            step_id: None,
+            part: None,
+        },
+    )
+    .await
+}
+async fn walkthrough_goto(
+    State(state): State<HttpState>,
+    payload: std::result::Result<
+        Json<WalkthroughGotoAction>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Walkthrough {
+            verb: WalkthroughVerb::Goto,
+            step_id: Some(payload.step_id),
+            part: payload.part,
+        },
+    )
+    .await
 }
 
 async fn extra_stylesheet(State(state): State<HttpState>) -> Response {
@@ -1122,7 +2096,7 @@ fn render_shell(state: &HttpState) -> String {
     out.push_str(&render_file_tree_html(review));
     out.push_str("<main>");
     out.push_str(&render_overview_with_target(review, &state.target));
-    out.push_str("<section id=\"review-stream\" class=\"review-stream\" aria-label=\"Shared review stream\"><div class=\"stream-heading\"><div><p class=\"eyebrow\">Shared projection</p><h2>Review stream</h2></div><p class=\"guided-only\">Skims stay compact; spotlights carry narration.</p><p class=\"full-only\">Every file and line is visible. Salience remains in the margin.</p></div>");
+    out.push_str("<section id=\"review-stream\" class=\"review-stream\" aria-label=\"Shared review stream\"><div class=\"stream-heading\"><div><p class=\"eyebrow\">Shared projection</p><h2>Review stream</h2></div><p class=\"guided-only\">Skims stay compact; spotlights carry narration.</p><p class=\"full-only\">Every file and line is visible. Salience remains in the margin.</p></div><form id=\"comment-composer\" class=\"comment-composer\"><label>Comment on selected row (or general)<textarea name=\"body\" required placeholder=\"Leave durable review feedback…\"></textarea></label><label>Channel <select name=\"channel\"><option value=\"\">Infer safely</option><option value=\"delegation\">Delegation</option><option value=\"collaboration\">Collaboration</option><option value=\"note\">Private note</option><option value=\"onboarding\">Onboarding</option></select></label><button type=\"submit\">Save comment</button><span class=\"action-status\" role=\"status\"></span></form>");
     for (index, region) in projection.regions.iter().enumerate() {
         if index < INITIAL_REGION_WINDOW || matches!(region.kind, ReadingRegionKind::Chapter(_)) {
             out.push_str(&render_region(region, false, RenderMode::Guided));
@@ -1219,7 +2193,7 @@ fn render_overview_with_target(review: &WebReview, target: &str) -> String {
         out.push_str("</ol></nav>");
     }
     if projection.has_walkthrough {
-        out.push_str("<a class=\"primary-action\" href=\"#review-stream\">Start guided tour</a>");
+        out.push_str("<div class=\"walkthrough-actions\"><button type=\"button\" data-action=\"walkthrough-prev\">Previous spotlight</button><button class=\"primary-action\" type=\"button\" data-action=\"walkthrough-next\">Next spotlight</button></div>");
     }
     out.push_str("</section>");
     out
@@ -1250,7 +2224,9 @@ fn render_file_tree_html(review: &WebReview) -> String {
     for file in &review.files {
         out.push_str("<li data-search=\"");
         escape_to(&mut out, &file.path.to_lowercase());
-        out.push_str("\"><label><input type=\"checkbox\" disabled ");
+        out.push_str("\"><label><input type=\"checkbox\" data-action=\"file-viewed\" data-path=\"");
+        escape_to(&mut out, &file.path);
+        out.push_str("\" ");
         if file.viewed {
             out.push_str("checked ");
         }
@@ -1325,7 +2301,15 @@ fn render_region(region: &ReadingRegion, fragment: bool, mode: RenderMode) -> St
         ReadingRegionKind::File { path, .. } => {
             out.push_str("<header class=\"file-header\"><h3>");
             escape_to(&mut out, path);
-            out.push_str("</h3></header><div class=\"diff-table\">");
+            out.push_str("</h3><div class=\"region-actions\"><button type=\"button\" data-action=\"salience-promote\" data-path=\"");
+            escape_to(&mut out, path);
+            out.push_str("\">Promote</button><button type=\"button\" data-action=\"salience-demote\" data-path=\"");
+            escape_to(&mut out, path);
+            out.push_str("\">Demote</button><button type=\"button\" data-action=\"salience-set\" data-salience=\"spotlight\" data-path=\"");
+            escape_to(&mut out, path);
+            out.push_str("\">Spotlight</button><button type=\"button\" data-action=\"salience-clear\" data-path=\"");
+            escape_to(&mut out, path);
+            out.push_str("\">Clear override</button><button type=\"button\" data-action=\"context-toggle\" aria-expanded=\"true\">Collapse context</button></div></header><div class=\"diff-table\">");
             for row in &region.rows {
                 render_diff_row(&mut out, row);
             }
@@ -1333,7 +2317,7 @@ fn render_region(region: &ReadingRegion, fragment: bool, mode: RenderMode) -> St
         }
         ReadingRegionKind::Skim(fold) => {
             out.push_str(
-                "<div class=\"guided-only skim-fold\"><span aria-hidden=\"true\">⌄</span><strong>",
+                "<div class=\"guided-only skim-fold\"><button type=\"button\" data-action=\"fold-toggle\" aria-expanded=\"false\">⌄</button><strong>",
             );
             out.push_str(&fold.files.len().to_string());
             out.push_str(if fold.files.len() == 1 {
@@ -1350,7 +2334,15 @@ fn render_region(region: &ReadingRegion, fragment: bool, mode: RenderMode) -> St
             if fold.acknowledged {
                 out.push_str(" · ✓ acknowledged");
             }
-            out.push_str("</small></div><div class=\"full-only\">");
+            out.push_str(
+                "</small><button type=\"button\" data-action=\"skim-acknowledge\" data-fold-id=\"",
+            );
+            escape_to(&mut out, &fold.id);
+            out.push('"');
+            if fold.acknowledged {
+                out.push_str(" disabled");
+            }
+            out.push_str(">Acknowledge</button></div><div class=\"full-only\">");
             if mode == RenderMode::Full {
                 out.push_str("<header class=\"file-header\"><h3>");
                 escape_to(&mut out, &fold.files.join(", "));
@@ -1463,6 +2455,9 @@ fn render_annotation(out: &mut String, annotation: &ReadingAnnotation) {
     out.push_str("</span>");
     match &annotation.source {
         ReadingAnnotationSource::Comment(comment) => {
+            out.push_str("<span hidden data-comment-id=\"");
+            escape_to(out, &comment.id);
+            out.push_str("\"></span>");
             out.push_str("<span>");
             escape_to(out, author_label(comment.author.kind));
             out.push(':');
@@ -1488,6 +2483,52 @@ fn render_annotation(out: &mut String, annotation: &ReadingAnnotation) {
                 escape_to(out, &reply.body);
                 out.push_str("</p></div>");
             }
+            out.push_str("<form class=\"reply-form\" data-comment-id=\"");
+            escape_to(out, &comment.id);
+            out.push_str("\"><textarea name=\"body\" required placeholder=\"Reply…\"></textarea><button type=\"submit\">Reply</button></form><div class=\"comment-actions\">");
+            if comment.author.kind == AuthorKind::Agent && comment.channel == Channel::Onboarding {
+                out.push_str(
+                    "<button type=\"button\" data-action=\"comment-request\" data-comment-id=\"",
+                );
+                escape_to(out, &comment.id);
+                out.push_str("\">Ask agent about this</button>");
+            }
+            if comment.author.kind == AuthorKind::Agent
+                && comment.state == CommentState::Draft
+                && comment.channel == Channel::Onboarding
+            {
+                out.push_str(
+                    "<button type=\"button\" data-action=\"draft-accept\" data-comment-id=\"",
+                );
+                escape_to(out, &comment.id);
+                out.push_str("\">Accept</button><button type=\"button\" data-action=\"draft-discard\" data-comment-id=\"");
+                escape_to(out, &comment.id);
+                out.push_str("\">Discard</button>");
+            } else {
+                out.push_str(
+                    "<button type=\"button\" data-action=\"comment-edit\" data-comment-id=\"",
+                );
+                escape_to(out, &comment.id);
+                out.push_str("\" data-comment-body=\"");
+                escape_to(out, &comment.body);
+                out.push_str("\">Edit</button>");
+                out.push_str("<button type=\"button\" data-action=\"comment-state\" data-state=\"");
+                out.push_str(if comment.state == CommentState::Resolved {
+                    "todo"
+                } else {
+                    "resolved"
+                });
+                out.push_str("\" data-comment-id=\"");
+                escape_to(out, &comment.id);
+                out.push_str("\">");
+                out.push_str(if comment.state == CommentState::Resolved {
+                    "Reopen"
+                } else {
+                    "Resolve"
+                });
+                out.push_str("</button>");
+            }
+            out.push_str("</div>");
         }
         ReadingAnnotationSource::Walkthrough {
             step,
@@ -2348,6 +3389,7 @@ mod tests {
             },
         )
         .unwrap();
+        let (actions, _receiver) = tokio::sync::mpsc::channel(1);
         HttpState {
             token: Arc::from("safe-token"),
             expected_host: Arc::from("127.0.0.1:8123"),
@@ -2364,6 +3406,7 @@ mod tests {
             shutdown: tokio::sync::watch::channel(false).1,
             extra_css: None,
             registration: Arc::new(Mutex::new(registration)),
+            actions,
         }
     }
 
@@ -2653,6 +3696,210 @@ mod tests {
     }
 
     #[test]
+    fn action_payloads_are_strict_and_require_generation() {
+        assert!(
+            serde_json::from_str::<FileViewedAction>(r#"{"expected_generation":4,"path":"a.rs"}"#)
+                .is_ok()
+        );
+        assert!(serde_json::from_str::<FileViewedAction>(r#"{"path":"a.rs"}"#).is_err());
+        assert!(
+            serde_json::from_str::<FileViewedAction>(
+                r#"{"expected_generation":4,"path":"a.rs","surprise":true}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<SalienceAction>(
+                r#"{"expected_generation":4,"target":{"path":"a.rs","extra":1}}"#
+            )
+            .is_err()
+        );
+        let edit: CommentEditAction = serde_json::from_str(
+            r#"{"expected_generation":4,"id":"comment","kind":null,"action":"fix"}"#,
+        )
+        .unwrap();
+        assert_eq!(edit.kind, Some(None));
+        assert_eq!(edit.action, Some(Some(ActionIntent::Fix)));
+    }
+
+    fn action_fixture() -> (
+        ReviewSession,
+        ReviewState,
+        tempfile::TempDir,
+        WebWatcher,
+        HttpState,
+    ) {
+        let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let session = ReviewSession::new(
+            ".".into(),
+            ReviewTarget::trunk_to_current(),
+            DiffSet::parse(raw).unwrap(),
+            ReviewState::default(),
+        );
+        let baseline = session.to_state();
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        baseline.save(&state_path).unwrap();
+        let watcher = WebWatcher {
+            state_path,
+            overlay_path: dir.path().join("agent.json"),
+            state_mtime: None,
+            overlay_mtime: None,
+            repo_fingerprint: None,
+            last_repo_poll: None,
+            jj: Box::new(WatchJj {
+                counts: Arc::new(JjCounts::default()),
+                fingerprint: Arc::new(Mutex::new(String::new())),
+                diff: raw.into(),
+            }),
+            ignore_globs: Vec::new(),
+            generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+        };
+        let http = http_state(WebReview::from_session(&session));
+        (session, baseline, dir, watcher, http)
+    }
+
+    #[test]
+    fn action_generation_is_preconditioned_and_merge_save_preserves_concurrent_state() {
+        let (mut session, mut baseline, _dir, mut watcher, http) = action_fixture();
+        let generation = http.review.read().unwrap().generation;
+        let stale = process_action(
+            generation.saturating_add(1),
+            ActionCommand::FileViewed {
+                path: "a.rs".into(),
+                viewed: true,
+            },
+            &mut session,
+            &watcher.state_path.clone(),
+            &mut baseline,
+            &mut watcher,
+            &http,
+        )
+        .unwrap_err();
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+
+        let mut external = ReviewState::load_or_default(&watcher.state_path).unwrap();
+        external.comments.push(Comment {
+            id: "from-tui".into(),
+            body: "concurrent".into(),
+            ..Comment::default()
+        });
+        external.save(&watcher.state_path).unwrap();
+        let state_path = watcher.state_path.clone();
+        let result = process_action(
+            generation,
+            ActionCommand::FileViewed {
+                path: "a.rs".into(),
+                viewed: true,
+            },
+            &mut session,
+            &state_path,
+            &mut baseline,
+            &mut watcher,
+            &http,
+        )
+        .unwrap();
+        assert!(result.generation > generation);
+        let saved = ReviewState::load_or_default(&state_path).unwrap();
+        assert!(saved.files["a.rs"].viewed);
+        assert!(
+            saved
+                .comments
+                .iter()
+                .any(|comment| comment.id == "from-tui")
+        );
+    }
+
+    #[test]
+    fn onboarding_request_infers_delegation_and_preserves_exact_source_location() {
+        let (mut session, _baseline, _dir, mut watcher, _http) = action_fixture();
+        let mut seeded = session.to_state();
+        let index = active_state_session_index(&mut seeded, &session);
+        let file = session.files[0].diff.clone();
+        let anchor = crate::anchor::comment_anchor_for_file_diff(&file, Some(1), None);
+        seeded.comments.push(Comment {
+            id: "onboarding-source".into(),
+            session_id: Some(seeded.sessions[index].id.clone()),
+            path: Some("a.rs".into()),
+            line: Some(1),
+            anchor,
+            body: "Agent explanation".into(),
+            state: CommentState::Resolved,
+            author: crate::state::Identity::agent(),
+            channel: Channel::Onboarding,
+            ..Comment::default()
+        });
+        seeded.save(&watcher.state_path).unwrap();
+        session.apply_review_state(seeded.clone());
+        let mut baseline = seeded;
+        let http = http_state(WebReview::from_session(&session));
+        let generation = http.review.read().unwrap().generation;
+        let state_path = watcher.state_path.clone();
+        let action = CommentAddAction {
+            expected_generation: generation,
+            path: None,
+            line: None,
+            end_line: None,
+            body: "Please explain the invariant".into(),
+            kind: None,
+            action: None,
+            state: None,
+            channel: None,
+            source_comment_id: Some("onboarding-source".into()),
+        };
+        let result = process_action(
+            generation,
+            ActionCommand::CommentAdd(action),
+            &mut session,
+            &state_path,
+            &mut baseline,
+            &mut watcher,
+            &http,
+        )
+        .unwrap();
+        assert_eq!(result.result["source_comment_id"], "onboarding-source");
+        assert_eq!(result.result["path"], "a.rs");
+        assert_eq!(result.result["line"], 1);
+        assert_eq!(result.result["channel"], "delegation");
+        assert_eq!(result.result["author"]["kind"], "human");
+    }
+
+    #[test]
+    fn browser_action_contract_has_optimism_busy_rollback_and_text_preservation() {
+        for phrase in [
+            "expected_generation: generation",
+            "pendingActions.has(key)",
+            "reportInteraction(\"comment editor\")",
+            "rollback()",
+            "editorDrafts",
+            "generation < returnedGeneration",
+        ] {
+            assert!(
+                COMPONENT_JS.contains(phrase),
+                "missing browser contract: {phrase}"
+            );
+        }
+        for action in [
+            "file-viewed",
+            "skim-acknowledge",
+            "comment-add",
+            "comment-edit",
+            "comment-reply",
+            "comment-state",
+            "draft-accept",
+            "draft-discard",
+            "salience-promote",
+            "salience-demote",
+            "walkthrough-next",
+        ] {
+            assert!(
+                COMPONENT_JS.contains(action),
+                "missing browser action {action}"
+            );
+        }
+    }
+
+    #[test]
     fn sse_uses_the_same_host_origin_and_token_guard() {
         // Route-independent validation is intentional: /events and assets
         // cannot bypass the middleware protecting the shell.
@@ -2710,12 +3957,12 @@ mod tests {
         assert!(html.contains("Skim folds"));
         assert!(html.contains("Coverage"));
         assert!(html.contains("Core behavior"));
-        assert!(html.contains("Start guided tour"));
+        assert!(html.contains("Next spotlight"));
         assert!(html.contains("id=\"mode-switch\""));
         assert!(html.contains("Full review"));
         assert!(html.contains("id=\"review-search\""));
         assert!(html.contains("class=\"file-tree full-only\""));
-        assert!(html.contains("type=\"checkbox\" disabled"));
+        assert!(html.contains("data-action=\"file-viewed\""));
         assert!(html.contains("generated churn"));
         assert!(!html.contains("version = 99"));
         assert!(html.contains("data-full-loaded=\"false\""));

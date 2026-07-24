@@ -2,7 +2,7 @@
 html { color-scheme: light dark; background: var(--background); color: var(--foreground); font-family: ui-sans-serif, system-ui, sans-serif; }
 body { margin: 0; min-width: 20rem; }
 a { color: var(--accent); }
-button, input { font: inherit; color: inherit; }
+button, input, textarea, select { font: inherit; color: inherit; }
 button { border: 1px solid var(--subtle); border-radius: .5rem; background: var(--surface); padding: .55rem .8rem; cursor: pointer; }
 code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .eyebrow { margin: 0 0 .35rem; color: var(--muted); font-size: .72rem; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
@@ -79,6 +79,15 @@ body[data-mode="guided"] .skim-region.present-expanded .full-only { display: blo
 .target { color: var(--detail); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .reply { margin-top: .7rem; padding: .65rem; border-left: .18rem solid var(--subtle); }
 .annotation details { margin-top: .6rem; }
+.comment-composer, .reply-form { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin: .8rem 0; padding: .8rem; border: 1px solid var(--subtle); border-radius: .65rem; background: var(--surface); }
+.comment-composer label { flex: 1 1 16rem; color: var(--muted); font-size: .78rem; }
+.comment-composer textarea, .reply-form textarea { display: block; width: 100%; min-height: 4rem; margin-top: .2rem; padding: .5rem; border: 1px solid var(--subtle); border-radius: .4rem; background: var(--background); resize: vertical; }
+.reply-form textarea { flex: 1 1 16rem; min-height: 2.8rem; }
+.comment-actions, .region-actions, .walkthrough-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+.action-pending { opacity: .62; pointer-events: none; }
+.action-conflict { outline: 2px solid var(--warning); }
+.action-status { color: var(--muted); }
+.context-collapsed .diff-row.context { display: none; }
 .annotation pre { overflow: auto; padding: .7rem; background: var(--surface); white-space: pre-wrap; }
 .region-skeleton { min-height: 10rem; padding: 1rem; }
 .skeleton-label { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); }

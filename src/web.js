@@ -27,6 +27,8 @@
   let presenterRows = [];
   let suppressScroll = false;
   let reportTimer;
+  const pendingActions = new Set();
+  let returnedGeneration = generation;
 
   const setMode = (next, human = false) => {
     const full = next === "full";
@@ -156,6 +158,207 @@
     }
     const file = event.target.closest?.("#file-tree a");
     if (file) reportInteraction(null, { path: file.textContent.trim(), old_line: null, new_line: null, hunk_header: null, pane: "files" });
+  });
+
+  const actionStatus = (message, error = false) => {
+    const status = document.querySelector(".action-status");
+    if (status) {
+      status.textContent = message || "";
+      status.classList.toggle("action-error", error);
+    }
+  };
+
+  const postAction = async (verb, payload, owner, optimistic = () => () => {}) => {
+    const key = `${verb}:${payload.id || payload.path || payload.fold_id || "one"}`;
+    if (pendingActions.has(key)) return null;
+    pendingActions.add(key);
+    const rollback = optimistic() || (() => {});
+    owner?.classList.add("action-pending");
+    actionStatus("Saving…");
+    try {
+      const response = await fetch(`/actions/${verb}?${new URLSearchParams({ token })}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ expected_generation: generation, ...payload }),
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        rollback();
+        owner?.classList.toggle("action-conflict", response.status === 409);
+        actionStatus(message, true);
+        if (response.status === 409) setTimeout(reload, 350);
+        return null;
+      }
+      const value = await response.json();
+      returnedGeneration = Math.max(returnedGeneration, Number(value.generation) || generation);
+      actionStatus("Saved");
+      if (returnedGeneration > generation) setTimeout(() => { if (generation < returnedGeneration) reload(); }, 1500);
+      return value.result;
+    } catch (error) {
+      rollback();
+      actionStatus(`Could not save: ${error.message}`, true);
+      return null;
+    } finally {
+      pendingActions.delete(key);
+      owner?.classList.remove("action-pending");
+    }
+  };
+
+  const selectedTarget = (fallbackPath = null) => {
+    const focus = visibleFocus();
+    const path = fallbackPath && focus.path !== fallbackPath ? fallbackPath : (focus.path || fallbackPath);
+    const line = focus.new_line || focus.old_line;
+    return path ? { path, ...((!fallbackPath || focus.path === fallbackPath) && line ? { line } : {}) } : null;
+  };
+
+  document.addEventListener("change", (event) => {
+    const checkbox = event.target.closest?.('[data-action="file-viewed"]');
+    if (!checkbox) return;
+    const viewed = checkbox.checked;
+    postAction(viewed ? "file-viewed" : "file-unviewed", { path: checkbox.dataset.path }, checkbox.closest("li"), () => () => { checkbox.checked = !viewed; });
+  });
+
+  document.addEventListener("submit", async (event) => {
+    const composer = event.target.closest?.("#comment-composer");
+    const reply = event.target.closest?.(".reply-form");
+    const editor = event.target.closest?.(".comment-edit-form");
+    if (!composer && !reply && !editor) return;
+    event.preventDefault();
+    const data = new FormData(event.target);
+    const bodyText = String(data.get("body") || "");
+    if (!bodyText.trim()) return;
+    reportInteraction("comment editor");
+    let result;
+    if (composer) {
+      const target = selectedTarget();
+      const channel = String(data.get("channel") || "");
+      const sourceCommentId = composer.dataset.sourceCommentId;
+      result = await postAction("comment-add", { ...(target || {}), body: bodyText, ...(channel ? { channel } : {}), ...(sourceCommentId ? { source_comment_id: sourceCommentId } : {}) }, composer);
+    } else if (reply) {
+      result = await postAction("comment-reply", { id: reply.dataset.commentId, body: bodyText }, reply);
+    } else {
+      result = await postAction("comment-edit", { id: editor.dataset.commentId, body: bodyText }, editor);
+    }
+    if (result) {
+      event.target.reset();
+      if (composer) {
+        delete composer.dataset.sourceCommentId;
+        composer.querySelector("textarea").placeholder = "Leave durable review feedback…";
+      }
+      if (editor) editor.remove();
+    }
+    reportInteraction(null);
+  });
+
+  document.addEventListener("focusin", (event) => {
+    if (event.target.closest?.("#comment-composer,.reply-form,.comment-edit-form")) reportInteraction("comment editor");
+  });
+  document.addEventListener("focusout", (event) => {
+    if (event.target.closest?.("#comment-composer,.reply-form,.comment-edit-form")) setTimeout(() => {
+      if (!document.activeElement?.closest?.("#comment-composer,.reply-form,.comment-edit-form")) reportInteraction(null);
+    }, 0);
+  });
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("button[data-action]");
+    if (!button) return;
+    const action = button.dataset.action;
+    if (action === "fold-toggle") {
+      const region = button.closest(".skim-region");
+      const expanded = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", String(expanded));
+      button.textContent = expanded ? "⌃" : "⌄";
+      if (expanded) {
+        const loaded = await load(region, "full");
+        loaded.classList.add("present-expanded");
+      } else region.classList.remove("present-expanded");
+      return;
+    }
+    if (action === "context-toggle") {
+      const region = button.closest(".file-region");
+      const collapsed = region.classList.toggle("context-collapsed");
+      button.setAttribute("aria-expanded", String(!collapsed));
+      button.textContent = collapsed ? "Expand context" : "Collapse context";
+      return;
+    }
+    if (action === "comment-edit") {
+      const article = button.closest(".annotation");
+      if (article.querySelector(".comment-edit-form")) return;
+      const form = document.createElement("form");
+      form.className = "comment-edit-form reply-form";
+      form.dataset.commentId = button.dataset.commentId;
+      const textarea = document.createElement("textarea");
+      textarea.name = "body";
+      textarea.required = true;
+      textarea.value = button.dataset.commentBody || "";
+      const save = document.createElement("button");
+      save.type = "submit";
+      save.textContent = "Save edit";
+      form.append(textarea, save);
+      article.append(form);
+      textarea.focus();
+      return;
+    }
+    if (action === "comment-request") {
+      const composer = document.querySelector("#comment-composer");
+      composer.dataset.sourceCommentId = button.dataset.commentId;
+      const textarea = composer.querySelector("textarea");
+      textarea.placeholder = "Ask the agent about this onboarding annotation…";
+      composer.scrollIntoView({ block: "center" });
+      textarea.focus();
+      return;
+    }
+    if (action === "skim-acknowledge") {
+      postAction(action, { fold_id: button.dataset.foldId }, button.closest(".skim-region"), () => {
+        const prior = button.textContent;
+        button.disabled = true; button.textContent = "✓ Acknowledged";
+        return () => { button.disabled = false; button.textContent = prior; };
+      });
+      return;
+    }
+    if (action === "comment-state") {
+      const article = button.closest(".annotation");
+      postAction(action, { id: button.dataset.commentId, state: button.dataset.state }, article, () => {
+        const prior = button.textContent; button.textContent = "Saved";
+        return () => { button.textContent = prior; };
+      });
+      return;
+    }
+    if (action === "draft-accept" || action === "draft-discard") {
+      const article = button.closest(".annotation");
+      postAction(action, { id: button.dataset.commentId }, article, () => {
+        article.hidden = true; return () => { article.hidden = false; };
+      });
+      return;
+    }
+    if (["salience-promote", "salience-demote", "salience-set", "salience-clear"].includes(action)) {
+      const target = selectedTarget(button.dataset.path);
+      if (target) postAction(action, { target, ...(button.dataset.salience ? { salience: button.dataset.salience } : {}) }, button.closest(".region"), () => {
+        const row = document.querySelector(".diff-row.web-selected");
+        const owner = row && row.dataset.path === target.path ? row : button.closest(".region");
+        const prior = ["spotlight", "supporting", "skim"].find((name) => owner?.classList.contains(`salience-${name}`));
+        const order = ["skim", "supporting", "spotlight"];
+        let next = button.dataset.salience;
+        if (!next && prior && action === "salience-promote") next = order[Math.min(order.length - 1, order.indexOf(prior) + 1)];
+        if (!next && prior && action === "salience-demote") next = order[Math.max(0, order.indexOf(prior) - 1)];
+        if (next) {
+          order.forEach((name) => owner?.classList.remove(`salience-${name}`));
+          owner?.classList.add(`salience-${next}`);
+        }
+        owner?.classList.add("action-pending");
+        return () => {
+          order.forEach((name) => owner?.classList.remove(`salience-${name}`));
+          if (prior) owner?.classList.add(`salience-${prior}`);
+          owner?.classList.remove("action-pending");
+        };
+      });
+      return;
+    }
+    if (action === "walkthrough-next" || action === "walkthrough-prev") {
+      const destination = await postAction(action, {}, button);
+      if (destination?.step_id) document.querySelector(`[data-step-id="${CSS.escape(destination.step_id)}"]`)?.closest(".annotation")?.scrollIntoView({ block: "center" });
+    }
   });
 
   const clearPresenterTarget = () => {
@@ -298,6 +501,11 @@
       if (!Number.isSafeInteger(update.generation) || update.generation <= generation) return;
       if (!update.full && update.generation !== generation + 1) return reload();
       const activeId = document.activeElement?.id;
+      const editorDrafts = [...document.querySelectorAll(".reply-form,.comment-edit-form")].map((form) => ({
+        id: form.dataset.commentId,
+        edit: form.classList.contains("comment-edit-form"),
+        body: form.querySelector("textarea")?.value || "",
+      })).filter((draft) => draft.body);
       const anchor = [...document.querySelectorAll("[data-region]")].find((node) => node.getBoundingClientRect().bottom >= 0);
       const anchorId = anchor?.dataset.region;
       const anchorTop = anchor?.getBoundingClientRect().top;
@@ -326,7 +534,18 @@
         if (node) stream.append(node);
       }
       generation = update.generation;
+      returnedGeneration = Math.max(returnedGeneration, generation);
       body.dataset.generation = String(generation);
+      for (const draft of editorDrafts) {
+        const selector = draft.edit ? `.comment-edit-form[data-comment-id="${CSS.escape(draft.id)}"]` : `.reply-form[data-comment-id="${CSS.escape(draft.id)}"]`;
+        let form = document.querySelector(selector);
+        if (!form && draft.edit) {
+          document.querySelector(`button[data-action="comment-edit"][data-comment-id="${CSS.escape(draft.id)}"]`)?.click();
+          form = document.querySelector(selector);
+        }
+        const textarea = form?.querySelector("textarea");
+        if (textarea) textarea.value = draft.body;
+      }
       if (activeId) document.getElementById(activeId)?.focus({ preventScroll: true });
       if (anchorId && Number.isFinite(anchorTop)) {
         const moved = document.querySelector(`[data-region="${CSS.escape(anchorId)}"]`);

@@ -21,6 +21,10 @@
   socket: coalesced presenter SSE, follow/pause/rejoin UX, reduced-motion
   behavior, deterministic multi-tab busy/focus arbitration, and web-backed
   `review/current_focus`/instance input heartbeats.
+- Added M16 Phase 4 web review mutations over shared services: viewed files,
+  exact skim acknowledgement, comment/thread lifecycle and agent-draft triage,
+  human salience overrides, and walkthrough visits, with strict guarded JSON,
+  atomic generation preconditions, optimistic rollback, and SSE reconciliation.
 
 ## v0.8.1 - 2026-07-23
 

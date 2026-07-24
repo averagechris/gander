@@ -54,6 +54,24 @@ pub(crate) fn merge_live_state_file(
     Ok(merged)
 }
 
+/// Persist the viewed state for one exact current file fingerprint.
+///
+/// This is the shared single-file mutation used by interactive adapters. An
+/// unview never erases historical fingerprints; it only makes the current
+/// fingerprint no longer count as viewed, preserving stale review evidence.
+pub fn set_file_viewed(state: &mut ReviewState, file: &FileDiff, viewed: bool) {
+    let saved = state.files.entry(file.path.clone()).or_default();
+    saved.normalize_legacy();
+    saved.fingerprint = file.fingerprint.clone();
+    saved.viewed = viewed;
+    if viewed {
+        saved.viewed_fingerprints.insert(file.fingerprint.clone());
+        saved.caught_up_fingerprints.remove(&file.fingerprint);
+    } else {
+        saved.viewed_fingerprints.remove(&file.fingerprint);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTargetSpec {
     pub repo: Option<String>,
@@ -688,6 +706,67 @@ pub fn delete_comment(
     let comment = comments.remove(index);
     touch(session);
     Ok(comment)
+}
+
+/// Accept an agent-authored onboarding draft without changing its durable id,
+/// anchor, source linkage, or authorship.
+pub fn accept_agent_draft(
+    session: &mut ReviewSession,
+    comments: &mut [Comment],
+    id: &str,
+    body: Option<String>,
+    channel: Channel,
+) -> Result<Comment> {
+    let canonical_id = resolve_comment_id(comments, id)?;
+    let draft = comments
+        .iter()
+        .find(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
+    ensure_comment_belongs_to_session(draft, session)?;
+    if draft.author.kind != AuthorKind::Agent
+        || draft.state != CommentState::Draft
+        || draft.channel != Channel::Onboarding
+    {
+        return Err(eyre!("comment `{}` is not a pending agent draft", draft.id));
+    }
+    let body = body.unwrap_or_else(|| draft.body.clone());
+    edit_comment(
+        session,
+        comments,
+        &canonical_id,
+        CommentEdits {
+            body: Some(body),
+            channel: Some(channel),
+            ..CommentEdits::default()
+        },
+    )?;
+    let state = match channel {
+        Channel::Delegation | Channel::Collaboration => CommentState::Todo,
+        Channel::Onboarding => CommentState::Resolved,
+        Channel::Note => CommentState::Draft,
+    };
+    set_comment_state(session, comments, &canonical_id, state)
+}
+
+/// Discard only a pending agent-authored onboarding draft.
+pub fn discard_agent_draft(
+    session: &mut ReviewSession,
+    comments: &mut Vec<Comment>,
+    id: &str,
+) -> Result<Comment> {
+    let canonical_id = resolve_comment_id(comments, id)?;
+    let draft = comments
+        .iter()
+        .find(|comment| comment.id == canonical_id)
+        .expect("resolved comment id must exist");
+    ensure_comment_belongs_to_session(draft, session)?;
+    if draft.author.kind != AuthorKind::Agent
+        || draft.state != CommentState::Draft
+        || draft.channel != Channel::Onboarding
+    {
+        return Err(eyre!("comment `{}` is not a pending agent draft", draft.id));
+    }
+    delete_comment(session, comments, &canonical_id)
 }
 
 fn ensure_comment_belongs_to_session(comment: &Comment, session: &ReviewSession) -> Result<()> {
@@ -2895,5 +2974,65 @@ mod tests {
         assert!(normalized.steps[1].target.anchor.is_none());
         assert_eq!(normalized.warnings.len(), 1);
         assert!(normalized.warnings[0].contains("missing.rs"));
+    }
+
+    #[test]
+    fn single_file_viewed_service_is_fingerprint_exact_and_reversible() {
+        let file = crate::diff::DiffSet::parse(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap()
+        .files
+        .remove(0);
+        let mut state = ReviewState::default();
+        set_file_viewed(&mut state, &file, true);
+        let saved = &state.files["a.rs"];
+        assert!(saved.viewed);
+        assert!(saved.viewed_fingerprints.contains(&file.fingerprint));
+        set_file_viewed(&mut state, &file, false);
+        let saved = &state.files["a.rs"];
+        assert!(!saved.viewed);
+        assert!(!saved.viewed_fingerprints.contains(&file.fingerprint));
+    }
+
+    #[test]
+    fn agent_draft_triage_preserves_identity_source_and_privacy_semantics() {
+        let mut session = ReviewSession {
+            id: "session".into(),
+            ..Default::default()
+        };
+        let mut comments = vec![Comment {
+            id: "agent-draft".into(),
+            session_id: Some(session.id.clone()),
+            body: "original".into(),
+            state: CommentState::Draft,
+            author: Identity::agent(),
+            channel: Channel::Onboarding,
+            source_comment_id: Some("source".into()),
+            ..Comment::default()
+        }];
+        let accepted = accept_agent_draft(
+            &mut session,
+            &mut comments,
+            "agent",
+            Some("edited".into()),
+            Channel::Note,
+        )
+        .unwrap();
+        assert_eq!(accepted.id, "agent-draft");
+        assert_eq!(accepted.author.kind, AuthorKind::Agent);
+        assert_eq!(accepted.source_comment_id.as_deref(), Some("source"));
+        assert_eq!(accepted.channel, Channel::Note);
+        assert_eq!(accepted.state, CommentState::Draft);
+        assert!(discard_agent_draft(&mut session, &mut comments, "agent").is_err());
+
+        comments[0].channel = Channel::Onboarding;
+        assert_eq!(
+            discard_agent_draft(&mut session, &mut comments, "agent")
+                .unwrap()
+                .id,
+            "agent-draft"
+        );
+        assert!(comments.is_empty());
     }
 }

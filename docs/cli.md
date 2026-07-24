@@ -438,7 +438,7 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 last-writer-wins during external-state merge; region identity and effective
 resolution are deterministic within the winning map.
 
-## Local web peer (Phase 2 reading experience)
+## Local web peer (Phase 4 review parity)
 
 ```sh
 gander web [--port <port>] [--no-open]
@@ -458,10 +458,17 @@ files use cheap structural skeletons and token/generation-gated fragment loads.
 Guided mode renders shared chapters, folds, spotlight narration, and annotation
 cards. One control switches to the peer traditional mode with every file/line,
 file tree, search, viewed indicators, comment threads, and salience margins.
-This phase is read-only: SSE state patches, live presentation broadcast, and
-review action endpoints remain later M16 phases. The process registers and
-hosts ACP exactly like the TUI, and SIGINT/SIGTERM gracefully remove its
-registry entry and Unix socket.
+Viewed state, exact skim acknowledgements, comments and replies, agent-draft
+triage, human salience overrides, and walkthrough visits use guarded
+`POST /actions/<verb>` calls over the same services as the commands documented
+above. Every body carries `expected_generation`; successful writes are durable
+before returning the new generation, then SSE reconciles every browser tab and
+concurrent TUI. Invalid schemas return 400, unknown selectors 404, and stale
+generations 409. The browser applies immediate feedback but preserves editor
+text and rolls back on validation, conflict, or network failure. Context,
+fold, and card expansion are browser-local. The process registers and hosts ACP
+exactly like the TUI, and SIGINT/SIGTERM gracefully remove its registry entry
+and Unix socket.
 
 ### Debugging TUI responsiveness
 

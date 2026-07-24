@@ -1990,27 +1990,12 @@ impl ReviewSession {
         self.reveal_filtered_file(file_index);
         self.select_file_revealed(file_index);
         let index = self.ensure_active_review_session_index();
-        review::edit_comment(
+        let accepted = review::accept_agent_draft(
             &mut self.durable_sessions[index],
             &mut self.comments,
             &draft.id,
-            review::CommentEdits {
-                body: Some(body),
-                channel: Some(channel),
-                ..Default::default()
-            },
-        )
-        .ok()?;
-        let accepted_state = match channel {
-            Channel::Delegation | Channel::Collaboration => CommentState::Todo,
-            Channel::Onboarding => CommentState::Resolved,
-            Channel::Note => CommentState::Draft,
-        };
-        let accepted = review::set_comment_state(
-            &mut self.durable_sessions[index],
-            &mut self.comments,
-            &draft.id,
-            accepted_state,
+            Some(body),
+            channel,
         )
         .ok()?;
         Some(accepted.id)
@@ -2025,7 +2010,13 @@ impl ReviewSession {
         {
             return false;
         }
-        self.delete_comment(draft_id)
+        let index = self.ensure_active_review_session_index();
+        review::discard_agent_draft(
+            &mut self.durable_sessions[index],
+            &mut self.comments,
+            draft_id,
+        )
+        .is_ok()
     }
 
     /// Jump to a durable review target in the loaded diff. File-only targets
@@ -2406,6 +2397,16 @@ impl ReviewSession {
 
     pub fn toggle_viewed(&mut self) {
         self.touch_durable_state();
+        let selected = self.selected;
+        if let Some(file) = self.files.get(selected) {
+            let viewed = !file.viewed;
+            let mut state = ReviewState {
+                files: std::mem::take(&mut self.persisted_files),
+                ..ReviewState::default()
+            };
+            review::set_file_viewed(&mut state, &file.diff, viewed);
+            self.persisted_files = state.files;
+        }
         if let Some(file) = self.selected_file_mut() {
             file.viewed = !file.viewed;
             file.caught_up = false;
@@ -2422,6 +2423,14 @@ impl ReviewSession {
         self.touch_durable_state();
         let selected = self.selected;
         let next = self.next_unviewed_index(1, Some(selected));
+        if let Some(file) = self.files.get(selected) {
+            let mut state = ReviewState {
+                files: std::mem::take(&mut self.persisted_files),
+                ..ReviewState::default()
+            };
+            review::set_file_viewed(&mut state, &file.diff, true);
+            self.persisted_files = state.files;
+        }
         if let Some(file) = self.selected_file_mut() {
             file.viewed = true;
             file.caught_up = false;
@@ -2437,22 +2446,31 @@ impl ReviewSession {
     }
 
     pub fn mark_all_viewed(&mut self) {
-        self.touch_durable_state();
-        for file in &mut self.files {
-            file.viewed = true;
-            file.caught_up = false;
-            file.changed_since_look = false;
-            file.changed_since_look_baseline = None;
-            file.changed_hunks.clear();
-            file.viewed_stale = false;
-        }
-        self.ensure_selected_file_visible();
+        self.mark_files_viewed_where(|_| true);
     }
 
     pub fn mark_files_viewed_where(&mut self, mut predicate: impl FnMut(&ReviewFile) -> bool) {
         self.touch_durable_state();
+        let selected_diffs = self
+            .files
+            .iter()
+            .filter(|file| predicate(file))
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let selected_paths = selected_diffs
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut state = ReviewState {
+            files: std::mem::take(&mut self.persisted_files),
+            ..ReviewState::default()
+        };
+        for file in &selected_diffs {
+            review::set_file_viewed(&mut state, file, true);
+        }
+        self.persisted_files = state.files;
         for file in &mut self.files {
-            if predicate(file) {
+            if selected_paths.contains(file.path.as_str()) {
                 file.viewed = true;
                 file.caught_up = false;
                 file.changed_since_look = false;

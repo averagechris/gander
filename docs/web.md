@@ -1,8 +1,8 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 3b implemented (secure standalone peer,
-shared-projection reader, lazy regions, durable SSE liveness, and agent-guided
-browser presentation); browser review actions remain phased work.
+Design for milestone 16. Status: Phase 4 implemented (secure standalone peer,
+shared-projection reader, lazy regions, durable SSE liveness, agent-guided
+browser presentation, and full review-state mutation parity).
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -315,21 +315,47 @@ on the change. Budgets, asserted where practical:
 | `GET /` | server-rendered app shell (overview + stream) |
 | `GET /events` | SSE: `state` (generation + region patches), `present` (presenter events), `notice` |
 | `POST /interaction` | Ephemeral per-tab visible focus and busy report; updates live routing heartbeat |
-| `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
+| `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/reply/state, salience set/clear/promote/demote, triage, walkthrough nav); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
 
-Phase 3a exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
+Phase 4 exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
 /fragment/<region>` lazy rendering, and the long-lived generation protocol on
 `GET /events`.
 Every route passes through one centralized guard enforcing the exact bound
 `Host`, absent-or-exact-same `Origin`, and capability token; unknown paths are
 guarded too. Fragment ids are stable projection-region ids and requests carry
 the projection generation, so unknown ids return 404 and stale generations
-return 409 rather than silently substituting content. Action endpoints remain
-later phases. Guided skim regions never serialize their hidden
+return 409 rather than silently substituting content. Phase 4 action endpoints
+use the same guarded, generation-checked path. Guided skim regions never serialize their hidden
 rows into the initial page (including search metadata); switching to full mode
 requests those rows explicitly, preserving both the all-lines contract and the
 compact first paint for huge generated changes.
+
+Action bodies require the expected projection generation plus stable
+fold/comment ids or explicit current file/range targets. Unknown JSON fields
+and malformed bodies return 400, unknown selectors return 404, and generation
+mismatches return 409. Success returns
+`{ "generation": N, "result": ... }` only after the merge-aware locked atomic
+save. Browser context/fold/card expansion remains ephemeral and never enters
+review state.
+
+Phase 4 action verbs and payload fields (all also include
+`expected_generation`) are:
+
+- `file-viewed` / `file-unviewed`: `path`;
+- `skim-acknowledge`: exactly one of `fold_id` or `path` plus optional
+  `line`/`end_line`; `skim-acknowledge-all` has no selector;
+- `comment-add`: optional `path`/`line`/`end_line`, `body`, optional
+  `kind`/`action`/`state`/`channel`/`source_comment_id`; `comment-edit`:
+  `id` plus editable fields; `comment-reply`: `id`, `body`, optional `resolve`;
+  `comment-state`: `id`, `state`;
+- `draft-accept`: `id`, optional edited `body`/`channel`; `draft-discard`:
+  `id`;
+- `salience-set|clear|promote|demote`: `target` (`path`, optional
+  `line`/`end_line`), plus `salience` for set and optional `rationale` where
+  meaningful;
+- `walkthrough-next|prev`: no selector; `walkthrough-goto`: `step_id` and
+  optional `part`.
 
 ## Runtime dependency decision
 

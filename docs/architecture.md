@@ -81,8 +81,10 @@ none of them fetches from or posts to a forge.
   projects and renders outside the short shared-projection lock, diffs stable
   overview/coverage/footer/stream regions, and publishes bounded SSE updates;
   lagged or stale clients recover with a full region set. Later
-  mutations must call `src/review.rs` rather than acquiring browser-specific
-  domain logic.
+  Phase 4 actions enter the live loop through a bounded command channel, check
+  the projection generation, call `src/review.rs`/shared attention services,
+  complete a baseline-aware locked atomic save, and only then return the new
+  generation. The web adapter contains no independent review-domain policy.
 
 ## Change guide
 

@@ -3264,6 +3264,7 @@ fn handle_drafts_command(
                         .is_some_and(|id| comment.belongs_to_session(id))
                         && comment.author.kind == crate::state::AuthorKind::Agent
                         && comment.state == CommentState::Draft
+                        && comment.channel == Channel::Onboarding
                 })
                 .collect::<Vec<_>>();
             print_json(&drafts)?;
@@ -3335,6 +3336,7 @@ fn handle_drafts_command(
                     comment.belongs_to_session(&active_session_id)
                         && comment.author.kind == crate::state::AuthorKind::Agent
                         && comment.state == CommentState::Draft
+                        && comment.channel == Channel::Onboarding
                 })
                 .collect::<Vec<_>>();
             let mut resolved_ids = Vec::with_capacity(ids.len());
@@ -3355,9 +3357,19 @@ fn handle_drafts_command(
             }
             resolved_ids.sort();
             resolved_ids.dedup();
-            state
-                .comments
-                .retain(|comment| !resolved_ids.contains(&comment.id));
+            let session_index = state
+                .sessions
+                .iter()
+                .position(|session| session.id == active_session_id)
+                .expect("active session id came from state");
+            for id in &resolved_ids {
+                review::discard_agent_draft(
+                    &mut state.sessions[session_index],
+                    &mut state.comments,
+                    id,
+                )
+                .map_err(into_user_error)?;
+            }
             state.save(state_path)?;
             let remaining = state
                 .comments
@@ -3366,6 +3378,7 @@ fn handle_drafts_command(
                     comment.belongs_to_session(&active_session_id)
                         && comment.author.kind == crate::state::AuthorKind::Agent
                         && comment.state == CommentState::Draft
+                        && comment.channel == Channel::Onboarding
                 })
                 .count();
             println!("Removed {}; remaining {remaining}", resolved_ids.len());

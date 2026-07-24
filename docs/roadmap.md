@@ -307,9 +307,9 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: in progress. Phase 3b adds coalesced agent-guided browser presentation,
-follow/pause UX, busy gating, and web-backed current focus over the unchanged
-live-instance socket; review mutations remain a future phase.
+Status: in progress. Phase 4 adds guarded full review-state mutation parity,
+optimistic browser feedback, and generation/SSE reconciliation over shared
+services; template convergence remains future work.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -324,8 +324,9 @@ live-instance socket; review mutations remain a future phase.
 - [x] `present/*` broadcast to connected tabs: scroll/highlight/ephemeral
   notes, follow/unfollow (human always wins), busy gating parity
   (`user is busy: <mode>`), web-backed `current_focus`
-- [ ] full review parity mutations via the same review services: viewed,
-  fold acknowledge, comment add/edit/state/triage, salience promote/demote
+- [x] full review parity mutations via the same review services: viewed,
+  fold acknowledge, comment add/edit/reply/state/triage, salience
+  set/clear/promote/demote, and walkthrough navigation
 - [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`
@@ -336,7 +337,7 @@ live-instance socket; review mutations remain a future phase.
   `[theme.palette.*]` overrides and a `gander themes list` CLI
 - [x] light/dark/system toggle: `prefers-color-scheme` live-follow,
   localStorage persistence, no first-paint flash
-- [ ] performance budgets: server-rendered first paint, windowed stream with
+- [x] performance budgets: server-rendered first paint, windowed stream with
   structural skeleton + on-demand fragments, optimistic mutations reconciled
   by generation, coalesced presenter events, perf smoke test in CI
 - [x] fix the live-instance autosave race (backlog item 3) with merge-aware
