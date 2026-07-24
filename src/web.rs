@@ -1470,14 +1470,30 @@ mod tests {
 
     #[test]
     fn shell_links_token_guarded_assets_and_extra_css_last() {
-        let mut state = sample_state();
+        let mut state = http_state(review_fixture());
         state.token = Arc::from("secret");
         state.extra_css = Some(Arc::from(".custom{color:var(--accent)}"));
         let html = render_shell(&state);
+        let app_css = html
+            .find("/assets/app.css?token=secret")
+            .expect("real shell should link token-guarded component CSS");
+        let extra_css = html
+            .find("/assets/extra.css?token=secret")
+            .expect("real shell should link token-guarded extra CSS when configured");
+        let prepaint = html
+            .find(PREPAINT_SCRIPT)
+            .expect("real shell should inline the pre-paint theme bootstrap");
+        let theme_style = html
+            .find("<style>")
+            .expect("real shell should inline generated theme token CSS");
         assert!(
-            html.find("/assets/app.css?token=secret") < html.find("/assets/extra.css?token=secret")
+            app_css < extra_css,
+            "extra CSS must load after component CSS"
         );
-        assert!(html.find(PREPAINT_SCRIPT) < html.find("<style>").unwrap());
+        assert!(
+            prepaint < theme_style,
+            "pre-paint bootstrap must run before theme CSS block"
+        );
         assert!(html.contains("data-theme-toggle"));
         assert!(html.contains("id=\"review-stream\""));
     }
