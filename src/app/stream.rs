@@ -139,6 +139,9 @@ pub struct StreamRow {
     /// a cross-file skim fold contains all of its member paths and indexes.
     pub member_paths: Vec<String>,
     pub member_file_indexes: Vec<usize>,
+    /// Effective attention classification supplied by the shared stream
+    /// resolver. Adapters may style it, but must not resolve salience again.
+    pub salience: Option<Salience>,
     pub kind: StreamRowKind,
 }
 
@@ -263,6 +266,9 @@ pub struct ReviewStream {
     pub rows: Vec<StreamRow>,
     pub spotlights: Vec<SpotlightTarget>,
     pub coverage: Coverage,
+    /// Shared annotation-card owners and durable sources. Render adapters may
+    /// format these differently, but must not place or filter cards again.
+    pub annotations: Vec<StreamAnnotation>,
     render_rows: Rc<Vec<DiffRow>>,
     owner_by_row_id: HashMap<String, usize>,
     owner_by_anchor: HashMap<(usize, String), usize>,
@@ -271,6 +277,23 @@ pub struct ReviewStream {
     owner_by_new_line: HashMap<(usize, usize), usize>,
     projected_ranges_by_file: HashMap<usize, Vec<ProjectedRangeOwner>>,
     entries_by_file: HashMap<usize, Vec<usize>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamAnnotation {
+    pub owner: usize,
+    pub source: StreamAnnotationSource,
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamAnnotationSource {
+    Comment(crate::state::Comment),
+    Walkthrough {
+        step: crate::state::WalkthroughStep,
+        target: StateReviewTarget,
+        part: usize,
+        rationale: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +382,7 @@ impl ReviewStream {
             rows,
             spotlights,
             coverage,
+            annotations: Vec::new(),
             render_rows,
             owner_by_row_id,
             owner_by_anchor,
@@ -833,7 +857,11 @@ impl ReviewSession {
                 let hidden = local
                     .iter()
                     .enumerate()
-                    .map(|(local_row, row)| stream_diff_row(file_index, local_row, &file.path, row))
+                    .map(|(local_row, row)| {
+                        let mut row = stream_diff_row(file_index, local_row, &file.path, row);
+                        row.salience = Some(Salience::Skim);
+                        row
+                    })
                     .collect::<Vec<_>>();
                 append_fold(
                     &mut pending,
@@ -856,7 +884,11 @@ impl ReviewSession {
             }
 
             for (local_row, row) in local.iter().enumerate() {
-                let stream_row = stream_diff_row(file_index, local_row, &file.path, row);
+                let mut stream_row = stream_diff_row(file_index, local_row, &file.path, row);
+                stream_row.salience = row_attention[local_row]
+                    .as_ref()
+                    .map(|(_, attention)| attention.salience)
+                    .or_else(|| effective.as_ref().map(|attention| attention.salience));
                 if let Some((target, line_attention)) = &row_attention[local_row]
                     && line_attention.salience == Salience::Skim
                 {
@@ -917,7 +949,75 @@ impl ReviewSession {
             covered: skim_covered + spotlight_covered,
             total: skim_total + spotlights.len(),
         };
-        ReviewStream::finalize(rows, spotlights, coverage)
+        let mut stream = ReviewStream::finalize(rows, spotlights, coverage);
+        stream.annotations = self.build_stream_annotations(&stream);
+        stream
+    }
+
+    fn build_stream_annotations(&self, stream: &ReviewStream) -> Vec<StreamAnnotation> {
+        let mut output = self
+            .comments
+            .iter()
+            .filter_map(|comment| {
+                let file_index = self.files.iter().position(|file| {
+                    comment
+                        .anchor
+                        .as_ref()
+                        .map(CommentAnchor::path)
+                        .or(comment.path.as_deref())
+                        == Some(file.path.as_str())
+                })?;
+                stream
+                    .comment_owner(file_index, comment)
+                    .map(|owner| StreamAnnotation {
+                        owner,
+                        source: StreamAnnotationSource::Comment(comment.clone()),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let Some(durable) = self.active_durable_session() else {
+            return output;
+        };
+        let files = self.files.iter().map(|file| &file.diff).collect::<Vec<_>>();
+        for step in durable
+            .walkthroughs
+            .iter()
+            .flat_map(|walkthrough| &walkthrough.steps)
+        {
+            for (part, target) in std::iter::once(&step.target)
+                .chain(&step.extra_targets)
+                .enumerate()
+            {
+                if !attention::target_is_current(target, &files) {
+                    continue;
+                }
+                let effective =
+                    attention::resolve_effective_attention_refs(durable, target, &files);
+                if effective.salience != Salience::Spotlight {
+                    continue;
+                }
+                let Some(file_index) = target
+                    .file
+                    .as_deref()
+                    .and_then(|path| self.files.iter().position(|file| file.path == path))
+                else {
+                    continue;
+                };
+                let Some(owner) = stream.walkthrough_owner(file_index, target) else {
+                    continue;
+                };
+                output.push(StreamAnnotation {
+                    owner,
+                    source: StreamAnnotationSource::Walkthrough {
+                        step: step.clone(),
+                        target: target.clone(),
+                        part,
+                        rationale: effective.rationale,
+                    },
+                });
+            }
+        }
+        output
     }
 
     #[cfg(test)]
@@ -1589,6 +1689,7 @@ fn flush_fold(
         local_row: first_local,
         member_paths: fold.files.clone(),
         member_file_indexes: fold.file_indexes.clone(),
+        salience: Some(Salience::Skim),
         kind: StreamRowKind::SkimFold(fold.clone()),
     });
     if expanded {
@@ -1610,6 +1711,7 @@ fn stream_diff_row(file_index: usize, local_row: usize, path: &str, row: &DiffRo
         local_row: Some(local_row),
         member_paths: vec![path.to_owned()],
         member_file_indexes: vec![file_index],
+        salience: None,
         kind,
     }
 }
@@ -1835,6 +1937,7 @@ fn insert_chapters(
                     local_row: row.local_row,
                     member_paths: row.member_paths.clone(),
                     member_file_indexes: row.member_file_indexes.clone(),
+                    salience: Some(Salience::Spotlight),
                     kind: StreamRowKind::ChapterHeader(chapter),
                 });
             }

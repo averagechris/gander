@@ -10,6 +10,10 @@ none of them fetches from or posts to a forge.
   `ReviewState`/`ReviewSession` data.
 - `src/app/stream.rs` projects that combined model into the cross-file stream:
   chapter headers, file and diff rows, folds, and annotation-card owners.
+- `src/app/reading.rs` is a toolkit-independent adapter over that canonical
+  stream. It groups rows into stable regions for web-sized rendering and
+  carries effective salience and shared card ownership forward without
+  resolving attention, folds, chapters, or annotation placement again.
 - `src/tui/viewport.rs` owns stable row selection, scrolling, transitions, and
   restoration across reprojections. `src/tui/mod.rs` coordinates input,
   refresh, autosave, and projection invalidation.
@@ -65,10 +69,15 @@ none of them fetches from or posts to a forge.
   typed ACP request loop.
 - `src/web.rs` is the M16 loopback HTTP adapter. Its centralized middleware
   validates the per-process capability token, exact bound Host, and same-origin
-  Origin before every route (including SSE and assets). Phase 1 serves only an
-  embedded SSR lifecycle shell; later web projections must consume
-  `src/app/stream.rs`, and later mutations must call `src/review.rs` rather than
-  acquiring browser-specific domain logic.
+  Origin before every route (including fragments, SSE, and assets). Phase 2
+  server-renders the attention overview and near-viewport reading regions from
+  `src/app/reading.rs`, leaves offscreen structural skeletons, and lazily serves
+  generation-checked stable-region fragments. The traditional mode expands the
+  same shared folds through explicit full-mode fragments rather than resolving
+  salience independently; guided responses do not embed hidden skim lines.
+  Later
+  mutations must call `src/review.rs` rather than acquiring browser-specific
+  domain logic.
 
 ## Change guide
 

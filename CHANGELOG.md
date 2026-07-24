@@ -9,6 +9,8 @@
 - Added the M16 Phase 1 `gander web` standalone peer with a loopback-only,
   capability-guarded SSR shell/SSE lifecycle, shared registry and ACP socket,
   and graceful endpoint cleanup.
+- Added the M16 Phase 2 attention-first web reader over the shared review-stream
+  projection, with peer guided/full modes and lazy token-gated stable regions.
 
 ## v0.8.1 - 2026-07-23
 

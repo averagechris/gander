@@ -307,18 +307,19 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: in progress. Phase 1 established the secure standalone peer process;
-the stream UI and interactive browser behavior remain future phases.
+Status: in progress. Phase 2 adds the shared-projection guided/full reading
+experience and lazy stable-region rendering; liveness, presentation, and
+review mutations remain future phases.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
   `gander acp`/`gander mcp`/`gander present` route to it by cwd unchanged
-- [ ] server-rendered stream view over the shared projection
+- [x] server-rendered stream view over the shared projection
   (`src/app/stream.rs`): chapters, skim folds, spotlight narration cards,
   annotation cards; assets embedded, no JS toolchain
 - [ ] liveness: watch durable state/overlay + read-only jj refresh, push
   generation-keyed region patches to browsers over SSE
-- [ ] attention-first landing (summary, chapters, coverage, start-guided-tour)
+- [x] attention-first landing (summary, chapters, coverage, start-guided-tour)
   with a one-control switch to full traditional review
 - [ ] `present/*` broadcast to connected tabs: scroll/highlight/ephemeral
   notes, follow/unfollow (human always wins), busy gating parity
@@ -328,7 +329,7 @@ the stream UI and interactive browser behavior remain future phases.
 - [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`
-- [ ] web emits derived theme slots as per-scheme CSS custom-property tokens;
+- [x] web emits derived theme slots as per-scheme CSS custom-property tokens;
   component CSS references tokens only (no literal colors)
 - [x] built-in named theme palettes (gander default + common community
   palettes) selectable via `[theme] name` for TUI and web alike, with

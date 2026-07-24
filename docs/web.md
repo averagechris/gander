@@ -1,8 +1,8 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 1 implemented (secure standalone peer
-process and lifecycle shell); stream projection, browser presentation, and
-review actions remain phased work.
+Design for milestone 16. Status: Phase 2 implemented (secure standalone peer
+plus the shared-projection reading experience and lazy regions); watch/SSE
+patches, browser presentation, and review actions remain phased work.
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -35,7 +35,7 @@ new kind of agent endpoint:
   harness can answer "what am I looking at?" for the web view just as it does
   for the TUI.
 
-Phase 1 command contract:
+Command contract:
 
 ```sh
 gander web [--port <port>] [--no-open]
@@ -287,11 +287,17 @@ on the change. Budgets, asserted where practical:
 | `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/state, salience set, triage, walkthrough nav); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
 
-Phase 1 exposes `GET /`, `GET /assets/app.css`, and a lifecycle-only `GET
-/events` notice. All three pass through one centralized guard enforcing the
-exact bound `Host`, absent-or-exact-same `Origin`, and capability token. Unknown
-paths are guarded too. Stream patches, fragments, and action endpoints are not
-implemented early.
+Phase 2 exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
+/fragment/<region>` lazy rendering, and a lifecycle-only `GET /events` notice.
+Every route passes through one centralized guard enforcing the exact bound
+`Host`, absent-or-exact-same `Origin`, and capability token; unknown paths are
+guarded too. Fragment ids are stable projection-region ids and requests carry
+the projection generation, so unknown ids return 404 and stale generations
+return 409 rather than silently substituting content. Stream patches and action
+endpoints remain later phases. Guided skim regions never serialize their hidden
+rows into the initial page (including search metadata); switching to full mode
+requests those rows explicitly, preserving both the all-lines contract and the
+compact first paint for huge generated changes.
 
 ## Runtime dependency decision
 

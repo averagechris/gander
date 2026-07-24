@@ -438,7 +438,7 @@ save. Action items, walkthroughs, walkthrough steps, and sessions likewise use n
 last-writer-wins during external-state merge; region identity and effective
 resolution are deterministic within the winning map.
 
-## Local web peer (Phase 1)
+## Local web peer (Phase 2 reading experience)
 
 ```sh
 gander web [--port <port>] [--no-open]
@@ -452,11 +452,16 @@ the scripted intent explicit and suppress the explanatory stderr note.
 
 Every HTTP request—including `/events` and embedded assets—must carry the
 token query parameter, the exact printed `Host`, and either no `Origin` or the
-exact printed origin. The token is never stored. Phase 1 serves an embedded
-server-rendered lifecycle shell and SSE readiness notice; stream UI, browser
-presentation, and review action endpoints are later M16 phases. The process
-registers and hosts ACP exactly like the TUI, and SIGINT/SIGTERM gracefully
-remove its registry entry and Unix socket.
+exact printed origin. The token is never stored. The initial server-rendered
+response contains the attention map and visible shared stream window; offscreen
+files use cheap structural skeletons and token/generation-gated fragment loads.
+Guided mode renders shared chapters, folds, spotlight narration, and annotation
+cards. One control switches to the peer traditional mode with every file/line,
+file tree, search, viewed indicators, comment threads, and salience margins.
+This phase is read-only: SSE state patches, live presentation broadcast, and
+review action endpoints remain later M16 phases. The process registers and
+hosts ACP exactly like the TUI, and SIGINT/SIGTERM gracefully remove its
+registry entry and Unix socket.
 
 ### Debugging TUI responsiveness
 

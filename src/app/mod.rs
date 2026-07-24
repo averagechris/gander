@@ -8,6 +8,7 @@
 
 mod context_expansion;
 mod diff_rows;
+mod reading;
 mod split_rows;
 mod stream;
 mod syntax_cache;
@@ -15,11 +16,15 @@ mod word_diff;
 
 pub use context_expansion::Expansion;
 pub use diff_rows::{DiffRow, DiffRowKind};
+pub use reading::{
+    ReadingAnnotation, ReadingAnnotationSource, ReadingProjection, ReadingRegion,
+    ReadingRegionKind, ReadingRow,
+};
 pub use split_rows::{SplitRow, split_rows};
 #[allow(unused_imports)]
 pub use stream::{
     ChapterHeader, Coverage, ReviewStream, SkimAcknowledgeResult, SkimFold, SpotlightTarget,
-    StreamRow, StreamRowKind,
+    StreamAnnotation, StreamAnnotationSource, StreamRow, StreamRowKind,
 };
 
 use crate::state::ReviewSessionStatus;
