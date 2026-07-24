@@ -292,12 +292,13 @@ not overwrite one another with stale snapshots.
 
 ## Milestone 15: static web walkthrough export
 
-Status: partially complete. `gander export html` now writes a self-contained
-static review page; a pages-style hosted tour remains separate future work.
+Status: complete for local/static export. `gander export html` writes a
+self-contained review page; a pages-style hosted tour remains a separate
+future product decision.
 
 - [x] export a self-contained local HTML artifact with walkthrough navigation,
   key hunks, comments, and task state
-- [ ] keep export local/static first, with no hosted sync or direct forge
+- [x] keep export local/static first, with no hosted sync or direct forge
   integration
 - [x] use the same session data as JSON/Markdown exports
 
@@ -307,9 +308,9 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: in progress. Phase 4 adds guarded full review-state mutation parity,
-optimistic browser feedback, and generation/SSE reconciliation over shared
-services; template convergence remains future work.
+Status: complete. Phase 5 converges live and static guide rendering over the
+shared reading projection while preserving their separate transport/security
+capabilities.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -342,7 +343,7 @@ services; template convergence remains future work.
   by generation, coalesced presenter events, perf smoke test in CI
 - [x] fix the live-instance autosave race (backlog item 3) with merge-aware
   saves or a reload handshake — required once two live instances coexist
-- [ ] converge `src/web_export.rs` static export with the live web templates
+- [x] converge `src/web_export.rs` static export with the live web templates
   so guides render identically live and exported
 
 ## Milestone 17: annotation channels

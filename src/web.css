@@ -89,6 +89,14 @@ body[data-mode="guided"] .skim-region.present-expanded .full-only { display: blo
 .action-status { color: var(--muted); }
 .context-collapsed .diff-row.context { display: none; }
 .annotation pre { overflow: auto; padding: .7rem; background: var(--surface); white-space: pre-wrap; }
+.card { margin: 1rem 0; padding: 1rem; border: 1px solid var(--subtle); border-radius: .7rem; background: var(--surface); }
+.comment { margin: .7rem 0; padding: .8rem; border: 1px solid var(--subtle); border-radius: .6rem; background: var(--background); }
+.comment p { white-space: pre-wrap; }
+.pill { display: inline-block; margin-right: .25rem; padding: .1rem .45rem; border: 1px solid var(--subtle); border-radius: 99rem; color: var(--muted); font-size: .72rem; }
+.pill.action, .target { color: var(--accent); }
+.loc { float: right; color: var(--muted); }
+.provenance, .external-ticket { color: var(--muted); }
+.evidence { margin-left: .8rem; }
 .region-skeleton { min-height: 10rem; padding: 1rem; }
 .skeleton-label { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); }
 .skeleton-lines { height: 5rem; margin-top: 1rem; border-block: 1px solid var(--subtle); background: var(--background); }

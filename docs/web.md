@@ -1,8 +1,9 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 4 implemented (secure standalone peer,
+Design for milestone 16. Status: Phase 5 implemented (secure standalone peer,
 shared-projection reader, lazy regions, durable SSE liveness, agent-guided
-browser presentation, and full review-state mutation parity).
+browser presentation, full review-state mutation parity, and static-export
+template convergence).
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -59,10 +60,13 @@ holds by construction because the web surface is a strict subset of existing
 core capabilities.
 
 No JS toolchain: assets are embedded in the binary, templates rendered in
-Rust, with a small hand-written script for scrolling, highlights, SSE
-handling, and follow mode. `src/web_export.rs` (static export) and the live
-web UI should converge on shared rendering so a guide authored once reads the
-same live, exported, and hosted-as-a-file.
+Rust, with small hand-written scripts. `src/web_render.rs` owns a pure guide
+view model over `ReadingProjection`, semantic HTML rendering, theme tokens,
+and component CSS. Both `src/web.rs` and `src/web_export.rs` supply explicit
+transport capabilities to it; neither calls through the other's HTTP/export
+internals. A guide authored once therefore has the same overview, chapters,
+guided/full stream, folds, narration, artifacts, comments, channels, and
+salience semantics live or hosted as an exported file.
 
 ## Liveness
 
@@ -209,6 +213,11 @@ agent harness "builds an onboarding experience" purely by writing review state
 through the CLI/MCP — the same artifact renders in the TUI, the live web UI,
 and the static HTML export.
 
+The static artifact uses the exact shared guide regions eagerly, then adds only
+publication-safe export provenance/action-item summaries. Its handwritten
+inline script provides theme/mode switching, file and chapter anchors, fold and
+context disclosure, and previous/next Spotlight navigation without a server.
+
 ## Look and feel
 
 The web UI should look like a considered modern tool, not a rendered
@@ -243,6 +252,10 @@ component CSS references tokens only. No literal colors in component styles,
 ever: that rule is what keeps the stylesheet themable and maintainable
 instead of spaghetti, and it means every theme inherits the WCAG contrast
 contract for free.
+
+Static HTML embeds the same generated token blocks and component stylesheet.
+The export command applies the configured theme while retaining both schemes;
+there is no export-only palette or component style fork.
 
 - **Built-in themes.** A theme is just a named light/dark palette pair plus
   an optional syntax theme, so shipping many is cheap. Gander ships its own
@@ -292,6 +305,11 @@ on the change. Budgets, asserted where practical:
   (document size, time-to-render, patch-apply cost) so regressions show up
   in CI rather than in reviewers' attention.
 
+Static export intentionally embeds every full-review row because it must work
+offline with no fragment endpoint. It still uses the shared guided folds and
+`content-visibility` component styles; artifact size therefore tracks the diff
+payload, unlike the live first-paint window.
+
 ## Security and boundaries
 
 - Loopback only. The server binds `127.0.0.1` and refuses non-loopback bind
@@ -304,6 +322,11 @@ on the change. Budgets, asserted where practical:
   state. No forge fetching or posting, no code-workspace mutation, no agent
   spawning, no chat UI. The web server adds no capability that lacks a CLI
   equivalent.
+- Static export is a separate capability profile: no capability token, guarded
+  URL, external asset, fetch, SSE, presenter, or mutation endpoint is emitted.
+  Artifact-profile filtering runs before the shared projection, so team HTML
+  cannot recover private walkthrough, attention, task, viewed, or note data
+  from hidden DOM or script state.
 - The confirmed jj helper popup does not cross to the web in v1; mutating jj
   helpers stay in the TUI where the literal-Enter confirmation model is
   established.

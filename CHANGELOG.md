@@ -25,6 +25,11 @@
   exact skim acknowledgement, comment/thread lifecycle and agent-draft triage,
   human salience overrides, and walkthrough visits, with strict guarded JSON,
   atomic generation preconditions, optimistic rollback, and SSE reconciliation.
+- Added M16 Phase 5 static-export convergence: live and self-contained HTML now
+  share a pure reading-projection guide renderer, semantic DOM, derived theme
+  tokens, and component styles. Static exports keep profile filtering and embed
+  local-only mode, fold, context, chapter, file, and Spotlight navigation with
+  no token, network, SSE, presenter, or mutation dependencies.
 
 ## v0.8.1 - 2026-07-23
 

@@ -1,11 +1,8 @@
 use std::collections::BTreeSet;
 
-use chrono::Utc;
-
 use crate::{
     app::ReviewSession,
     artifact::{ArtifactProfile, ReviewArtifact},
-    diff::DiffLineKind,
     state::{ActionItem, AuthorKind, Channel, Comment, ReviewState, ReviewTarget},
 };
 
@@ -31,9 +28,24 @@ pub fn render_html_with_profile_and_attention_files(
     session: &ReviewSession,
     state: &ReviewState,
     profile: ArtifactProfile,
-    attention_files: &[crate::diff::FileDiff],
+    _attention_files: &[crate::diff::FileDiff],
 ) -> String {
-    let generated_at = Utc::now().to_rfc3339();
+    render_html_with_profile_attention_files_and_theme(
+        session,
+        state,
+        profile,
+        _attention_files,
+        &crate::config::ThemeConfig::default(),
+    )
+}
+
+pub fn render_html_with_profile_attention_files_and_theme(
+    session: &ReviewSession,
+    state: &ReviewState,
+    profile: ArtifactProfile,
+    _attention_files: &[crate::diff::FileDiff],
+    theme: &crate::config::ThemeConfig,
+) -> String {
     let team = profile == ArtifactProfile::Team;
     let projected_team_session = team.then(|| {
         let mut projected = session.clone();
@@ -44,6 +56,37 @@ pub fn render_html_with_profile_and_attention_files(
     let team_artifact = projected_team_session
         .as_ref()
         .map(|projected| ReviewArtifact::build(projected, ArtifactProfile::Team));
+    let mut projected = session.clone();
+    projected.apply_review_state(state.clone());
+    if let Some(artifact) = &team_artifact {
+        let mut publication = projected.to_state();
+        publication.comments = artifact
+            .comments
+            .iter()
+            .map(|comment| comment.comment.clone())
+            .collect();
+        if let Some(active) = active_durable_session(session, state)
+            && let Some(durable) = publication
+                .sessions
+                .iter_mut()
+                .find(|candidate| candidate.id == active.id)
+        {
+            durable.walkthroughs.clear();
+            durable.attention_regions.clear();
+            durable.attention_progress.clear();
+            durable.action_items.clear();
+        }
+        projected.apply_review_state(publication);
+    }
+    let mut view = crate::web_render::GuideView::from_session(&projected);
+    if team {
+        if let Some(artifact) = &team_artifact {
+            view.projection.summary.clone_from(&artifact.summary);
+        }
+        for file in &mut view.files {
+            file.viewed = false;
+        }
+    }
     let active_session = active_durable_session(session, state);
     let active_session_id = active_session.map(|durable| durable.id.as_str());
     let linked_comment_ids = if let Some(artifact) = &team_artifact {
@@ -59,55 +102,25 @@ pub fn render_html_with_profile_and_attention_files(
             .flat_map(|item| item.comment_ids.iter().map(String::as_str))
             .collect::<BTreeSet<_>>()
     };
+    let mut options = crate::web_render::RenderOptions::static_artifact();
+    options.show_private_progress = !team;
     let mut out = String::from(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>gander review export</title>\n<style>",
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>gander review export</title><script>",
     );
-    out.push_str(CSS);
-    out.push_str("</style>\n</head>\n<body>\n");
-    out.push_str("<header class=\"hero\"><div><p class=\"eyebrow\">gander review export</p><h1>");
-    esc_to(&mut out, &session.repo.display().to_string());
-    out.push_str("</h1><p class=\"summary\">");
-    if let Some(artifact) = &team_artifact {
-        esc_to(&mut out, &artifact.summary);
-    } else {
-        esc_to(&mut out, &session.summary_line());
-    }
-    out.push_str("</p></div><div class=\"meta\"><div><span>Target</span><b>");
-    esc_to(&mut out, &session.target.base);
-    out.push_str(" → ");
-    esc_to(&mut out, &session.target.rev);
-    out.push_str("</b></div><div><span>Generated</span><b>");
-    esc_to(&mut out, &generated_at);
-    out.push_str(
-        "</b></div></div></header>\n<div class=\"layout\"><nav class=\"sidebar\"><h2>Files</h2>",
-    );
-    for file in &session.files {
-        out.push_str("<a class=\"file-link\" href=\"#");
-        out.push_str(&file_anchor(&file.path));
-        out.push_str("\"><span>");
-        // Viewed/caught-up progress is private review state; team exports
-        // render a neutral bullet for every file.
-        out.push_str(if team {
-            "• "
-        } else if file.viewed {
-            "✓ "
-        } else if file.caught_up {
-            "◌ "
-        } else {
-            "• "
-        });
-        esc_to(&mut out, &file.path);
-        out.push_str("</span><small><ins>+");
-        out.push_str(&file.additions.to_string());
-        out.push_str("</ins> <del>-");
-        out.push_str(&file.deletions.to_string());
-        out.push_str("</del>");
-        if file.generated {
-            out.push_str(" <em>generated</em>");
-        }
-        out.push_str("</small></a>");
-    }
-    out.push_str("</nav><main>\n");
+    out.push_str(crate::web_render::PREPAINT_SCRIPT);
+    out.push_str("</script><style>");
+    out.push_str(&crate::web_render::render_theme_css(theme));
+    out.push_str(crate::web_render::COMPONENT_CSS);
+    out.push_str("</style></head><body data-mode=\"guided\"><header class=\"topbar\"><div><p class=\"eyebrow\">Gander static review</p><strong>");
+    esc_to(&mut out, &session.target.to_string());
+    out.push_str("</strong></div><div class=\"controls\"><button class=\"theme-toggle\" type=\"button\" data-theme-toggle>Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
+    out.push_str(&crate::web_render::render_file_tree(&view, options));
+    out.push_str("<main>");
+    out.push_str(&crate::web_render::render_overview(
+        &view,
+        &view.target,
+        options,
+    ));
     if team {
         if let Some(disposition) = team_artifact
             .as_ref()
@@ -124,8 +137,12 @@ pub fn render_html_with_profile_and_attention_files(
             out.push_str("</p></section>");
         }
     } else {
-        render_walkthroughs(&mut out, active_session);
-        render_attention_regions(&mut out, active_session, attention_files);
+        if !projection_has_walkthrough(&view) {
+            render_walkthroughs(&mut out, active_session);
+        }
+        // Keep the durable assignment ledger as export-only provenance. The
+        // guide itself still comes exclusively from the reading projection.
+        render_attention_regions(&mut out, active_session);
         render_action_items(&mut out, active_session, &state.comments);
     }
     let team_comments = team_artifact.as_ref().map(|artifact| {
@@ -157,67 +174,74 @@ pub fn render_html_with_profile_and_attention_files(
         }
         out.push_str("</section>");
     }
-    for file in &session.files {
-        let comments: Vec<_> = if let Some(comments) = &team_comments {
-            comments
-                .iter()
-                .copied()
-                .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
-                .collect()
-        } else {
-            state
-                .comments
-                .iter()
-                .filter(|comment| comment_belongs_to_session(comment, active_session_id))
-                .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
-                .filter(|comment| comment.path.as_deref() == Some(file.path.as_str()))
-                .collect()
-        };
-        out.push_str("<section class=\"card file\" id=\"");
-        out.push_str(&file_anchor(&file.path));
-        out.push_str("\"><details open><summary><h2>");
-        esc_to(&mut out, &file.path);
-        out.push_str("</h2><span class=\"pill\">");
-        esc_to(&mut out, &file.status.to_string());
-        out.push_str("</span><span class=\"stat add\">+");
-        out.push_str(&file.additions.to_string());
-        out.push_str("</span><span class=\"stat del\">-");
-        out.push_str(&file.deletions.to_string());
-        out.push_str("</span></summary><table class=\"diff\"><tbody>");
-        for hunk in &file.diff.hunks {
-            out.push_str("<tr class=\"hunk\"><td colspan=\"3\">");
-            esc_to(&mut out, &hunk.header);
-            out.push_str("</td></tr>");
-            for line in &hunk.lines {
-                let class = match line.kind {
-                    DiffLineKind::Added => "add",
-                    DiffLineKind::Removed => "del",
-                    DiffLineKind::Meta => "meta",
-                    DiffLineKind::Context => "ctx",
-                };
-                out.push_str("<tr class=\"");
-                out.push_str(class);
-                out.push_str("\"><td class=\"ln\">");
-                line_no(&mut out, line.old_lineno);
-                out.push_str("</td><td class=\"ln\">");
-                line_no(&mut out, line.new_lineno);
-                out.push_str("</td><td><pre>");
-                esc_to(&mut out, &line.text);
-                out.push_str("</pre></td></tr>");
-            }
+    let projected_comment_ids = projected_comment_ids(&view);
+    let file_comments = if let Some(comments) = &team_comments {
+        comments
+            .iter()
+            .copied()
+            .filter(|comment| comment.path.is_some())
+            .filter(|comment| !projected_comment_ids.contains(comment.id.as_str()))
+            .collect::<Vec<_>>()
+    } else {
+        state
+            .comments
+            .iter()
+            .filter(|comment| comment_belongs_to_session(comment, active_session_id))
+            .filter(|comment| !linked_comment_ids.contains(comment.id.as_str()))
+            .filter(|comment| comment.path.is_some())
+            .filter(|comment| !projected_comment_ids.contains(comment.id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    if !file_comments.is_empty() {
+        out.push_str("<section class=\"card comments\"><h2>Unanchored file comments</h2>");
+        for comment in file_comments {
+            render_comment(&mut out, comment);
         }
-        out.push_str("</tbody></table>");
-        if !comments.is_empty() {
-            out.push_str("<div class=\"comments\"><h3>Comments</h3>");
-            for comment in comments {
-                render_comment(&mut out, comment);
-            }
-            out.push_str("</div>");
-        }
-        out.push_str("</details></section>\n");
+        out.push_str("</section>");
     }
-    out.push_str("</main></div><script>document.querySelectorAll('[data-step-target]').forEach(a=>a.addEventListener('click',()=>{const e=document.querySelector(a.getAttribute('href')); if(e) e.querySelector('details')?.setAttribute('open','');}));</script>\n</body></html>\n");
+    out.push_str("<section id=\"review-stream\" class=\"review-stream\" aria-label=\"Shared review stream\"><div class=\"stream-heading\"><div><p class=\"eyebrow\">Shared projection</p><h2>Review stream</h2></div><p class=\"guided-only\">Skims stay compact; spotlights carry narration.</p><p class=\"full-only\">Every file and line is visible. Salience remains in the margin.</p></div>");
+    for region in &view.projection.regions {
+        out.push_str(&crate::web_render::render_region(
+            region,
+            crate::web_render::RenderMode::Full,
+            options,
+        ));
+    }
+    out.push_str("</section>");
+    out.push_str(&crate::web_render::render_footer(&view));
+    out.push_str("</main></div><script>");
+    out.push_str(crate::web_render::THEME_CONTROL_SCRIPT);
+    out.push_str("</script><script>");
+    out.push_str(include_str!("web_static.js"));
+    out.push_str("</script></body></html>\n");
     out
+}
+
+fn projected_comment_ids(view: &crate::web_render::GuideView) -> BTreeSet<&str> {
+    view.projection
+        .regions
+        .iter()
+        .flat_map(|region| &region.rows)
+        .flat_map(|row| &row.annotations)
+        .filter_map(|annotation| match &annotation.source {
+            crate::app::ReadingAnnotationSource::Comment(comment) => Some(comment.id.as_str()),
+            crate::app::ReadingAnnotationSource::Walkthrough { .. } => None,
+        })
+        .collect()
+}
+
+fn projection_has_walkthrough(view: &crate::web_render::GuideView) -> bool {
+    view.projection
+        .regions
+        .iter()
+        .flat_map(|region| &region.rows)
+        .flat_map(|row| &row.annotations)
+        .any(|annotation| {
+            matches!(
+                annotation.source,
+                crate::app::ReadingAnnotationSource::Walkthrough { .. }
+            )
+        })
 }
 
 fn identity_kind(kind: AuthorKind) -> &'static str {
@@ -254,22 +278,25 @@ fn comment_belongs_to_session(comment: &Comment, session_id: Option<&str>) -> bo
     })
 }
 
+/// Compatibility summary for legacy walkthroughs that cannot enter the
+/// fingerprint-current reading projection. Current guides render inline via
+/// `web_render`; this path prevents older artifacts from silently losing data.
 fn render_walkthroughs(out: &mut String, session: Option<&crate::state::ReviewSession>) {
-    let steps: Vec<_> = session
+    let steps = session
         .into_iter()
-        .flat_map(|session| session.walkthroughs.iter())
-        .flat_map(|walkthrough| walkthrough.steps.iter())
-        .collect();
+        .flat_map(|session| &session.walkthroughs)
+        .flat_map(|walkthrough| &walkthrough.steps)
+        .collect::<Vec<_>>();
     if steps.is_empty() {
         return;
     }
-    out.push_str("<section class=\"card\"><h2>Walkthrough</h2><ol class=\"walkthrough\">");
+    out.push_str("<section class=\"card\"><h2>Legacy walkthrough</h2><ol>");
     for step in steps {
         out.push_str("<li><h3>");
         esc_to(out, step.title.as_deref().unwrap_or("Review step"));
         out.push_str("</h3>");
         if let Some(why) = &step.why {
-            out.push_str("<p class=\"why\">Why: ");
+            out.push_str("<p><strong>Why:</strong> ");
             esc_to(out, why);
             out.push_str("</p>");
         }
@@ -284,32 +311,22 @@ fn render_walkthroughs(out: &mut String, session: Option<&crate::state::ReviewSe
     out.push_str("</ol></section>");
 }
 
-fn render_attention_regions(
-    out: &mut String,
-    durable: Option<&crate::state::ReviewSession>,
-    files: &[crate::diff::FileDiff],
-) {
-    let Some(durable) = durable else {
-        return;
-    };
-    let regions = crate::attention::list_assigned_attention(durable, files);
-    if regions.is_empty() {
+fn render_attention_regions(out: &mut String, durable: Option<&crate::state::ReviewSession>) {
+    let Some(durable) = durable else { return };
+    if durable.attention_regions.is_empty() {
         return;
     }
     out.push_str("<section class=\"card attention\"><h2>Attention assignments</h2><ul>");
-    for region in regions {
+    for region in &durable.attention_regions {
         out.push_str("<li><strong>");
         esc_to(out, &format!("{:?}", region.salience).to_lowercase());
         out.push_str("</strong> <span class=\"pill\">");
         esc_to(out, &format!("{:?}", region.source).to_lowercase());
         out.push_str("</span>");
-        if region.stale {
-            out.push_str(" <span class=\"pill\">stale</span>");
-        }
         render_target_link(out, &region.target);
-        if let Some(rationale) = region.rationale {
+        if let Some(rationale) = &region.rationale {
             out.push_str("<p>");
-            esc_to(out, &rationale);
+            esc_to(out, rationale);
             out.push_str("</p>");
         }
         out.push_str("</li>");
@@ -580,12 +597,6 @@ fn line_range(line: Option<usize>, end_line: Option<usize>) -> String {
     }
 }
 
-fn line_no(out: &mut String, line: Option<usize>) {
-    if let Some(line) = line {
-        out.push_str(&line.to_string());
-    }
-}
-
 fn file_anchor(path: &str) -> String {
     let mut anchor = String::from("file-");
     for b in path.bytes() {
@@ -611,6 +622,7 @@ fn esc_to(out: &mut String, text: &str) {
     }
 }
 
+#[allow(dead_code)] // Retained temporarily for downstream snapshot readability during convergence.
 const CSS: &str = r#"
 :root{color-scheme:dark;--bg:#0f1117;--panel:#191724;--panel2:#1f1d2e;--text:#e6e1e8;--muted:#908caa;--rose:#eb6f92;--iris:#c4a7e7;--green:#3fb950;--red:#f85149;--line:#2a2837}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,#26233a,#0f1117 34rem);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.hero{display:flex;justify-content:space-between;gap:2rem;padding:2rem 2.4rem;border-bottom:1px solid var(--line);background:rgba(15,17,23,.82);backdrop-filter:blur(10px)}h1,h2,h3,p{margin-top:0}.eyebrow{color:var(--rose);font-weight:700;text-transform:uppercase;letter-spacing:.12em}.summary{color:var(--muted);font-size:1.05rem}.meta{display:grid;gap:.7rem;min-width:18rem}.meta div,.card{border:1px solid var(--line);background:rgba(25,23,36,.88);border-radius:16px}.meta div{padding:.8rem 1rem}.meta span{display:block;color:var(--muted);font-size:.78rem}.layout{display:grid;grid-template-columns:18rem 1fr;gap:1.2rem;padding:1.2rem}.sidebar{position:sticky;top:1rem;align-self:start;padding:1rem;border:1px solid var(--line);border-radius:16px;background:rgba(25,23,36,.92)}.file-link{display:block;padding:.55rem .2rem;color:var(--text);text-decoration:none;border-top:1px solid #242133}.file-link small{display:block;color:var(--muted)}ins{color:var(--green);text-decoration:none}del{color:var(--red);text-decoration:none}em,.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:.12rem .5rem;color:var(--iris);font-style:normal;font-size:.75rem}.card{margin-bottom:1rem;padding:1rem;box-shadow:0 16px 40px rgba(0,0,0,.28)}summary{cursor:pointer;display:flex;align-items:center;gap:.6rem}summary h2{display:inline;margin:0;flex:1}.stat{font-weight:700}.add{color:var(--green)}.del{color:var(--red)}.diff{width:100%;border-collapse:collapse;margin-top:1rem;overflow:hidden;border-radius:12px}.diff td{border-top:1px solid #242133}.ln{width:4.2rem;text-align:right;color:var(--muted);user-select:none;padding:.08rem .7rem;background:#15131f}.diff pre{margin:0;white-space:pre-wrap;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.diff .add td{background:rgba(46,160,67,.13)}.diff .del td{background:rgba(248,81,73,.13)}.diff .hunk td{padding:.42rem .8rem;color:var(--iris);background:#211f30;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.comment,.action-item{padding:1rem;margin:.75rem 0;border:1px solid var(--line);border-radius:12px;background:var(--panel2)}.action{color:var(--rose)}.loc,.target{color:var(--muted);margin-left:.4rem}.target{display:inline-block;margin:.4rem 0 0 0}.why{color:#f6c177}@media(max-width:900px){.layout{display:block}.sidebar{position:static;margin-bottom:1rem}.hero{display:block}}"#;
 
@@ -618,10 +630,11 @@ const CSS: &str = r#"
 mod tests {
     use super::*;
     use crate::{
-        diff::{DiffLine, DiffSet, FileDiff, FileStatus, Hunk},
+        diff::{DiffLine, DiffLineKind, DiffSet, FileDiff, FileStatus, Hunk},
         jj::ReviewTarget as JjReviewTarget,
         state::{CommentState, Walkthrough, WalkthroughStep},
     };
+    use chrono::Utc;
 
     fn fixture() -> (ReviewSession, ReviewState) {
         let diff = DiffSet {
@@ -747,6 +760,89 @@ mod tests {
         assert!(html.contains("Address comment"));
         assert!(html.contains("snapshot unavailable (legacy; target label is not proof)"));
         assert_eq!(html.matches("comment body").count(), 1);
+    }
+
+    #[test]
+    fn live_and_static_share_representative_guide_dom_semantics() {
+        let (session, state) = fixture();
+        let view = crate::web_render::GuideView::from_session(&session);
+        let html = render_html(&session, &state);
+        let options = crate::web_render::RenderOptions::static_artifact();
+
+        let overview = crate::web_render::render_overview(&view, &view.target, options);
+        assert!(
+            html.contains(&overview),
+            "static shell must embed the shared overview verbatim"
+        );
+        for region in &view.projection.regions {
+            let shared = crate::web_render::render_region(
+                region,
+                crate::web_render::RenderMode::Full,
+                options,
+            );
+            assert!(
+                html.contains(&shared),
+                "static shell must embed shared region {} verbatim",
+                region.id
+            );
+        }
+        let live_regions = view
+            .projection
+            .regions
+            .iter()
+            .map(|region| {
+                crate::web_render::render_region(
+                    region,
+                    crate::web_render::RenderMode::Guided,
+                    crate::web_render::RenderOptions::live(
+                        crate::web_render::RenderMode::Guided,
+                        false,
+                    ),
+                )
+            })
+            .collect::<String>();
+        for semantic in ["data-region=", "diff-row", "salience-"] {
+            assert!(html.contains(semantic), "static guide lacks {semantic}");
+            assert!(
+                live_regions.contains(semantic),
+                "live guide lacks {semantic}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_export_has_only_embedded_assets_and_local_navigation() {
+        let (session, state) = fixture();
+        let html = render_html(&session, &state);
+        for forbidden in [
+            "<link ",
+            "<script src=",
+            "EventSource(",
+            "fetch(",
+            "/actions/",
+            "data-token=",
+            "?token=",
+            "safe-token",
+        ] {
+            assert!(
+                !html.contains(forbidden),
+                "static export leaked {forbidden}"
+            );
+        }
+        for hook in [
+            "id=\"mode-switch\"",
+            "data-theme-toggle",
+            "data-local-action=\"context-toggle\"",
+            "data-guide-nav=\"next\"",
+            "scrollIntoView",
+            "COMPONENT_CSS",
+        ] {
+            if hook == "COMPONENT_CSS" {
+                assert!(html.contains("content-visibility: auto"));
+            } else {
+                assert!(html.contains(hook), "missing static navigation hook {hook}");
+            }
+        }
     }
 
     #[test]

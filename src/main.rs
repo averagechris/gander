@@ -26,6 +26,7 @@ mod tui;
 mod walkthrough;
 mod web;
 mod web_export;
+mod web_render;
 
 use std::{
     error::Error,
@@ -1420,11 +1421,12 @@ fn run() -> color_eyre::Result<()> {
                 let final_attention_diff =
                     load_unfiltered_attention_diff(&jj, &repo, &session.target)?;
                 if request.format == OutputFormat::Html {
-                    let html = web_export::render_html_with_profile_and_attention_files(
+                    let html = web_export::render_html_with_profile_attention_files_and_theme(
                         &session,
                         &state,
                         ArtifactProfile::from(request.profile),
                         &final_attention_diff.files,
+                        &config.theme,
                     );
                     match request.destination {
                         TuiArtifactDestination::File(path) => std::fs::write(&path, html)
@@ -1521,11 +1523,12 @@ fn run() -> color_eyre::Result<()> {
             warn_session_target_mismatch(&state, &spec);
             note_if_no_session_for_artifact(&state, &spec);
             if format == OutputFormat::Html {
-                let html = web_export::render_html_with_profile_and_attention_files(
+                let html = web_export::render_html_with_profile_attention_files_and_theme(
                     &session,
                     &state,
                     ArtifactProfile::from(profile),
                     &attention_diff.files,
+                    &config.theme,
                 );
                 match destination {
                     TuiArtifactDestination::File(path) => std::fs::write(&path, html)

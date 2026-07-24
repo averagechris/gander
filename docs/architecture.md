@@ -55,9 +55,13 @@ none of them fetches from or posts to a forge.
   with the shared channel color language.
 - `src/theme.rs` derives UI-toolkit-agnostic RGB theme slots; `src/tui/theme.rs`
   adapts them to ratatui styles, terminal background detection, and xterm-256.
-- `src/artifact.rs` builds JSON/Markdown review artifacts from durable state;
-  `src/web_export.rs` renders the self-contained HTML form. `src/delegation.rs`
-  builds the narrower external-harness work packet.
+- `src/artifact.rs` builds JSON/Markdown review artifacts from durable state.
+  `src/web_render.rs` is the pure HTML layer: it accepts the toolkit-independent
+  `ReadingProjection` plus file metadata and explicit transport capabilities,
+  and owns guide DOM, escaping, theme tokens, and component assets.
+  `src/web_export.rs` profile-filters first, then embeds that renderer eagerly
+  with local-only handwritten navigation; `src/delegation.rs` builds the
+  narrower external-harness work packet.
 - `src/main.rs` and `src/mcp.rs` should remain thin adapters over the same core
   operations. A new MCP or TUI capability requires a scriptable CLI equivalent.
 
@@ -84,7 +88,10 @@ none of them fetches from or posts to a forge.
   Phase 4 actions enter the live loop through a bounded command channel, check
   the projection generation, call `src/review.rs`/shared attention services,
   complete a baseline-aware locked atomic save, and only then return the new
-  generation. The web adapter contains no independent review-domain policy.
+  generation. It supplies live action/lazy-fragment capabilities to
+  `src/web_render.rs`; tokens, guarded URLs, SSE, and presenter chrome stay in
+  this adapter and never enter static HTML. The web adapter contains no
+  independent review-domain policy.
 
 ## Change guide
 

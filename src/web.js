@@ -261,9 +261,9 @@
   });
 
   document.addEventListener("click", async (event) => {
-    const button = event.target.closest?.("button[data-action]");
+    const button = event.target.closest?.("button[data-action],button[data-local-action]");
     if (!button) return;
-    const action = button.dataset.action;
+    const action = button.dataset.action || button.dataset.localAction;
     if (action === "fold-toggle") {
       const region = button.closest(".skim-region");
       const expanded = button.getAttribute("aria-expanded") !== "true";
