@@ -310,7 +310,9 @@ while a full every-line review stays equally first-class. Design:
 
 Status: complete. Phase 5 converges live and static guide rendering over the
 shared reading projection while preserving their separate transport/security
-capabilities.
+capabilities; the browserless CI smoke directly exercises the integrated SSR,
+windowing/fragments, generation-guarded actions, surgical patch diffing, and
+presenter coalescing model.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so

@@ -406,3 +406,30 @@ the CLI first or simultaneously (design rule 4).
 - Editing walkthrough/attention curation from the browser beyond
   promote/demote — authoring stays CLI/MCP/TUI in v1.
 - Mobile-first layout (should degrade acceptably, not be designed for).
+
+# Local web UI performance budgets
+
+The M16 smoke coverage is browser-independent. It measures deterministic
+proxies that CI can run without adding a browser, package, feature, or toolchain:
+server-side document generation time, HTML and patch byte counts, initial
+meaningful-content placement, bounded initial stream materialization, structural
+skeleton counts, guarded fragment lookup, generation-guarded action
+reconciliation, surgical SSE patch scope, and presenter coalescing. These
+numbers do **not** claim browser layout, paint, network, or JavaScript execution
+timing.
+
+Demo-sized CI budgets in `src/web.rs`:
+
+- initial server-rendered document: at most 64 KiB;
+- initial meaningful content marker: within the first 12 KiB;
+- server render proxy elapsed time after warmup: at most 250 ms;
+- initial full regions match the live window plus chapter rules, with remaining
+  regions represented as structural skeletons;
+- guarded fragment lookup returns full shared-renderer HTML for the current
+  generation and rejects stale generation requests;
+- surgical patch scope stays ordered and below 16 KiB for the fixture update;
+- generation-guarded actions reject stale optimistic writes;
+- presenter coalescing keeps only the latest move in the watch channel.
+
+Elapsed ceilings are intentionally generous and backed by structural byte/count
+assertions so the gate is deterministic on SourceHut and local Nix runners.

@@ -2795,6 +2795,105 @@ mod tests {
     }
 
     #[test]
+    fn demo_sized_web_performance_smoke_stays_inside_integrated_proxy_budgets() {
+        let review = review_fixture();
+        let http = http_state(review.clone());
+
+        // Browser-independent proxy: this measures deterministic server-side
+        // rendering, payload size, window/skeleton structure, guarded fragment
+        // lookup, surgical SSE patch scope, and presenter latest-value
+        // coalescing. It does not claim browser layout, paint, network, or JS
+        // execution timing.
+        let _warmup = render_shell(&http);
+        let started = std::time::Instant::now();
+        let html = render_shell(&http);
+        let render_elapsed = started.elapsed();
+        let meaningful_offset = html.find("Attention map").unwrap_or(usize::MAX);
+
+        assert!(html.len() <= 64 * 1024, "SSR bytes {} > 64KiB", html.len());
+        assert!(
+            meaningful_offset <= 12 * 1024,
+            "initial meaningful marker is too deep in the document"
+        );
+        assert!(
+            render_elapsed <= std::time::Duration::from_millis(250),
+            "SSR proxy render took {render_elapsed:?}"
+        );
+        let skeleton_expected = review
+            .projection
+            .regions
+            .iter()
+            .enumerate()
+            .filter(|(index, region)| {
+                *index >= INITIAL_REGION_WINDOW
+                    && !matches!(region.kind, ReadingRegionKind::Chapter(_))
+            })
+            .count();
+        assert_eq!(
+            html.matches("data-region=").count(),
+            review.projection.regions.len()
+        );
+        assert_eq!(html.matches("region-skeleton").count(), skeleton_expected);
+        assert!(html.contains("data-action=\"file-viewed\""));
+
+        let fragment = lookup_fragment(&review, "file-6", Some(review.generation)).unwrap();
+        let fragment_html = render_region(fragment, true, RenderMode::Guided);
+        assert!(fragment_html.contains("data-region=\"file-6\""));
+        assert_eq!(
+            lookup_fragment(&review, "file-6", Some(review.generation - 1))
+                .unwrap_err()
+                .0,
+            StatusCode::CONFLICT
+        );
+
+        let mut next = review.clone();
+        next.generation += 1;
+        next.projection.coverage.covered += 1;
+        next.projection.regions.reverse();
+        let event = diff_projection(&review, &next);
+        let patch_bytes: usize = event
+            .patches
+            .iter()
+            .map(|patch| {
+                patch.guided.as_ref().map_or(0, String::len)
+                    + patch.full.as_ref().map_or(0, String::len)
+            })
+            .sum();
+        assert!(!event.full);
+        assert_eq!(event.generation, review.generation + 1);
+        assert!(
+            patch_bytes <= 16 * 1024,
+            "patch bytes {patch_bytes} > 16KiB"
+        );
+
+        let (present_tx, present_rx) = tokio::sync::watch::channel(None);
+        for sequence in 1..=64 {
+            present_tx
+                .send(Some(Arc::new(PresentEvent {
+                    sequence,
+                    command: "focus",
+                    status: serde_json::json!({"sequence": sequence}),
+                    target: None,
+                    note: Some(format!("latest-{sequence}")),
+                })))
+                .unwrap();
+        }
+        let latest = present_rx.borrow().as_ref().unwrap().clone();
+        assert_eq!(latest.sequence, 64);
+        assert_eq!(latest.note.as_deref(), Some("latest-64"));
+
+        eprintln!(
+            "web_perf_smoke metrics: ssr_bytes={} meaningful_offset={} render_elapsed={:?} skeleton_regions={} patch_bytes={} latest_presenter_sequence={}",
+            html.len(),
+            meaningful_offset,
+            render_elapsed,
+            html.matches("region-skeleton").count(),
+            patch_bytes,
+            latest.sequence
+        );
+    }
+
+    #[test]
     fn projection_diff_is_monotonic_surgical_and_carries_removals() {
         let previous = review_fixture();
         let mut next = review_fixture();

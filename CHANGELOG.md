@@ -30,6 +30,9 @@
   tokens, and component styles. Static exports keep profile filtering and embed
   local-only mode, fold, context, chapter, file, and Spotlight navigation with
   no token, network, SSE, presenter, or mutation dependencies.
+- Added deterministic browserless web performance smoke coverage for demo-sized
+  M16 SSR/windowing, fragment patching, guarded action reconciliation, and
+  presenter-coalescing proxy budgets.
 
 ## v0.8.1 - 2026-07-23
 
