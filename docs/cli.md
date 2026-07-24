@@ -25,6 +25,18 @@ Most list commands and mutation echoes accept `--format <json|text>`. JSON is
 always the default (agent-stable); `text` prints compact aligned rows or a
 short human echo.
 
+## Themes
+
+```sh
+gander themes list [--format json|text]
+```
+
+`themes list` is the scriptable palette contract for TUI and future web
+renderers. JSON returns `{ "themes": [{ "name": "gander", "aliases": [...] }, ...] }`.
+Canonical names are `gander`, `catppuccin`, `gruvbox`, `solarized`, `nord`,
+`tokyo-night`, and `dracula`; config also accepts documented aliases after
+normalizing ASCII case and treating spaces/underscores as hyphens.
+
 ## Reviews
 
 ```sh

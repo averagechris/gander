@@ -263,6 +263,11 @@ enum Command {
     Mcp,
     /// Print resolved state/runtime/config locations for this workspace.
     Paths,
+    /// List built-in light/dark palette pairs.
+    Themes {
+        #[command(subcommand)]
+        command: ThemesCommand,
+    },
     /// Print a terse summary of the current change.
     Summary,
     /// Machine-readable file queries for the current review session.
@@ -332,6 +337,15 @@ enum TourCommand {
         /// One-based slide number to render. Omit to render all slides.
         #[arg(long)]
         slide: Option<usize>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ThemesCommand {
+    /// List accepted built-in theme names and aliases.
+    List {
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
     },
 }
 
@@ -1259,6 +1273,10 @@ fn run() -> color_eyre::Result<()> {
         print_paths(&workspace_paths, &repo, cli.state.as_deref());
         return Ok(());
     }
+    if let Command::Themes { command } = &command {
+        handle_themes(command)?;
+        return Ok(());
+    }
     // One-release migration fallback (docs/decisions.md D6): pick up legacy
     // `.gander/` state before anything reads the new locations.
     workspace_paths
@@ -1745,6 +1763,7 @@ fn run() -> color_eyre::Result<()> {
             )?;
         }
         Command::Paths => unreachable!("handled before loading the diff"),
+        Command::Themes { .. } => unreachable!("handled before loading the diff"),
         Command::Summary => {
             println!("Reviewing {}", session.target);
             println!("{}", session.summary_line());
@@ -4195,6 +4214,31 @@ fn print_paths(
         paths.legacy_dir.display(),
         presence(&paths.legacy_dir)
     );
+}
+
+fn handle_themes(command: &ThemesCommand) -> color_eyre::Result<()> {
+    match command {
+        ThemesCommand::List { format } => match format {
+            ListFormat::Json => {
+                let themes: Vec<_> = crate::theme::BUILTIN_THEMES
+                    .iter()
+                    .map(|theme| {
+                        serde_json::json!({
+                            "name": theme.name,
+                            "aliases": theme.aliases,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::json!({ "themes": themes }));
+            }
+            ListFormat::Text => {
+                for theme in crate::theme::BUILTIN_THEMES {
+                    println!("{}\t{}", theme.name, theme.aliases.join(","));
+                }
+            }
+        },
+    }
+    Ok(())
 }
 
 fn resolve_export_options(

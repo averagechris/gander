@@ -94,6 +94,28 @@ impl Default for AppTheme {
 }
 
 impl AppTheme {
+    pub(crate) fn resolve_config(
+        config: &crate::config::ThemeConfig,
+        truecolor: bool,
+        detected: Option<Rgb>,
+    ) -> Self {
+        let kind = match config.mode {
+            crate::config::ThemeModeConfig::Dark => ThemeKind::Dark,
+            crate::config::ThemeModeConfig::Light => ThemeKind::Light,
+            crate::config::ThemeModeConfig::Auto => {
+                detected.map(kind_for_background).unwrap_or(ThemeKind::Dark)
+            }
+        };
+        Self::resolve_with_palette(
+            kind,
+            config.mode,
+            config.transparent,
+            truecolor,
+            detected,
+            config.base_palette(kind),
+        )
+    }
+
     /// Derive the theme.
     ///
     /// * `mode`: explicit dark/light, or auto (uses `detected`, falling back
@@ -118,7 +140,17 @@ impl AppTheme {
             }
         };
         let palette = BasePalette::for_kind(kind);
+        Self::resolve_with_palette(kind, mode, transparent, truecolor, detected, palette)
+    }
 
+    fn resolve_with_palette(
+        kind: ThemeKind,
+        _mode: crate::config::ThemeModeConfig,
+        transparent: bool,
+        truecolor: bool,
+        detected: Option<Rgb>,
+        palette: BasePalette,
+    ) -> Self {
         // The background text sits on: painted palette background when
         // opaque; the real terminal background when transparent. In
         // xterm-256 opaque mode the painted background is itself quantized,

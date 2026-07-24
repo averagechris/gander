@@ -329,7 +329,7 @@ Status: designed, future.
   of `src/tui/theme.rs`
 - [ ] web emits derived theme slots as per-scheme CSS custom-property tokens;
   component CSS references tokens only (no literal colors)
-- [ ] built-in named theme palettes (gander default + common community
+- [x] built-in named theme palettes (gander default + common community
   palettes) selectable via `[theme] name` for TUI and web alike, with
   `[theme.palette.*]` overrides and a `gander themes list` CLI
 - [ ] light/dark/system toggle: `prefers-color-scheme` live-follow,

@@ -15,6 +15,16 @@ implementation is `src/theme.rs` (shared palette→slot derivation),
   (background, foreground, accent, add/remove hues, info) through
   WCAG-2.x-contrast-guarded blending. Semantic slots are resolved *before*
   cells are written; no color value ever doubles as semantic metadata.
+- `[theme] name` selects a built-in light/dark palette pair for the shared core:
+  `gander`, `catppuccin`, `gruvbox`, `solarized`, `nord`, `tokyo-night`, or
+  `dracula`. Names are normalized to lowercase with spaces/underscores treated
+  as hyphens; aliases include `default`, `gander-default`, `catppuccin-mocha`,
+  `catppuccin-latte`, `gruvbox-dark`, `gruvbox-light`, `solarized-dark`,
+  `solarized-light`, `nordic`, `tokyonight`, `tokyo`, `tokyo-night-storm`, and
+  `dracula-pro`. Unknown names fail config loading with the accepted canonical
+  names. `[theme.palette.dark]` and `[theme.palette.light]` may override any base
+  entry (`background`, `foreground`, `accent`, `positive`, `negative`, `info`)
+  with `#rrggbb` values.
 - User-provided `[diff.theme]` and `[syntax.theme]` specs are literal styles
   and are never reinterpreted. Unset `[diff.theme]` entries derive from the
   palette. Syntax-token styles remain literal generally; changed-word
@@ -146,7 +156,7 @@ API extension), tracked as future work under milestone 19.
 - Diff-cue derivation details: docs/focused-diff-ux.md §"Config".
 - Implementation: `src/theme.rs`, `src/tui/theme.rs`, `src/tui/osc_guard.rs`,
   `src/tui/pty_tests.rs` (production-path PTY scenarios).
-- Web reuse (M16, designed): the palette→slot derivation now lives in a shared
-  core; the web UI serves the slots as CSS custom-property tokens
-  with built-in named palettes and a system/light/dark toggle. See
+- Web reuse (M16, in progress): the palette→slot derivation now lives in a shared
+  core with built-in named palettes and config overrides; the web UI will serve
+  the slots as CSS custom-property tokens with a system/light/dark toggle. See
   docs/web.md §Theming.

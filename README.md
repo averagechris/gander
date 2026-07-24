@@ -195,17 +195,24 @@ context-step = 10
 # gutter-added = "cyan"
 
 [theme]
-# Derived TUI theme: all chrome colors are computed from a light or dark
-# base palette with WCAG-contrast guarding, then quantized to xterm-256 on
+# Derived TUI/future-web theme: all chrome colors are computed from a named
+# light/dark base palette pair with WCAG-contrast guarding, then quantized to xterm-256 on
 # terminals without truecolor (COLORTERM). `auto` detects light/dark from
 # the terminal background with a one-shot OSC 11 query at TUI startup
 # (bounded by a DA1 fence and a short timeout; dark is the fallback).
 # `dark`/`light` never query. Non-interactive commands never query.
 # Guarantees and documented edge cases: docs/theme.md.
+name = "gander" # gander | catppuccin | gruvbox | solarized | nord | tokyo-night | dracula
 mode = "auto" # auto | dark | light
 # Keep the terminal's own background visible (default). Set false to paint
 # the palette background.
 transparent = true
+
+# Optional per-entry overrides for the selected built-in palette pair.
+# [theme.palette.dark]
+# accent = "#d29922"
+# [theme.palette.light]
+# accent = "#9a6700"
 
 [ui]
 # Auto-hide the file pane below this terminal width unless explicitly toggled.

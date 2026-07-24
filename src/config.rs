@@ -10,6 +10,7 @@ use crate::{
     generated::{GeneratedPolicy, GeneratedPreset},
     state::{AuthorKind, Channel, CommentState, Identity},
     syntax::SyntaxConfig,
+    theme::{BasePalette, Rgb, accepted_theme_names, builtin_theme},
 };
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -55,24 +56,106 @@ impl Default for UiConfig {
 /// Derived TUI theme (docs/roadmap.md M19). All chrome colors derive from a
 /// light or dark base palette; `[diff.theme]`/`[syntax.theme]` entries stay
 /// literal user values on top of it.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct ThemeConfig {
+    /// Built-in palette pair name. Accepted names are normalized lowercase with
+    /// `_`/space treated as `-`; aliases resolve to their canonical name.
+    pub name: String,
     /// `auto` (default) detects light/dark from the terminal background via
     /// a one-shot OSC 11 query at TUI startup; `dark`/`light` never query.
     pub mode: ThemeModeConfig,
     /// Leave the terminal's own background visible instead of painting the
     /// palette background (default: true, Gander's historical look).
     pub transparent: bool,
+    pub palette: ThemePaletteConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ThemePaletteConfig {
+    pub dark: ThemePaletteOverride,
+    pub light: ThemePaletteOverride,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ThemePaletteOverride {
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
+    pub accent: Option<Rgb>,
+    pub positive: Option<Rgb>,
+    pub negative: Option<Rgb>,
+    pub info: Option<Rgb>,
+}
+
+impl ThemePaletteOverride {
+    pub(crate) fn apply_to(self, palette: &mut BasePalette) {
+        if let Some(value) = self.background {
+            palette.background = value;
+        }
+        if let Some(value) = self.foreground {
+            palette.foreground = value;
+        }
+        if let Some(value) = self.accent {
+            palette.accent = value;
+        }
+        if let Some(value) = self.positive {
+            palette.positive = value;
+        }
+        if let Some(value) = self.negative {
+            palette.negative = value;
+        }
+        if let Some(value) = self.info {
+            palette.info = value;
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Rgb {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_hex_rgb(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
+            name: "gander".to_owned(),
             mode: ThemeModeConfig::default(),
             transparent: true,
+            palette: ThemePaletteConfig::default(),
         }
     }
+}
+
+impl ThemeConfig {
+    pub(crate) fn base_palette(&self, kind: crate::theme::ThemeKind) -> BasePalette {
+        let builtin = builtin_theme(&self.name).unwrap_or_else(|| builtin_theme("gander").unwrap());
+        let mut palette = BasePalette::from_pair(builtin.palettes, kind);
+        match kind {
+            crate::theme::ThemeKind::Dark => self.palette.dark.apply_to(&mut palette),
+            crate::theme::ThemeKind::Light => self.palette.light.apply_to(&mut palette),
+        }
+        palette
+    }
+}
+
+fn parse_hex_rgb(raw: &str) -> std::result::Result<Rgb, String> {
+    let value = raw
+        .trim()
+        .strip_prefix('#')
+        .ok_or_else(|| format!("theme palette color {raw:?} must be #rrggbb"))?;
+    if value.len() != 6 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("theme palette color {raw:?} must be #rrggbb"));
+    }
+    u32::from_str_radix(value, 16)
+        .map(Rgb::hex)
+        .map_err(|_| format!("theme palette color {raw:?} must be #rrggbb"))
 }
 
 /// Light/dark selection for the derived theme.
@@ -465,8 +548,10 @@ struct UiConfigPatch {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct ThemeConfigPatch {
+    name: Option<String>,
     mode: Option<ThemeModeConfig>,
     transparent: Option<bool>,
+    palette: ThemePaletteConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -906,7 +991,7 @@ impl Config {
             }
             keybinding_patches.push(patch.keybindings.clone());
             patch.keybindings = KeybindingsConfigPatch::default();
-            config.apply_patch(patch);
+            config.apply_patch(patch)?;
         }
 
         let final_preset = keybinding_patches
@@ -922,7 +1007,7 @@ impl Config {
         Ok(config)
     }
 
-    fn apply_patch(&mut self, patch: ConfigPatch) {
+    fn apply_patch(&mut self, patch: ConfigPatch) -> Result<()> {
         if let Some(globs) = patch.ignore.globs {
             self.ignore.globs = globs;
         }
@@ -1041,10 +1126,50 @@ impl Config {
         if let Some(mode) = patch.theme.mode {
             self.theme.mode = mode;
         }
+        if let Some(name) = patch.theme.name {
+            let normalized = crate::theme::normalize_theme_name(&name);
+            let Some(builtin) = builtin_theme(&normalized) else {
+                bail!(
+                    "invalid [theme] name {name:?}; accepted names: {} (aliases: default, gander-default, catppuccin-mocha, catppuccin-latte, gruvbox-dark, gruvbox-light, solarized-dark, solarized-light, nordic, tokyonight, tokyo, tokyo-night-storm, dracula-pro)",
+                    accepted_theme_names()
+                );
+            };
+            self.theme.name = builtin.name.to_owned();
+        }
         if let Some(transparent) = patch.theme.transparent {
             self.theme.transparent = transparent;
         }
+        self.theme.palette.dark =
+            merge_palette_override(self.theme.palette.dark, patch.theme.palette.dark);
+        self.theme.palette.light =
+            merge_palette_override(self.theme.palette.light, patch.theme.palette.light);
+        Ok(())
     }
+}
+
+fn merge_palette_override(
+    mut base: ThemePaletteOverride,
+    patch: ThemePaletteOverride,
+) -> ThemePaletteOverride {
+    if patch.background.is_some() {
+        base.background = patch.background;
+    }
+    if patch.foreground.is_some() {
+        base.foreground = patch.foreground;
+    }
+    if patch.accent.is_some() {
+        base.accent = patch.accent;
+    }
+    if patch.positive.is_some() {
+        base.positive = patch.positive;
+    }
+    if patch.negative.is_some() {
+        base.negative = patch.negative;
+    }
+    if patch.info.is_some() {
+        base.info = patch.info;
+    }
+    base
 }
 
 impl From<GeneratedConfig> for GeneratedPolicy {
@@ -1616,6 +1741,56 @@ move-down = ["n", "down"]
             config.comments.default_channel,
             Some(Channel::Collaboration)
         );
+    }
+
+    #[test]
+    fn theme_name_and_palette_overrides_load_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("theme.toml");
+        fs::write(
+            &config_path,
+            r##"
+[theme]
+name = "Tokyo_Night"
+
+[theme.palette.dark]
+accent = "#123456"
+
+[theme.palette.light]
+background = "#fedcba"
+"##,
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path: config_path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert_eq!(config.theme.name, "tokyo-night");
+        assert_eq!(config.theme.palette.dark.accent, Some(Rgb::hex(0x123456)));
+        assert_eq!(
+            config.theme.palette.light.background,
+            Some(Rgb::hex(0xfedcba))
+        );
+    }
+
+    #[test]
+    fn invalid_theme_name_reports_accepted_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("theme.toml");
+        fs::write(&config_path, "[theme]\nname = \"bogus\"\n").unwrap();
+
+        let error = Config::load_layers(&[ConfigSource {
+            path: config_path,
+            required: true,
+        }])
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("invalid [theme] name \"bogus\""));
+        assert!(error.contains("gander, catppuccin, gruvbox"));
     }
 
     #[test]

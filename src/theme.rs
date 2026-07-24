@@ -140,7 +140,7 @@ pub(crate) enum ThemeKind {
 }
 
 /// The small base palette every chrome slot is derived from.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BasePalette {
     pub background: Rgb,
     pub foreground: Rgb,
@@ -150,25 +150,135 @@ pub(crate) struct BasePalette {
     pub info: Rgb,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PalettePair {
+    pub dark: BasePalette,
+    pub light: BasePalette,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BuiltinTheme {
+    pub name: &'static str,
+    pub aliases: &'static [&'static str],
+    pub palettes: PalettePair,
+}
+
+pub(crate) const BUILTIN_THEMES: &[BuiltinTheme] = &[
+    BuiltinTheme {
+        name: "gander",
+        aliases: &["default", "gander-default"],
+        palettes: PalettePair {
+            dark: BasePalette::dark_default(),
+            light: BasePalette::light_default(),
+        },
+    },
+    BuiltinTheme {
+        name: "catppuccin",
+        aliases: &["catppuccin-mocha", "mocha", "catppuccin-latte", "latte"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x1e1e2e, 0xcdd6f4, 0xf9e2af, 0xa6e3a1, 0xf38ba8, 0x89b4fa),
+            light: BasePalette::new(0xeff1f5, 0x4c4f69, 0xdf8e1d, 0x40a02b, 0xd20f39, 0x1e66f5),
+        },
+    },
+    BuiltinTheme {
+        name: "gruvbox",
+        aliases: &["gruvbox-dark", "gruvbox-light"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x282828, 0xebdbb2, 0xfabd2f, 0xb8bb26, 0xfb4934, 0x83a598),
+            light: BasePalette::new(0xfbf1c7, 0x3c3836, 0xaf3a03, 0x79740e, 0x9d0006, 0x076678),
+        },
+    },
+    BuiltinTheme {
+        name: "solarized",
+        aliases: &["solarized-dark", "solarized-light"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x002b36, 0x93a1a1, 0xb58900, 0x859900, 0xdc322f, 0x268bd2),
+            light: BasePalette::new(0xfdf6e3, 0x586e75, 0xb58900, 0x859900, 0xdc322f, 0x268bd2),
+        },
+    },
+    BuiltinTheme {
+        name: "nord",
+        aliases: &["nordic"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x2e3440, 0xe5e9f0, 0xebcb8b, 0xa3be8c, 0xbf616a, 0x81a1c1),
+            light: BasePalette::new(0xeceff4, 0x2e3440, 0xb48ead, 0x5e81ac, 0xbf616a, 0x4c566a),
+        },
+    },
+    BuiltinTheme {
+        name: "tokyo-night",
+        aliases: &["tokyonight", "tokyo", "tokyo-night-storm"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x1a1b26, 0xc0caf5, 0xe0af68, 0x9ece6a, 0xf7768e, 0x7aa2f7),
+            light: BasePalette::new(0xd5d6db, 0x343b58, 0x965027, 0x485e30, 0x8c4351, 0x34548a),
+        },
+    },
+    BuiltinTheme {
+        name: "dracula",
+        aliases: &["dracula-pro"],
+        palettes: PalettePair {
+            dark: BasePalette::new(0x282a36, 0xf8f8f2, 0xf1fa8c, 0x50fa7b, 0xff5555, 0x8be9fd),
+            light: BasePalette::new(0xf8f8f2, 0x282a36, 0x8a6a00, 0x0b7f35, 0xc41f3b, 0x006d8f),
+        },
+    },
+];
+
+pub(crate) fn normalize_theme_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase().replace(['_', ' '], "-")
+}
+
+pub(crate) fn builtin_theme(name: &str) -> Option<&'static BuiltinTheme> {
+    let normalized = normalize_theme_name(name);
+    BUILTIN_THEMES.iter().find(|theme| {
+        theme.name == normalized || theme.aliases.iter().any(|alias| *alias == normalized)
+    })
+}
+
+pub(crate) fn accepted_theme_names() -> String {
+    BUILTIN_THEMES
+        .iter()
+        .map(|theme| theme.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl BasePalette {
+    pub(crate) const fn new(
+        background: u32,
+        foreground: u32,
+        accent: u32,
+        positive: u32,
+        negative: u32,
+        info: u32,
+    ) -> Self {
+        Self {
+            background: Rgb::hex(background),
+            foreground: Rgb::hex(foreground),
+            accent: Rgb::hex(accent),
+            positive: Rgb::hex(positive),
+            negative: Rgb::hex(negative),
+            info: Rgb::hex(info),
+        }
+    }
+
+    const fn dark_default() -> Self {
+        Self::new(0x0d1117, 0xe6edf3, 0xd29922, 0x3fb950, 0xf85149, 0x58a6ff)
+    }
+
+    const fn light_default() -> Self {
+        Self::new(0xffffff, 0x1f2328, 0x9a6700, 0x1a7f37, 0xcf222e, 0x0969da)
+    }
+
     pub(crate) fn for_kind(kind: ThemeKind) -> Self {
         match kind {
-            ThemeKind::Dark => Self {
-                background: Rgb::hex(0x0d1117),
-                foreground: Rgb::hex(0xe6edf3),
-                accent: Rgb::hex(0xd29922),
-                positive: Rgb::hex(0x3fb950),
-                negative: Rgb::hex(0xf85149),
-                info: Rgb::hex(0x58a6ff),
-            },
-            ThemeKind::Light => Self {
-                background: Rgb::hex(0xffffff),
-                foreground: Rgb::hex(0x1f2328),
-                accent: Rgb::hex(0x9a6700),
-                positive: Rgb::hex(0x1a7f37),
-                negative: Rgb::hex(0xcf222e),
-                info: Rgb::hex(0x0969da),
-            },
+            ThemeKind::Dark => Self::dark_default(),
+            ThemeKind::Light => Self::light_default(),
+        }
+    }
+
+    pub(crate) fn from_pair(pair: PalettePair, kind: ThemeKind) -> Self {
+        match kind {
+            ThemeKind::Dark => pair.dark,
+            ThemeKind::Light => pair.light,
         }
     }
 }
@@ -421,6 +531,29 @@ mod tests {
             assert!(contrast_ratio(slots.gutter_removed_fg, palette.background) >= MUTED_CONTRAST);
             assert_surface_contract(slots, &format!("kind={kind:?}"));
         }
+    }
+
+    #[test]
+    fn every_builtin_palette_pair_meets_the_slot_contract() {
+        for theme in BUILTIN_THEMES {
+            for kind in [ThemeKind::Dark, ThemeKind::Light] {
+                let palette = BasePalette::from_pair(theme.palettes, kind);
+                let slots = ThemeSlots::derive(palette, palette.background);
+                assert!(
+                    contrast_ratio(slots.foreground, palette.background) >= FOREGROUND_CONTRAST,
+                    "{} {kind:?}",
+                    theme.name
+                );
+                assert_surface_contract(slots, &format!("{} {kind:?}", theme.name));
+            }
+        }
+    }
+
+    #[test]
+    fn theme_name_aliases_normalize_to_builtins() {
+        assert_eq!(builtin_theme("Tokyo Night").unwrap().name, "tokyo-night");
+        assert_eq!(builtin_theme("default").unwrap().name, "gander");
+        assert!(builtin_theme("unknown").is_none());
     }
 
     #[test]

@@ -601,12 +601,7 @@ pub fn run(
         BackgroundDetection::Detected(rgb) => Some(rgb),
         BackgroundDetection::Unsupported | BackgroundDetection::Inconclusive => None,
     };
-    let app_theme = AppTheme::resolve(
-        theme_config.mode,
-        theme_config.transparent,
-        truecolor,
-        detected_background,
-    );
+    let app_theme = AppTheme::resolve_config(theme_config, truecolor, detected_background);
     // Only a parsed reply proves every solicited byte was consumed. An
     // `Unsupported` verdict is *usually* fence-validated, but the query
     // library can also report it without having confirmed the DA1 fence

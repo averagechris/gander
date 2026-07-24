@@ -4,6 +4,8 @@
 
 - Fixed stale review-state autosaves across concurrent live instances and
   CLI/MCP/ACP writers with locked transactions and baseline-aware delta merges.
+- Added built-in named theme palette pairs, `[theme] name` and
+  `[theme.palette.dark|light]` overrides, plus `gander themes list`.
 
 ## v0.8.1 - 2026-07-23
 
