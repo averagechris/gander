@@ -10,11 +10,452 @@ use std::path::Path;
 use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
-    ActionIntent, ActionItem, ActionItemStatus, AuthorKind, Channel, ClosedDisposition, Comment,
-    CommentKind, CommentReply, CommentState, ExternalTicket, Identity, ReviewDisposition,
-    ReviewSession, ReviewSessionStatus, ReviewState, ReviewStateFileLock, ReviewStateTombstones,
-    ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
+    ActionIntent, ActionItem, ActionItemStatus, AttentionRegion, AuthorKind, Channel,
+    ClosedDisposition, Comment, CommentKind, CommentReply, CommentState, ExternalTicket, Identity,
+    ReviewDisposition, ReviewSession, ReviewSessionStatus, ReviewState, ReviewStateFileLock,
+    ReviewStateTombstones, ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
 };
+
+/// Adapter-neutral policy inputs for one complete review mutation.
+///
+/// Transports supply identity/configuration facts; this service owns anchor
+/// construction, source linkage, channel selection, provenance capture, state
+/// coercion, selector resolution, and the actual durable mutation.
+#[derive(Debug, Clone)]
+pub struct ReviewActionContext<'a> {
+    pub session_index: usize,
+    pub files: &'a [FileDiff],
+    pub author: Identity,
+    pub initial_comment_state: CommentState,
+    pub channel_policy: CommentChannelPolicy<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CommentChannelPolicy<'a> {
+    /// CLI/MCP compatibility: configured default, then state-derived fallback.
+    StateDerived { fixed_default: Option<Channel> },
+    /// Interactive adapters infer from review facts. `agent_attached` is an
+    /// additional live signal; durable agent annotations are detected here.
+    Contextual {
+        agent_attached: bool,
+        configured_human_name: Option<&'a str>,
+        configured_human_email: Option<&'a str>,
+        target_author_name: Option<&'a str>,
+        target_author_email: Option<&'a str>,
+        fixed_default: Option<Channel>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AddCommentRequest {
+    pub path: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub body: String,
+    pub kind: Option<CommentKind>,
+    pub action: Option<ActionIntent>,
+    pub state: Option<CommentState>,
+    pub channel: Option<Channel>,
+    pub source_comment_id: Option<String>,
+    /// An adapter may already hold the canonical selected anchor (notably the
+    /// TUI viewport). Other adapters leave this empty for service derivation.
+    pub anchor: Option<crate::anchor::CommentAnchor>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReviewAction {
+    FileViewed {
+        path: String,
+        viewed: bool,
+    },
+    Acknowledge(crate::attention::SkimSelection),
+    CommentAdd(AddCommentRequest),
+    CommentEdit {
+        id: String,
+        edits: CommentEdits,
+    },
+    CommentReply {
+        id: String,
+        body: String,
+        resolve: bool,
+    },
+    CommentState {
+        id: String,
+        state: CommentState,
+    },
+    DraftAccept {
+        id: String,
+        body: Option<String>,
+        channel: Option<Channel>,
+    },
+    DraftDiscard {
+        id: String,
+    },
+    SalienceSet {
+        path: String,
+        line: Option<usize>,
+        end_line: Option<usize>,
+        salience: crate::state::Salience,
+        rationale: Option<String>,
+    },
+    SalienceClear {
+        path: String,
+        line: Option<usize>,
+        end_line: Option<usize>,
+    },
+    SaliencePromote {
+        path: String,
+        line: Option<usize>,
+        end_line: Option<usize>,
+        rationale: Option<String>,
+    },
+    SalienceDemote {
+        path: String,
+        line: Option<usize>,
+        end_line: Option<usize>,
+        rationale: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ReviewActionOutcome {
+    Comment(Box<Comment>),
+    Attention(Box<AttentionRegion>),
+    Acknowledgement(crate::attention::SkimAcknowledgeOutcome),
+    Value(serde_json::Value),
+}
+
+fn selected_channel(
+    state: &ReviewState,
+    session_id: &str,
+    policy: &CommentChannelPolicy<'_>,
+    requested: Option<Channel>,
+    requested_state: CommentState,
+    onboarding_target: bool,
+) -> Channel {
+    if let Some(channel) = requested {
+        return channel;
+    }
+    match policy {
+        CommentChannelPolicy::StateDerived { fixed_default } => {
+            fixed_default.unwrap_or_else(|| {
+                if requested_state == CommentState::Todo {
+                    Channel::Delegation
+                } else {
+                    Channel::Note
+                }
+            })
+        }
+        CommentChannelPolicy::Contextual {
+            agent_attached,
+            configured_human_name,
+            configured_human_email,
+            target_author_name,
+            target_author_email,
+            fixed_default,
+        } => infer_comment_channel(ChannelInferenceContext {
+            onboarding_target,
+            agent_attached: *agent_attached
+                || state.comments.iter().any(|comment| {
+                    comment.belongs_to_session(session_id)
+                        && comment.author.kind == AuthorKind::Agent
+                }),
+            configured_human_name: *configured_human_name,
+            configured_human_email: *configured_human_email,
+            target_author_name: *target_author_name,
+            target_author_email: *target_author_email,
+            fixed_default: *fixed_default,
+            ..ChannelInferenceContext::default()
+        }),
+    }
+}
+
+fn action_snapshot(
+    state: &ReviewState,
+    context: &ReviewActionContext<'_>,
+) -> crate::provenance::SnapshotEvidence {
+    let session = &state.sessions[context.session_index];
+    crate::provenance::SnapshotEvidence::capture(
+        chrono::Utc::now(),
+        session.id.clone(),
+        session.target.clone(),
+        context.files.iter(),
+    )
+}
+
+/// Execute one complete durable review use-case.
+///
+/// CLI, TUI, MCP, and web adapters should translate transport/input state into
+/// this request rather than rebuilding any of the policy implemented here.
+pub fn apply_review_action(
+    state: &mut ReviewState,
+    context: ReviewActionContext<'_>,
+    action: ReviewAction,
+) -> Result<ReviewActionOutcome> {
+    if context.session_index >= state.sessions.len() {
+        return Err(eyre!("active review session is unavailable"));
+    }
+    match action {
+        ReviewAction::FileViewed { path, viewed } => {
+            let file = context
+                .files
+                .iter()
+                .find(|file| file.path == path)
+                .ok_or_else(|| eyre!("unknown current file `{path}`"))?;
+            set_file_viewed(state, file, viewed);
+            Ok(ReviewActionOutcome::Value(serde_json::json!({
+                "path": path, "viewed": viewed, "fingerprint": file.fingerprint
+            })))
+        }
+        ReviewAction::Acknowledge(selection) => {
+            let outcome = crate::attention::acknowledge_skim_folds(
+                &mut state.sessions[context.session_index],
+                context.files,
+                &selection,
+            )?;
+            crate::attention::apply_whole_file_viewed_effects(
+                state,
+                context.files,
+                &outcome.whole_files_viewed,
+            );
+            Ok(ReviewActionOutcome::Acknowledgement(outcome))
+        }
+        ReviewAction::CommentAdd(request) => {
+            let session_id = state.sessions[context.session_index].id.clone();
+            let source_id = request
+                .source_comment_id
+                .as_deref()
+                .map(|source| resolve_comment_id(&state.comments, source))
+                .transpose()?;
+            let source = source_id.as_deref().map(|source_id| {
+                state
+                    .comments
+                    .iter()
+                    .find(|comment| comment.id == source_id)
+                    .expect("resolved source exists")
+                    .clone()
+            });
+            if let Some(source) = &source {
+                if !source.belongs_to_session(&session_id) {
+                    return Err(eyre!("source comment belongs to another review session"));
+                }
+                if source.author.kind != AuthorKind::Agent || source.channel != Channel::Onboarding
+                {
+                    return Err(eyre!(
+                        "source comment is not an agent onboarding annotation"
+                    ));
+                }
+            }
+            let path = source
+                .as_ref()
+                .and_then(|source| source.path.clone())
+                .or(request.path);
+            let line = source
+                .as_ref()
+                .and_then(|source| source.line)
+                .or(request.line);
+            let end_line = source
+                .as_ref()
+                .and_then(|source| source.end_line)
+                .or(request.end_line);
+            if path.is_none() && (line.is_some() || end_line.is_some()) {
+                return Err(eyre!("comment line requires path"));
+            }
+            if line.is_none() && end_line.is_some() {
+                return Err(eyre!("comment end_line requires line"));
+            }
+            let anchor = match source
+                .as_ref()
+                .and_then(|source| source.anchor.clone())
+                .or(request.anchor)
+            {
+                Some(anchor) => Some(anchor),
+                None => match path.as_deref() {
+                    Some(path) => {
+                        let file = context
+                            .files
+                            .iter()
+                            .find(|file| file.path == path)
+                            .ok_or_else(|| eyre!("unknown current file `{path}`"))?;
+                        crate::anchor::comment_anchor_for_file_diff(file, line, end_line)
+                    }
+                    None => None,
+                },
+            };
+            let requested_state = request.state.unwrap_or(context.initial_comment_state);
+            let channel = selected_channel(
+                state,
+                &session_id,
+                &context.channel_policy,
+                request.channel,
+                requested_state,
+                source.is_some(),
+            );
+            let comment_state = if requested_state == CommentState::Todo && !channel.permits_todo()
+            {
+                CommentState::Draft
+            } else {
+                requested_state
+            };
+            let observation = crate::provenance::CommentObservation::new(
+                action_snapshot(state, &context),
+                anchor.clone(),
+            );
+            let comment = add_comment(
+                &mut state.sessions[context.session_index],
+                &mut state.comments,
+                NewComment {
+                    session_id,
+                    path,
+                    line,
+                    end_line,
+                    anchor,
+                    observation: Some(observation),
+                    body: request.body,
+                    kind: request.kind,
+                    action: request.action,
+                    state: comment_state,
+                    author: context.author,
+                    channel,
+                },
+            )?;
+            if let Some(source_id) = source_id {
+                state
+                    .comments
+                    .iter_mut()
+                    .find(|saved| saved.id == comment.id)
+                    .expect("new comment exists")
+                    .source_comment_id = Some(source_id);
+            }
+            Ok(ReviewActionOutcome::Comment(Box::new(
+                state
+                    .comments
+                    .iter()
+                    .find(|saved| saved.id == comment.id)
+                    .expect("new comment exists")
+                    .clone(),
+            )))
+        }
+        ReviewAction::CommentEdit { id, edits } => {
+            Ok(ReviewActionOutcome::Comment(Box::new(edit_comment(
+                &mut state.sessions[context.session_index],
+                &mut state.comments,
+                &id,
+                edits,
+            )?)))
+        }
+        ReviewAction::CommentReply { id, body, resolve } => {
+            let snapshot = action_snapshot(state, &context);
+            Ok(ReviewActionOutcome::Comment(Box::new(
+                reply_and_maybe_resolve_comment(
+                    &mut state.sessions[context.session_index],
+                    &mut state.comments,
+                    &id,
+                    body,
+                    context.author,
+                    resolve,
+                    snapshot,
+                )?,
+            )))
+        }
+        ReviewAction::CommentState { id, state: next } => {
+            Ok(ReviewActionOutcome::Comment(Box::new(set_comment_state(
+                &mut state.sessions[context.session_index],
+                &mut state.comments,
+                &id,
+                next,
+            )?)))
+        }
+        ReviewAction::DraftAccept { id, body, channel } => {
+            let session_id = state.sessions[context.session_index].id.clone();
+            let inferred = selected_channel(
+                state,
+                &session_id,
+                &context.channel_policy,
+                channel,
+                context.initial_comment_state,
+                true,
+            );
+            Ok(ReviewActionOutcome::Comment(Box::new(accept_agent_draft(
+                &mut state.sessions[context.session_index],
+                &mut state.comments,
+                &id,
+                body,
+                inferred,
+            )?)))
+        }
+        ReviewAction::DraftDiscard { id } => {
+            let comment = discard_agent_draft(
+                &mut state.sessions[context.session_index],
+                &mut state.comments,
+                &id,
+            )?;
+            Ok(ReviewActionOutcome::Value(
+                serde_json::json!({"discarded": comment.id}),
+            ))
+        }
+        ReviewAction::SalienceSet {
+            path,
+            line,
+            end_line,
+            salience,
+            rationale,
+        } => {
+            let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
+            Ok(ReviewActionOutcome::Attention(Box::new(
+                crate::attention::set_human_attention(
+                    &mut state.sessions[context.session_index],
+                    target,
+                    salience,
+                    rationale,
+                )?,
+            )))
+        }
+        ReviewAction::SalienceClear {
+            path,
+            line,
+            end_line,
+        } => {
+            let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
+            Ok(ReviewActionOutcome::Value(serde_json::json!({
+                "cleared": crate::attention::clear_human_attention(&mut state.sessions[context.session_index], &target)
+            })))
+        }
+        ReviewAction::SaliencePromote {
+            path,
+            line,
+            end_line,
+            rationale,
+        } => {
+            let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
+            Ok(ReviewActionOutcome::Attention(Box::new(
+                crate::attention::promote_human_attention(
+                    &mut state.sessions[context.session_index],
+                    target,
+                    rationale,
+                    context.files,
+                )?,
+            )))
+        }
+        ReviewAction::SalienceDemote {
+            path,
+            line,
+            end_line,
+            rationale,
+        } => {
+            let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
+            Ok(ReviewActionOutcome::Attention(Box::new(
+                crate::attention::demote_human_attention(
+                    &mut state.sessions[context.session_index],
+                    target,
+                    rationale,
+                    context.files,
+                )?,
+            )))
+        }
+    }
+}
 
 /// Hold the review-state transaction lock across a CLI read/mutate/save
 /// sequence. Long-lived live instances must instead use [`merge_live_state_file`]
@@ -593,6 +1034,7 @@ pub fn resolve_comment(
     set_comment_state(session, comments, id, CommentState::Resolved)
 }
 
+#[cfg(test)]
 pub fn reply_to_comment(
     session: &mut ReviewSession,
     comments: &mut [Comment],
@@ -1651,6 +2093,201 @@ mod tests {
             ReviewTarget::default(),
             std::iter::empty(),
         )
+    }
+
+    fn parity_file() -> FileDiff {
+        crate::diff::DiffSet::parse(
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .unwrap()
+        .files
+        .remove(0)
+    }
+
+    fn run_adapter_parity_sequence(contextual: bool) -> ReviewState {
+        let file = parity_file();
+        let files = vec![file.clone()];
+        let mut state = ReviewState::default();
+        let session = ensure_session(&mut state, &spec(), None);
+        session.walkthroughs.push(Walkthrough {
+            id: "walkthrough".into(),
+            title: Some("Shared path".into()),
+            steps: vec![WalkthroughStep {
+                id: "step".into(),
+                ..Default::default()
+            }],
+            ..Walkthrough::default()
+        });
+        let session_id = session.id.clone();
+        let anchor = crate::anchor::comment_anchor_for_file_diff(&file, Some(1), None);
+        for id in ["source", "triage"] {
+            state.comments.push(Comment {
+                id: id.into(),
+                session_id: Some(session_id.clone()),
+                path: Some(file.path.clone()),
+                line: Some(1),
+                anchor: anchor.clone(),
+                body: format!("{id} body"),
+                author: Identity::agent(),
+                channel: Channel::Onboarding,
+                state: CommentState::Draft,
+                ..Comment::default()
+            });
+        }
+        let policy = || {
+            if contextual {
+                CommentChannelPolicy::Contextual {
+                    agent_attached: false,
+                    configured_human_name: Some("Reviewer"),
+                    configured_human_email: None,
+                    target_author_name: Some("Reviewer"),
+                    target_author_email: None,
+                    fixed_default: None,
+                }
+            } else {
+                CommentChannelPolicy::StateDerived {
+                    fixed_default: None,
+                }
+            }
+        };
+        let apply = |state: &mut ReviewState, action| {
+            apply_review_action(
+                state,
+                ReviewActionContext {
+                    session_index: 0,
+                    files: &files,
+                    author: Identity::local_human(),
+                    initial_comment_state: CommentState::Todo,
+                    channel_policy: policy(),
+                },
+                action,
+            )
+            .unwrap()
+        };
+
+        let added = apply(
+            &mut state,
+            ReviewAction::CommentAdd(AddCommentRequest {
+                path: None,
+                line: None,
+                end_line: None,
+                body: "delegated fix".into(),
+                kind: Some(CommentKind::Issue),
+                action: Some(ActionIntent::Fix),
+                state: None,
+                channel: None,
+                source_comment_id: Some("source".into()),
+                anchor: None,
+            }),
+        );
+        let ReviewActionOutcome::Comment(added) = added else {
+            unreachable!()
+        };
+        assert_eq!(added.source_comment_id.as_deref(), Some("source"));
+        assert_eq!(added.anchor, anchor);
+        assert!(added.observation.is_some());
+        assert_eq!(added.channel, Channel::Delegation);
+        assert_eq!(added.state, CommentState::Todo);
+        let id = added.id.clone();
+        apply(
+            &mut state,
+            ReviewAction::CommentEdit {
+                id: id.clone(),
+                edits: CommentEdits {
+                    body: Some("edited fix".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::CommentReply {
+                id: id.clone(),
+                body: "reply evidence".into(),
+                resolve: false,
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::CommentState {
+                id: id.clone(),
+                state: CommentState::Resolved,
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::DraftAccept {
+                id: "triage".into(),
+                body: Some("accepted triage".into()),
+                channel: None,
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::FileViewed {
+                path: file.path.clone(),
+                viewed: false,
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::SalienceSet {
+                path: file.path.clone(),
+                line: None,
+                end_line: None,
+                salience: crate::state::Salience::Skim,
+                rationale: Some("generated churn".into()),
+            },
+        );
+        apply(
+            &mut state,
+            ReviewAction::Acknowledge(crate::attention::SkimSelection::Target {
+                path: file.path.clone(),
+                line: None,
+                end_line: None,
+            }),
+        );
+        apply(
+            &mut state,
+            ReviewAction::SaliencePromote {
+                path: file.path.clone(),
+                line: None,
+                end_line: None,
+                rationale: Some("review it".into()),
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn complete_action_service_keeps_web_cli_and_tui_semantics_in_parity() {
+        let web = run_adapter_parity_sequence(true);
+        let cli_tui = run_adapter_parity_sequence(false);
+        for state in [&web, &cli_tui] {
+            let delegated = state
+                .comments
+                .iter()
+                .find(|comment| comment.body == "edited fix")
+                .unwrap();
+            assert_eq!(delegated.state, CommentState::Resolved);
+            assert_eq!(delegated.replies.len(), 1);
+            assert!(delegated.replies[0].result.is_some());
+            let triaged = state
+                .comments
+                .iter()
+                .find(|comment| comment.id == "triage")
+                .unwrap();
+            assert_eq!(triaged.body, "accepted triage");
+            assert_eq!(triaged.state, CommentState::Todo);
+            assert_eq!(triaged.channel, Channel::Delegation);
+            assert!(state.files["src/lib.rs"].viewed);
+            assert_eq!(
+                state.sessions[0].attention_regions[0].salience,
+                crate::state::Salience::Supporting
+            );
+            assert_eq!(state.sessions[0].walkthroughs[0].id, "walkthrough");
+            assert_eq!(state.sessions[0].walkthroughs[0].steps[0].id, "step");
+        }
     }
     fn spec() -> SessionTargetSpec {
         SessionTargetSpec {

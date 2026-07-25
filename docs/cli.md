@@ -35,6 +35,7 @@ short human echo.
 | Web/TUI viewed state | `gander files list`, `gander mark-viewed`, `gander mark-generated-viewed` |
 | Web/TUI comments and draft triage | `gander comments ...`, `gander agent-drafts ...` |
 | Web/TUI attention, folds, and walkthrough navigation | `gander attention ...`, `gander walkthrough ...`, `gander present ...` for live ephemeral presentation |
+| Live Web/TUI current focus | `gander current-focus [--format json|text]` |
 
 The web action endpoints are the browser transport for these same services; use
 the CLI/MCP/ACP surfaces for automation.
@@ -602,12 +603,28 @@ reply, resolution, and action-item closure evidence in Gander.
 ```sh
 gander mcp
 gander acp
+gander current-focus [--format json|text]
 ```
 
 Normal automation should use the CLI directly. `mcp` is optional typed/live harness integration, including CLI-parity state tools. `acp` is a low-level/internal line-delimited JSON-RPC bridge for debugging live-session curation: it
 bridges to a running TUI or web peer on the same workspace when one exists
 (announcing `bridged to live session` vs `serving snapshot` on stderr, and a `mode`
 field in the `initialize` response). See `docs/acp.md`.
+
+`current-focus` is the CLI-first equivalent of ACP
+`review/current_focus` and the MCP `current_focus` tool. It uses the current
+working directory's unchanged instance-registry routing, connects to the most
+recently active live TUI or web peer, and prints the method result (without a
+JSON-RPC envelope). JSON is the stable default:
+
+```json
+{"repo":"/repo","base":"trunk()","revision":"@","pane":"diff","path":"src/lib.rs","line":{"side":"new","old_line":null,"new_line":42,"hunk_header":"@@ -40 +40 @@"}}
+```
+
+`--format text` prints one compact line: `diff src/lib.rs:new:42
+trunk()..@`. Unlike `gander acp`/`gander mcp`, this query intentionally has no
+snapshot fallback: without a live instance there is no human focus, so it exits
+non-zero with guidance to start `gander tui` or `gander web`.
 
 ## Automation without MCP
 

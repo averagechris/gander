@@ -41,6 +41,7 @@ gander comments ready --all-drafts
 gander action-items add --title "Tighten invariant" --action fix --comment <comment-id> --path src/lib.rs --line 42
 gander walkthrough add-step --title "Start at the invariant" --path src/lib.rs --line 42 --why "This controls the rest of the change."
 gander walkthrough show
+gander current-focus
 gander handoff --copy
 gander hunks show <hunk-id>
 ```
@@ -122,6 +123,7 @@ scriptable surface.
 | `reviews_create` | `gander reviews create [--title <title>]` |
 | `review_disposition` | `gander reviews disposition show` |
 | `review_disposition_set` | `gander reviews disposition set <state>` / `gander reviews disposition clear` |
+| `current_focus` | `gander current-focus [--format json|text]` (requires a live TUI/web peer) |
 | `comments` with `channel` | `gander comments list --channel onboarding|delegation|collaboration|note` |
 | `comment_add` | `gander comments add (--path <path> [--line <n>] [--end-line <n>] \| --general) --body <text> [--kind ...] [--action ...] [--state ...]` |
 | `comment_reply` | `gander comments reply <id> --body <text> [--resolve]` |

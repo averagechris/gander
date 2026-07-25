@@ -270,6 +270,12 @@ enum Command {
         #[arg(long)]
         pid: Option<u32>,
     },
+    /// Print what the human is viewing in the current workspace's live instance.
+    CurrentFocus {
+        /// Output stable JSON (default) or one compact human-readable line.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
     /// Optional typed/live MCP harness integration on stdio; CLI remains normal automation.
     Mcp,
     /// Print resolved state/runtime/config locations for this workspace.
@@ -1288,6 +1294,9 @@ fn run() -> color_eyre::Result<()> {
         handle_themes(command)?;
         return Ok(());
     }
+    if let Command::CurrentFocus { format } = &command {
+        return handle_current_focus(&workspace_paths, *format);
+    }
     // One-release migration fallback (docs/decisions.md D6): pick up legacy
     // `.gander/` state before anything reads the new locations.
     workspace_paths
@@ -1799,6 +1808,7 @@ fn run() -> color_eyre::Result<()> {
         }
         Command::Paths => unreachable!("handled before loading the diff"),
         Command::Themes { .. } => unreachable!("handled before loading the diff"),
+        Command::CurrentFocus { .. } => unreachable!("handled before loading the diff"),
         Command::Summary => {
             println!("Reviewing {}", session.target);
             println!("{}", session.summary_line());
@@ -1891,62 +1901,46 @@ fn run() -> color_eyre::Result<()> {
                 if let Some(path) = path.as_deref() {
                     ensure_diff_file(&session, path)?;
                 }
-                let anchor = path.as_deref().and_then(|path| {
-                    session
-                        .files
-                        .iter()
-                        .find(|file| file.path == path)
-                        .and_then(|file| comment_anchor_for_file_lines(file, line, end_line))
-                });
-                if let Some(path) = path.as_deref() {
-                    warn_if_anchorless_line(path, line, anchor.is_some());
-                }
                 let spec = session_target_spec(&repo, &session.target);
                 note_if_creating_mismatched_session(&state, &spec);
                 let id = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == id).unwrap();
-                let observation = crate::provenance::CommentObservation::new(
-                    provenance_snapshot(&session, &state.sessions[idx]),
-                    anchor.clone(),
-                );
-                let initial_state = initial_state
-                    .map(Into::into)
-                    .unwrap_or_else(|| config.comments.initial_state.into());
-                let channel = channel
-                    .map(Into::into)
-                    .or(config.comments.default_channel)
-                    .unwrap_or_else(|| {
-                        if initial_state == CommentState::Todo {
-                            Channel::Delegation
-                        } else {
-                            Channel::Note
-                        }
-                    });
-                let initial_state =
-                    if initial_state == CommentState::Todo && !channel.permits_todo() {
-                        CommentState::Draft
-                    } else {
-                        initial_state
-                    };
-                let comment = review::add_comment(
-                    &mut state.sessions[idx],
-                    &mut state.comments,
-                    review::NewComment {
-                        session_id: id,
-                        path,
+                let files = session
+                    .files
+                    .iter()
+                    .map(|file| file.diff.clone())
+                    .collect::<Vec<_>>();
+                let outcome = review::apply_review_action(
+                    &mut state,
+                    review::ReviewActionContext {
+                        session_index: idx,
+                        files: &files,
+                        author: config.human_identity(),
+                        initial_comment_state: config.comments.initial_state.into(),
+                        channel_policy: review::CommentChannelPolicy::StateDerived {
+                            fixed_default: config.comments.default_channel,
+                        },
+                    },
+                    review::ReviewAction::CommentAdd(review::AddCommentRequest {
+                        path: path.clone(),
                         line,
                         end_line,
-                        anchor,
-                        observation: Some(observation),
                         body,
                         kind: kind.map(Into::into),
                         action: action.and_then(action_intent_arg_to_option),
-                        state: initial_state,
-                        author: config.human_identity(),
-                        channel,
-                    },
+                        state: initial_state.map(Into::into),
+                        channel: channel.map(Into::into),
+                        source_comment_id: None,
+                        anchor: None,
+                    }),
                 )
                 .map_err(into_user_error)?;
+                let review::ReviewActionOutcome::Comment(comment) = outcome else {
+                    unreachable!("comment add returns a comment")
+                };
+                if let Some(path) = path.as_deref() {
+                    warn_if_anchorless_line(path, line, comment.anchor.is_some());
+                }
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&comment)?,
@@ -2025,28 +2019,28 @@ fn run() -> color_eyre::Result<()> {
                 note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
-                let snapshot = provenance_snapshot(&session, &state.sessions[idx]);
-                let comment = if resolve {
-                    review::reply_and_maybe_resolve_comment(
-                        &mut state.sessions[idx],
-                        &mut state.comments,
-                        &id,
-                        body,
-                        config.human_identity(),
-                        true,
-                        snapshot,
-                    )
-                } else {
-                    review::reply_to_comment(
-                        &mut state.sessions[idx],
-                        &mut state.comments,
-                        &id,
-                        body,
-                        config.human_identity(),
-                        snapshot,
-                    )
-                }
+                let files = session
+                    .files
+                    .iter()
+                    .map(|file| file.diff.clone())
+                    .collect::<Vec<_>>();
+                let outcome = review::apply_review_action(
+                    &mut state,
+                    review::ReviewActionContext {
+                        session_index: idx,
+                        files: &files,
+                        author: config.human_identity(),
+                        initial_comment_state: config.comments.initial_state.into(),
+                        channel_policy: review::CommentChannelPolicy::StateDerived {
+                            fixed_default: config.comments.default_channel,
+                        },
+                    },
+                    review::ReviewAction::CommentReply { id, body, resolve },
+                )
                 .map_err(into_user_error)?;
+                let review::ReviewActionOutcome::Comment(comment) = outcome else {
+                    unreachable!("comment reply returns a comment")
+                };
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&comment)?,
@@ -2062,13 +2056,31 @@ fn run() -> color_eyre::Result<()> {
                 note_if_creating_mismatched_session(&state, &spec);
                 let sid = review::ensure_session(&mut state, &spec, None).id.clone();
                 let idx = state.sessions.iter().position(|s| s.id == sid).unwrap();
-                let comment = review::set_comment_state(
-                    &mut state.sessions[idx],
-                    &mut state.comments,
-                    &id,
-                    new_state.into(),
+                let files = session
+                    .files
+                    .iter()
+                    .map(|file| file.diff.clone())
+                    .collect::<Vec<_>>();
+                let outcome = review::apply_review_action(
+                    &mut state,
+                    review::ReviewActionContext {
+                        session_index: idx,
+                        files: &files,
+                        author: config.human_identity(),
+                        initial_comment_state: config.comments.initial_state.into(),
+                        channel_policy: review::CommentChannelPolicy::StateDerived {
+                            fixed_default: config.comments.default_channel,
+                        },
+                    },
+                    review::ReviewAction::CommentState {
+                        id,
+                        state: new_state.into(),
+                    },
                 )
                 .map_err(into_user_error)?;
+                let review::ReviewActionOutcome::Comment(comment) = outcome else {
+                    unreachable!("comment state returns a comment")
+                };
                 state.save(&state_path)?;
                 match format {
                     ListFormat::Json => print_json(&comment)?,
@@ -4177,6 +4189,85 @@ fn send_present_request(
     let mut response = String::new();
     std::io::BufReader::new(stream).read_line(&mut response)?;
     Ok(response.trim_end().to_owned())
+}
+
+fn handle_current_focus(paths: &WorkspacePaths, format: ListFormat) -> color_eyre::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (paths, format);
+        return Err(user_error(
+            "current-focus requires Unix sockets and a live instance",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let instance = crate::registry::find_live_for_workspace(
+            &paths.registry_dir,
+            &paths.workspace_root,
+        )
+        .ok_or_else(|| {
+            user_error(
+                "no live instance for this workspace; start `gander tui` or `gander web` and retry",
+            )
+        })?;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "review/current_focus"
+        });
+        let raw = send_present_request(&instance.socket_path, &request)?;
+        let response: serde_json::Value = serde_json::from_str(&raw)
+            .wrap_err("live instance returned invalid current-focus JSON")?;
+        if let Some(error) = response.get("error") {
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("live instance rejected current-focus");
+            return Err(user_error(message));
+        }
+        let focus = response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| user_error("live instance returned no current-focus result"))?;
+        match format {
+            ListFormat::Json => print_json(&focus)?,
+            ListFormat::Text => {
+                let pane = focus
+                    .get("pane")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                let path = focus
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
+                let line = focus
+                    .get("line")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|line| {
+                        let side = line
+                            .get("side")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("line");
+                        let number = line
+                            .get("new_line")
+                            .or_else(|| line.get("old_line"))
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|number| number.to_string())
+                            .unwrap_or_else(|| "-".to_owned());
+                        format!("{side}:{number}")
+                    })
+                    .unwrap_or_else(|| "-".to_owned());
+                let base = focus
+                    .get("base")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?");
+                let revision = focus
+                    .get("revision")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("?");
+                println!("{pane} {path}:{line} {base}..{revision}");
+            }
+        }
+        Ok(())
+    }
 }
 
 fn merge_generated(

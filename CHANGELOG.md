@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed the M16 adapter boundary by routing web and existing adapter comment/
+  attention mutations through one complete review use-case, and added
+  `gander current-focus` JSON/text CLI parity for live TUI/web focus queries.
 - Fixed stale review-state autosaves across concurrent live instances and
   CLI/MCP/ACP writers with locked transactions and baseline-aware delta merges.
 - Added built-in named theme palette pairs, `[theme] name` and

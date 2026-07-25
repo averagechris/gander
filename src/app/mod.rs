@@ -3428,47 +3428,52 @@ impl ReviewSession {
     ) -> bool {
         let index = self.ensure_active_review_session_index();
         let session_id = self.durable_sessions[index].id.clone();
-        let observation = crate::provenance::CommentObservation::new(
-            self.provenance_snapshot(index),
-            Some(anchor.clone()),
-        );
-        let state = self.initial_state_for_channel(channel);
-        let added = review::add_comment(
-            &mut self.durable_sessions[index],
-            &mut self.comments,
-            review::NewComment {
-                session_id,
+        let mut state = self.to_state();
+        let state_index = state
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .expect("active session exists in review state");
+        let end_line = match &anchor {
+            CommentAnchor::Range { end_line, .. } => Some(*end_line),
+            _ => anchor
+                .end_line()
+                .filter(|end_line| Some(*end_line) != anchor.line()),
+        };
+        let files = self
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let result = review::apply_review_action(
+            &mut state,
+            review::ReviewActionContext {
+                session_index: state_index,
+                files: &files,
+                author: self.human_identity.clone(),
+                initial_comment_state: self.comment_initial_state,
+                channel_policy: review::CommentChannelPolicy::StateDerived {
+                    fixed_default: None,
+                },
+            },
+            review::ReviewAction::CommentAdd(review::AddCommentRequest {
                 path: Some(anchor.path().to_owned()),
                 line: anchor.line(),
-                end_line: match &anchor {
-                    CommentAnchor::Range { end_line, .. } => Some(*end_line),
-                    _ => anchor
-                        .end_line()
-                        .filter(|end_line| Some(*end_line) != anchor.line()),
-                },
-                anchor: Some(anchor),
-                observation: Some(observation),
+                end_line,
                 body,
                 kind: None,
                 action: None,
-                state,
-                author: self.human_identity.clone(),
-                channel,
-            },
+                state: None,
+                channel: Some(channel),
+                source_comment_id,
+                anchor: Some(anchor),
+            }),
         );
-        match added {
-            Ok(comment) => {
-                if let Some(source_comment_id) = source_comment_id
-                    && let Some(saved) = self
-                        .comments
-                        .iter_mut()
-                        .find(|saved| saved.id == comment.id)
-                {
-                    saved.source_comment_id = Some(source_comment_id);
-                }
-                true
-            }
-            Err(_) => false,
+        if result.is_ok() {
+            self.apply_review_state(state);
+            true
+        } else {
+            false
         }
     }
 
@@ -3558,35 +3563,46 @@ impl ReviewSession {
     pub fn add_general_comment_in_channel(&mut self, body: String, channel: Channel) -> bool {
         let index = self.ensure_active_review_session_index();
         let session_id = self.durable_sessions[index].id.clone();
-        let observation =
-            crate::provenance::CommentObservation::new(self.provenance_snapshot(index), None);
-        let state = self.initial_state_for_channel(channel);
-        review::add_comment(
-            &mut self.durable_sessions[index],
-            &mut self.comments,
-            review::NewComment {
-                session_id,
+        let mut state = self.to_state();
+        let state_index = state
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .expect("active session exists in review state");
+        let files = self
+            .files
+            .iter()
+            .map(|file| file.diff.clone())
+            .collect::<Vec<_>>();
+        let result = review::apply_review_action(
+            &mut state,
+            review::ReviewActionContext {
+                session_index: state_index,
+                files: &files,
+                author: self.human_identity.clone(),
+                initial_comment_state: self.comment_initial_state,
+                channel_policy: review::CommentChannelPolicy::StateDerived {
+                    fixed_default: None,
+                },
+            },
+            review::ReviewAction::CommentAdd(review::AddCommentRequest {
                 path: None,
                 line: None,
                 end_line: None,
-                anchor: None,
-                observation: Some(observation),
                 body,
                 kind: None,
                 action: None,
-                state,
-                author: self.human_identity.clone(),
-                channel,
-            },
-        )
-        .is_ok()
-    }
-
-    fn initial_state_for_channel(&self, channel: Channel) -> CommentState {
-        if self.comment_initial_state == CommentState::Todo && !channel.permits_todo() {
-            CommentState::Draft
+                state: None,
+                channel: Some(channel),
+                source_comment_id: None,
+                anchor: None,
+            }),
+        );
+        if result.is_ok() {
+            self.apply_review_state(state);
+            true
         } else {
-            self.comment_initial_state
+            false
         }
     }
 

@@ -308,11 +308,12 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: complete. Phase 5 converges live and static guide rendering over the
-shared reading projection while preserving their separate transport/security
-capabilities; the browserless CI smoke directly exercises the integrated SSR,
-windowing/fragments, generation-guarded actions, surgical patch diffing, and
-presenter coalescing model.
+Status: final audit remediation in progress. The Phase 5 implementation
+converges live and static guide rendering over the shared reading projection,
+but this status does not claim closure of remaining watcher/SSE or client-race
+audit findings outside this repair. Browserless CI smoke exercises the
+integrated SSR, windowing/fragments, generation-guarded actions, surgical patch
+diffing, and presenter coalescing model.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -330,6 +331,11 @@ presenter coalescing model.
 - [x] full review parity mutations via the same review services: viewed,
   fold acknowledge, comment add/edit/reply/state/triage, salience
   set/clear/promote/demote, and walkthrough navigation
+- [x] final boundary repair: web action transport dispatches one complete core
+  use-case; CLI/TUI/MCP comment paths share that operation, and live
+  `review/current_focus` has `gander current-focus` JSON/text parity
+- [ ] close remaining independent final-audit findings (watcher/SSE and client
+  race controls are intentionally outside this boundary repair)
 - [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`

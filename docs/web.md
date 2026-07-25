@@ -1,6 +1,7 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 5 implemented (secure standalone peer,
+Design for milestone 16. Status: Phase 5 implementation landed; final audit
+remediation remains in progress (secure standalone peer,
 shared-projection reader, lazy regions, durable SSE liveness, agent-guided
 browser presentation, full review-state mutation parity, and static-export
 template convergence).
@@ -55,7 +56,8 @@ projects the same review stream the TUI renders (`src/app/stream.rs`: chapter
 headers, file rows, skim folds, spotlight narration cards, annotation cards)
 into server-rendered HTML view models, and pushes updates over SSE. Business
 logic lives only in the core services (vision design rule 3); web mutations
-call the same `src/review.rs` seams as the CLI/MCP. CLI parity (design rule 4)
+dispatch one complete `src/review.rs` action use-case also used by CLI/TUI/MCP
+adapters. CLI parity (design rule 4)
 holds by construction because the web surface is a strict subset of existing
 core capabilities.
 

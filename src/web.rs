@@ -36,7 +36,7 @@ use tokio::net::TcpListener;
 use crate::{
     acp::socket::{AcpBridge, PresentCommand},
     app::{Focus, ReadingRegion, ReadingRegionKind, ReviewSession},
-    attention::{self, SkimSelection},
+    attention::SkimSelection,
     config::ThemeConfig,
     diff::{DiffSet, FileDiff},
     generated::GeneratedMatcher,
@@ -44,8 +44,8 @@ use crate::{
     registry::{InstanceInfo, InstanceRegistration},
     review,
     state::{
-        ActionIntent, AuthorKind, Channel, CommentKind, CommentState, ReviewState,
-        ReviewStateTombstones, Salience,
+        ActionIntent, Channel, CommentKind, CommentState, ReviewState, ReviewStateTombstones,
+        Salience,
     },
     web_render::{
         self, COMPONENT_CSS, GuideView, PREPAINT_SCRIPT, RenderMode, RenderOptions,
@@ -714,27 +714,6 @@ fn active_state_session_index(state: &mut ReviewState, session: &ReviewSession) 
         .expect("ensured session exists")
 }
 
-fn inferred_web_channel(
-    session: &ReviewSession,
-    state: &ReviewState,
-    session_id: &str,
-    onboarding_target: bool,
-) -> Channel {
-    let agent_attached = state.comments.iter().any(|comment| {
-        comment.belongs_to_session(session_id) && comment.author.kind == AuthorKind::Agent
-    });
-    review::infer_comment_channel(review::ChannelInferenceContext {
-        onboarding_target,
-        agent_attached,
-        configured_human_name: session.configured_human_name.as_deref(),
-        configured_human_email: session.configured_human_email.as_deref(),
-        target_author_name: session.target_author_name.as_deref(),
-        target_author_email: session.target_author_email.as_deref(),
-        fixed_default: session.comment_default_channel,
-        ..review::ChannelInferenceContext::default()
-    })
-}
-
 fn process_action(
     expected_generation: u64,
     command: ActionCommand,
@@ -786,281 +765,103 @@ fn process_action(
         command => {
             let mut state = session.to_state();
             let session_index = active_state_session_index(&mut state, session);
-            match command {
+            let action = match command {
                 ActionCommand::FileViewed { path, viewed } => {
-                    let file = files.iter().find(|file| file.path == path).ok_or_else(|| {
-                        ActionError::bad(format!("unknown current file `{path}`"))
-                    })?;
-                    review::set_file_viewed(&mut state, file, viewed);
-                    result =
-                        json!({"path": path, "viewed": viewed, "fingerprint": file.fingerprint});
+                    review::ReviewAction::FileViewed { path, viewed }
                 }
                 ActionCommand::Acknowledge { selection } => {
-                    let outcome = attention::acknowledge_skim_folds(
-                        &mut state.sessions[session_index],
-                        &files,
-                        &selection,
-                    )
-                    .map_err(ActionError::bad)?;
-                    attention::apply_whole_file_viewed_effects(
-                        &mut state,
-                        &files,
-                        &outcome.whole_files_viewed,
-                    );
-                    result = serde_json::to_value(outcome).expect("acknowledgement serializes");
+                    review::ReviewAction::Acknowledge(selection)
                 }
                 ActionCommand::CommentAdd(action) => {
-                    let source_id = action
-                        .source_comment_id
-                        .as_deref()
-                        .map(|source| review::resolve_comment_id(&state.comments, source))
-                        .transpose()
-                        .map_err(ActionError::bad)?;
-                    let source = source_id.as_deref().map(|source_id| {
-                        state
-                            .comments
-                            .iter()
-                            .find(|comment| comment.id == source_id)
-                            .expect("resolved source exists")
-                            .clone()
-                    });
-                    if let Some(source) = &source {
-                        if !source.belongs_to_session(&state.sessions[session_index].id) {
-                            return Err(ActionError::bad(
-                                "source comment belongs to another review session",
-                            ));
-                        }
-                        if source.author.kind != AuthorKind::Agent
-                            || source.channel != Channel::Onboarding
-                        {
-                            return Err(ActionError::bad(
-                                "source comment is not an agent onboarding annotation",
-                            ));
-                        }
-                    }
-                    let path = source
-                        .as_ref()
-                        .and_then(|source| source.path.clone())
-                        .or(action.path);
-                    let line = source
-                        .as_ref()
-                        .and_then(|source| source.line)
-                        .or(action.line);
-                    let end_line = source
-                        .as_ref()
-                        .and_then(|source| source.end_line)
-                        .or(action.end_line);
-                    if path.is_none() && (line.is_some() || end_line.is_some()) {
-                        return Err(ActionError::bad("comment line requires path"));
-                    }
-                    if line.is_none() && end_line.is_some() {
-                        return Err(ActionError::bad("comment end_line requires line"));
-                    }
-                    let anchor = match source.as_ref().and_then(|source| source.anchor.clone()) {
-                        Some(anchor) => Some(anchor),
-                        None => match path.as_deref() {
-                            Some(path) => {
-                                let file = files.iter().find(|file| file.path == path).ok_or_else(
-                                    || ActionError::bad(format!("unknown current file `{path}`")),
-                                )?;
-                                crate::anchor::comment_anchor_for_file_diff(file, line, end_line)
-                            }
-                            None => None,
-                        },
-                    };
-                    let onboarding_target = source.is_some();
-                    let channel = action.channel.unwrap_or_else(|| {
-                        inferred_web_channel(
-                            session,
-                            &state,
-                            &state.sessions[session_index].id,
-                            onboarding_target,
-                        )
-                    });
-                    let requested_state = action.state.unwrap_or(session.comment_initial_state);
-                    let comment_state =
-                        if requested_state == CommentState::Todo && !channel.permits_todo() {
-                            CommentState::Draft
-                        } else {
-                            requested_state
-                        };
-                    let snapshot = crate::provenance::SnapshotEvidence::capture(
-                        Utc::now(),
-                        state.sessions[session_index].id.clone(),
-                        state.sessions[session_index].target.clone(),
-                        files.iter(),
-                    );
-                    let observation =
-                        crate::provenance::CommentObservation::new(snapshot, anchor.clone());
-                    let new = review::NewComment {
-                        session_id: state.sessions[session_index].id.clone(),
-                        path,
-                        line,
-                        end_line,
-                        anchor,
-                        observation: Some(observation),
+                    review::ReviewAction::CommentAdd(review::AddCommentRequest {
+                        path: action.path,
+                        line: action.line,
+                        end_line: action.end_line,
                         body: action.body,
                         kind: action.kind,
                         action: action.action,
-                        state: comment_state,
-                        author: session.human_identity.clone(),
-                        channel,
-                    };
-                    let comment = review::add_comment(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        new,
-                    )
-                    .map_err(ActionError::bad)?;
-                    if let Some(source_id) = source_id {
-                        state
-                            .comments
-                            .iter_mut()
-                            .find(|saved| saved.id == comment.id)
-                            .expect("new comment exists")
-                            .source_comment_id = Some(source_id);
-                    }
-                    result = serde_json::to_value(
-                        state
-                            .comments
-                            .iter()
-                            .find(|saved| saved.id == comment.id)
-                            .expect("new comment exists"),
-                    )
-                    .expect("comment serializes");
+                        state: action.state,
+                        channel: action.channel,
+                        source_comment_id: action.source_comment_id,
+                        anchor: None,
+                    })
                 }
-                ActionCommand::CommentEdit(action) => {
-                    let comment = review::edit_comment(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        &action.id,
-                        review::CommentEdits {
-                            body: action.body,
-                            kind: action.kind,
-                            action: action.action,
-                            channel: action.channel,
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = serde_json::to_value(comment).expect("comment serializes");
-                }
-                ActionCommand::CommentReply(action) => {
-                    let snapshot = crate::provenance::SnapshotEvidence::capture(
-                        Utc::now(),
-                        state.sessions[session_index].id.clone(),
-                        state.sessions[session_index].target.clone(),
-                        files.iter(),
-                    );
-                    let comment = review::reply_and_maybe_resolve_comment(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        &action.id,
-                        action.body,
-                        session.human_identity.clone(),
-                        action.resolve,
-                        snapshot,
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = serde_json::to_value(comment).expect("comment serializes");
-                }
-                ActionCommand::CommentState { id, state: next } => {
-                    let comment = review::set_comment_state(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        &id,
-                        next,
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = serde_json::to_value(comment).expect("comment serializes");
+                ActionCommand::CommentEdit(action) => review::ReviewAction::CommentEdit {
+                    id: action.id,
+                    edits: review::CommentEdits {
+                        body: action.body,
+                        kind: action.kind,
+                        action: action.action,
+                        channel: action.channel,
+                        ..Default::default()
+                    },
+                },
+                ActionCommand::CommentReply(action) => review::ReviewAction::CommentReply {
+                    id: action.id,
+                    body: action.body,
+                    resolve: action.resolve,
+                },
+                ActionCommand::CommentState { id, state } => {
+                    review::ReviewAction::CommentState { id, state }
                 }
                 ActionCommand::DraftAccept { id, body, channel } => {
-                    let inferred = channel.unwrap_or_else(|| {
-                        inferred_web_channel(
-                            session,
-                            &state,
-                            &state.sessions[session_index].id,
-                            true,
-                        )
-                    });
-                    let comment = review::accept_agent_draft(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        &id,
-                        body,
-                        inferred,
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = serde_json::to_value(comment).expect("comment serializes");
+                    review::ReviewAction::DraftAccept { id, body, channel }
                 }
-                ActionCommand::DraftDiscard { id } => {
-                    let comment = review::discard_agent_draft(
-                        &mut state.sessions[session_index],
-                        &mut state.comments,
-                        &id,
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = json!({"discarded": comment.id});
-                }
+                ActionCommand::DraftDiscard { id } => review::ReviewAction::DraftDiscard { id },
                 ActionCommand::Salience {
                     verb,
                     target,
                     salience,
                     rationale,
-                } => {
-                    let file = files
-                        .iter()
-                        .find(|file| file.path == target.path)
-                        .ok_or_else(|| {
-                            ActionError::bad(format!("unknown current file `{}`", target.path))
-                        })?;
-                    let durable_target = attention::target_for_file_diff(
-                        file,
-                        &target.path,
-                        target.line,
-                        target.end_line,
-                    )
-                    .map_err(ActionError::bad)?;
-                    result = match verb {
-                        SalienceVerb::Clear => {
-                            json!({"cleared": attention::clear_human_attention(&mut state.sessions[session_index], &durable_target)})
-                        }
-                        SalienceVerb::Set => serde_json::to_value(
-                            attention::set_human_attention(
-                                &mut state.sessions[session_index],
-                                durable_target,
-                                salience.ok_or_else(|| {
-                                    ActionError::bad("salience-set requires salience")
-                                })?,
-                                rationale,
-                            )
-                            .map_err(ActionError::bad)?,
-                        )
-                        .expect("attention serializes"),
-                        SalienceVerb::Promote => serde_json::to_value(
-                            attention::promote_human_attention(
-                                &mut state.sessions[session_index],
-                                durable_target,
-                                rationale,
-                                &files,
-                            )
-                            .map_err(ActionError::bad)?,
-                        )
-                        .expect("attention serializes"),
-                        SalienceVerb::Demote => serde_json::to_value(
-                            attention::demote_human_attention(
-                                &mut state.sessions[session_index],
-                                durable_target,
-                                rationale,
-                                &files,
-                            )
-                            .map_err(ActionError::bad)?,
-                        )
-                        .expect("attention serializes"),
-                    };
-                }
+                } => match verb {
+                    SalienceVerb::Set => review::ReviewAction::SalienceSet {
+                        path: target.path,
+                        line: target.line,
+                        end_line: target.end_line,
+                        salience: salience
+                            .ok_or_else(|| ActionError::bad("salience-set requires salience"))?,
+                        rationale,
+                    },
+                    SalienceVerb::Clear => review::ReviewAction::SalienceClear {
+                        path: target.path,
+                        line: target.line,
+                        end_line: target.end_line,
+                    },
+                    SalienceVerb::Promote => review::ReviewAction::SaliencePromote {
+                        path: target.path,
+                        line: target.line,
+                        end_line: target.end_line,
+                        rationale,
+                    },
+                    SalienceVerb::Demote => review::ReviewAction::SalienceDemote {
+                        path: target.path,
+                        line: target.line,
+                        end_line: target.end_line,
+                        rationale,
+                    },
+                },
                 ActionCommand::Walkthrough { .. } => unreachable!(),
-            }
+            };
+            let outcome = review::apply_review_action(
+                &mut state,
+                review::ReviewActionContext {
+                    session_index,
+                    files: &files,
+                    author: session.human_identity.clone(),
+                    initial_comment_state: session.comment_initial_state,
+                    channel_policy: review::CommentChannelPolicy::Contextual {
+                        agent_attached: false,
+                        configured_human_name: session.configured_human_name.as_deref(),
+                        configured_human_email: session.configured_human_email.as_deref(),
+                        target_author_name: session.target_author_name.as_deref(),
+                        target_author_email: session.target_author_email.as_deref(),
+                        fixed_default: session.comment_default_channel,
+                    },
+                },
+                action,
+            )
+            .map_err(ActionError::bad)?;
+            result = serde_json::to_value(outcome).expect("review action outcome serializes");
             session.apply_review_state(state);
         }
     }

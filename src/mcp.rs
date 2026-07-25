@@ -735,61 +735,34 @@ impl GanderMcp {
         }
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index_for_context(state, &context);
-            let session_id = state.sessions[idx].id.clone();
-            let anchor = params.path.as_deref().and_then(|path| {
-                context
-                    .files
-                    .iter()
-                    .find(|file| file.path == path)
-                    .and_then(|file| {
-                        crate::anchor::comment_anchor_for_file_diff(
-                            file,
-                            params.line,
-                            params.end_line,
-                        )
-                    })
-            });
-            let observation = crate::provenance::CommentObservation::new(
-                Self::provenance_snapshot(&context, &state.sessions[idx]),
-                anchor.clone(),
-            );
-            let initial_state = params
-                .state
-                .map(Into::into)
-                .unwrap_or(this.initial_comment_state);
-            // Same channel semantics as CLI `comments add`: an explicit
-            // channel wins, then `[comments].default-channel`, then the
-            // state-derived default; a non-actionable channel demotes a todo.
-            let channel = params.channel.or(this.default_comment_channel).unwrap_or({
-                if initial_state == CommentState::Todo {
-                    Channel::Delegation
-                } else {
-                    Channel::Note
-                }
-            });
-            let initial_state = if initial_state == CommentState::Todo && !channel.permits_todo() {
-                CommentState::Draft
-            } else {
-                initial_state
-            };
-            review::add_comment(
-                &mut state.sessions[idx],
-                &mut state.comments,
-                review::NewComment {
-                    session_id,
+            let outcome = review::apply_review_action(
+                state,
+                review::ReviewActionContext {
+                    session_index: idx,
+                    files: &context.files,
+                    author: this.agent_identity.clone(),
+                    initial_comment_state: this.initial_comment_state,
+                    channel_policy: review::CommentChannelPolicy::StateDerived {
+                        fixed_default: this.default_comment_channel,
+                    },
+                },
+                review::ReviewAction::CommentAdd(review::AddCommentRequest {
                     path: params.path,
                     line: params.line,
                     end_line: params.end_line,
-                    anchor,
-                    observation: Some(observation),
                     body: params.body,
                     kind: params.kind,
                     action: params.action,
-                    state: initial_state,
-                    author: this.agent_identity.clone(),
-                    channel,
-                },
-            )
+                    state: params.state.map(Into::into),
+                    channel: params.channel,
+                    source_comment_id: None,
+                    anchor: None,
+                }),
+            )?;
+            match outcome {
+                review::ReviewActionOutcome::Comment(comment) => Ok(*comment),
+                _ => unreachable!("comment add returns a comment"),
+            }
         })
     }
 
@@ -856,16 +829,27 @@ impl GanderMcp {
         let context = self.selected_review_context()?;
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index_for_context(state, &context);
-            let snapshot = Self::provenance_snapshot(&context, &state.sessions[idx]);
-            review::reply_and_maybe_resolve_comment(
-                &mut state.sessions[idx],
-                &mut state.comments,
-                &params.id,
-                params.body,
-                this.agent_identity.clone(),
-                params.resolve.unwrap_or(false),
-                snapshot,
-            )
+            let outcome = review::apply_review_action(
+                state,
+                review::ReviewActionContext {
+                    session_index: idx,
+                    files: &context.files,
+                    author: this.agent_identity.clone(),
+                    initial_comment_state: this.initial_comment_state,
+                    channel_policy: review::CommentChannelPolicy::StateDerived {
+                        fixed_default: this.default_comment_channel,
+                    },
+                },
+                review::ReviewAction::CommentReply {
+                    id: params.id,
+                    body: params.body,
+                    resolve: params.resolve.unwrap_or(false),
+                },
+            )?;
+            match outcome {
+                review::ReviewActionOutcome::Comment(comment) => Ok(*comment),
+                _ => unreachable!("comment reply returns a comment"),
+            }
         })
     }
 
@@ -879,12 +863,26 @@ impl GanderMcp {
         let context = self.selected_review_context()?;
         self.with_state_mut(|state, this| {
             let idx = this.ensure_session_index_for_context(state, &context);
-            review::set_comment_state(
-                &mut state.sessions[idx],
-                &mut state.comments,
-                &params.id,
-                params.state,
-            )
+            let outcome = review::apply_review_action(
+                state,
+                review::ReviewActionContext {
+                    session_index: idx,
+                    files: &context.files,
+                    author: this.agent_identity.clone(),
+                    initial_comment_state: this.initial_comment_state,
+                    channel_policy: review::CommentChannelPolicy::StateDerived {
+                        fixed_default: this.default_comment_channel,
+                    },
+                },
+                review::ReviewAction::CommentState {
+                    id: params.id,
+                    state: params.state,
+                },
+            )?;
+            match outcome {
+                review::ReviewActionOutcome::Comment(comment) => Ok(*comment),
+                _ => unreachable!("comment state returns a comment"),
+            }
         })
     }
 

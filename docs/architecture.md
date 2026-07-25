@@ -41,10 +41,14 @@ none of them fetches from or posts to a forge.
 
 - `src/state.rs` defines `Identity`, annotation `Channel`, comments, replies,
   anchors, and serde-compatible durable state.
-- `src/review.rs` is the shared mutation and selector service used by CLI and
-  MCP adapters; `src/config.rs` supplies configured human/agent identities and
-  channel defaults.
-- Channel inference and TUI composition live in `src/tui/mod.rs`. Publication
+- `src/review.rs` is the shared complete use-case and selector service used by
+  CLI, TUI, MCP, and web adapters. Its `apply_review_action` boundary owns
+  anchoring, provenance capture, source linkage, channel policy, state coercion,
+  viewed/attention effects, and comment triage; `src/config.rs` supplies
+  configured human/agent identities and channel defaults.
+- Interactive adapters gather transient facts (for example whether an agent
+  contacted the TUI), while channel inference executes in the review service.
+  TUI composition remains in `src/tui/mod.rs`. Publication
   boundaries are enforced by artifact profiles, not merely by presentation.
   See [annotations.md](annotations.md) for the lifecycle and privacy contract.
 
@@ -90,7 +94,10 @@ none of them fetches from or posts to a forge.
   the live loop through a bounded command channel, check
   the projection generation, call `src/review.rs`/shared attention services,
   complete a baseline-aware locked atomic save, and only then return the new
-  generation. It supplies live action/lazy-fragment capabilities to
+  generation. The HTTP adapter parses typed, deny-unknown-fields transport
+  requests and dispatches one `review::apply_review_action` operation; it does
+  not reconstruct comment or attention policy. It supplies live
+  action/lazy-fragment capabilities to
   `src/web_render.rs`; tokens, guarded URLs, SSE, and presenter chrome stay in
   this adapter and never enter static HTML. The web adapter contains no
   independent review-domain policy.
