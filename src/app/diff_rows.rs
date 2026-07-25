@@ -2,7 +2,7 @@
 //! including per-line comment anchors and symbol-aware context folding.
 
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, ops::Range, rc::Rc};
+use std::{collections::BTreeMap, ops::Range, sync::Arc};
 
 use crate::{
     anchor::{CommentAnchor, diff_line_kind_label, line_anchor_for_diff_row},
@@ -84,16 +84,16 @@ impl ReviewSession {
     /// Diff rows for the selected file, memoized per file/fingerprint/syntax
     /// config. Rebuilding on every draw and cursor move was the main hot spot
     /// on large files.
-    pub fn diff_rows_for_selected_file(&self) -> Rc<Vec<DiffRow>> {
+    pub fn diff_rows_for_selected_file(&self) -> Arc<Vec<DiffRow>> {
         if self.selected_visible_file().is_none() {
-            return Rc::new(Vec::new());
+            return Arc::new(Vec::new());
         }
         self.diff_rows_for_file_index(self.selected)
     }
 
-    pub(crate) fn diff_rows_for_file_index(&self, file_index: usize) -> Rc<Vec<DiffRow>> {
+    pub(crate) fn diff_rows_for_file_index(&self, file_index: usize) -> Arc<Vec<DiffRow>> {
         let Some(file) = self.files.get(file_index) else {
-            return Rc::new(Vec::new());
+            return Arc::new(Vec::new());
         };
 
         let key = (
@@ -106,8 +106,8 @@ impl ReviewSession {
         if let Some(cached) = self.rows_cache.borrow().get(&key).cloned() {
             return cached;
         }
-        let rows = Rc::new(self.build_diff_rows(file));
-        self.rows_cache.borrow_mut().insert(key, Rc::clone(&rows));
+        let rows = Arc::new(self.build_diff_rows(file));
+        self.rows_cache.borrow_mut().insert(key, Arc::clone(&rows));
         rows
     }
 

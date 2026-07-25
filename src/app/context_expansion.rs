@@ -7,7 +7,7 @@
 //! contents suffice; old line numbers derive from the hunk offsets. The
 //! underlying `Hunk`s and all comment anchors are never modified.
 
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, sync::Arc};
 
 use crate::diff::Hunk;
 
@@ -195,7 +195,7 @@ impl ReviewSession {
     /// the expansion epoch so cached rows rebuild.
     pub fn store_file_contents(&mut self, path: &str, contents: Option<String>) {
         let lines = contents
-            .map(|contents| Rc::new(contents.lines().map(str::to_owned).collect::<Vec<String>>()));
+            .map(|contents| Arc::new(contents.lines().map(str::to_owned).collect::<Vec<String>>()));
         self.file_contents.insert(path.to_owned(), lines);
         self.expansion_epoch += 1;
     }
@@ -210,7 +210,7 @@ impl ReviewSession {
         matches!(self.file_contents.get(path), Some(Some(_)))
     }
 
-    pub(super) fn cached_file_lines(&self, path: &str) -> Option<Rc<Vec<String>>> {
+    pub(super) fn cached_file_lines(&self, path: &str) -> Option<Arc<Vec<String>>> {
         self.file_contents.get(path)?.clone()
     }
 

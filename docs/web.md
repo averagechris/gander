@@ -81,8 +81,15 @@ connected browsers in roughly real time (one poll/event tick):
   discipline, with the same single deliberate snapshot point per poll
   (roadmap backlog item 4 applies unchanged).
 
-Change delivery is generation-based: the server re-projects affected view
-models, bumps the projection generation, and emits an SSE `state` event
+Change delivery is generation-based. A single dedicated blocking coordinator
+owns the mutable session and performs filesystem reads, the one deliberate jj
+snapshot, all subsequent `--ignore-working-copy` reads, parsing, projection,
+diffing, and rendering off the current-thread Tokio reactor. Poll ticks coalesce
+after slow work rather than overlapping or accumulating a backlog; bounded
+action submission remains responsive, locks cover only projection swaps, and
+shutdown stops scheduling new work before joining the worker. The server
+re-projects affected view models, bumps the projection generation, and emits an
+SSE `state` event
 carrying patch fragments keyed by stable region ids (file sections, cards,
 folds, footer/coverage). The client swaps those regions in place; a dropped
 SSE connection reconnects and requests a full re-render. Fingerprint-guarded
@@ -102,8 +109,12 @@ shared reading-region ids. `order` is the canonical stream order so additions
 and moves do not require a page render. The initial EventSource query supplies
 `generation`; on automatic reconnect the browser's `Last-Event-ID` is
 authoritative because EventSource retains its original query string. An absent,
-stale, ahead, or broadcast-lagged cursor receives a `full: true` projection
-patch set (still region swaps, not a whole-page response). The stream sends a
+stale, ahead, or broadcast-lagged cursor receives a `full: true` recovery set:
+mode-independent overview/coverage/navigation patches plus compact structural
+skeletons in canonical order. Recovery never carries both render modes or hidden
+skim rows. The browser advances generation, then uses the guarded fragment route
+for only the current mode's visible/near-viewport regions (still region swaps,
+not a whole-page response). The stream sends a
 15-second comment keepalive, uses bounded per-client and broadcast queues, and
 drops its forwarding task as soon as the client disconnects.
 
@@ -433,8 +444,13 @@ Demo-sized CI budgets in `src/web.rs`:
 - guarded fragment lookup returns full shared-renderer HTML for the current
   generation and rejects stale generation requests;
 - surgical patch scope stays ordered and below 16 KiB for the fixture update;
+- reconnect/lag recovery stays below 8 KiB for the fixture and remains bounded
+  when thousands of generated/skim rows are hidden;
 - generation-guarded actions reject stale optimistic writes;
 - presenter coalescing keeps only the latest move in the watch channel.
+- a deterministic slow-worker barrier proves current-thread HTTP/SSE heartbeat
+  scheduling remains live, while cadence tests prove one-at-a-time polling,
+  missed-tick coalescing, and prompt worker release/shutdown.
 
 Elapsed ceilings are intentionally generous and backed by structural byte/count
 assertions so the gate is deterministic on SourceHut and local Nix runners.

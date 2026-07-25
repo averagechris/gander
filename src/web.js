@@ -35,9 +35,7 @@
     body.dataset.mode = full ? "full" : "guided";
     mode.textContent = full ? "Guided review" : "Full review";
     mode.setAttribute("aria-pressed", String(full));
-    if (full) {
-      document.querySelectorAll('.skim-region[data-full-loaded="false"]').forEach((region) => load(region, "full"));
-    }
+    if (full) observeLazyRegions();
     if (human && presentation.active) {
       presentation.ownsMode = false;
       pauseFollow();
@@ -60,7 +58,10 @@
     if (!region?.isConnected) return region;
     if (!region.classList.contains("region-skeleton") && !(requestedMode === "full" && region.dataset.fullLoaded === "false")) return region;
     const id = region.dataset.region;
-    const query = new URLSearchParams({ token, generation: String(generation), mode: requestedMode });
+    const requestedGeneration = generation;
+    if (region.dataset.fragmentLoading === `${requestedGeneration}:${requestedMode}`) return region;
+    region.dataset.fragmentLoading = `${requestedGeneration}:${requestedMode}`;
+    const query = new URLSearchParams({ token, generation: String(requestedGeneration), mode: requestedMode });
     try {
       const response = await fetch(`/fragment/${encodeURIComponent(id)}?${query}`, {
         credentials: "same-origin",
@@ -71,9 +72,11 @@
       template.innerHTML = await response.text();
       const replacement = template.content.firstElementChild;
       if (!replacement || replacement.dataset.region !== id) throw new Error("invalid fragment response");
+      if (requestedGeneration !== generation || !region.isConnected) return region;
       region.replaceWith(replacement);
       return replacement;
     } catch (error) {
+      if (requestedGeneration !== generation || !region.isConnected) return region;
       region.classList.remove("region-skeleton");
       region.innerHTML = `<p class="fragment-error"></p>`;
       region.querySelector("p").textContent = `Could not load region: ${error.message}`;
@@ -81,8 +84,11 @@
     }
   };
 
-  const observeSkeletons = () => {
-    const skeletons = document.querySelectorAll(".region-skeleton");
+  const observeLazyRegions = () => {
+    const selector = body.dataset.mode === "full"
+      ? '.region-skeleton,.skim-region[data-full-loaded="false"]'
+      : ".region-skeleton";
+    const skeletons = document.querySelectorAll(selector);
     if ("IntersectionObserver" in window) {
       const observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
         if (entry.isIntersecting) {
@@ -95,7 +101,7 @@
       skeletons.forEach(load);
     }
   };
-  observeSkeletons();
+  observeLazyRegions();
 
   const parseFragment = (html, id) => {
     const template = document.createElement("template");
@@ -521,9 +527,17 @@
           current?.remove();
           continue;
         }
-        const html = body.dataset.mode === "full" ? patch.full : patch.guided;
-        if (!html) return reload();
-        const replacement = parseFragment(html, patch.id);
+        const html = patch.html || (body.dataset.mode === "full" ? patch.full : patch.guided);
+        let replacement;
+        if (html) {
+          replacement = parseFragment(html, patch.id);
+        } else {
+          replacement = document.createElement("section");
+          replacement.id = patch.id;
+          replacement.className = "region region-skeleton";
+          replacement.dataset.region = patch.id;
+          replacement.innerHTML = '<div class="skeleton-lines" aria-hidden="true"></div>';
+        }
         if (current) current.replaceWith(replacement);
         else if (ids.has(patch.id)) document.querySelector("#review-stream")?.append(replacement);
         else return reload();
@@ -552,7 +566,7 @@
         if (moved) scrollBy(0, moved.getBoundingClientRect().top - anchorTop);
       }
       if (presentation.target) presentation.following ? moveToTarget() : updateEdge();
-      observeSkeletons();
+      observeLazyRegions();
     } catch (_) {
       reload();
     }

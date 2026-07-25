@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     hash::{DefaultHasher, Hash, Hasher},
     rc::Rc,
+    sync::Arc,
 };
 
 use ratatui::layout::Rect;
@@ -43,14 +44,14 @@ struct CachedDiffLayout {
     identity: LayoutIdentity,
     /// Retain the allocation named by `identity.rows_ptr`; otherwise an
     /// allocator could recycle that address for unrelated logical rows.
-    _rows: Rc<Vec<DiffRow>>,
+    _rows: Arc<Vec<DiffRow>>,
     layout: Rc<MeasuredDiffLayout>,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct DiffMeasurement {
     identity: LayoutIdentity,
-    rows: Rc<Vec<DiffRow>>,
+    rows: Arc<Vec<DiffRow>>,
     layout: Rc<MeasuredDiffLayout>,
     selected_annotation: Option<AnnotationSource>,
 }
@@ -251,7 +252,7 @@ impl DiffViewportController {
     pub(super) fn measure_rows(
         &self,
         session: &ReviewSession,
-        rows: Rc<Vec<DiffRow>>,
+        rows: Arc<Vec<DiffRow>>,
         inner: Rect,
         split_active: bool,
     ) -> DiffMeasurement {
@@ -278,7 +279,7 @@ impl DiffViewportController {
         let mut annotation_hasher = DefaultHasher::new();
         annotation_input.hash(&mut annotation_hasher);
         let identity = LayoutIdentity {
-            rows_ptr: Rc::as_ptr(&rows) as usize,
+            rows_ptr: Arc::as_ptr(&rows) as usize,
             width: inner.width,
             split_active,
             soft_wrap: session.diff_cues.soft_wrap,
@@ -289,7 +290,7 @@ impl DiffViewportController {
         {
             return DiffMeasurement {
                 identity,
-                rows: Rc::clone(&cached._rows),
+                rows: Arc::clone(&cached._rows),
                 layout: Rc::clone(&cached.layout),
                 selected_annotation,
             };
@@ -305,7 +306,7 @@ impl DiffViewportController {
         ));
         let measurement = DiffMeasurement {
             identity: identity.clone(),
-            rows: Rc::clone(&rows),
+            rows: Arc::clone(&rows),
             layout: Rc::clone(&layout),
             selected_annotation,
         };

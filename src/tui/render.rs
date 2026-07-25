@@ -904,7 +904,7 @@ impl MeasuredDiffLayout {
 #[cfg(test)]
 pub(super) fn cached_diff_layout(
     session: &ReviewSession,
-    rows: Rc<Vec<DiffRow>>,
+    rows: std::sync::Arc<Vec<DiffRow>>,
     inner: Rect,
     split_active: bool,
     tui_state: &TuiState,
@@ -7301,7 +7301,7 @@ diff --git a/README.md b/README.md
         );
         assert!(!Rc::ptr_eq(&split, &wrap));
 
-        let replacement_rows = Rc::new(rows.as_ref().clone());
+        let replacement_rows = std::sync::Arc::new(rows.as_ref().clone());
         let replaced = cached_diff_layout(
             &session,
             replacement_rows,

@@ -10,7 +10,11 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver as BlockingReceiver, RecvTimeoutError, SyncSender, TrySendError},
+    },
     task::{Context as TaskContext, Poll},
     time::{Duration, SystemTime},
 };
@@ -242,13 +246,14 @@ struct HttpState {
     target: Arc<str>,
     theme_css: Arc<str>,
     review: Arc<RwLock<WebReview>>,
+    recovery: Arc<RwLock<Arc<ProjectionEvent>>>,
     events: tokio::sync::broadcast::Sender<Arc<ProjectionEvent>>,
     present_events: tokio::sync::watch::Receiver<Option<Arc<PresentEvent>>>,
     interactions: Arc<Mutex<WebInteractions>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     extra_css: Option<Arc<str>>,
     registration: Arc<Mutex<InstanceRegistration>>,
-    actions: tokio::sync::mpsc::Sender<ActionEnvelope>,
+    actions: SyncSender<ActionEnvelope>,
 }
 
 #[derive(Debug)]
@@ -486,6 +491,8 @@ type WebReview = GuideView;
 #[derive(Debug, Clone)]
 struct RegionPatch {
     id: String,
+    /// Mode-independent markup, used only by compact recovery events.
+    html: Option<String>,
     guided: Option<String>,
     full: Option<String>,
     remove: bool,
@@ -687,11 +694,19 @@ fn publish_projection(state: &HttpState, session: &ReviewSession) {
     }
     next.generation = current.generation.saturating_add(1);
     let event = diff_projection(&current, &next);
-    let Ok(mut stored) = state.review.write() else {
+    let recovery = recovery_projection_event(&next);
+    let Ok(mut stored_review) = state.review.write() else {
         return;
     };
-    *stored = next;
-    drop(stored);
+    let Ok(mut stored_recovery) = state.recovery.write() else {
+        return;
+    };
+    // Commit the fragment source and reconnect skeleton as one short critical
+    // section. No rendering or await occurs while either lock is held.
+    *stored_review = next;
+    *stored_recovery = recovery;
+    drop(stored_recovery);
+    drop(stored_review);
     let _ = state.events.send(Arc::new(event));
 }
 
@@ -900,6 +915,7 @@ fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
         if previous_regions.get(id) != Some(&(guided.clone(), full.clone())) {
             patches.push(RegionPatch {
                 id: id.clone(),
+                html: None,
                 guided: Some(guided.clone()),
                 full: Some(full.clone()),
                 remove: false,
@@ -910,6 +926,7 @@ fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
         if !next_regions.contains_key(id) {
             patches.push(RegionPatch {
                 id: id.clone(),
+                html: None,
                 guided: None,
                 full: None,
                 remove: true,
@@ -959,21 +976,20 @@ fn rendered_projection(review: &WebReview) -> std::collections::BTreeMap<String,
     regions
 }
 
-fn full_projection_event(state: &HttpState) -> Arc<ProjectionEvent> {
-    let review = state
-        .review
-        .read()
-        .expect("web projection lock poisoned")
-        .clone();
-    let patches = rendered_projection(&review)
-        .into_iter()
-        .map(|(id, (guided, full))| RegionPatch {
-            id,
-            guided: Some(guided),
-            full: Some(full),
-            remove: false,
-        })
-        .collect();
+fn recovery_projection_event(review: &WebReview) -> Arc<ProjectionEvent> {
+    let mut patches = vec![
+        recovery_patch("overview", render_overview(review)),
+        recovery_patch("coverage", render_coverage(review)),
+        recovery_patch("file-tree", render_file_tree_html(review)),
+        recovery_patch("footer", render_footer(review)),
+    ];
+    patches.extend(
+        review
+            .projection
+            .regions
+            .iter()
+            .map(|region| recovery_patch(&region.id, render_region_skeleton(region))),
+    );
     Arc::new(ProjectionEvent {
         generation: review.generation,
         full: true,
@@ -987,29 +1003,44 @@ fn full_projection_event(state: &HttpState) -> Arc<ProjectionEvent> {
     })
 }
 
+fn recovery_patch(id: &str, html: String) -> RegionPatch {
+    RegionPatch {
+        id: id.to_owned(),
+        html: Some(html),
+        guided: None,
+        full: None,
+        remove: false,
+    }
+}
+
 fn sse_state_event(event: &ProjectionEvent) -> SseEvent {
+    SseEvent::default()
+        .event("state")
+        .id(event.generation.to_string())
+        .json_data(projection_event_json(event))
+        .expect("projection event is JSON serializable")
+}
+
+fn projection_event_json(event: &ProjectionEvent) -> Value {
     let patches = event
         .patches
         .iter()
         .map(|patch| {
             json!({
                 "id": patch.id,
+                "html": patch.html,
                 "guided": patch.guided,
                 "full": patch.full,
                 "remove": patch.remove,
             })
         })
         .collect::<Vec<_>>();
-    SseEvent::default()
-        .event("state")
-        .id(event.generation.to_string())
-        .json_data(json!({
-            "generation": event.generation,
-            "full": event.full,
-            "patches": patches,
-            "order": event.order,
-        }))
-        .expect("projection event is JSON serializable")
+    json!({
+        "generation": event.generation,
+        "full": event.full,
+        "patches": patches,
+        "order": event.order,
+    })
 }
 
 fn sse_present_event(event: &PresentEvent) -> SseEvent {
@@ -1042,11 +1073,21 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     .with_context(|| format!("failed to bind 127.0.0.1:{}", params.port))?;
     let address = listener.local_addr()?;
     debug_assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
-    let mut watcher = WebWatcher::new(&mut params);
+    // Building the shared projection can parse and materialize a large diff.
+    // Do it before serving, but never on the current-thread Tokio reactor.
+    let (returned, initial_review, initial_recovery) = tokio::task::spawn_blocking(move || {
+        let review = WebReview::from_session(&params.session);
+        let recovery = recovery_projection_event(&review);
+        (params, review, recovery)
+    })
+    .await
+    .wrap_err("web projection bootstrap worker stopped")?;
+    params = returned;
+    let watcher = WebWatcher::new(&mut params);
 
-    let mut bridge = AcpBridge::bind(
+    let bridge = AcpBridge::bind(
         params.socket_path.clone(),
-        params.overlay_path,
+        params.overlay_path.clone(),
         Some(params.acp_jj),
     )?;
     let now = Utc::now();
@@ -1054,23 +1095,22 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         &params.registry_dir,
         InstanceInfo {
             pid: std::process::id(),
-            workspace_root: params.workspace_root,
+            workspace_root: params.workspace_root.clone(),
             base: params.session.target.base.clone(),
             rev: params.session.target.rev.clone(),
             summary: params.session.summary_line(),
-            socket_path: params.socket_path,
+            socket_path: params.socket_path.clone(),
             started_at: now,
             last_input_at: now,
         },
     )?;
 
-    let initial_review = WebReview::from_session(&params.session);
     let review = Arc::new(RwLock::new(initial_review));
     let (events, _) = tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY);
     // A watch channel deliberately retains only the newest presenter move.
     // Fast agent driving therefore cannot queue a browser scroll storm.
     let (present_tx, present_rx) = tokio::sync::watch::channel(None);
-    let (action_tx, mut action_rx) = tokio::sync::mpsc::channel(16);
+    let (action_tx, action_rx) = std::sync::mpsc::sync_channel(16);
     let (stream_shutdown_tx, stream_shutdown_rx) = tokio::sync::watch::channel(false);
     let token = uuid::Uuid::new_v4().to_string();
     let host = format!("127.0.0.1:{}", address.port());
@@ -1086,6 +1126,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         target: Arc::from(params.session.target.to_string()),
         theme_css: Arc::from(render_theme_css(&params.theme)),
         review,
+        recovery: Arc::new(RwLock::new(initial_recovery)),
         events,
         present_events: present_rx,
         interactions: Arc::new(Mutex::new(WebInteractions::default())),
@@ -1109,81 +1150,152 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     }
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let worker_shutdown = Arc::new(AtomicBool::new(false));
+    let signal_worker_shutdown = worker_shutdown.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
+        signal_worker_shutdown.store(true, Ordering::Release);
         let _ = stream_shutdown_tx.send(true);
         let _ = shutdown_tx.send(());
     });
-    let server = async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-    };
-    tokio::pin!(server);
-
-    let mut baseline = params.session.to_state();
-    let mut presentation = None;
-    let mut present_sequence = 0u64;
-    let mut tick = tokio::time::interval(WATCH_TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            result = &mut server => {
-                result.wrap_err("web server failed")?;
-                break;
-            }
-            _ = tick.tick() => {
-                let before = params.session.stream_inputs_generation();
-                process_acp_requests(
-                    &mut bridge,
-                    &mut params.session,
-                    &params.state_path,
-                    &mut baseline,
-                    &mut watcher,
-                    &mut presentation,
-                    &mut present_sequence,
-                    &present_tx,
-                    &http_state,
-                );
-                watcher.poll_files(&mut params.session, &mut baseline);
-                watcher.poll_repo(&mut params.session);
-                if reconcile_web_presentation(&params.session, &mut presentation) {
-                    publish_present_event(
-                        &params.session,
-                        &mut present_sequence,
-                        &present_tx,
-                        "sync",
-                        &presentation,
-                        None,
-                        None,
-                    );
-                }
-                if params.session.stream_inputs_generation() != before {
-                    publish_projection(&http_state, &params.session);
-                }
-            }
-            Some(action) = action_rx.recv() => {
-                let result = process_action(
-                    action.expected_generation,
-                    action.command,
-                    &mut params.session,
-                    &params.state_path,
-                    &mut baseline,
-                    &mut watcher,
-                    &http_state,
-                );
-                let _ = action.response.send(result);
-            }
-        }
-    }
+    let worker_http = http_state.clone();
+    let worker_flag = worker_shutdown.clone();
+    let worker_session = params.session;
+    let worker_state_path = params.state_path;
+    let worker = tokio::task::spawn_blocking(move || {
+        run_blocking_worker(BlockingWorker {
+            session: worker_session,
+            state_path: worker_state_path,
+            watcher,
+            bridge,
+            actions: action_rx,
+            present_tx,
+            http: worker_http,
+            shutdown: worker_flag,
+        });
+    });
+    let server_result = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+    worker_shutdown.store(true, Ordering::Release);
+    server_result.wrap_err("web server failed")?;
+    worker.await.wrap_err("web blocking worker stopped")?;
 
     // Keep the registration alive until after the HTTP server and ACP loop
     // have stopped. Dropping these owners removes the registry and socket.
     drop(http_state);
-    drop(bridge);
     Ok(())
+}
+
+/// Owns all mutable review/session state and every potentially blocking jj,
+/// filesystem, parse, projection, and render operation. A single worker plus a
+/// bounded action channel means polls cannot overlap or build a stale backlog;
+/// missed ticks coalesce to one run after the current operation completes.
+struct BlockingWorker {
+    session: ReviewSession,
+    state_path: PathBuf,
+    watcher: WebWatcher,
+    bridge: AcpBridge,
+    actions: BlockingReceiver<ActionEnvelope>,
+    present_tx: tokio::sync::watch::Sender<Option<Arc<PresentEvent>>>,
+    http: HttpState,
+    shutdown: Arc<AtomicBool>,
+}
+
+fn run_blocking_worker(worker: BlockingWorker) {
+    let BlockingWorker {
+        mut session,
+        state_path,
+        mut watcher,
+        mut bridge,
+        actions,
+        present_tx,
+        http,
+        shutdown,
+    } = worker;
+    let mut baseline = session.to_state();
+    let mut presentation = None;
+    let mut present_sequence = 0u64;
+    let mut cadence = WorkerCadence::new(std::time::Instant::now());
+    while !shutdown.load(Ordering::Acquire) {
+        let wait = cadence.wait(std::time::Instant::now());
+        match actions.recv_timeout(wait) {
+            Ok(action) => {
+                let result = process_action(
+                    action.expected_generation,
+                    action.command,
+                    &mut session,
+                    &state_path,
+                    &mut baseline,
+                    &mut watcher,
+                    &http,
+                );
+                let _ = action.response.send(result);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        if cadence.take_due(std::time::Instant::now()) {
+            let before = session.stream_inputs_generation();
+            process_acp_requests(
+                &mut bridge,
+                &mut session,
+                &state_path,
+                &mut baseline,
+                &mut watcher,
+                &mut presentation,
+                &mut present_sequence,
+                &present_tx,
+                &http,
+            );
+            watcher.poll_files(&mut session, &mut baseline);
+            watcher.poll_repo(&mut session);
+            if reconcile_web_presentation(&session, &mut presentation) {
+                publish_present_event(
+                    &session,
+                    &mut present_sequence,
+                    &present_tx,
+                    "sync",
+                    &presentation,
+                    None,
+                    None,
+                );
+            }
+            if session.stream_inputs_generation() != before {
+                publish_projection(&http, &session);
+            }
+        }
+    }
+}
+
+struct WorkerCadence {
+    next_tick: std::time::Instant,
+}
+
+impl WorkerCadence {
+    fn new(now: std::time::Instant) -> Self {
+        Self { next_tick: now }
+    }
+
+    fn wait(&self, now: std::time::Instant) -> Duration {
+        self.next_tick.saturating_duration_since(now)
+    }
+
+    /// Claims at most one poll after any number of missed intervals. Scheduling
+    /// from completion, rather than replaying interval ticks, prevents overlap
+    /// and backlog after a slow jj/render operation.
+    fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if now < self.next_tick {
+            return false;
+        }
+        self.next_tick = now + WATCH_TICK;
+        true
+    }
 }
 
 fn router(state: HttpState) -> Router {
@@ -1305,8 +1417,15 @@ fn request_token(query: Option<&str>) -> Option<&str> {
     token
 }
 
-async fn shell(State(state): State<HttpState>) -> Html<String> {
-    Html(render_shell(&state))
+async fn shell(State(state): State<HttpState>) -> Response {
+    match tokio::task::spawn_blocking(move || render_shell(&state)).await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "web render worker unavailable",
+        )
+            .into_response(),
+    }
 }
 
 async fn stylesheet() -> impl IntoResponse {
@@ -1349,7 +1468,14 @@ async fn fragment(
         Ok(region) => region.clone(),
         Err(error) => return error.into_response(),
     };
-    Html(render_region(&region, true, mode)).into_response()
+    match tokio::task::spawn_blocking(move || render_region(&region, true, mode)).await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "fragment render worker unavailable",
+        )
+            .into_response(),
+    }
 }
 
 fn lookup_fragment<'a>(
@@ -1382,21 +1508,23 @@ async fn submit_action(
     command: ActionCommand,
 ) -> Response {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    if state
-        .actions
-        .send(ActionEnvelope {
-            expected_generation,
-            command,
-            response: sender,
-        })
-        .await
-        .is_err()
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "review action service unavailable",
-        )
-            .into_response();
+    if let Err(error) = state.actions.try_send(ActionEnvelope {
+        expected_generation,
+        command,
+        response: sender,
+    }) {
+        return match error {
+            TrySendError::Full(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "review action service busy; retry",
+            )
+                .into_response(),
+            TrySendError::Disconnected(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "review action service unavailable",
+            )
+                .into_response(),
+        };
     }
     match receiver.await {
         Ok(Ok(result)) => Json(result).into_response(),
@@ -1738,9 +1866,16 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
     let tab_for_stream = tab_id.clone();
     let mut shutdown = state.shutdown.clone();
     tokio::spawn(async move {
-        let current = full_projection_event(&state_for_stream);
+        let current = state_for_stream
+            .recovery
+            .read()
+            .expect("web recovery lock poisoned")
+            .clone();
         if client_generation != Some(current.generation)
-            && sender.send(sse_state_event(&current)).await.is_err()
+            && sender
+                .send(sse_state_event_blocking(current).await)
+                .await
+                .is_err()
         {
             return;
         }
@@ -1781,13 +1916,25 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
             let Some(received) = received else { break };
             match received {
                 Ok(event) => {
-                    if sender.send(sse_state_event(&event)).await.is_err() {
+                    if sender
+                        .send(sse_state_event_blocking(event).await)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    let recovery = full_projection_event(&state_for_stream);
-                    if sender.send(sse_state_event(&recovery)).await.is_err() {
+                    let recovery = state_for_stream
+                        .recovery
+                        .read()
+                        .expect("web recovery lock poisoned")
+                        .clone();
+                    if sender
+                        .send(sse_state_event_blocking(recovery).await)
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1803,6 +1950,16 @@ async fn events(State(state): State<HttpState>, request: Request) -> Response {
     })
     .keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE).text("gander"))
     .into_response()
+}
+
+async fn sse_state_event_blocking(event: Arc<ProjectionEvent>) -> SseEvent {
+    tokio::task::spawn_blocking(move || sse_state_event(&event))
+        .await
+        .unwrap_or_else(|_| {
+            SseEvent::default()
+                .event("notice")
+                .data("state serialization worker unavailable")
+        })
 }
 
 async fn not_found() -> impl IntoResponse {
@@ -1899,6 +2056,19 @@ fn render_file_tree_html(review: &WebReview) -> String {
 
 fn render_region(region: &ReadingRegion, fragment: bool, mode: RenderMode) -> String {
     web_render::render_region(region, mode, RenderOptions::live(mode, fragment))
+}
+
+fn render_region_skeleton(region: &ReadingRegion) -> String {
+    let mut out = String::from("<section id=\"");
+    escape_to(&mut out, &region.id);
+    out.push_str("\" class=\"region region-skeleton\" data-region=\"");
+    escape_to(&mut out, &region.id);
+    out.push_str("\"><div class=\"skeleton-label\"><strong>");
+    escape_to(&mut out, &web_render::region_label(region));
+    out.push_str(
+        "</strong></div><div class=\"skeleton-lines\" aria-hidden=\"true\"></div></section>",
+    );
+    out
 }
 
 fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
@@ -2574,7 +2744,8 @@ mod tests {
             },
         )
         .unwrap();
-        let (actions, _receiver) = tokio::sync::mpsc::channel(1);
+        let (actions, _receiver) = std::sync::mpsc::sync_channel(1);
+        let recovery = recovery_projection_event(&review);
         HttpState {
             token: Arc::from("safe-token"),
             expected_host: Arc::from("127.0.0.1:8123"),
@@ -2585,6 +2756,7 @@ mod tests {
             target: Arc::from("main..@"),
             theme_css: Arc::from(render_theme_css(&ThemeConfig::default())),
             review: Arc::new(RwLock::new(review)),
+            recovery: Arc::new(RwLock::new(recovery)),
             events: tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY).0,
             present_events: tokio::sync::watch::channel(None).1,
             interactions: Arc::new(Mutex::new(WebInteractions::default())),
@@ -2666,6 +2838,21 @@ mod tests {
             patch_bytes <= 16 * 1024,
             "patch bytes {patch_bytes} > 16KiB"
         );
+        let recovery = recovery_projection_event(&next);
+        let recovery_bytes = serde_json::to_vec(&projection_event_json(&recovery))
+            .unwrap()
+            .len();
+        assert!(recovery.full);
+        assert!(
+            recovery_bytes <= 8 * 1024,
+            "recovery bytes {recovery_bytes} > 8KiB"
+        );
+        assert!(
+            recovery
+                .patches
+                .iter()
+                .all(|patch| patch.guided.is_none() && patch.full.is_none())
+        );
 
         let (present_tx, present_rx) = tokio::sync::watch::channel(None);
         for sequence in 1..=64 {
@@ -2684,12 +2871,13 @@ mod tests {
         assert_eq!(latest.note.as_deref(), Some("latest-64"));
 
         eprintln!(
-            "web_perf_smoke metrics: ssr_bytes={} meaningful_offset={} render_elapsed={:?} skeleton_regions={} patch_bytes={} latest_presenter_sequence={}",
+            "web_perf_smoke metrics: ssr_bytes={} meaningful_offset={} render_elapsed={:?} skeleton_regions={} patch_bytes={} recovery_bytes={} latest_presenter_sequence={}",
             html.len(),
             meaningful_offset,
             render_elapsed,
             html.matches("region-skeleton").count(),
             patch_bytes,
+            recovery_bytes,
             latest.sequence
         );
     }
@@ -2738,14 +2926,117 @@ mod tests {
 
     #[test]
     fn full_projection_recovers_absent_or_dropped_generation() {
-        let state = http_state(review_fixture());
-        let event = full_projection_event(&state);
+        let review = review_fixture();
+        let event = recovery_projection_event(&review);
         assert!(event.full);
         assert_eq!(event.generation, 42);
         assert!(event.patches.iter().any(|patch| patch.id == "overview"));
         assert!(event.patches.iter().any(|patch| patch.id == "footer"));
         assert!(event.patches.iter().any(|patch| patch.id == "file-core"));
         assert_eq!(event.order.first().map(String::as_str), Some("chapter-one"));
+        assert!(event.patches.iter().all(|patch| patch.guided.is_none()));
+        assert!(event.patches.iter().all(|patch| patch.full.is_none()));
+        assert!(event.patches.iter().all(|patch| patch.html.is_some()));
+        let payload = serde_json::to_string(
+            &event
+                .patches
+                .iter()
+                .map(|patch| (&patch.id, &patch.html, &patch.guided, &patch.full))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(payload.len() < 8 * 1024, "recovery bytes={}", payload.len());
+        assert!(!payload.contains("version = 99"));
+    }
+
+    #[test]
+    fn recovery_and_guided_skim_stay_compact_for_generated_payloads() {
+        let mut review = review_fixture();
+        let skim = review
+            .projection
+            .regions
+            .iter_mut()
+            .find(|region| matches!(region.kind, ReadingRegionKind::Skim(_)))
+            .unwrap();
+        for index in 0..2_000 {
+            skim.rows.push(row(
+                &format!("hidden-{index}"),
+                "generated.lock",
+                &format!("large generated payload {index}"),
+                Salience::Skim,
+            ));
+        }
+        let guided = render_region(skim, true, RenderMode::Guided);
+        let full = render_region(skim, true, RenderMode::Full);
+        let recovery = recovery_projection_event(&review);
+        let recovery_bytes: usize = recovery
+            .patches
+            .iter()
+            .map(|patch| patch.html.as_ref().map_or(0, String::len))
+            .sum();
+        assert!(guided.len() < 2 * 1024, "guided bytes={}", guided.len());
+        assert!(full.len() > 100 * 1024, "full bytes={}", full.len());
+        assert!(recovery_bytes < 8 * 1024, "recovery bytes={recovery_bytes}");
+        assert!(!guided.contains("large generated payload"));
+        assert!(full.contains("large generated payload 1999"));
+    }
+
+    #[test]
+    fn worker_cadence_coalesces_missed_ticks_without_overlap_or_backlog() {
+        let start = std::time::Instant::now();
+        let mut cadence = WorkerCadence::new(start);
+        assert!(cadence.take_due(start));
+        for offset in 1..=100 {
+            assert!(!cadence.take_due(start + Duration::from_millis(offset)));
+        }
+        let after_slow_job = start + WATCH_TICK + Duration::from_secs(5);
+        assert!(cadence.take_due(after_slow_job));
+        assert!(!cadence.take_due(after_slow_job));
+        assert_eq!(cadence.wait(after_slow_job), WATCH_TICK);
+    }
+
+    #[test]
+    fn fragment_fallback_is_generation_guarded_and_lazy() {
+        assert!(COMPONENT_JS.contains("patch.html ||"));
+        assert!(COMPONENT_JS.contains("region region-skeleton"));
+        assert!(COMPONENT_JS.contains("requestedGeneration !== generation"));
+        assert!(COMPONENT_JS.contains("observeLazyRegions"));
+        assert!(!COMPONENT_JS.contains("return reload();\n        const replacement"));
+    }
+
+    #[test]
+    fn slow_blocking_work_does_not_starve_current_thread_heartbeat_and_shuts_down() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let slow_fake_jj_render = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                release_rx.recv().unwrap();
+            });
+            tokio::time::timeout(Duration::from_secs(2), started_rx)
+                .await
+                .expect("blocking worker did not start")
+                .unwrap();
+
+            // This timer and task run on the same current-thread reactor used
+            // by the web server. The deliberately blocked worker must not
+            // prevent an HTTP/SSE-style heartbeat from being scheduled.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            })
+            .await
+            .expect("reactor heartbeat starved behind blocking work");
+
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), slow_fake_jj_render)
+                .await
+                .expect("blocking worker ignored shutdown/release")
+                .unwrap();
+        });
     }
 
     #[derive(Default)]

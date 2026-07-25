@@ -6,7 +6,7 @@
 //! conservatively without treating changed code as acknowledged.
 
 use std::collections::{BTreeSet, HashMap};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -269,7 +269,7 @@ pub struct ReviewStream {
     /// Shared annotation-card owners and durable sources. Render adapters may
     /// format these differently, but must not place or filter cards again.
     pub annotations: Vec<StreamAnnotation>,
-    render_rows: Rc<Vec<DiffRow>>,
+    render_rows: Arc<Vec<DiffRow>>,
     owner_by_row_id: HashMap<String, usize>,
     owner_by_anchor: HashMap<(usize, String), usize>,
     owner_by_line_fingerprint: HashMap<(usize, String), usize>,
@@ -377,7 +377,7 @@ impl ReviewStream {
                 }
             }
         }
-        let render_rows = Rc::new(Self::rendered(&rows));
+        let render_rows = Arc::new(Self::rendered(&rows));
         Self {
             rows,
             spotlights,
@@ -744,8 +744,8 @@ impl ReviewSession {
         added
     }
 
-    pub fn review_stream_rows(&self) -> Rc<Vec<DiffRow>> {
-        Rc::clone(&self.review_stream().render_rows)
+    pub fn review_stream_rows(&self) -> Arc<Vec<DiffRow>> {
+        Arc::clone(&self.review_stream().render_rows)
     }
 
     /// Cheap cache key for the memoized stream projection. Everything here is
@@ -765,18 +765,18 @@ impl ReviewSession {
         }
     }
 
-    pub fn review_stream(&self) -> Rc<ReviewStream> {
+    pub fn review_stream(&self) -> Arc<ReviewStream> {
         if let Some((cached_key, stream)) = self.stream_cache.borrow().as_ref()
             && cached_key.matches(self)
         {
-            return Rc::clone(stream);
+            return Arc::clone(stream);
         }
         let key = self.stream_cache_key();
-        let stream = Rc::new(self.build_review_stream());
+        let stream = Arc::new(self.build_review_stream());
         #[cfg(test)]
         self.stream_projection_builds
             .set(self.stream_projection_builds.get() + 1);
-        *self.stream_cache.borrow_mut() = Some((key, Rc::clone(&stream)));
+        *self.stream_cache.borrow_mut() = Some((key, Arc::clone(&stream)));
         stream
     }
 
@@ -1032,16 +1032,16 @@ impl ReviewSession {
         &self,
         file_index: usize,
         file: &super::ReviewFile,
-    ) -> Rc<Vec<DiffRow>> {
+    ) -> Arc<Vec<DiffRow>> {
         if let Some((fingerprint, rows)) = self.structural_rows_cache.borrow().get(&file_index)
             && *fingerprint == file.diff.fingerprint
         {
-            return Rc::clone(rows);
+            return Arc::clone(rows);
         }
-        let rows = Rc::new(structural_rows(file));
+        let rows = Arc::new(structural_rows(file));
         self.structural_rows_cache.borrow_mut().insert(
             file_index,
-            (file.diff.fingerprint.clone(), Rc::clone(&rows)),
+            (file.diff.fingerprint.clone(), Arc::clone(&rows)),
         );
         rows
     }
@@ -2072,7 +2072,7 @@ mod tests {
         );
         session.syntax_cache.borrow_mut().insert(
             syntax_key,
-            Rc::new(super::super::syntax_cache::SyntaxFileCache {
+            Arc::new(super::super::syntax_cache::SyntaxFileCache {
                 new_status: super::super::syntax_cache::SyntaxCacheStatus::Failed,
                 old_status: super::super::syntax_cache::SyntaxCacheStatus::Failed,
                 ..Default::default()
@@ -3149,7 +3149,7 @@ mod tests {
         let builds = session.stream_projection_build_count();
         session.syntax.enabled = !session.syntax.enabled;
         let after = session.review_stream_rows();
-        assert!(!Rc::ptr_eq(&before, &after));
+        assert!(!Arc::ptr_eq(&before, &after));
         assert_eq!(session.stream_projection_build_count(), builds + 1);
     }
 

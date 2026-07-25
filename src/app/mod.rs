@@ -32,7 +32,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    rc::Rc,
+    sync::Arc,
 };
 
 use chrono::Utc;
@@ -64,9 +64,9 @@ use syntax_cache::{SyntaxCacheKey, SyntaxFileCache, SyntaxSide, syntax_source};
 /// context-fold, force-render-large, and word-highlight flags and the
 /// context-expansion epoch (bumped whenever expansion state or fetched file
 /// contents change).
-type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool, u64), Rc<Vec<DiffRow>>>;
+type DiffRowsCache = BTreeMap<(SyntaxCacheKey, bool, bool, bool, u64), Arc<Vec<DiffRow>>>;
 /// file index → (diff fingerprint, memoized cheap structural stream rows).
-type StructuralRowsCache = BTreeMap<usize, (String, Rc<Vec<DiffRow>>)>;
+type StructuralRowsCache = BTreeMap<usize, (String, Arc<Vec<DiffRow>>)>;
 
 const GENERATED_TREE_GROUP: &str = "generated/noisy";
 
@@ -156,7 +156,7 @@ pub struct ReviewSession {
     /// current stream viewport. All other files stay on cheap parsed-diff
     /// structural rows.
     stream_materialized_files: RefCell<BTreeSet<usize>>,
-    stream_cache: RefCell<Option<(stream::StreamCacheKey, Rc<ReviewStream>)>>,
+    stream_cache: RefCell<Option<(stream::StreamCacheKey, Arc<ReviewStream>)>>,
     /// Monotonic generation covering every stream-projection input that the
     /// cheap scalar cache key cannot observe directly: the file set and
     /// fingerprints, force-render marks, skim-fold peeks, durable sessions
@@ -193,11 +193,11 @@ pub struct ReviewSession {
     /// Lazily fetched full file contents (new side) per path, split into
     /// lines. `None` records a failed fetch (deleted/binary file) so gap
     /// rows stop offering expansion.
-    file_contents: BTreeMap<String, Option<Rc<Vec<String>>>>,
+    file_contents: BTreeMap<String, Option<Arc<Vec<String>>>>,
     /// Bumped whenever expansion state or fetched contents change so cached
     /// diff rows rebuild.
     expansion_epoch: u64,
-    syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, Rc<SyntaxFileCache>>>,
+    syntax_cache: RefCell<BTreeMap<SyntaxCacheKey, Arc<SyntaxFileCache>>>,
     /// Memoized diff rows per file (same key as the syntax cache plus the
     /// context-fold flag), rebuilt only when the diff fingerprint, syntax
     /// config, or fold mode changes.
@@ -3957,7 +3957,7 @@ diff --git a/README.md b/README.md
             &old_indices,
         );
 
-        assert!(Rc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]
@@ -5527,7 +5527,7 @@ diff --git a/src/c.rs b/src/c.rs
         let first = session.diff_rows_for_selected_file();
         let second = session.diff_rows_for_selected_file();
 
-        assert!(std::rc::Rc::ptr_eq(&first, &second));
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
     }
 
     #[test]
@@ -5541,7 +5541,7 @@ diff --git a/src/c.rs b/src/c.rs
         };
         let after = session.diff_rows_for_selected_file();
 
-        assert!(!std::rc::Rc::ptr_eq(&before, &after));
+        assert!(!std::sync::Arc::ptr_eq(&before, &after));
         assert!(
             !after
                 .iter()
