@@ -173,7 +173,43 @@ pub fn render_overview(view: &GuideView, target: &str, options: RenderOptions) -
         if options.actions {
             out.push_str(" data-action=\"walkthrough-next\"");
         }
-        out.push_str(">Next spotlight</button></div>");
+        out.push_str(">Next spotlight</button>");
+        if options.actions {
+            out.push_str("<label class=\"walkthrough-goto\">Go to spotlight <select data-action=\"walkthrough-goto\" aria-label=\"Go to a specific Spotlight\"><option value=\"\">Choose…</option>");
+            let mut seen = std::collections::BTreeSet::new();
+            for annotation in projection
+                .regions
+                .iter()
+                .flat_map(|region| &region.rows)
+                .flat_map(|row| &row.annotations)
+            {
+                if let ReadingAnnotationSource::Walkthrough { step, part, .. } = &annotation.source
+                    && seen.insert((step.id.clone(), *part))
+                {
+                    out.push_str("<option data-step-id=\"");
+                    escape_to(&mut out, &step.id);
+                    out.push_str("\" data-part=\"");
+                    out.push_str(&part.to_string());
+                    out.push_str("\" value=\"");
+                    escape_to(&mut out, &format!("{}:{part}", step.id));
+                    out.push_str("\">");
+                    escape_to(
+                        &mut out,
+                        &format!(
+                            "{} · part {}",
+                            step.title.as_deref().unwrap_or("Walkthrough step"),
+                            part + 1
+                        ),
+                    );
+                    out.push_str("</option>");
+                }
+            }
+            out.push_str("</select></label>");
+        }
+        out.push_str("</div>");
+    }
+    if options.actions && projection.skim_count > 0 {
+        out.push_str("<div class=\"bulk-actions\"><button type=\"button\" data-action=\"skim-acknowledge-all\" aria-label=\"Acknowledge all current skim folds\">Acknowledge all current skims</button></div>");
     }
     out.push_str("</section>");
     out
@@ -349,6 +385,52 @@ pub fn render_region(region: &ReadingRegion, mode: RenderMode, options: RenderOp
                     out.push_str(" disabled");
                 }
                 out.push_str(">Acknowledge</button>");
+                if !fold.target.members.is_empty() {
+                    out.push_str("<span class=\"skim-salience-controls\"><label>Salience target <select data-skim-target aria-label=\"Select folded skim target\">");
+                    for member in &fold.target.members {
+                        out.push_str("<option data-path=\"");
+                        escape_to(&mut out, &member.file);
+                        if let Some(line) = member.line {
+                            out.push_str("\" data-line=\"");
+                            out.push_str(&line.to_string());
+                        }
+                        if let Some(end_line) = member.end_line {
+                            out.push_str("\" data-end-line=\"");
+                            out.push_str(&end_line.to_string());
+                        }
+                        out.push_str("\">");
+                        escape_to(&mut out, &member.file);
+                        if let Some(line) = member.line {
+                            out.push(':');
+                            out.push_str(&line.to_string());
+                            if let Some(end) = member.end_line.filter(|end| *end != line) {
+                                out.push('-');
+                                out.push_str(&end.to_string());
+                            }
+                        }
+                        out.push_str("</option>");
+                    }
+                    out.push_str("</select></label>");
+                    for (label, action, salience) in [
+                        ("Promote", "salience-promote", None),
+                        ("Demote", "salience-demote", None),
+                        ("Set Spotlight", "salience-set", Some("spotlight")),
+                        ("Set Supporting", "salience-set", Some("supporting")),
+                        ("Set Skim", "salience-set", Some("skim")),
+                        ("Clear salience", "salience-clear", None),
+                    ] {
+                        out.push_str("<button type=\"button\" data-action=\"");
+                        out.push_str(action);
+                        if let Some(salience) = salience {
+                            out.push_str("\" data-salience=\"");
+                            out.push_str(salience);
+                        }
+                        out.push_str("\">");
+                        out.push_str(label);
+                        out.push_str("</button>");
+                    }
+                    out.push_str("</span>");
+                }
             }
             out.push_str("</div><div class=\"full-only\">");
             if options.eager_full {

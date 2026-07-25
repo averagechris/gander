@@ -308,12 +308,17 @@ Attention is the product: the web view is where harness-curated guides breathe,
 while a full every-line review stays equally first-class. Design:
 [docs/web.md](web.md). Decision record: docs/decisions.md D10.
 
-Status: final audit remediation in progress. The Phase 5 implementation
-converges live and static guide rendering over the shared reading projection,
-but this status does not claim closure of remaining watcher/SSE or client-race
-audit findings outside this repair. Browserless CI smoke exercises the
-integrated SSR, windowing/fragments, generation-guarded actions, surgical patch
-diffing, and presenter coalescing model.
+Status: complete. Final adversarial-audit remediation keeps blocking
+watcher/render work off the async runtime, bounds and cancels watcher jj
+subprocesses and worker shutdown, gives every loaded document an in-memory tab
+identity, makes SSE leases the sole source of browser-tab liveness, orders
+interaction reports per tab, closes the guided/full fragment
+race, and exposes the already-supported skim, salience, and walkthrough actions
+as accessible browser controls. Central response headers and a repo-wide web
+style audit close the security/CSS findings without weakening the embedded
+asset policy. Browserless CI smoke exercises the integrated SSR,
+windowing/fragments, generation-guarded actions, surgical patch diffing, and
+presenter coalescing model.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so
@@ -334,8 +339,13 @@ diffing, and presenter coalescing model.
 - [x] final boundary repair: web action transport dispatches one complete core
   use-case; CLI/TUI/MCP comment paths share that operation, and live
   `review/current_focus` has `gander current-focus` JSON/text parity
-- [ ] close remaining independent final-audit findings (watcher/SSE and client
-  race controls are intentionally outside this boundary repair)
+- [x] close remaining final-audit watcher/runtime, SSE lease and interaction
+  ordering, full-mode fragment race, browser control parity, CSS, and response
+  header findings
+- [x] close adversarial-audit tab-duplication and bounded-shutdown blockers:
+  per-document leases never use copied browser storage; watcher jj children are
+  timeout/cancellation bounded; endpoint cleanup and queued action failure do
+  not wait indefinitely for arbitrary synchronous worker code
 - [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`

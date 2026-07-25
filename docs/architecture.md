@@ -79,7 +79,9 @@ none of them fetches from or posts to a forge.
   typed ACP request loop.
 - `src/web.rs` is the M16 loopback HTTP adapter. Its centralized middleware
   validates the per-process capability token, exact bound Host, and same-origin
-  Origin before every route (including fragments, SSE, and assets). Phase 2
+  Origin before every route (including fragments, SSE, and assets), then adds
+  no-store, nosniff, no-referrer, and frame-denial headers to successes and
+  errors alike. Phase 2
   server-renders the attention overview and near-viewport reading regions from
   `src/app/reading.rs`, leaves offscreen structural skeletons, and lazily serves
   generation-checked stable-region fragments. The traditional mode expands the

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed the remaining M16 web correctness audit gaps: SSE-only tab liveness and
+  ordered interaction reports, race-safe full fragments, accessible bulk skim/
+  Spotlight/salience controls, centralized anti-referrer/frame headers, and
+  removal and auditing of dead literal-color component CSS. Final adversarial
+  remediation gives each loaded document a fresh in-memory lease, bounds worker
+  shutdown, and kills/reaps cancelled or timed-out watcher jj subprocesses.
 - Fixed the M16 adapter boundary by routing web and existing adapter comment/
   attention mutations through one complete review use-case, and added
   `gander current-focus` JSON/text CLI parity for live TUI/web focus queries.

@@ -63,6 +63,10 @@ body[data-mode="guided"] .skim-region.present-expanded .full-only { display: blo
 .salience-skim .salience-margin { background: var(--muted); }
 .skim-fold { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: .7rem; align-items: center; padding: .75rem .9rem; color: var(--muted); }
 .skim-fold strong { color: var(--foreground); }
+.skim-salience-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .4rem; align-items: end; }
+.skim-salience-controls label, .walkthrough-goto { color: var(--muted); font-size: .75rem; }
+.skim-salience-controls select, .walkthrough-goto select { display: block; margin-top: .2rem; border: 1px solid var(--subtle); border-radius: .4rem; padding: .45rem; background: var(--background); }
+.bulk-actions { margin-top: .7rem; }
 .salience-chip, .badge { border: 1px solid var(--subtle); border-radius: 99rem; padding: .1rem .45rem; color: var(--muted); font-size: .72rem; }
 .theme-toggle { color: var(--foreground); background: var(--surface); border: 1px solid var(--subtle); border-radius: .5rem; padding: .55rem .8rem; }
 .annotation { max-width: 54rem; margin: 1rem clamp(.6rem, 5vw, 5rem); padding: 1rem 1.1rem; border: 1px solid var(--subtle); border-left: .3rem solid var(--accent); border-radius: .7rem; background: var(--background); box-shadow: 0 .35rem 1.2rem var(--shadow); font: .95rem/1.6 ui-sans-serif, system-ui, sans-serif; }

@@ -12,16 +12,21 @@
   const note = document.querySelector("#presenter-note");
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
   const tabId = (() => {
+    const browserCrypto = globalThis.crypto;
+    if (!browserCrypto?.getRandomValues) throw new Error("Gander web requires Web Crypto for tab identity");
     try {
-      const prior = sessionStorage.getItem("gander.tabId");
-      if (prior) return prior;
-      const id = crypto.randomUUID();
-      sessionStorage.setItem("gander.tabId", id);
-      return id;
-    } catch (_) {
-      return `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
+      if (typeof browserCrypto.randomUUID === "function") return browserCrypto.randomUUID();
+    } catch (_) {}
+    const bytes = browserCrypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   })();
+  // Per-document identity and ordering survive EventSource reconnects because
+  // this closure remains alive, while reload/duplication deliberately starts
+  // an independent lease at sequence zero.
+  let clientSequence = 0;
 
   let presentation = { active: false, following: false, target: null, ownsMode: false, priorMode: null };
   let presenterRows = [];
@@ -73,10 +78,21 @@
       const replacement = template.content.firstElementChild;
       if (!replacement || replacement.dataset.region !== id) throw new Error("invalid fragment response");
       if (requestedGeneration !== generation || !region.isConnected) return region;
+      if (requestedMode !== body.dataset.mode) {
+        delete region.dataset.fragmentLoading;
+        return load(region, body.dataset.mode);
+      }
       region.replaceWith(replacement);
+      if (body.dataset.mode === "full" && replacement.dataset.fullLoaded === "false") {
+        return load(replacement, "full");
+      }
       return replacement;
     } catch (error) {
       if (requestedGeneration !== generation || !region.isConnected) return region;
+      if (requestedMode !== body.dataset.mode) {
+        delete region.dataset.fragmentLoading;
+        return load(region, body.dataset.mode);
+      }
       region.classList.remove("region-skeleton");
       region.innerHTML = `<p class="fragment-error"></p>`;
       region.querySelector("p").textContent = `Could not load region: ${error.message}`;
@@ -145,11 +161,12 @@
   const reportInteraction = (busy = null, focus = visibleFocus()) => {
     clearTimeout(reportTimer);
     reportTimer = setTimeout(() => {
+      clientSequence += 1;
       fetch(`/interaction?${new URLSearchParams({ token })}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ tab_id: tabId, focus, busy }),
+        body: JSON.stringify({ tab_id: tabId, client_sequence: clientSequence, focus, busy }),
         keepalive: true,
       }).catch(() => {});
     }, 80);
@@ -220,9 +237,22 @@
 
   document.addEventListener("change", (event) => {
     const checkbox = event.target.closest?.('[data-action="file-viewed"]');
-    if (!checkbox) return;
-    const viewed = checkbox.checked;
-    postAction(viewed ? "file-viewed" : "file-unviewed", { path: checkbox.dataset.path }, checkbox.closest("li"), () => () => { checkbox.checked = !viewed; });
+    if (checkbox) {
+      const viewed = checkbox.checked;
+      postAction(viewed ? "file-viewed" : "file-unviewed", { path: checkbox.dataset.path }, checkbox.closest("li"), () => () => { checkbox.checked = !viewed; });
+      return;
+    }
+    const goto = event.target.closest?.('select[data-action="walkthrough-goto"]');
+    const option = goto?.selectedOptions[0];
+    if (!option?.dataset.stepId) return;
+    postAction("walkthrough-goto", { step_id: option.dataset.stepId, part: Number(option.dataset.part) }, goto, () => {
+      goto.disabled = true;
+      return () => { goto.disabled = false; goto.value = ""; };
+    }).then((destination) => {
+      goto.disabled = false;
+      goto.value = "";
+      if (destination?.step_id) document.querySelector(`[data-step-id="${CSS.escape(destination.step_id)}"][data-step-part="${Number(destination.part || 0)}"]`)?.closest(".annotation")?.scrollIntoView({ block: "center" });
+    });
   });
 
   document.addEventListener("submit", async (event) => {
@@ -323,6 +353,21 @@
       });
       return;
     }
+    if (action === "skim-acknowledge-all") {
+      postAction(action, {}, button.closest(".attention-map"), () => {
+        const controls = [...document.querySelectorAll('button[data-action="skim-acknowledge"]:not(:disabled)')];
+        controls.forEach((control) => { control.disabled = true; control.textContent = "✓ Acknowledged"; });
+        button.disabled = true;
+        const prior = button.textContent;
+        button.textContent = "✓ All current skims acknowledged";
+        return () => {
+          controls.forEach((control) => { control.disabled = false; control.textContent = "Acknowledge"; });
+          button.disabled = false;
+          button.textContent = prior;
+        };
+      });
+      return;
+    }
     if (action === "comment-state") {
       const article = button.closest(".annotation");
       postAction(action, { id: button.dataset.commentId, state: button.dataset.state }, article, () => {
@@ -339,7 +384,13 @@
       return;
     }
     if (["salience-promote", "salience-demote", "salience-set", "salience-clear"].includes(action)) {
-      const target = selectedTarget(button.dataset.path);
+      const foldedOption = button.closest(".skim-region")?.querySelector("[data-skim-target]")?.selectedOptions[0];
+      const foldedTarget = foldedOption ? {
+        path: foldedOption.dataset.path,
+        ...(foldedOption.dataset.line ? { line: Number(foldedOption.dataset.line) } : {}),
+        ...(foldedOption.dataset.endLine ? { end_line: Number(foldedOption.dataset.endLine) } : {}),
+      } : null;
+      const target = foldedTarget || selectedTarget(button.dataset.path);
       if (target) postAction(action, { target, ...(button.dataset.salience ? { salience: button.dataset.salience } : {}) }, button.closest(".region"), () => {
         const row = document.querySelector(".diff-row.web-selected");
         const owner = row && row.dataset.path === target.path ? row : button.closest(".region");
@@ -348,9 +399,9 @@
         let next = button.dataset.salience;
         if (!next && prior && action === "salience-promote") next = order[Math.min(order.length - 1, order.indexOf(prior) + 1)];
         if (!next && prior && action === "salience-demote") next = order[Math.max(0, order.indexOf(prior) - 1)];
-        if (next) {
+        if (next || action === "salience-clear") {
           order.forEach((name) => owner?.classList.remove(`salience-${name}`));
-          owner?.classList.add(`salience-${next}`);
+          if (next) owner?.classList.add(`salience-${next}`);
         }
         owner?.classList.add("action-pending");
         return () => {
@@ -501,6 +552,7 @@
   });
 
   const source = new EventSource(`/events?${new URLSearchParams({ token, generation: String(generation), tab: tabId })}`);
+  source.addEventListener("open", () => reportInteraction(null));
   source.addEventListener("state", (message) => {
     try {
       const update = JSON.parse(message.data);
@@ -541,6 +593,7 @@
         if (current) current.replaceWith(replacement);
         else if (ids.has(patch.id)) document.querySelector("#review-stream")?.append(replacement);
         else return reload();
+        if (body.dataset.mode === "full" && replacement.dataset.fullLoaded === "false") load(replacement, "full");
       }
       const stream = document.querySelector("#review-stream");
       for (const id of update.order || []) {

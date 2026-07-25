@@ -4184,6 +4184,9 @@ fn send_present_request(
     use std::os::unix::net::UnixStream;
     let mut stream = UnixStream::connect(socket_path)
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .wrap_err("failed to set live-instance response deadline")?;
     writeln!(stream, "{request}")?;
     stream.flush()?;
     let mut response = String::new();

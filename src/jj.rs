@@ -1,20 +1,24 @@
 use std::{
     fmt, io,
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::Duration,
+    process::{Command, Output, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use color_eyre::eyre::{Result, bail, eyre};
 
-#[derive(Debug, Clone)]
-pub struct JjCommand {
-    binary: PathBuf,
-    repo: PathBuf,
-    target: ReviewTarget,
-}
+pub struct JjCommand;
 
 pub trait JjBackend {
+    /// Apply subprocess limits for long-lived callers such as the web watcher.
+    /// In-memory/test backends may ignore this; the CLI backend kills and reaps
+    /// an active child on cancellation or timeout.
+    fn configure_process_control(&mut self, _control: JjProcessControl) {}
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String>;
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>>;
     /// Changes in the reviewed range (`base..rev`), oldest first.
@@ -85,6 +89,19 @@ impl JjChangeSummary {
 #[derive(Debug, Clone)]
 pub struct JjCliBackend {
     binary: PathBuf,
+    process_control: Option<JjProcessControl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JjProcessControl {
+    cancelled: Arc<AtomicBool>,
+    timeout: Duration,
+}
+
+impl JjProcessControl {
+    pub fn new(cancelled: Arc<AtomicBool>, timeout: Duration) -> Self {
+        Self { cancelled, timeout }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,20 +141,8 @@ impl fmt::Display for ReviewTarget {
 }
 
 impl JjCommand {
-    pub fn new(binary: PathBuf, repo: PathBuf, target: ReviewTarget) -> Self {
-        Self {
-            binary,
-            repo,
-            target,
-        }
-    }
-
     pub fn resolve_binary(configured: &Path) -> Result<PathBuf> {
         resolve_binary_with_probe(configured, can_run_jj)
-    }
-
-    pub fn diff(&self) -> Result<String> {
-        Self::run_diff(&self.binary, &self.repo, &self.target, None)
     }
 
     fn run_diff(
@@ -145,24 +150,28 @@ impl JjCommand {
         repo: &Path,
         target: &ReviewTarget,
         at_operation: Option<&str>,
+        process_control: Option<&JjProcessControl>,
     ) -> Result<String> {
         let mut command = Command::new(binary);
         command.arg("--ignore-working-copy");
         if let Some(operation_id) = at_operation {
             command.arg("--at-operation").arg(operation_id);
         }
-        let output = command
-            .arg("diff")
-            .arg("--from")
-            .arg(&target.base)
-            .arg("--to")
-            .arg(&target.rev)
-            .arg("--git")
-            .arg("--color=never")
-            .arg("--no-pager")
-            .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+        let output = run_output(
+            command
+                .arg("diff")
+                .arg("--from")
+                .arg(&target.base)
+                .arg("--to")
+                .arg(&target.rev)
+                .arg("--git")
+                .arg("--color=never")
+                .arg("--no-pager")
+                .stdin(Stdio::null())
+                .current_dir(repo),
+            process_control,
+            "jj diff",
+        )?;
 
         if !output.status.success() {
             bail!(
@@ -176,8 +185,18 @@ impl JjCommand {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub fn operations(binary: &Path, repo: &Path) -> Result<Vec<JjOperationSummary>> {
-        let output = Command::new(binary)
+    #[cfg(test)]
+    fn operations(binary: &Path, repo: &Path) -> Result<Vec<JjOperationSummary>> {
+        Self::operations_controlled(binary, repo, None)
+    }
+
+    fn operations_controlled(
+        binary: &Path,
+        repo: &Path,
+        process_control: Option<&JjProcessControl>,
+    ) -> Result<Vec<JjOperationSummary>> {
+        let mut command = Command::new(binary);
+        let output = run_output(command
             .arg("--ignore-working-copy")
             .arg("op")
             .arg("log")
@@ -187,8 +206,7 @@ impl JjCommand {
             .arg("--template")
             .arg("id.short() ++ \"\\t\" ++ time.end().ago() ++ \"\\t\" ++ description ++ \"\\n\"")
             .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+            .current_dir(repo), process_control, "jj op log")?;
 
         if !output.status.success() {
             bail!(
@@ -201,23 +219,45 @@ impl JjCommand {
         parse_operation_summaries(&String::from_utf8_lossy(&output.stdout))
     }
 
-    pub fn change_summaries(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
-        Self::log_summaries(binary, repo, "ancestors(@) | trunk() | bookmarks()", false)
+    #[cfg(test)]
+    fn change_summaries(binary: &Path, repo: &Path) -> Result<Vec<JjChangeSummary>> {
+        Self::log_summaries(
+            binary,
+            repo,
+            "ancestors(@) | trunk() | bookmarks()",
+            false,
+            None,
+        )
     }
 
-    pub fn file_contents(binary: &Path, repo: &Path, rev: &str, path: &str) -> Result<String> {
-        let output = Command::new(binary)
-            .arg("--ignore-working-copy")
-            .arg("file")
-            .arg("show")
-            .arg("-r")
-            .arg(rev)
-            .arg(path)
-            .arg("--color=never")
-            .arg("--no-pager")
-            .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+    #[cfg(test)]
+    fn file_contents(binary: &Path, repo: &Path, rev: &str, path: &str) -> Result<String> {
+        Self::file_contents_controlled(binary, repo, rev, path, None)
+    }
+
+    fn file_contents_controlled(
+        binary: &Path,
+        repo: &Path,
+        rev: &str,
+        path: &str,
+        process_control: Option<&JjProcessControl>,
+    ) -> Result<String> {
+        let mut command = Command::new(binary);
+        let output = run_output(
+            command
+                .arg("--ignore-working-copy")
+                .arg("file")
+                .arg("show")
+                .arg("-r")
+                .arg(rev)
+                .arg(path)
+                .arg("--color=never")
+                .arg("--no-pager")
+                .stdin(Stdio::null())
+                .current_dir(repo),
+            process_control,
+            "jj file show",
+        )?;
 
         if !output.status.success() {
             bail!(
@@ -232,7 +272,8 @@ impl JjCommand {
 
     /// Changes between the review base and tip, oldest first, so callers
     /// can step through the stack change-by-change.
-    pub fn stack_changes(
+    #[cfg(test)]
+    fn stack_changes(
         binary: &Path,
         repo: &Path,
         target: &ReviewTarget,
@@ -242,12 +283,24 @@ impl JjCommand {
             repo,
             &format!("{}..{}", target.base, target.rev),
             true,
+            None,
         )
     }
 
     /// Commit ids of every change in the target range, one per line.
-    pub fn change_fingerprint(binary: &Path, repo: &Path, target: &ReviewTarget) -> Result<String> {
-        let output = Command::new(binary)
+    #[cfg(test)]
+    fn change_fingerprint(binary: &Path, repo: &Path, target: &ReviewTarget) -> Result<String> {
+        Self::change_fingerprint_controlled(binary, repo, target, None)
+    }
+
+    fn change_fingerprint_controlled(
+        binary: &Path,
+        repo: &Path,
+        target: &ReviewTarget,
+        process_control: Option<&JjProcessControl>,
+    ) -> Result<String> {
+        let mut command = Command::new(binary);
+        let output = run_output(command
             .arg("--ignore-working-copy")
             .arg("log")
             .arg("-r")
@@ -260,8 +313,7 @@ impl JjCommand {
                 "if(current_working_copy, \"@ \" ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\", \"\") ++ change_id.short() ++ \" \" ++ commit_id ++ \"\\n\"",
             )
             .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+            .current_dir(repo), process_control, "jj log fingerprint")?;
 
         if !output.status.success() {
             bail!(
@@ -275,28 +327,38 @@ impl JjCommand {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub fn target_author(
+    #[cfg(test)]
+    fn target_author(binary: &Path, repo: &Path, target: &ReviewTarget) -> Result<TargetAuthor> {
+        Self::target_author_controlled(binary, repo, target, None)
+    }
+
+    fn target_author_controlled(
         binary: &Path,
         repo: &Path,
         target: &ReviewTarget,
+        process_control: Option<&JjProcessControl>,
     ) -> Result<TargetAuthor> {
-        let output = Command::new(binary)
-            .arg("--ignore-working-copy")
-            .arg("log")
-            .arg("-r")
-            // Exclude empty changes (for example the ubiquitous empty
-            // working-copy commit sitting on top of a reviewed stack) so
-            // channel inference sees only the changes that carry the reviewed
-            // work, per docs/annotations.md rule 4 ("every non-empty change").
-            .arg(format!("({}..{}) ~ empty()", target.base, target.rev))
-            .arg("--no-graph")
-            .arg("--color=never")
-            .arg("--no-pager")
-            .arg("--template")
-            .arg("author.name() ++ \"\\x1f\" ++ author.email() ++ \"\\0\"")
-            .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+        let mut command = Command::new(binary);
+        let output = run_output(
+            command
+                .arg("--ignore-working-copy")
+                .arg("log")
+                .arg("-r")
+                // Exclude empty changes (for example the ubiquitous empty
+                // working-copy commit sitting on top of a reviewed stack) so
+                // channel inference sees only the changes that carry the reviewed
+                // work, per docs/annotations.md rule 4 ("every non-empty change").
+                .arg(format!("({}..{}) ~ empty()", target.base, target.rev))
+                .arg("--no-graph")
+                .arg("--color=never")
+                .arg("--no-pager")
+                .arg("--template")
+                .arg("author.name() ++ \"\\x1f\" ++ author.email() ++ \"\\0\"")
+                .stdin(Stdio::null())
+                .current_dir(repo),
+            process_control,
+            "jj log authors",
+        )?;
 
         if !output.status.success() {
             bail!(
@@ -315,6 +377,7 @@ impl JjCommand {
         repo: &Path,
         revset: &str,
         reversed: bool,
+        process_control: Option<&JjProcessControl>,
     ) -> Result<Vec<JjChangeSummary>> {
         let mut command = Command::new(binary);
         command
@@ -332,7 +395,11 @@ impl JjCommand {
         if reversed {
             command.arg("--reversed");
         }
-        let output = command.stdin(Stdio::null()).current_dir(repo).output()?;
+        let output = run_output(
+            command.stdin(Stdio::null()).current_dir(repo),
+            process_control,
+            "jj log summaries",
+        )?;
 
         if !output.status.success() {
             bail!(
@@ -346,15 +413,97 @@ impl JjCommand {
     }
 }
 
-fn snapshot_working_copy(binary: &Path, repo: &Path) -> Result<()> {
-    let output = Command::new(binary)
-        .arg("util")
-        .arg("snapshot")
-        .arg("--color=never")
-        .arg("--no-pager")
-        .stdin(Stdio::null())
-        .current_dir(repo)
-        .output()?;
+fn run_output(
+    command: &mut Command,
+    process_control: Option<&JjProcessControl>,
+    operation: &str,
+) -> Result<Output> {
+    let Some(control) = process_control else {
+        return Ok(command.output()?);
+    };
+    if control.cancelled.load(Ordering::Acquire) {
+        bail!("{operation} cancelled before start");
+    }
+
+    use wait_timeout::ChildExt;
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| eyre!("{operation} stdout was not captured"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| eyre!("{operation} stderr was not captured"))?;
+    // Drain both pipes while the process runs, otherwise a verbose child can
+    // fill an OS pipe and never reach the wait/cancellation loop.
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stdout = stdout;
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stderr = stderr;
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let started = Instant::now();
+    let poll = Duration::from_millis(25);
+    let (status, stopped) = loop {
+        if control.cancelled.load(Ordering::Acquire) {
+            break (None, Some("cancelled"));
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= control.timeout {
+            break (None, Some("timed out"));
+        }
+        let wait = poll.min(control.timeout.saturating_sub(elapsed));
+        if let Some(status) = child.wait_timeout(wait)? {
+            break (Some(status), None);
+        }
+    };
+    if let Some(reason) = stopped {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stdout_reader.join();
+        let _ = stderr_reader.join();
+        bail!(
+            "{operation} {reason} after {}ms; child process was killed and reaped",
+            started.elapsed().as_millis()
+        );
+    }
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| eyre!("{operation} stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| eyre!("{operation} stderr reader panicked"))??;
+    Ok(Output {
+        status: status.expect("completed child has an exit status"),
+        stdout,
+        stderr,
+    })
+}
+
+fn snapshot_working_copy(
+    binary: &Path,
+    repo: &Path,
+    process_control: Option<&JjProcessControl>,
+) -> Result<()> {
+    let mut command = Command::new(binary);
+    let output = run_output(
+        command
+            .arg("util")
+            .arg("snapshot")
+            .arg("--color=never")
+            .arg("--no-pager")
+            .stdin(Stdio::null())
+            .current_dir(repo),
+        process_control,
+        "jj util snapshot",
+    )?;
 
     if !output.status.success() {
         bail!(
@@ -371,37 +520,70 @@ impl JjCliBackend {
     pub fn from_configured(configured: &Path) -> Result<Self> {
         Ok(Self {
             binary: JjCommand::resolve_binary(configured)?,
+            process_control: None,
         })
     }
 }
 
 impl JjBackend for JjCliBackend {
+    fn configure_process_control(&mut self, control: JjProcessControl) {
+        self.process_control = Some(control);
+    }
+
     fn snapshot_working_copy(&self, repo: &Path) -> Result<()> {
-        snapshot_working_copy(&self.binary, repo)
+        snapshot_working_copy(&self.binary, repo, self.process_control.as_ref())
     }
 
     fn diff(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
-        JjCommand::new(self.binary.clone(), repo.to_path_buf(), target.clone()).diff()
+        JjCommand::run_diff(
+            &self.binary,
+            repo,
+            target,
+            None,
+            self.process_control.as_ref(),
+        )
     }
 
     fn change_summaries(&self, repo: &Path) -> Result<Vec<JjChangeSummary>> {
-        JjCommand::change_summaries(&self.binary, repo)
+        JjCommand::log_summaries(
+            &self.binary,
+            repo,
+            "ancestors(@) | trunk() | bookmarks()",
+            false,
+            self.process_control.as_ref(),
+        )
     }
 
     fn stack_changes(&self, repo: &Path, target: &ReviewTarget) -> Result<Vec<JjChangeSummary>> {
-        JjCommand::stack_changes(&self.binary, repo, target)
+        JjCommand::log_summaries(
+            &self.binary,
+            repo,
+            &format!("{}..{}", target.base, target.rev),
+            true,
+            self.process_control.as_ref(),
+        )
     }
 
     fn target_author(&self, repo: &Path, target: &ReviewTarget) -> Result<TargetAuthor> {
-        JjCommand::target_author(&self.binary, repo, target)
+        JjCommand::target_author_controlled(
+            &self.binary,
+            repo,
+            target,
+            self.process_control.as_ref(),
+        )
     }
 
     fn change_fingerprint(&self, repo: &Path, target: &ReviewTarget) -> Result<String> {
-        JjCommand::change_fingerprint(&self.binary, repo, target)
+        JjCommand::change_fingerprint_controlled(
+            &self.binary,
+            repo,
+            target,
+            self.process_control.as_ref(),
+        )
     }
 
     fn operations(&self, repo: &Path) -> Result<Vec<JjOperationSummary>> {
-        JjCommand::operations(&self.binary, repo)
+        JjCommand::operations_controlled(&self.binary, repo, self.process_control.as_ref())
     }
 
     fn diff_at_operation(
@@ -410,21 +592,37 @@ impl JjBackend for JjCliBackend {
         target: &ReviewTarget,
         operation_id: &str,
     ) -> Result<String> {
-        JjCommand::run_diff(&self.binary, repo, target, Some(operation_id))
+        JjCommand::run_diff(
+            &self.binary,
+            repo,
+            target,
+            Some(operation_id),
+            self.process_control.as_ref(),
+        )
     }
 
     fn file_contents(&self, repo: &Path, rev: &str, path: &str) -> Result<String> {
-        JjCommand::file_contents(&self.binary, repo, rev, path)
+        JjCommand::file_contents_controlled(
+            &self.binary,
+            repo,
+            rev,
+            path,
+            self.process_control.as_ref(),
+        )
     }
 
     fn run_command(&self, repo: &Path, args: &[String]) -> Result<String> {
-        let output = Command::new(&self.binary)
-            .args(args)
-            .arg("--color=never")
-            .arg("--no-pager")
-            .stdin(Stdio::null())
-            .current_dir(repo)
-            .output()?;
+        let mut command = Command::new(&self.binary);
+        let output = run_output(
+            command
+                .args(args)
+                .arg("--color=never")
+                .arg("--no-pager")
+                .stdin(Stdio::null())
+                .current_dir(repo),
+            self.process_control.as_ref(),
+            "jj command",
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -856,7 +1054,7 @@ mod tests {
         fs::set_permissions(&script, permissions).unwrap();
 
         let target = ReviewTarget::trunk_to_current();
-        JjCommand::run_diff(&script, dir.path(), &target, None).unwrap();
+        JjCommand::run_diff(&script, dir.path(), &target, None, None).unwrap();
         assert!(
             fs::read_to_string(&args_path)
                 .unwrap()
@@ -939,5 +1137,35 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert!(error.to_string().contains("nixpkgs#jujutsu"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controlled_backend_kills_and_reaps_a_cancelled_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("jj-slow");
+        fs::write(&script, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = JjProcessControl::new(cancelled.clone(), Duration::from_secs(10));
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || {
+            JjCommand::change_fingerprint_controlled(
+                &script,
+                dir.path(),
+                &ReviewTarget::new("main", "@"),
+                Some(&control),
+            )
+            .unwrap_err()
+            .to_string()
+        });
+        std::thread::sleep(Duration::from_millis(75));
+        cancelled.store(true, Ordering::Release);
+        let error = worker.join().unwrap();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(error.contains("killed and reaped"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

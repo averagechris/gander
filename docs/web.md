@@ -1,10 +1,11 @@
 # Local web UI (`gander web`)
 
-Design for milestone 16. Status: Phase 5 implementation landed; final audit
-remediation remains in progress (secure standalone peer,
-shared-projection reader, lazy regions, durable SSE liveness, agent-guided
-browser presentation, full review-state mutation parity, and static-export
-template convergence).
+Design for milestone 16. Status: complete after final audit remediation (secure
+standalone peer, shared-projection reader, race-safe lazy/full regions,
+lease-bound and ordered multi-tab interaction state, durable SSE liveness,
+agent-guided browser presentation, accessible full review-state mutation
+parity, centralized response hardening, token-only component styles, and
+static-export template convergence).
 
 Gander exists to spend reviewer attention where the mental-model delta is. In
 an age of abundant generated code, most of a change is boilerplate and glue;
@@ -87,7 +88,11 @@ snapshot, all subsequent `--ignore-working-copy` reads, parsing, projection,
 diffing, and rendering off the current-thread Tokio reactor. Poll ticks coalesce
 after slow work rather than overlapping or accumulating a backlog; bounded
 action submission remains responsive, locks cover only projection swaps, and
-shutdown stops scheduling new work before joining the worker. The server
+shutdown stops scheduling new work before a bounded worker join. Watcher and
+ACP jj subprocesses have operation deadlines, observe shutdown cancellation,
+and kill/reap an active child. Registry/socket cleanup is owned outside the
+worker, and queued action responders fail explicitly, so arbitrary synchronous
+filesystem/parser code cannot hold process shutdown or endpoint ownership. The server
 re-projects affected view models, bumps the projection generation, and emits an
 SSE `state` event
 carrying patch fragments keyed by stable region ids (file sections, cards,
@@ -196,7 +201,11 @@ UI control.
   existing `user is busy: <mode>` error and the client shows a pending
   presenter indicator instead. Phase 3b reports the existing search editor;
   Phase 4 comment forms plug into the same renderer-state field.
-- **Browser interaction.** Each tab reports its stable visible/selected stream
+- **Browser interaction.** Each loaded document generates a fresh tab id from
+  Web Crypto (`randomUUID`, with `getRandomValues` fallback), keeps it and its
+  sequence only in the script closure, and reuses both across EventSource
+  reconnects. Browser storage is never identity: duplicated tabs and reloads
+  receive independent leases and restart their own sequence. Each tab reports its stable visible/selected stream
   row (file, old/new line, hunk, pane) and current editing/modal state through a
   guarded renderer endpoint. The most recently server-observed connected tab
   controls `review/current_focus` and busy gating; tab id is the deterministic
@@ -448,9 +457,12 @@ Demo-sized CI budgets in `src/web.rs`:
   when thousands of generated/skim rows are hidden;
 - generation-guarded actions reject stale optimistic writes;
 - presenter coalescing keeps only the latest move in the watch channel.
-- a deterministic slow-worker barrier proves current-thread HTTP/SSE heartbeat
-  scheduling remains live, while cadence tests prove one-at-a-time polling,
-  missed-tick coalescing, and prompt worker release/shutdown.
+- a deterministic never-releasing worker barrier proves current-thread
+  HTTP/SSE heartbeat scheduling, endpoint cleanup, queued responder failure,
+  and bounded shutdown; subprocess tests prove cancellation kills/reaps jj;
+  cadence tests prove one-at-a-time polling and missed-tick coalescing;
+- duplicated-storage tab modeling proves independent leases, sequences,
+  reconnects, and disconnect cleanup.
 
 Elapsed ceilings are intentionally generous and backed by structural byte/count
 assertions so the gate is deterministic on SourceHut and local Nix runners.
