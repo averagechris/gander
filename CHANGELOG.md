@@ -7,7 +7,8 @@
   Spotlight/salience controls, centralized anti-referrer/frame headers, and
   removal and auditing of dead literal-color component CSS. Final adversarial
   remediation gives each loaded document a fresh in-memory lease, bounds worker
-  shutdown, and kills/reaps cancelled or timed-out watcher jj subprocesses.
+  and HTTP graceful shutdown, force-closes connections after the process drain
+  deadline, and kills/reaps cancelled or timed-out watcher jj subprocesses.
 - Fixed the M16 adapter boundary by routing web and existing adapter comment/
   attention mutations through one complete review use-case, and added
   `gander current-focus` JSON/text CLI parity for live TUI/web focus queries.

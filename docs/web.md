@@ -92,8 +92,15 @@ shutdown stops scheduling new work before a bounded worker join. Watcher and
 ACP jj subprocesses have operation deadlines, observe shutdown cancellation,
 and kill/reap an active child. Registry/socket cleanup is owned outside the
 worker, and queued action responders fail explicitly, so arbitrary synchronous
-filesystem/parser code cannot hold process shutdown or endpoint ownership. The server
-re-projects affected view models, bumps the projection generation, and emits an
+filesystem/parser code cannot hold process shutdown or endpoint ownership.
+SIGINT/SIGTERM also starts an independent three-second HTTP graceful-drain
+deadline. Claimed mutations may complete authoritatively during that grace
+period, but expiry shuts down every accepted socket and drops the Axum server
+future before endpoint cleanup and the bounded worker join. Thus a permanently
+blocked request or client connection cannot retain the Tokio runtime or delay
+endpoint removal; ordinary requests still never receive a false failure for a
+mutation that may commit later. The server re-projects affected view models,
+bumps the projection generation, and emits an
 SSE `state` event
 carrying patch fragments keyed by stable region ids (file sections, cards,
 folds, footer/coverage). The client swaps those regions in place; a dropped
