@@ -100,7 +100,13 @@ none of them fetches from or posts to a forge.
   cancelled lifecycle: the worker atomically claims it immediately before any
   mutation, while an HTTP deadline or shutdown can cancel only a still-queued
   action. A request whose action is already running waits for its authoritative
-  result instead of reporting a rollback-inducing failure. The HTTP adapter
+  result instead of reporting a rollback-inducing failure. Process shutdown is
+  a separate lifecycle boundary: it grants active HTTP requests a fixed
+  graceful-drain interval, then closes tracked accepted sockets and drops the
+  server future before registry/socket cleanup and the bounded worker join.
+  This force-drain applies only after SIGINT/SIGTERM and therefore cannot turn
+  ordinary action response timing into false failure/late-commit semantics.
+  The HTTP adapter
   parses typed, deny-unknown-fields transport
   requests and dispatches one `review::apply_review_action` operation; it does
   not reconstruct comment or attention policy. It supplies live

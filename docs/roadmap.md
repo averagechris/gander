@@ -310,7 +310,8 @@ while a full every-line review stays equally first-class. Design:
 
 Status: complete. Final adversarial-audit remediation keeps blocking
 watcher/render work off the async runtime, bounds and cancels watcher jj
-subprocesses and worker shutdown, gives every loaded document an in-memory tab
+subprocesses, HTTP graceful drain, and worker shutdown, gives every loaded
+document an in-memory tab
 identity, makes SSE leases the sole source of browser-tab liveness, orders
 interaction reports per tab, closes the guided/full fragment
 race, and exposes the already-supported skim, salience, and walkthrough actions
@@ -348,7 +349,9 @@ generation.
 - [x] close adversarial-audit tab-duplication and bounded-shutdown blockers:
   per-document leases never use copied browser storage; watcher jj children are
   timeout/cancellation bounded; endpoint cleanup and queued action failure do
-  not wait indefinitely for arbitrary synchronous worker code
+  not wait indefinitely for arbitrary synchronous worker code; and an
+  independent HTTP drain deadline force-closes accepted connections before
+  endpoint cleanup
 - [x] loopback-only bind + per-session capability token + Origin/Host checks
 - [x] shared derived-theme core: factor the M19 palette→slot derivation out
   of `src/tui/theme.rs`

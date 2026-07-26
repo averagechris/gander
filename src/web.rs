@@ -7,9 +7,13 @@
 //! are thin, generation-guarded adapters over the shared review services.
 
 use std::{
+    collections::BTreeMap,
     fs,
+    future::IntoFuture,
+    io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -35,7 +39,10 @@ use color_eyre::eyre::{Context, Result};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::{TcpListener, TcpStream},
+};
 
 use crate::{
     acp::socket::{AcpBridge, PresentCommand},
@@ -65,6 +72,13 @@ const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 const SSE_BROADCAST_CAPACITY: usize = 16;
 const WATCH_JJ_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Maximum time process shutdown allows existing HTTP requests to finish.
+///
+/// Claimed mutations remain authoritative during ordinary request handling and
+/// throughout this drain. Once process shutdown exceeds this independent
+/// bound, all accepted sockets are shut down and the Axum server future is
+/// dropped so endpoint and worker cleanup cannot be held hostage by a request.
+const HTTP_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1241,7 +1255,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         );
     }
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let signal_worker_shutdown = worker_shutdown.clone();
     let signal_actions = action_rx.clone();
     tokio::spawn(async move {
@@ -1249,7 +1263,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         signal_worker_shutdown.store(true, Ordering::Release);
         fail_queued_actions(&signal_actions, "review action service is shutting down");
         let _ = stream_shutdown_tx.send(true);
-        let _ = shutdown_tx.send(());
+        let _ = shutdown_tx.send(true);
     });
     let worker_http = http_state.clone();
     let worker_flag = worker_shutdown.clone();
@@ -1265,11 +1279,15 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         http: worker_http,
         shutdown: worker_flag,
     });
-    let server_result = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-        })
-        .await;
+    let connections = ActiveHttpConnections::default();
+    let server_result = serve_http_until_shutdown(
+        listener,
+        app,
+        shutdown_rx,
+        connections,
+        HTTP_GRACEFUL_SHUTDOWN_TIMEOUT,
+    )
+    .await;
     worker_shutdown.store(true, Ordering::Release);
     fail_queued_actions(&action_rx, "review action service stopped");
     // Endpoint ownership is independent of the worker: unlink before the
@@ -1279,6 +1297,167 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     drop(http_state);
     server_result.wrap_err("web server failed")?;
     Ok(())
+}
+
+#[derive(Clone, Default)]
+struct ActiveHttpConnections {
+    inner: Arc<Mutex<ActiveHttpConnectionsInner>>,
+}
+
+#[derive(Default)]
+struct ActiveHttpConnectionsInner {
+    next_id: u64,
+    sockets: BTreeMap<u64, std::net::TcpStream>,
+}
+
+impl ActiveHttpConnections {
+    fn track(&self, stream: TcpStream) -> io::Result<TrackedTcpStream> {
+        let stream = stream.into_std()?;
+        let control = stream.try_clone()?;
+        let stream = TcpStream::from_std(stream)?;
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let id = inner.next_id;
+        inner.next_id = inner.next_id.wrapping_add(1);
+        inner.sockets.insert(id, control);
+        drop(inner);
+        Ok(TrackedTcpStream {
+            stream,
+            id,
+            connections: self.clone(),
+        })
+    }
+
+    fn abort_all(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        for socket in inner.sockets.values() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+        inner.sockets.clear();
+    }
+}
+
+struct TrackedTcpListener {
+    listener: TcpListener,
+    connections: ActiveHttpConnections,
+}
+
+impl axum::serve::Listener for TrackedTcpListener {
+    type Io = TrackedTcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, address)) => match self.connections.track(stream) {
+                    Ok(stream) => return (stream, address),
+                    Err(error) => eprintln!("gander web: failed to track HTTP connection: {error}"),
+                },
+                Err(error) => {
+                    eprintln!("gander web: failed to accept HTTP connection: {error}");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+struct TrackedTcpStream {
+    stream: TcpStream,
+    id: u64,
+    connections: ActiveHttpConnections,
+}
+
+impl Drop for TrackedTcpStream {
+    fn drop(&mut self) {
+        self.connections
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sockets
+            .remove(&self.id);
+    }
+}
+
+impl AsyncRead for TrackedTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for TrackedTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+}
+
+async fn shutdown_requested(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn serve_http_until_shutdown(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    connections: ActiveHttpConnections,
+    graceful_timeout: Duration,
+) -> io::Result<()> {
+    let tracked_listener = TrackedTcpListener {
+        listener,
+        connections: connections.clone(),
+    };
+    let mut graceful_shutdown = shutdown.clone();
+    let server = axum::serve(tracked_listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_requested(&mut graceful_shutdown).await;
+        })
+        .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result,
+        () = shutdown_requested(&mut shutdown) => {
+            match tokio::time::timeout(graceful_timeout, &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    eprintln!(
+                        "gander web: HTTP connections did not drain within the shutdown deadline"
+                    );
+                    // Axum owns detached tasks for accepted connections. Closing
+                    // every tracked socket makes those tasks drop their request
+                    // futures; leaving this scope then drops the server future.
+                    connections.abort_all();
+                    Ok(())
+                }
+            }
+        }
+    }
 }
 
 struct EndpointCleanup {
@@ -2818,9 +2997,37 @@ mod tests {
         web_render::GuideFile,
     };
     use std::{
+        io::{Read, Write},
+        net::TcpStream as StdTcpStream,
         path::Path as FsPath,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    async fn test_action(State(state): State<HttpState>) -> Response {
+        submit_action(
+            state,
+            42,
+            ActionCommand::FileViewed {
+                path: "src/lib.rs".into(),
+                viewed: true,
+            },
+        )
+        .await
+    }
+
+    fn action_request(address: SocketAddr) -> std::thread::JoinHandle<io::Result<String>> {
+        std::thread::spawn(move || {
+            let mut stream = StdTcpStream::connect(address)?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            write!(
+                stream,
+                "POST /action HTTP/1.1\r\nHost: {address}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        })
+    }
 
     fn row(id: &str, path: &str, text: &str, salience: Salience) -> ReadingRow {
         ReadingRow {
@@ -3282,31 +3489,38 @@ mod tests {
     }
 
     #[test]
-    fn stuck_blocking_work_does_not_own_shutdown_endpoints_or_queued_responders() {
+    fn graceful_http_deadline_aborts_claimed_request_before_endpoint_and_worker_cleanup() {
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()
             .unwrap();
         runtime.block_on(async {
-            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            let stuck_fake_jj_render = spawn_blocking_task(move || {
-                let _ = started_tx.send(());
-                release_rx.recv().unwrap();
-            });
-            tokio::time::timeout(Duration::from_secs(2), started_rx)
-                .await
-                .expect("blocking worker did not start")
-                .unwrap();
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (action_tx, action_rx) = std::sync::mpsc::sync_channel(2);
+            let action_rx = Arc::new(Mutex::new(action_rx));
+            let mut http = http_state(review_fixture());
+            http.actions = action_tx.clone();
+            let app = Router::new()
+                .route("/action", post(test_action))
+                .with_state(http);
 
-            // This timer and task run on the same current-thread reactor used
-            // by the web server. The deliberately blocked worker must not
-            // prevent an HTTP/SSE-style heartbeat from being scheduled.
-            tokio::time::timeout(Duration::from_secs(2), async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            })
-            .await
-            .expect("reactor heartbeat starved behind blocking work");
+            let worker_actions = action_rx.clone();
+            let (claimed_tx, claimed_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+            let stuck_worker = spawn_blocking_task(move || {
+                let action = worker_actions.lock().unwrap().recv().unwrap();
+                assert!(action.lifecycle.claim());
+                let _ = claimed_tx.send(());
+                release_rx.recv().unwrap();
+                action.lifecycle.complete();
+                let _ = action.response.send(Ok(ActionResult {
+                    generation: 43,
+                    result: json!({"saved": true}),
+                }));
+                let _ = finished_tx.send(());
+            });
 
             let dir = tempfile::tempdir().unwrap();
             let socket_path = dir.path().join("web.sock");
@@ -3317,9 +3531,30 @@ mod tests {
                 socket_path: socket_path.clone(),
                 registration_path: registration_path.clone(),
             };
-            let (action_tx, action_rx) = std::sync::mpsc::sync_channel(2);
-            let action_rx = Arc::new(Mutex::new(action_rx));
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(async move {
+                let result = serve_http_until_shutdown(
+                    listener,
+                    app,
+                    shutdown_rx,
+                    ActiveHttpConnections::default(),
+                    Duration::from_millis(50),
+                )
+                .await;
+                drop(cleanup);
+                stuck_worker.shutdown();
+                result
+            });
+            let client = action_request(address);
+            tokio::time::timeout(Duration::from_secs(2), claimed_rx)
+                .await
+                .expect("HTTP action was not claimed")
+                .unwrap();
+
+            // A second request envelope is still queued when process shutdown
+            // begins and therefore must fail rollback-safely without execution.
             let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+            let queued_lifecycle = Arc::new(ActionLifecycle::queued());
             action_tx
                 .send(ActionEnvelope {
                     expected_generation: 0,
@@ -3328,23 +3563,104 @@ mod tests {
                         viewed: true,
                     },
                     response: response_tx,
-                    lifecycle: Arc::new(ActionLifecycle::queued()),
+                    lifecycle: queued_lifecycle.clone(),
                 })
                 .unwrap();
 
             let shutdown_started = std::time::Instant::now();
             fail_queued_actions(&action_rx, "review action service stopped");
-            drop(cleanup);
-            stuck_fake_jj_render.shutdown();
+            shutdown_tx.send(true).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), server)
+                .await
+                .expect("server did not honor the graceful HTTP deadline")
+                .unwrap()
+                .unwrap();
             assert!(shutdown_started.elapsed() < Duration::from_secs(3));
             assert!(!socket_path.exists());
             assert!(!registration_path.exists());
             let error = response_rx.try_recv().unwrap().unwrap_err();
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(queued_lifecycle.0.load(Ordering::Acquire), ACTION_CANCELLED);
+            assert!(
+                !client
+                    .join()
+                    .unwrap()
+                    .unwrap_or_default()
+                    .contains("200 OK"),
+                "forced connection unexpectedly reported mutation success"
+            );
 
-            // The fake truly remained blocked across the deadline, but no
-            // immortal test thread remains once its external operation ends.
+            // The worker remained blocked through server return and endpoint
+            // cleanup. Releasing the detached test thread cannot resurrect or
+            // retain either endpoint because it never owned their guard.
             release_tx.send(()).unwrap();
+            finished_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("detached worker did not finish after its fake was released");
+        });
+    }
+
+    #[test]
+    fn claimed_action_completing_within_http_grace_returns_authoritative_result() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (action_tx, action_rx) = std::sync::mpsc::sync_channel(1);
+            let mut http = http_state(review_fixture());
+            http.actions = action_tx;
+            let app = Router::new()
+                .route("/action", post(test_action))
+                .with_state(http);
+            let (claimed_tx, claimed_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let worker = spawn_blocking_task(move || {
+                let action = action_rx.recv().unwrap();
+                assert!(action.lifecycle.claim());
+                let _ = claimed_tx.send(());
+                release_rx.recv().unwrap();
+                action.lifecycle.complete();
+                action
+                    .response
+                    .send(Ok(ActionResult {
+                        generation: 43,
+                        result: json!({"saved": true}),
+                    }))
+                    .unwrap();
+            });
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(async move {
+                let result = serve_http_until_shutdown(
+                    listener,
+                    app,
+                    shutdown_rx,
+                    ActiveHttpConnections::default(),
+                    Duration::from_secs(1),
+                )
+                .await;
+                worker.shutdown();
+                result
+            });
+            let client = action_request(address);
+            tokio::time::timeout(Duration::from_secs(2), claimed_rx)
+                .await
+                .expect("HTTP action was not claimed")
+                .unwrap();
+
+            shutdown_tx.send(true).unwrap();
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("server did not finish its graceful drain")
+                .unwrap()
+                .unwrap();
+            let response = client.join().unwrap().unwrap();
+            assert!(response.contains("200 OK"), "response was {response:?}");
+            assert!(response.contains("\"generation\":43"));
+            assert!(response.contains("\"saved\":true"));
         });
     }
 
