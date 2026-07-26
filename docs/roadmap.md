@@ -318,7 +318,10 @@ as accessible browser controls. Central response headers and a repo-wide web
 style audit close the security/CSS findings without weakening the embedded
 asset policy. Browserless CI smoke exercises the integrated SSR,
 windowing/fragments, generation-guarded actions, surgical patch diffing, and
-presenter coalescing model.
+presenter coalescing model. Queued browser actions now have a monotonic atomic
+lifecycle, so response deadlines and shutdown can guarantee cancellation before
+reporting failure while already-running mutations return their authoritative
+generation.
 
 - [x] `gander web`: standalone peer instance — registers in the instance
   registry and hosts the per-instance ACP socket (including `present/*`), so

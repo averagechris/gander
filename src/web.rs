@@ -12,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         mpsc::{Receiver as BlockingReceiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     task::{Context as TaskContext, Poll},
@@ -270,6 +270,55 @@ struct ActionEnvelope {
     expected_generation: u64,
     command: ActionCommand,
     response: tokio::sync::oneshot::Sender<std::result::Result<ActionResult, ActionError>>,
+    lifecycle: Arc<ActionLifecycle>,
+}
+
+/// Monotonic ownership of an action from admission through execution.
+#[derive(Debug)]
+struct ActionLifecycle(AtomicU8);
+
+const ACTION_QUEUED: u8 = 0;
+const ACTION_RUNNING: u8 = 1;
+const ACTION_COMPLETED: u8 = 2;
+const ACTION_CANCELLED: u8 = 3;
+
+impl ActionLifecycle {
+    fn queued() -> Self {
+        Self(AtomicU8::new(ACTION_QUEUED))
+    }
+
+    fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(
+                ACTION_QUEUED,
+                ACTION_RUNNING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel_queued(&self) -> bool {
+        self.0
+            .compare_exchange(
+                ACTION_QUEUED,
+                ACTION_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn complete(&self) {
+        self.0
+            .compare_exchange(
+                ACTION_RUNNING,
+                ACTION_COMPLETED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .expect("only a claimed action can complete");
+    }
 }
 
 #[derive(Debug)]
@@ -334,6 +383,7 @@ struct ActionResult {
 struct ActionError {
     status: StatusCode,
     message: String,
+    rollback_safe: bool,
 }
 
 impl ActionError {
@@ -344,12 +394,17 @@ impl ActionError {
         } else {
             StatusCode::BAD_REQUEST
         };
-        Self { status, message }
+        Self {
+            status,
+            message,
+            rollback_safe: true,
+        }
     }
     fn conflict(current: u64) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             message: format!("stale action generation; current generation is {current}"),
+            rollback_safe: true,
         }
     }
 }
@@ -758,6 +813,7 @@ fn process_action(
         .map_err(|_| ActionError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "review projection unavailable".into(),
+            rollback_safe: true,
         })?
         .generation;
     if expected_generation != current {
@@ -905,6 +961,7 @@ fn process_action(
     .map_err(|error| ActionError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         message: format!("failed to save review action: {error}"),
+        rollback_safe: false,
     })?;
     session.apply_review_state(merged.clone());
     *baseline = merged;
@@ -916,6 +973,7 @@ fn process_action(
         .map_err(|_| ActionError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "review projection unavailable".into(),
+            rollback_safe: false,
         })?
         .generation;
     Ok(ActionResult { generation, result })
@@ -1312,6 +1370,16 @@ fn run_blocking_worker(worker: BlockingWorker) {
             .unwrap_or(Err(RecvTimeoutError::Disconnected));
         match received {
             Ok(action) => {
+                if shutdown.load(Ordering::Acquire) {
+                    fail_queued_action(action, "review action service is shutting down");
+                    continue;
+                }
+                // This CAS is the linearization point: cancellation before it
+                // guarantees no mutation; cancellation after it cannot turn a
+                // running action into a reported failure.
+                if !action.lifecycle.claim() {
+                    continue;
+                }
                 let result = process_action(
                     action.expected_generation,
                     action.command,
@@ -1321,6 +1389,7 @@ fn run_blocking_worker(worker: BlockingWorker) {
                     &mut watcher,
                     &http,
                 );
+                action.lifecycle.complete();
                 let _ = action.response.send(result);
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1368,9 +1437,16 @@ fn fail_queued_actions(
 ) {
     let Ok(actions) = actions.lock() else { return };
     while let Ok(action) = actions.try_recv() {
+        fail_queued_action(action, message);
+    }
+}
+
+fn fail_queued_action(action: ActionEnvelope, message: &'static str) {
+    if action.lifecycle.cancel_queued() {
         let _ = action.response.send(Err(ActionError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.to_owned(),
+            rollback_safe: true,
         }));
     }
 }
@@ -1624,12 +1700,14 @@ async fn submit_action(
     command: ActionCommand,
 ) -> Response {
     let (sender, receiver) = tokio::sync::oneshot::channel();
+    let lifecycle = Arc::new(ActionLifecycle::queued());
     if let Err(error) = state.actions.try_send(ActionEnvelope {
         expected_generation,
         command,
         response: sender,
+        lifecycle: lifecycle.clone(),
     }) {
-        return match error {
+        let response = match error {
             TrySendError::Full(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "review action service busy; retry",
@@ -1641,20 +1719,64 @@ async fn submit_action(
             )
                 .into_response(),
         };
+        return rollback_safe_response(response);
     }
-    match tokio::time::timeout(ACTION_RESPONSE_TIMEOUT, receiver).await {
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "review action service response deadline exceeded",
-        )
-            .into_response(),
-        Ok(Ok(Ok(result))) => Json(result).into_response(),
-        Ok(Ok(Err(error))) => (error.status, error.message).into_response(),
-        Ok(Err(_)) => (
+    match await_action_response(lifecycle, receiver, ACTION_RESPONSE_TIMEOUT).await {
+        ActionResponseWait::Cancelled => rollback_safe_response(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "review action service response deadline exceeded before execution",
+            )
+                .into_response(),
+        ),
+        ActionResponseWait::Response(Ok(Ok(result))) => Json(result).into_response(),
+        ActionResponseWait::Response(Ok(Err(error))) => {
+            let rollback_safe = error.rollback_safe;
+            let response = (error.status, error.message).into_response();
+            if rollback_safe {
+                rollback_safe_response(response)
+            } else {
+                response
+            }
+        }
+        ActionResponseWait::Response(Err(_)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "review action service stopped",
         )
             .into_response(),
+    }
+}
+
+fn rollback_safe_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        "x-gander-action-rollback-safe",
+        HeaderValue::from_static("true"),
+    );
+    response
+}
+
+enum ActionResponseWait {
+    Cancelled,
+    Response(
+        std::result::Result<
+            std::result::Result<ActionResult, ActionError>,
+            tokio::sync::oneshot::error::RecvError,
+        >,
+    ),
+}
+
+async fn await_action_response(
+    lifecycle: Arc<ActionLifecycle>,
+    mut receiver: tokio::sync::oneshot::Receiver<std::result::Result<ActionResult, ActionError>>,
+    deadline: Duration,
+) -> ActionResponseWait {
+    match tokio::time::timeout(deadline, &mut receiver).await {
+        Err(_) if lifecycle.cancel_queued() => ActionResponseWait::Cancelled,
+        // The worker won the claim race (or completed while the timer fired).
+        // Dropping this request now would turn an authoritative mutation into
+        // an apparent failure, so continue waiting for its bounded operation.
+        Err(_) => ActionResponseWait::Response(receiver.await),
+        Ok(response) => ActionResponseWait::Response(response),
     }
 }
 
@@ -3206,6 +3328,7 @@ mod tests {
                         viewed: true,
                     },
                     response: response_tx,
+                    lifecycle: Arc::new(ActionLifecycle::queued()),
                 })
                 .unwrap();
 
@@ -3223,6 +3346,106 @@ mod tests {
             // immortal test thread remains once its external operation ends.
             release_tx.send(()).unwrap();
         });
+    }
+
+    #[test]
+    fn response_deadline_cancels_queued_action_before_any_mutation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (action_tx, action_rx) = std::sync::mpsc::sync_channel(1);
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let lifecycle = Arc::new(ActionLifecycle::queued());
+            action_tx
+                .send(ActionEnvelope {
+                    expected_generation: 0,
+                    command: ActionCommand::FileViewed {
+                        path: "src/lib.rs".into(),
+                        viewed: true,
+                    },
+                    response: response_tx,
+                    lifecycle: lifecycle.clone(),
+                })
+                .unwrap();
+
+            assert!(matches!(
+                await_action_response(lifecycle, response_rx, Duration::from_millis(10)).await,
+                ActionResponseWait::Cancelled
+            ));
+
+            // The worker was blocked past the response deadline. When it can
+            // finally dequeue the envelope, the cancelled action cannot be
+            // claimed and therefore cannot mutate state.
+            let mutations = AtomicUsize::new(0);
+            let action = action_rx.recv().unwrap();
+            if action.lifecycle.claim() {
+                mutations.fetch_add(1, Ordering::SeqCst);
+            }
+            assert_eq!(mutations.load(Ordering::SeqCst), 0);
+            assert_eq!(action.lifecycle.0.load(Ordering::Acquire), ACTION_CANCELLED);
+        });
+    }
+
+    #[test]
+    fn worker_claim_before_deadline_returns_authoritative_generation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let lifecycle = Arc::new(ActionLifecycle::queued());
+            // Deterministically establish the claim-before-deadline ordering.
+            // A zero deadline below then forces the timeout branch without a
+            // scheduler race.
+            assert!(lifecycle.claim());
+            let worker_lifecycle = lifecycle.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                worker_lifecycle.complete();
+                response_tx
+                    .send(Ok(ActionResult {
+                        generation: 43,
+                        result: json!({"saved": true}),
+                    }))
+                    .unwrap();
+            });
+
+            let response = await_action_response(lifecycle, response_rx, Duration::ZERO).await;
+            let ActionResponseWait::Response(Ok(Ok(result))) = response else {
+                panic!("claimed action did not return its authoritative success");
+            };
+            assert_eq!(result.generation, 43);
+        });
+    }
+
+    #[test]
+    fn shutdown_cancels_queued_actions_and_they_cannot_execute() {
+        let (action_tx, action_rx) = std::sync::mpsc::sync_channel(1);
+        let action_rx = Arc::new(Mutex::new(action_rx));
+        let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+        let lifecycle = Arc::new(ActionLifecycle::queued());
+        action_tx
+            .send(ActionEnvelope {
+                expected_generation: 0,
+                command: ActionCommand::FileViewed {
+                    path: "src/lib.rs".into(),
+                    viewed: true,
+                },
+                response: response_tx,
+                lifecycle: lifecycle.clone(),
+            })
+            .unwrap();
+
+        fail_queued_actions(&action_rx, "review action service stopped");
+
+        let error = response_rx.try_recv().unwrap().unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!lifecycle.claim());
+        assert_eq!(lifecycle.0.load(Ordering::Acquire), ACTION_CANCELLED);
+        assert!(action_rx.lock().unwrap().try_recv().is_err());
     }
 
     #[derive(Default)]
@@ -3672,6 +3895,22 @@ mod tests {
                 "missing browser contract: {phrase}"
             );
         }
+        let transport_failure = COMPONENT_JS
+            .split("const postAction")
+            .nth(1)
+            .expect("postAction function")
+            .split("} catch (error) {")
+            .nth(1)
+            .and_then(|tail| tail.split("} finally {").next())
+            .expect("postAction transport failure branch");
+        assert!(!transport_failure.contains("rollback()"));
+        assert!(transport_failure.contains("Save outcome unknown; reloading"));
+        assert!(transport_failure.contains("setTimeout(reload"));
+        assert!(
+            COMPONENT_JS
+                .contains("response.headers.get(\"x-gander-action-rollback-safe\") === \"true\"")
+        );
+        assert!(COMPONENT_JS.contains("if (rollbackSafe) rollback()"));
         for action in [
             "file-viewed",
             "skim-acknowledge",

@@ -96,7 +96,12 @@ none of them fetches from or posts to a forge.
   the live loop through a bounded command channel, check
   the projection generation, call `src/review.rs`/shared attention services,
   complete a baseline-aware locked atomic save, and only then return the new
-  generation. The HTTP adapter parses typed, deny-unknown-fields transport
+  generation. Each admitted action has a monotonic queued/running/completed or
+  cancelled lifecycle: the worker atomically claims it immediately before any
+  mutation, while an HTTP deadline or shutdown can cancel only a still-queued
+  action. A request whose action is already running waits for its authoritative
+  result instead of reporting a rollback-inducing failure. The HTTP adapter
+  parses typed, deny-unknown-fields transport
   requests and dispatches one `review::apply_review_action` operation; it does
   not reconstruct comment or attention policy. It supplies live
   action/lazy-fragment capabilities to

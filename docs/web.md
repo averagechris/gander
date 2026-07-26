@@ -177,6 +177,15 @@ open TUI (via durable-state watching). These endpoints are the browser's guarded
 UI transport, not a new automation API; scripts should use the CLI/MCP/ACP
 surfaces over the same services.
 
+Action admission has a monotonic lifecycle. The worker atomically claims a
+queued action immediately before mutation; the two-second HTTP deadline cancels
+and rejects only an action that is still queued. If the worker already claimed
+it, the request remains pending for the authoritative result. Shutdown likewise
+cancels queued work while allowing claimed work to report its true outcome.
+Consequently the browser rolls back optimism only for a server rejection marked
+as guaranteed pre-commit; any unmarked server or transport failure has an
+unknown outcome and triggers generation reconciliation instead.
+
 ## Agent-guided presentation over the web
 
 This is the "ask my agent about the review and watch it guide me" flow. It

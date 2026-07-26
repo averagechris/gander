@@ -207,10 +207,12 @@
       });
       if (!response.ok) {
         const message = await response.text();
-        rollback();
+        const rollbackSafe = response.headers.get("x-gander-action-rollback-safe") === "true";
+        if (rollbackSafe) rollback();
         owner?.classList.toggle("action-conflict", response.status === 409);
-        actionStatus(message, true);
+        actionStatus(rollbackSafe ? message : `Save outcome unknown; reloading: ${message}`, true);
         if (response.status === 409) setTimeout(reload, 350);
+        else if (!rollbackSafe) setTimeout(reload, 350);
         return null;
       }
       const value = await response.json();
@@ -219,8 +221,8 @@
       if (returnedGeneration > generation) setTimeout(() => { if (generation < returnedGeneration) reload(); }, 1500);
       return value.result;
     } catch (error) {
-      rollback();
-      actionStatus(`Could not save: ${error.message}`, true);
+      actionStatus(`Save outcome unknown; reloading: ${error.message}`, true);
+      setTimeout(reload, 350);
       return null;
     } finally {
       pendingActions.delete(key);
