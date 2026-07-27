@@ -75,7 +75,7 @@ none of them fetches from or posts to a forge.
   `src/web_export.rs` profile-filters first, then embeds that renderer eagerly
   with local-only handwritten navigation; `src/delegation.rs` builds the
   narrower external-harness work packet.
-- `src/main.rs`, `src/mcp.rs`, and `src/web.rs` should remain thin adapters over
+- `src/main.rs`, `src/mcp.rs`, and `src/web/mod.rs` should remain thin adapters over
   the same core operations. A new MCP, TUI, or web capability requires a
   scriptable CLI equivalent; web action routes are browser transport for those
   services, not an automation API fork.
@@ -86,7 +86,20 @@ none of them fetches from or posts to a forge.
   both `gander tui` and `gander web`; each live process advertises the same
   workspace/target/summary/socket/pid/heartbeat record and drains the same
   typed ACP request loop.
-- `src/web.rs` is the M16 loopback HTTP adapter. Its centralized middleware
+- `src/web/` is the M16 loopback HTTP adapter. `mod.rs` keeps only its
+  crate-visible `WebParams`/`run` entry surface and module wiring; `shared.rs`
+  holds the intentionally sibling-visible transport state and constants;
+  `server.rs` owns
+  routing, request guards, security headers, CSP, shell and fragment delivery;
+  `runtime.rs` owns the blocking coordinator, watcher, worker failure and
+  bounded HTTP shutdown; `projection.rs` owns projection diffs, recovery and
+  SSE; `interactions.rs` owns browser leases and ephemeral interaction state;
+  `presentation.rs` adapts ACP presentation; `actions.rs` owns typed action
+  transport and dispatch to shared review services; and `assets.rs` owns the
+  embedded client contract and live theme/custom CSS loading. The dedicated
+  `tests.rs` keeps the real-router, lifecycle, security, contract and
+  performance regression suite together while production modules stay small.
+  The adapter's centralized middleware
   validates the per-process capability token, exact bound Host, and same-origin
   Origin before every route (including fragments, SSE, and assets), then adds
   no-store, nosniff, no-referrer, and frame-denial headers to successes and

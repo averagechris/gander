@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Split the M16 local web adapter into cohesive server, runtime, projection,
+  interaction, presentation, action, and asset modules without changing its
+  public entry points or browser behavior.
 - Fixed M16 web UX/doc corrections: authoritative server-returned salience
   outcomes drive browser optimism, theme DOM state uses `[data-theme]`, draft
   docs reference `gander drafts`, and walkthrough landings start at the first

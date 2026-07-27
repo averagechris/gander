@@ -531,6 +531,10 @@ whether or not the terminal reports the SHIFT modifier.
 
 Known debt, in priority order:
 
+- `src/tui/mod.rs` has regrown as orchestration and interaction behavior
+  accumulated after the original TUI split. Re-establish reviewable ownership
+  boundaries in a dedicated structural change; do not couple that work to the
+  M16 web adapter split.
 - The ACP surface is a minimal JSON-RPC method set (`gander-acp` v1), not the
   published Agent Client Protocol schema. Direction changed twice: D5 moved the
   agent-facing surface toward MCP, and D7 clarifies that MCP is an optional
