@@ -531,6 +531,12 @@ whether or not the terminal reports the SHIFT modifier.
 
 Known debt, in priority order:
 
+- Live-state merge discipline (baseline refresh, tombstone bookkeeping, lock
+  ordering) is enforced by adapter convention, not types: TUI, web, and ACP
+  each independently compose `merge_changes_since` + tombstones + locked
+  save. Encapsulate `{baseline, tombstones, save}` in one `LiveStateHandle`
+  used by every live adapter so a future contributor cannot hold it wrong
+  (2026-07 M16 review follow-up).
 - `src/tui/mod.rs` has regrown as orchestration and interaction behavior
   accumulated after the original TUI split. Re-establish reviewable ownership
   boundaries in a dedicated structural change; do not couple that work to the
