@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed M16 web UX/doc corrections: authoritative server-returned salience
+  outcomes drive browser optimism, theme DOM state uses `[data-theme]`, draft
+  docs reference `gander drafts`, and walkthrough landings start at the first
+  current Spotlight with accessible controls.
 - Hardened the local web server with production-router authorization coverage,
   strict hash/nonce-based live and artifact CSPs, a 64-socket pre-auth
   connection cap, and coordinator panic containment that fails work, shuts down

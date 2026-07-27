@@ -29,7 +29,7 @@
       const stops = [...document.querySelectorAll("[data-step-id]")];
       if (!stops.length) return;
       const current = stops.findIndex((stop) => stop.closest(".annotation")?.getBoundingClientRect().top >= 0);
-      const delta = nav.dataset.guideNav === "prev" ? -1 : 1;
+      const delta = nav.dataset.guideNav === "prev" ? -1 : nav.dataset.guideNav === "start" ? -Infinity : 1;
       stops[Math.max(0, Math.min(stops.length - 1, (current < 0 ? 0 : current) + delta))]
         ?.closest(".annotation")?.scrollIntoView({ block: "center" });
     }

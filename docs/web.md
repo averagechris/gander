@@ -192,7 +192,7 @@ Everything the TUI can write, the web can write, through the same services:
 
 Mutations POST to small action endpoints that map one-to-one onto the same
 review service calls exposed by the CLI (`files`/`mark-viewed`, `attention`,
-`comments`, `agent-drafts`, and `walkthrough`) and return the new generation;
+`comments`, `drafts`, and `walkthrough`) and return the new generation;
 the SSE stream then patches every connected client, including a concurrently
 open TUI (via durable-state watching). These endpoints are the browser's guarded
 UI transport, not a new automation API; scripts should use the CLI/MCP/ACP

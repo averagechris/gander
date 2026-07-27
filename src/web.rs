@@ -385,6 +385,7 @@ enum SalienceVerb {
 
 #[derive(Debug, Clone, Copy)]
 enum WalkthroughVerb {
+    Start,
     Next,
     Prev,
     Goto,
@@ -905,6 +906,7 @@ fn process_action(
             part,
         } => {
             let destination = match verb {
+                WalkthroughVerb::Start => session.jump_to_spotlight_index(0),
                 WalkthroughVerb::Next => session.jump_spotlight_with_identity(1),
                 WalkthroughVerb::Prev => session.jump_spotlight_with_identity(-1),
                 WalkthroughVerb::Goto => {
@@ -1856,6 +1858,7 @@ fn router(state: HttpState) -> Router {
         .route("/actions/salience-clear", post(salience_clear))
         .route("/actions/salience-promote", post(salience_promote))
         .route("/actions/salience-demote", post(salience_demote))
+        .route("/actions/walkthrough-start", post(walkthrough_start))
         .route("/actions/walkthrough-next", post(walkthrough_next))
         .route("/actions/walkthrough-prev", post(walkthrough_prev))
         .route("/actions/walkthrough-goto", post(walkthrough_goto))
@@ -2391,6 +2394,25 @@ salience_handler!(salience_set, SalienceVerb::Set);
 salience_handler!(salience_clear, SalienceVerb::Clear);
 salience_handler!(salience_promote, SalienceVerb::Promote);
 salience_handler!(salience_demote, SalienceVerb::Demote);
+
+async fn walkthrough_start(
+    State(state): State<HttpState>,
+    payload: std::result::Result<Json<GenerationAction>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(payload)) = payload else {
+        return json_bad(payload.unwrap_err());
+    };
+    submit_action(
+        state,
+        payload.expected_generation,
+        ActionCommand::Walkthrough {
+            verb: WalkthroughVerb::Start,
+            step_id: None,
+            part: None,
+        },
+    )
+    .await
+}
 
 async fn walkthrough_next(
     State(state): State<HttpState>,
@@ -3586,6 +3608,12 @@ mod tests {
                     "POST",
                     "/actions/salience-demote?token=safe-token",
                     r#"{"expected_generation":42,"target":{"path":"src/lib.rs"}}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/walkthrough-start?token=safe-token",
+                    r#"{"expected_generation":42}"#,
                     500,
                 ),
                 (
@@ -5003,6 +5031,20 @@ mod tests {
                 "missing browser contract: {phrase}"
             );
         }
+        let salience_handler = COMPONENT_JS
+            .split(
+                "[\"salience-promote\", \"salience-demote\", \"salience-set\", \"salience-clear\"]",
+            )
+            .nth(1)
+            .expect("salience action handler")
+            .split("if (action === \"walkthrough-start\"")
+            .next()
+            .expect("salience handler boundary");
+        assert!(salience_handler.contains("const salience = result?.salience"));
+        assert!(salience_handler.contains("result?.target || target"));
+        assert!(salience_handler.contains("owner?.classList.add(\"action-pending\")"));
+        assert!(!salience_handler.contains("const order ="));
+        assert!(!salience_handler.contains("order.indexOf"));
         let transport_failure = COMPONENT_JS
             .split("const postAction")
             .nth(1)
@@ -5032,6 +5074,7 @@ mod tests {
             "salience-demote",
             "salience-set",
             "salience-clear",
+            "walkthrough-start",
             "walkthrough-next",
             "walkthrough-goto",
             "skim-acknowledge-all",
@@ -5101,7 +5144,9 @@ mod tests {
         assert!(html.contains("Skim folds"));
         assert!(html.contains("Coverage"));
         assert!(html.contains("Core behavior"));
-        assert!(html.contains("Next spotlight"));
+        assert!(html.contains("Start guided tour"));
+        assert!(html.contains("data-action=\"walkthrough-start\""));
+        assert!(html.contains("aria-label=\"Start guided tour at the first current Spotlight\""));
         assert!(html.contains("id=\"mode-switch\""));
         assert!(html.contains("Full review"));
         assert!(html.contains("id=\"review-search\""));
@@ -5199,8 +5244,9 @@ mod tests {
     fn theme_css_emits_independent_light_and_dark_slots() {
         let css = render_theme_css(&ThemeConfig::default());
         assert!(css.contains("prefers-color-scheme:dark"));
-        assert!(css.contains("[data-color-scheme=light]"));
-        assert!(css.contains("[data-color-scheme=dark]"));
+        assert!(css.contains("[data-theme=\"light\"]"));
+        assert!(css.contains("[data-theme=\"dark\"]"));
+        assert!(!css.contains("data-color-scheme"));
         assert!(css.contains("--background:rgb("));
         assert!(css.contains("--accent:rgb("));
         assert!(css.contains("--gutter-removed-fg:rgb("));
@@ -5252,8 +5298,10 @@ mod tests {
     #[test]
     fn theme_control_scripts_contract_stays_tiny_and_handwritten() {
         assert!(PREPAINT_SCRIPT.contains("localStorage.getItem('gander.colorScheme')"));
-        assert!(PREPAINT_SCRIPT.contains("document.documentElement.dataset.colorScheme=m"));
+        assert!(PREPAINT_SCRIPT.contains("document.documentElement.dataset.theme=m"));
         assert!(THEME_CONTROL_SCRIPT.contains("['system','light','dark']"));
+        assert!(THEME_CONTROL_SCRIPT.contains("delete document.documentElement.dataset.theme"));
+        assert!(!THEME_CONTROL_SCRIPT.contains("dataset.colorScheme"));
         assert!(THEME_CONTROL_SCRIPT.contains("matchMedia('(prefers-color-scheme: dark)')"));
         assert!(THEME_CONTROL_SCRIPT.contains("addEventListener('change'"));
         assert!(THEME_CONTROL_SCRIPT.contains("localStorage.setItem(k,m)"));

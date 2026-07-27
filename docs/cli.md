@@ -33,7 +33,7 @@ short human echo.
 | Local web peer | `gander web [--port <port>] [--no-open]` for the human UI; durable writes still map to the CLI groups below |
 | Theme palette discovery | `gander themes list [--format json|text]` |
 | Web/TUI viewed state | `gander files list`, `gander mark-viewed`, `gander mark-generated-viewed` |
-| Web/TUI comments and draft triage | `gander comments ...`, `gander agent-drafts ...` |
+| Web/TUI comments and draft triage | `gander comments ...`, `gander drafts ...` |
 | Web/TUI attention, folds, and walkthrough navigation | `gander attention ...`, `gander walkthrough ...`, `gander present ...` for live ephemeral presentation |
 | Live Web/TUI current focus | `gander current-focus [--format json|text]` |
 
@@ -483,7 +483,7 @@ cards. One control switches to the peer traditional mode with every file/line,
 file tree, search, viewed indicators, comment threads, and salience margins.
 Viewed state (`files`/`mark-viewed`), exact skim acknowledgements (`attention
 acknowledge`), comments and replies (`comments`), agent-draft triage
-(`agent-drafts`), human salience overrides (`attention set|clear`), and
+(`drafts`), human salience overrides (`attention set|clear`), and
 walkthrough visits (`walkthrough`) use guarded `POST /actions/<verb>` calls over
 the same services as those scriptable commands. The HTTP actions are browser UI
 transport, not a separate automation API. Every body carries

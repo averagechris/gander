@@ -396,25 +396,21 @@
       if (target) postAction(action, { target, ...(button.dataset.salience ? { salience: button.dataset.salience } : {}) }, button.closest(".region"), () => {
         const row = document.querySelector(".diff-row.web-selected");
         const owner = row && row.dataset.path === target.path ? row : button.closest(".region");
-        const prior = ["spotlight", "supporting", "skim"].find((name) => owner?.classList.contains(`salience-${name}`));
-        const order = ["skim", "supporting", "spotlight"];
-        let next = button.dataset.salience;
-        if (!next && prior && action === "salience-promote") next = order[Math.min(order.length - 1, order.indexOf(prior) + 1)];
-        if (!next && prior && action === "salience-demote") next = order[Math.max(0, order.indexOf(prior) - 1)];
-        if (next || action === "salience-clear") {
-          order.forEach((name) => owner?.classList.remove(`salience-${name}`));
-          if (next) owner?.classList.add(`salience-${next}`);
-        }
         owner?.classList.add("action-pending");
-        return () => {
-          order.forEach((name) => owner?.classList.remove(`salience-${name}`));
-          if (prior) owner?.classList.add(`salience-${prior}`);
-          owner?.classList.remove("action-pending");
-        };
+        return () => owner?.classList.remove("action-pending");
+      }).then((result) => {
+        const salience = result?.salience;
+        const resultTarget = result?.target || target;
+        const row = document.querySelector(".diff-row.web-selected");
+        const owner = row && row.dataset.path === resultTarget.path ? row : button.closest(".region");
+        if (salience || action === "salience-clear") {
+          ["skim", "supporting", "spotlight"].forEach((name) => owner?.classList.remove(`salience-${name}`));
+          if (salience) owner?.classList.add(`salience-${salience}`);
+        }
       });
       return;
     }
-    if (action === "walkthrough-next" || action === "walkthrough-prev") {
+    if (action === "walkthrough-start" || action === "walkthrough-next" || action === "walkthrough-prev") {
       const destination = await postAction(action, {}, button);
       if (destination?.step_id) document.querySelector(`[data-step-id="${CSS.escape(destination.step_id)}"]`)?.closest(".annotation")?.scrollIntoView({ block: "center" });
     }

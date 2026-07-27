@@ -15,8 +15,8 @@ use crate::{
 use sha2::{Digest, Sha256};
 
 pub const COMPONENT_CSS: &str = include_str!("web.css");
-pub const PREPAINT_SCRIPT: &str = "(()=>{try{let m=localStorage.getItem('gander.colorScheme');if(m==='light'||m==='dark')document.documentElement.dataset.colorScheme=m;}catch(e){}})();";
-pub const THEME_CONTROL_SCRIPT: &str = "(()=>{let k='gander.colorScheme',o=['system','light','dark'],q=matchMedia('(prefers-color-scheme: dark)'),b=document.querySelector('[data-theme-toggle]'),l=document.querySelector('[data-theme-label]');function g(){try{return localStorage.getItem(k)||'system'}catch(e){return 'system'}}function s(m){document.documentElement.dataset.colorScheme=(m==='light'||m==='dark')?m:'';if(l)l.textContent=m}function set(m){try{m==='system'?localStorage.removeItem(k):localStorage.setItem(k,m)}catch(e){}s(m)}if(b)b.addEventListener('click',()=>set(o[(o.indexOf(g())+1)%o.length]));q.addEventListener&&q.addEventListener('change',()=>{if(g()==='system')s('system')});s(g())})();";
+pub const PREPAINT_SCRIPT: &str = "(()=>{try{let m=localStorage.getItem('gander.colorScheme');if(m==='light'||m==='dark')document.documentElement.dataset.theme=m;}catch(e){}})();";
+pub const THEME_CONTROL_SCRIPT: &str = "(()=>{let k='gander.colorScheme',o=['system','light','dark'],q=matchMedia('(prefers-color-scheme: dark)'),b=document.querySelector('[data-theme-toggle]'),l=document.querySelector('[data-theme-label]');function g(){try{let m=localStorage.getItem(k)||'system';return o.includes(m)?m:'system'}catch(e){return 'system'}}function s(m){if(m==='light'||m==='dark')document.documentElement.dataset.theme=m;else delete document.documentElement.dataset.theme;if(l)l.textContent=m}function set(m){try{m==='system'?localStorage.removeItem(k):localStorage.setItem(k,m)}catch(e){}s(m)}if(b)b.addEventListener('click',()=>set(o[(o.indexOf(g())+1)%o.length]));q.addEventListener&&q.addEventListener('change',()=>{if(g()==='system')s('system')});s(g())})();";
 
 /// CSP hashes are over the exact UTF-8 bytes between the script tags.
 pub(crate) fn sha256_base64(bytes: &[u8]) -> String {
@@ -194,12 +194,16 @@ pub fn render_overview(view: &GuideView, target: &str, options: RenderOptions) -
     }
     if projection.has_walkthrough {
         out.push_str(
-            "<div class=\"walkthrough-actions\"><button type=\"button\" data-guide-nav=\"prev\"",
+            "<div class=\"walkthrough-actions\"><button class=\"primary-action\" type=\"button\" data-guide-nav=\"start\" aria-label=\"Start guided tour at the first current Spotlight\"",
         );
+        if options.actions {
+            out.push_str(" data-action=\"walkthrough-start\"");
+        }
+        out.push_str(">Start guided tour</button><button type=\"button\" data-guide-nav=\"prev\"");
         if options.actions {
             out.push_str(" data-action=\"walkthrough-prev\"");
         }
-        out.push_str(">Previous spotlight</button><button class=\"primary-action\" type=\"button\" data-guide-nav=\"next\"");
+        out.push_str(">Previous spotlight</button><button type=\"button\" data-guide-nav=\"next\"");
         if options.actions {
             out.push_str(" data-action=\"walkthrough-next\"");
         }
@@ -846,7 +850,7 @@ pub fn render_theme_css(config: &ThemeConfig) -> String {
     let light = ThemeSlots::derive(light_palette, light_palette.background);
     let dark = ThemeSlots::derive(dark_palette, dark_palette.background);
     format!(
-        ":root,[data-color-scheme=light]{{color-scheme:light;{}}}@media(prefers-color-scheme:dark){{:root{{color-scheme:dark;{}}}}}[data-color-scheme=dark]{{color-scheme:dark;{}}}",
+        ":root,[data-theme=\"light\"]{{color-scheme:light;{}}}@media(prefers-color-scheme:dark){{:root{{color-scheme:dark;{}}}}}[data-theme=\"dark\"]{{color-scheme:dark;{}}}",
         slot_tokens(light_palette.background, light),
         slot_tokens(dark_palette.background, dark),
         slot_tokens(dark_palette.background, dark)
