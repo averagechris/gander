@@ -53,6 +53,31 @@ pub struct EffectiveAttentionRegion {
     pub source: Option<SalienceSource>,
 }
 
+/// Browser-facing identity for an attention mutation target.
+///
+/// Durable [`ReviewTarget`] uses `file` because it also represents repository
+/// and revision targets. Action consumers operate on changed paths, so this
+/// deliberately exposes `path` and only the canonical range fields.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SalienceActionTarget {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
+}
+
+/// Authoritative result shared by every salience mutation adapter.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SalienceActionOutcome {
+    pub target: SalienceActionTarget,
+    pub effective_salience: Salience,
+    pub effective_source: Option<SalienceSource>,
+    pub rationale: Option<String>,
+    /// Whether this action actually removed a matching human override.
+    pub cleared: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct HeuristicUpdate {
     pub added: usize,
@@ -968,6 +993,34 @@ pub fn resolve_effective_attention_refs(
     files: &[&FileDiff],
 ) -> EffectiveAttentionRegion {
     EffectiveAttentionResolver::new(session, files).resolve(query)
+}
+
+/// Resolve the post-mutation value returned to action consumers.
+///
+/// Call this only after the mutation has been applied. In particular, clear
+/// actions then expose the agent/heuristic fallback (or structural supporting
+/// default) rather than making transports reconstruct precedence locally.
+pub fn salience_action_outcome(
+    session: &ReviewSession,
+    target: &ReviewTarget,
+    files: &[FileDiff],
+    cleared: bool,
+) -> SalienceActionOutcome {
+    let effective = resolve_effective_attention(session, target, files);
+    SalienceActionOutcome {
+        target: SalienceActionTarget {
+            path: target
+                .file
+                .clone()
+                .expect("a canonical attention action target has a path"),
+            line: target.line,
+            end_line: target.end_line,
+        },
+        effective_salience: effective.salience,
+        effective_source: effective.source,
+        rationale: effective.rationale,
+        cleared,
+    }
 }
 
 /// Effective-attention resolver with staleness precomputed once for one

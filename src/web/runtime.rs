@@ -273,12 +273,14 @@ pub(super) async fn run_async(mut params: WebParams) -> Result<()> {
     };
     let app = router(http_state.clone());
 
-    println!("{url}");
-    if params.no_open {
-        eprintln!("not opening browser (--no-open); use the printed URL");
-    } else if let Err(error) = open_url(&url) {
-        eprintln!("warning: failed to open browser ({error}); use the printed URL");
-    }
+    announce_url(
+        &url,
+        params.no_open,
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        open_url,
+    )
+    .wrap_err("failed to print web capability URL")?;
 
     let signal_worker_shutdown = worker_shutdown.clone();
     let signal_actions = action_rx.clone();
@@ -352,6 +354,28 @@ pub(super) fn open_url(url: &str) -> io::Result<()> {
     let program = "xdg-open";
 
     open_url_with(program, url)
+}
+
+pub(super) fn announce_url(
+    url: &str,
+    no_open: bool,
+    stdout: &mut impl io::Write,
+    stderr: &mut impl io::Write,
+    opener: impl FnOnce(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    writeln!(stdout, "{url}")?;
+    if no_open {
+        writeln!(
+            stderr,
+            "not opening browser (--no-open); use the printed URL"
+        )?;
+    } else if let Err(error) = opener(url) {
+        writeln!(
+            stderr,
+            "warning: failed to open browser ({error}); use the printed URL"
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn open_url_with(program: &str, url: &str) -> io::Result<()> {

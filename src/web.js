@@ -399,14 +399,13 @@
         owner?.classList.add("action-pending");
         return () => owner?.classList.remove("action-pending");
       }).then((result) => {
-        const salience = result?.salience;
-        const resultTarget = result?.target || target;
-        const row = document.querySelector(".diff-row.web-selected");
-        const owner = row && row.dataset.path === resultTarget.path ? row : button.closest(".region");
-        if (salience || action === "salience-clear") {
-          ["skim", "supporting", "spotlight"].forEach((name) => owner?.classList.remove(`salience-${name}`));
-          if (salience) owner?.classList.add(`salience-${salience}`);
-        }
+        if (!result?.target || !result?.effective_salience) return;
+        targetRows(result.target).forEach((row) => {
+          ["skim", "supporting", "spotlight"].forEach((name) => {
+            row.classList.toggle(`salience-${name}`, name === result.effective_salience);
+          });
+          row.querySelector(".salience-margin")?.setAttribute("aria-label", result.effective_salience);
+        });
       });
       return;
     }

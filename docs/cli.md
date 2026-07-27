@@ -480,9 +480,10 @@ gander web [--port <port>] [--no-open]
 
 `web` starts a standalone live instance on `127.0.0.1`. Port `0` (the
 default) asks the OS for a free port; `--port` pins it. The first stdout line is
-the usable URL including an ephemeral capability token. Gander currently does
-not auto-open a browser: open that URL manually, or pass `--no-open` to make
-the scripted intent explicit and suppress the explanatory stderr note.
+always the usable URL including an ephemeral capability token. By default
+Gander attempts the platform opener; `--no-open` suppresses only that attempt,
+not URL output. An opener failure emits a nonfatal stderr warning and leaves the
+server running so the printed URL can be opened manually.
 
 Every HTTP request—including `/events` and embedded assets—must carry the
 token query parameter, the exact printed `Host`, and either no `Origin` or the

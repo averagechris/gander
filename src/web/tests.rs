@@ -33,6 +33,34 @@ fn opener_uses_direct_process_and_reports_spawn_failure() {
     assert_eq!(missing.kind(), io::ErrorKind::NotFound);
 }
 
+#[test]
+fn runtime_always_prints_url_and_no_open_suppresses_only_invocation() {
+    let url = "http://127.0.0.1:8123/?token=secret";
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    announce_url(url, true, &mut stdout, &mut stderr, |_| {
+        panic!("--no-open must not invoke the opener")
+    })
+    .unwrap();
+    assert_eq!(String::from_utf8(stdout).unwrap(), format!("{url}\n"));
+    assert!(String::from_utf8(stderr).unwrap().contains("--no-open"));
+
+    let calls = AtomicUsize::new(0);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    announce_url(url, false, &mut stdout, &mut stderr, |opened| {
+        assert_eq!(opened, url);
+        calls.fetch_add(1, Ordering::Relaxed);
+        Err(io::Error::new(io::ErrorKind::NotFound, "missing opener"))
+    })
+    .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(String::from_utf8(stdout).unwrap(), format!("{url}\n"));
+    let warning = String::from_utf8(stderr).unwrap();
+    assert!(warning.contains("warning: failed to open browser"));
+    assert!(warning.contains("use the printed URL"));
+}
+
 async fn test_action(State(state): State<HttpState>) -> Response {
     submit_action(
         state,
@@ -1832,6 +1860,76 @@ fn onboarding_request_infers_delegation_and_preserves_exact_source_location() {
 }
 
 #[test]
+fn salience_action_endpoints_return_authoritative_shared_results() {
+    let (mut session, _baseline, _dir, mut watcher, _http) = action_fixture();
+    let files = session_files(&session);
+    let target = crate::attention::target_for_diff(&files, "a.rs", Some(1), None).unwrap();
+    let mut seeded = session.to_state();
+    let index = active_state_session_index(&mut seeded, &session);
+    seeded.sessions[index]
+        .attention_regions
+        .push(crate::state::AttentionRegion {
+            target,
+            salience: Salience::Skim,
+            rationale: Some("agent fallback".into()),
+            source: crate::state::SalienceSource::Agent,
+        });
+    seeded.save(&watcher.state_path).unwrap();
+    session.apply_review_state(seeded.clone());
+    let mut baseline = review::LiveStateHandle::new(watcher.state_path.clone(), seeded);
+    let http = http_state(WebReview::from_session(&session));
+    let mut rendered = rendered_projection(&WebReview::from_session(&session));
+
+    let cases = [
+        (
+            SalienceVerb::Set,
+            Some(Salience::Supporting),
+            "supporting",
+            "human",
+            false,
+        ),
+        (SalienceVerb::Promote, None, "spotlight", "human", false),
+        (SalienceVerb::Demote, None, "supporting", "human", false),
+        (SalienceVerb::Clear, None, "skim", "agent", true),
+    ];
+    for (verb, salience, expected_salience, expected_source, cleared) in cases {
+        let generation = http.review.read().unwrap().generation;
+        let state_path = watcher.state_path.clone();
+        let result = process_action(
+            generation,
+            ActionCommand::Salience {
+                verb,
+                target: TargetAction {
+                    path: "a.rs".into(),
+                    line: Some(1),
+                    end_line: None,
+                },
+                salience,
+                rationale: None,
+            },
+            &mut session,
+            &state_path,
+            &mut baseline,
+            &mut watcher,
+            ProjectionPublisher {
+                http: &http,
+                rendered: &mut rendered,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.result["target"],
+            serde_json::json!({"path":"a.rs","line":1})
+        );
+        assert_eq!(result.result["effective_salience"], expected_salience);
+        assert_eq!(result.result["effective_source"], expected_source);
+        assert_eq!(result.result["cleared"], cleared);
+        assert!(result.result["target"].get("file").is_none());
+        assert!(result.generation > generation);
+    }
+}
+
+#[test]
 fn browser_action_contract_has_optimism_busy_rollback_and_text_preservation() {
     for phrase in [
         "expected_generation: generation",
@@ -1853,9 +1951,14 @@ fn browser_action_contract_has_optimism_busy_rollback_and_text_preservation() {
         .split("if (action === \"walkthrough-start\"")
         .next()
         .expect("salience handler boundary");
-    assert!(salience_handler.contains("const salience = result?.salience"));
-    assert!(salience_handler.contains("result?.target || target"));
+    assert!(salience_handler.contains("!result?.target || !result?.effective_salience"));
+    assert!(salience_handler.contains("targetRows(result.target).forEach"));
+    assert!(salience_handler.contains("name === result.effective_salience"));
+    assert!(salience_handler.contains("aria-label\", result.effective_salience"));
     assert!(salience_handler.contains("owner?.classList.add(\"action-pending\")"));
+    assert!(!salience_handler.contains("result?.target || target"));
+    assert!(!salience_handler.contains("action === \"salience-clear\""));
+    assert!(!salience_handler.contains("classList.remove(`salience-"));
     assert!(!salience_handler.contains("const order ="));
     assert!(!salience_handler.contains("order.indexOf"));
     let transport_failure = COMPONENT_JS
@@ -2572,6 +2675,38 @@ fn presenter_watch_broadcasts_to_all_tabs_and_coalesces_bursts() {
     assert_eq!(receiver_b.borrow().as_ref().unwrap().sequence, 3);
     let wire = sse_present_event(receiver_a.borrow().as_ref().unwrap());
     assert!(format!("{wire:?}").contains("present"));
+}
+
+#[test]
+fn salience_browser_model_selects_only_the_authoritative_exact_dom_target() {
+    let target_rows = COMPONENT_JS
+        .split("const targetRows = (target) => {")
+        .nth(1)
+        .and_then(|tail| tail.split("const materializeTarget").next())
+        .expect("targetRows browser model");
+    for phrase in [
+        "CSS.escape(target.path || \"\")",
+        ".diff-row[data-path=\"${escaped}\"]",
+        "if (!Number.isSafeInteger(target.line)) return true",
+        "target.line <= oldLine && oldLine <= end",
+        "target.line <= newLine && newLine <= end",
+    ] {
+        assert!(
+            target_rows.contains(phrase),
+            "missing exact DOM match: {phrase}"
+        );
+    }
+
+    let result_handler = COMPONENT_JS
+        .split("[\"salience-promote\", \"salience-demote\", \"salience-set\", \"salience-clear\"]")
+        .nth(1)
+        .and_then(|tail| tail.split("}).then((result) => {").nth(1))
+        .and_then(|tail| tail.split("      });").next())
+        .expect("authoritative salience result handler");
+    assert!(result_handler.contains("targetRows(result.target)"));
+    assert!(!result_handler.contains("web-selected"));
+    assert!(!result_handler.contains("button.closest"));
+    assert!(!result_handler.contains("|| target"));
 }
 
 #[test]

@@ -175,12 +175,15 @@ enum Command {
         #[arg(long)]
         tour: bool,
     },
-    /// Serve the local browser UI as a standalone live review instance.
+    /// Serve the local browser UI, print its capability URL, and open it.
+    #[command(
+        after_help = "The capability URL is always printed to stdout. By default Gander attempts the platform opener. --no-open suppresses only that opener attempt. Opener failure warns on stderr but does not stop the server."
+    )]
     Web {
         /// Loopback TCP port. Defaults to a random free port.
         #[arg(long, default_value_t = 0)]
         port: u16,
-        /// Do not open a browser. This is currently the default behavior.
+        /// Suppress the default platform-opener attempt; the URL is still printed.
         #[arg(long)]
         no_open: bool,
     },
@@ -4637,6 +4640,24 @@ mod tests {
     use chrono::TimeZone;
     use clap::CommandFactory;
     use std::cell::RefCell;
+
+    #[test]
+    fn web_help_documents_url_and_nonfatal_opener_contract() {
+        let command = Cli::command();
+        let web = command.find_subcommand("web").expect("web subcommand");
+        let mut help = Vec::new();
+        web.clone().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        for phrase in [
+            "capability URL is always printed",
+            "attempts the platform opener",
+            "--no-open suppresses only",
+            "Opener failure warns",
+            "does not stop the server",
+        ] {
+            assert!(help.contains(phrase), "missing web help contract: {phrase}");
+        }
+    }
 
     struct FinalAttentionDiffBackend {
         diff: String,

@@ -26,7 +26,8 @@ In one sentence:
 new kind of agent endpoint:
 
 - It is its own process serving HTTP on `127.0.0.1` (random free port by
-  default, `--port` to pin; prints the URL and does not auto-open a browser).
+  default, `--port` to pin; always prints the URL and attempts the platform
+  opener by default).
 - It registers in the existing instance registry (workspace root, target,
   summary, socket path, pid, `last_input_at`) exactly like a TUI instance
   (docs/decisions.md D3), and hosts the same per-instance ACP Unix socket —
@@ -44,11 +45,12 @@ Command contract:
 gander web [--port <port>] [--no-open]
 ```
 
-The process prints the complete capability-bearing URL on stdout. Browser
-auto-open is deliberately unavailable for now because Gander has no existing
-cross-platform, dependency-free opener convention; the default is to leave
-opening to the user, and `--no-open` suppresses the explanatory stderr note for
-scripts. The token exists only in process memory and the printed URL. `gander
+The process always prints the complete capability-bearing URL on stdout and by
+default attempts to open it with the platform opener (`open` on macOS,
+`xdg-open` on supported Unix) without invoking a shell. `--no-open` suppresses
+only that opener attempt; URL output is unchanged. Opener failure is a nonfatal
+stderr warning, so the printed URL remains usable. The token exists only in
+process memory and the printed URL. `gander
 paths` reports the bind convention and existing socket/registry locations,
 never the token.
 
@@ -410,7 +412,7 @@ payload, unlike the live first-paint window.
 | `GET /` | server-rendered app shell (overview + stream) |
 | `GET /events` | SSE: `state` (generation + region patches), `present` (presenter events), `notice` |
 | `POST /interaction` | Ephemeral per-tab visible focus and busy report; updates live routing heartbeat |
-| `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/reply/state, salience set/clear/promote/demote, triage, walkthrough nav); token-gated; returns the new generation |
+| `POST /actions/<verb>` | one-to-one review-service actions (viewed, acknowledge, comment add/edit/reply/state, salience set/clear/promote/demote, triage, walkthrough start/next/prev/goto); token-gated; returns the new generation |
 | `GET /fragment/<region>` | re-fetch a single rendered region (reconnect/patch fallback) |
 
 Phase 4 exposes `GET /`, embedded CSS/handwritten JS assets, token-gated `GET
@@ -434,6 +436,15 @@ mismatches return 409. Success returns
 save. Browser context/fold/card expansion remains ephemeral and never enters
 review state.
 
+All four salience verbs return the same result shape:
+`{ "target": { "path": P, "line"?: L, "end_line"?: E },
+"effective_salience": S, "effective_source": human|agent|heuristic|null,
+"rationale": string|null, "cleared": bool }`. The target is canonical current
+diff identity (`path`, never the durable model's internal `file` field), and the
+effective fields are resolved by the attention service after mutation. A clear
+therefore reports an overlapping agent/heuristic fallback immediately rather
+than asking browser code to reconstruct source precedence.
+
 Phase 4 action verbs and payload fields (all also include
 `expected_generation`) are:
 
@@ -449,7 +460,7 @@ Phase 4 action verbs and payload fields (all also include
 - `salience-set|clear|promote|demote`: `target` (`path`, optional
   `line`/`end_line`), plus `salience` for set and optional `rationale` where
   meaningful;
-- `walkthrough-next|prev`: no selector; `walkthrough-goto`: `step_id` and
+- `walkthrough-start|next|prev`: no selector; `walkthrough-goto`: `step_id` and
   optional `part`.
 
 ## Runtime dependency decision

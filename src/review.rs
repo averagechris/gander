@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
-    ActionIntent, ActionItem, ActionItemStatus, AttentionRegion, AuthorKind, Channel,
-    ClosedDisposition, Comment, CommentKind, CommentReply, CommentState, ExternalTicket, FileState,
-    Identity, ReviewDisposition, ReviewSession, ReviewSessionStatus, ReviewState,
-    ReviewStateFileLock, ReviewStateTombstones, ReviewTarget, StepKind, Walkthrough,
-    WalkthroughStep,
+    ActionIntent, ActionItem, ActionItemStatus, AuthorKind, Channel, ClosedDisposition, Comment,
+    CommentKind, CommentReply, CommentState, ExternalTicket, FileState, Identity,
+    ReviewDisposition, ReviewSession, ReviewSessionStatus, ReviewState, ReviewStateFileLock,
+    ReviewStateTombstones, ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
 };
 
 /// Adapter-neutral policy inputs for one complete review mutation.
@@ -122,7 +121,7 @@ pub enum ReviewAction {
 #[serde(untagged)]
 pub enum ReviewActionOutcome {
     Comment(Box<Comment>),
-    Attention(Box<AttentionRegion>),
+    Salience(Box<crate::attention::SalienceActionOutcome>),
     Acknowledgement(crate::attention::SkimAcknowledgeOutcome),
     Value(serde_json::Value),
 }
@@ -402,13 +401,19 @@ pub fn apply_review_action(
             rationale,
         } => {
             let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
-            Ok(ReviewActionOutcome::Attention(Box::new(
-                crate::attention::set_human_attention(
-                    &mut state.sessions[context.session_index],
-                    target,
-                    salience,
-                    rationale,
-                )?,
+            crate::attention::set_human_attention(
+                &mut state.sessions[context.session_index],
+                target.clone(),
+                salience,
+                rationale,
+            )?;
+            Ok(ReviewActionOutcome::Salience(Box::new(
+                crate::attention::salience_action_outcome(
+                    &state.sessions[context.session_index],
+                    &target,
+                    context.files,
+                    false,
+                ),
             )))
         }
         ReviewAction::SalienceClear {
@@ -417,9 +422,18 @@ pub fn apply_review_action(
             end_line,
         } => {
             let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
-            Ok(ReviewActionOutcome::Value(serde_json::json!({
-                "cleared": crate::attention::clear_human_attention(&mut state.sessions[context.session_index], &target)
-            })))
+            let cleared = crate::attention::clear_human_attention(
+                &mut state.sessions[context.session_index],
+                &target,
+            );
+            Ok(ReviewActionOutcome::Salience(Box::new(
+                crate::attention::salience_action_outcome(
+                    &state.sessions[context.session_index],
+                    &target,
+                    context.files,
+                    cleared,
+                ),
+            )))
         }
         ReviewAction::SaliencePromote {
             path,
@@ -428,13 +442,19 @@ pub fn apply_review_action(
             rationale,
         } => {
             let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
-            Ok(ReviewActionOutcome::Attention(Box::new(
-                crate::attention::promote_human_attention(
-                    &mut state.sessions[context.session_index],
-                    target,
-                    rationale,
+            crate::attention::promote_human_attention(
+                &mut state.sessions[context.session_index],
+                target.clone(),
+                rationale,
+                context.files,
+            )?;
+            Ok(ReviewActionOutcome::Salience(Box::new(
+                crate::attention::salience_action_outcome(
+                    &state.sessions[context.session_index],
+                    &target,
                     context.files,
-                )?,
+                    false,
+                ),
             )))
         }
         ReviewAction::SalienceDemote {
@@ -444,13 +464,19 @@ pub fn apply_review_action(
             rationale,
         } => {
             let target = crate::attention::target_for_diff(context.files, &path, line, end_line)?;
-            Ok(ReviewActionOutcome::Attention(Box::new(
-                crate::attention::demote_human_attention(
-                    &mut state.sessions[context.session_index],
-                    target,
-                    rationale,
+            crate::attention::demote_human_attention(
+                &mut state.sessions[context.session_index],
+                target.clone(),
+                rationale,
+                context.files,
+            )?;
+            Ok(ReviewActionOutcome::Salience(Box::new(
+                crate::attention::salience_action_outcome(
+                    &state.sessions[context.session_index],
+                    &target,
                     context.files,
-                )?,
+                    false,
+                ),
             )))
         }
     }
@@ -930,6 +956,161 @@ mod file_viewed_tests {
             .to_string()
             .contains("stale viewed state")
         );
+    }
+}
+
+#[cfg(test)]
+mod salience_action_tests {
+    use super::*;
+    use crate::state::{Salience, SalienceSource};
+
+    fn context(files: &[FileDiff]) -> ReviewActionContext<'_> {
+        ReviewActionContext {
+            session_index: 0,
+            files,
+            author: Identity::default(),
+            initial_comment_state: CommentState::Todo,
+            channel_policy: CommentChannelPolicy::StateDerived {
+                fixed_default: None,
+            },
+        }
+    }
+
+    fn salience_value(
+        state: &mut ReviewState,
+        files: &[FileDiff],
+        action: ReviewAction,
+    ) -> serde_json::Value {
+        let outcome = apply_review_action(state, context(files), action).unwrap();
+        assert!(matches!(outcome, ReviewActionOutcome::Salience(_)));
+        serde_json::to_value(outcome).unwrap()
+    }
+
+    #[test]
+    fn salience_actions_serialize_one_authoritative_shape_and_clear_to_fallbacks() {
+        let files = crate::diff::DiffSet::parse(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n",
+        )
+        .unwrap()
+        .files;
+        let mut state = ReviewState::default();
+        state.sessions.push(ReviewSession {
+            id: "session".into(),
+            status: ReviewSessionStatus::Open,
+            ..ReviewSession::default()
+        });
+        let file_target = crate::attention::target_for_diff(&files, "a.rs", None, None).unwrap();
+        let range_target =
+            crate::attention::target_for_diff(&files, "a.rs", Some(1), Some(2)).unwrap();
+        state.sessions[0].attention_regions.extend([
+            crate::state::AttentionRegion {
+                target: range_target,
+                salience: Salience::Skim,
+                rationale: Some("generated fallback".into()),
+                source: SalienceSource::Heuristic,
+            },
+            crate::state::AttentionRegion {
+                target: file_target,
+                salience: Salience::Spotlight,
+                rationale: Some("agent fallback".into()),
+                source: SalienceSource::Agent,
+            },
+        ]);
+
+        let target = || ("a.rs".to_owned(), Some(1), Some(2));
+        let (path, line, end_line) = target();
+        let set = salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SalienceSet {
+                path,
+                line,
+                end_line,
+                salience: Salience::Skim,
+                rationale: Some("human choice".into()),
+            },
+        );
+        assert_eq!(
+            set["target"],
+            serde_json::json!({"path":"a.rs","line":1,"end_line":2})
+        );
+        assert_eq!(set["effective_salience"], "skim");
+        assert_eq!(set["effective_source"], "human");
+        assert_eq!(set["cleared"], false);
+        assert!(set.get("file").is_none());
+        assert!(set["target"].get("file").is_none());
+
+        let (path, line, end_line) = target();
+        let promoted = salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SaliencePromote {
+                path,
+                line,
+                end_line,
+                rationale: None,
+            },
+        );
+        assert_eq!(promoted["effective_salience"], "supporting");
+        assert_eq!(promoted["effective_source"], "human");
+
+        let (path, line, end_line) = target();
+        let demoted = salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SalienceDemote {
+                path,
+                line,
+                end_line,
+                rationale: None,
+            },
+        );
+        assert_eq!(demoted["effective_salience"], "skim");
+        assert_eq!(demoted["effective_source"], "human");
+
+        let (path, line, end_line) = target();
+        let agent_fallback = salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SalienceClear {
+                path,
+                line,
+                end_line,
+            },
+        );
+        assert_eq!(agent_fallback["effective_salience"], "spotlight");
+        assert_eq!(agent_fallback["effective_source"], "agent");
+        assert_eq!(agent_fallback["rationale"], "agent fallback");
+        assert_eq!(agent_fallback["cleared"], true);
+
+        state.sessions[0]
+            .attention_regions
+            .retain(|region| region.source != SalienceSource::Agent);
+        let (path, line, end_line) = target();
+        salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SalienceSet {
+                path,
+                line,
+                end_line,
+                salience: Salience::Spotlight,
+                rationale: None,
+            },
+        );
+        let (path, line, end_line) = target();
+        let heuristic_fallback = salience_value(
+            &mut state,
+            &files,
+            ReviewAction::SalienceClear {
+                path,
+                line,
+                end_line,
+            },
+        );
+        assert_eq!(heuristic_fallback["effective_salience"], "skim");
+        assert_eq!(heuristic_fallback["effective_source"], "heuristic");
+        assert_eq!(heuristic_fallback["rationale"], "generated fallback");
     }
 }
 

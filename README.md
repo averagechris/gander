@@ -48,7 +48,9 @@ This repo is intentionally early, but the first vertical slice is in place:
 - exposes scriptable CLI groups for `reviews`, `files`, `hunks`, `comments`,
   `action-items`, and `walkthrough`; see [docs/cli.md](docs/cli.md)
 - offers `gander web`, an optional token-guarded loopback SSR peer (random port
-  by default, printed capability URL, no browser auto-open) whose theme uses the
+  by default, always-printed capability URL, platform opener attempted by
+  default; `--no-open` suppresses only opening, and opener failure is a nonfatal
+  warning) whose theme uses the
   same named palettes and `[theme.palette.dark|light]` overrides as the TUI;
   `[web] extra-css = "path"` loads a local user stylesheet last
 - exports review artifacts as JSON, Markdown, or self-contained HTML, including an agent profile
