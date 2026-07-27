@@ -7,6 +7,9 @@
   raw forward-schema rejection that leaves newer JSON byte-for-byte untouched,
   and a `LiveStateHandle` that structurally owns baseline/current/path/
   tombstone merge discipline across TUI, web, and embedded ACP writes.
+- Added `gander files set-viewed <path> [--unviewed]` and matching MCP
+  `file_set_viewed` parity over the shared fingerprint-guarded viewed-state
+  mutation path.
 - Fixed the remaining M16 web correctness audit gaps: SSE-only tab liveness and
   ordered interaction reports, race-safe full fragments, accessible bulk skim/
   Spotlight/salience controls, centralized anti-referrer/frame headers, and

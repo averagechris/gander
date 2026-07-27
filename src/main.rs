@@ -451,6 +451,17 @@ enum FilesCommand {
         #[arg(long, value_enum, default_value_t = ListFormat::Json)]
         format: ListFormat,
     },
+    /// Mark one changed file viewed, or remove the current viewed mark.
+    SetViewed {
+        /// Repository-relative changed file path exactly as shown by `files list`.
+        path: String,
+        /// Remove the current fingerprint's viewed mark instead of setting it.
+        #[arg(long)]
+        unviewed: bool,
+        /// Output format for the mutation echo.
+        #[arg(long, value_enum, default_value_t = ListFormat::Json)]
+        format: ListFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1833,6 +1844,71 @@ fn run() -> color_eyre::Result<()> {
                 ListFormat::Json => print_json(&session_files_json(&session))?,
                 ListFormat::Text => print!("{}", session_files_text(&session)),
             },
+            FilesCommand::SetViewed {
+                path,
+                unviewed,
+                format,
+            } => {
+                let files = session
+                    .files
+                    .iter()
+                    .map(|file| file.diff.clone())
+                    .collect::<Vec<_>>();
+                let target_spec = session_target_spec(&repo, &session.target);
+                let outcome = review::mutate_state_file(&state_path, |latest| {
+                    let session_index = latest
+                        .sessions
+                        .iter()
+                        .position(|review_session| {
+                            review_session.status == state::ReviewSessionStatus::Open
+                                && review_session.target.repo == target_spec.repo
+                                && review_session.target.base == target_spec.base
+                                && review_session.target.revision == target_spec.revision
+                        })
+                        .ok_or_else(|| eyre!("active review session is unavailable"))?;
+                    review::apply_review_action(
+                        latest,
+                        review::ReviewActionContext {
+                            session_index,
+                            files: &files,
+                            author: config.human_identity(),
+                            initial_comment_state: config.comments.initial_state.into(),
+                            channel_policy: review::CommentChannelPolicy::StateDerived {
+                                fixed_default: config.comments.default_channel,
+                            },
+                        },
+                        review::ReviewAction::FileViewed {
+                            path,
+                            viewed: !unviewed,
+                        },
+                    )
+                })
+                .map_err(|error| user_error(error.to_string()))?;
+                match format {
+                    ListFormat::Json => print_json(&outcome)?,
+                    ListFormat::Text => {
+                        let review::ReviewActionOutcome::Value(value) = outcome else {
+                            return Err(user_error("unexpected file viewed outcome"));
+                        };
+                        let viewed = value
+                            .get("viewed")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let path = value
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        let fingerprint = value
+                            .get("fingerprint")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("");
+                        println!(
+                            "{mark} {path} ({fingerprint})",
+                            mark = if viewed { "viewed" } else { "unviewed" },
+                        );
+                    }
+                }
+            }
         },
         Command::Hunks { command } => match command {
             HunksCommand::List {

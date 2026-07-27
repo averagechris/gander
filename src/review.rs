@@ -11,9 +11,10 @@ use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
 use crate::state::{
     ActionIntent, ActionItem, ActionItemStatus, AttentionRegion, AuthorKind, Channel,
-    ClosedDisposition, Comment, CommentKind, CommentReply, CommentState, ExternalTicket, Identity,
-    ReviewDisposition, ReviewSession, ReviewSessionStatus, ReviewState, ReviewStateFileLock,
-    ReviewStateTombstones, ReviewTarget, StepKind, Walkthrough, WalkthroughStep,
+    ClosedDisposition, Comment, CommentKind, CommentReply, CommentState, ExternalTicket, FileState,
+    Identity, ReviewDisposition, ReviewSession, ReviewSessionStatus, ReviewState,
+    ReviewStateFileLock, ReviewStateTombstones, ReviewTarget, StepKind, Walkthrough,
+    WalkthroughStep,
 };
 
 /// Adapter-neutral policy inputs for one complete review mutation.
@@ -198,14 +199,12 @@ pub fn apply_review_action(
     }
     match action {
         ReviewAction::FileViewed { path, viewed } => {
-            let file = context
-                .files
-                .iter()
-                .find(|file| file.path == path)
-                .ok_or_else(|| eyre!("unknown current file `{path}`"))?;
-            set_file_viewed(state, file, viewed);
+            let outcome = set_file_viewed_for_path(state, context.files, &path, viewed)?;
             Ok(ReviewActionOutcome::Value(serde_json::json!({
-                "path": path, "viewed": viewed, "fingerprint": file.fingerprint
+                "path": outcome.path,
+                "viewed": outcome.viewed,
+                "fingerprint": outcome.fingerprint,
+                "previous_viewed": outcome.previous_viewed,
             })))
         }
         ReviewAction::Acknowledge(selection) => {
@@ -558,14 +557,55 @@ impl LiveStateHandle {
 pub fn set_file_viewed(state: &mut ReviewState, file: &FileDiff, viewed: bool) {
     let saved = state.files.entry(file.path.clone()).or_default();
     saved.normalize_legacy();
-    saved.fingerprint = file.fingerprint.clone();
-    saved.viewed = viewed;
-    if viewed {
-        saved.viewed_fingerprints.insert(file.fingerprint.clone());
-        saved.caught_up_fingerprints.remove(&file.fingerprint);
-    } else {
-        saved.viewed_fingerprints.remove(&file.fingerprint);
+    apply_file_viewed_state(saved, &file.fingerprint, viewed);
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FileViewedOutcome {
+    pub path: String,
+    pub viewed: bool,
+    pub fingerprint: String,
+    pub previous_viewed: bool,
+}
+
+fn set_file_viewed_for_path(
+    state: &mut ReviewState,
+    files: &[FileDiff],
+    path: &str,
+    viewed: bool,
+) -> Result<FileViewedOutcome> {
+    let file = files
+        .iter()
+        .find(|file| file.path == path)
+        .ok_or_else(|| eyre!("unknown changed file `{path}`"))?;
+    let entry = state.files.entry(path.to_owned()).or_default();
+    entry.normalize_legacy();
+    let previous_viewed = entry.is_viewed_fingerprint(&file.fingerprint);
+    if !viewed && !previous_viewed && entry.has_any_viewed_fingerprint() {
+        return Err(eyre!(
+            "stale viewed state for `{path}`: current fingerprint `{}` is not marked viewed",
+            file.fingerprint
+        ));
     }
+    apply_file_viewed_state(entry, &file.fingerprint, viewed);
+    Ok(FileViewedOutcome {
+        path: path.to_owned(),
+        viewed,
+        fingerprint: file.fingerprint.clone(),
+        previous_viewed,
+    })
+}
+
+fn apply_file_viewed_state(state: &mut FileState, fingerprint: &str, viewed: bool) {
+    if viewed {
+        state.viewed_fingerprints.insert(fingerprint.to_owned());
+        state.caught_up_fingerprints.remove(fingerprint);
+    } else {
+        state.viewed_fingerprints.remove(fingerprint);
+        state.caught_up_fingerprints.remove(fingerprint);
+    }
+    state.fingerprint = fingerprint.to_owned();
+    state.viewed = state.is_viewed_fingerprint(fingerprint);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,6 +803,134 @@ pub fn open_session_for_other_target<'a>(
 
 fn target_matches(actual: &ReviewTarget, spec: &SessionTargetSpec) -> bool {
     actual.repo == spec.repo && actual.base == spec.base && actual.revision == spec.revision
+}
+
+#[cfg(test)]
+mod file_viewed_tests {
+    use super::*;
+    use crate::diff::FileStatus;
+
+    fn file(path: &str, fingerprint: &str) -> FileDiff {
+        FileDiff {
+            path: path.to_owned(),
+            old_path: None,
+            status: FileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            hunks: Vec::new(),
+            raw: String::new(),
+            fingerprint: fingerprint.to_owned(),
+        }
+    }
+
+    fn state_with_session() -> ReviewState {
+        let mut state = ReviewState::default();
+        state.sessions.push(ReviewSession {
+            id: "session".to_owned(),
+            title: None,
+            target: ReviewTarget::default(),
+            status: ReviewSessionStatus::Open,
+            disposition: None,
+            attention_regions: Vec::new(),
+            attention_progress: Vec::new(),
+            walkthroughs: Vec::new(),
+            action_items: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        });
+        state
+    }
+
+    fn context(files: &[FileDiff]) -> ReviewActionContext<'_> {
+        ReviewActionContext {
+            session_index: 0,
+            files,
+            author: Identity::default(),
+            initial_comment_state: CommentState::Todo,
+            channel_policy: CommentChannelPolicy::StateDerived {
+                fixed_default: None,
+            },
+        }
+    }
+
+    fn viewed_value(outcome: ReviewActionOutcome) -> serde_json::Value {
+        match outcome {
+            ReviewActionOutcome::Value(value) => value,
+            _ => panic!("unexpected outcome"),
+        }
+    }
+
+    #[test]
+    fn file_viewed_sets_and_clears_current_fingerprint() {
+        let files = vec![file("src/lib.rs", "fp1")];
+        let mut state = state_with_session();
+        let viewed = apply_review_action(
+            &mut state,
+            context(&files),
+            ReviewAction::FileViewed {
+                path: "src/lib.rs".into(),
+                viewed: true,
+            },
+        )
+        .unwrap();
+        let viewed = viewed_value(viewed);
+        assert_eq!(viewed["viewed"], true);
+        assert_eq!(viewed["previous_viewed"], false);
+        assert!(state.files["src/lib.rs"].is_viewed_fingerprint("fp1"));
+
+        let unviewed = apply_review_action(
+            &mut state,
+            context(&files),
+            ReviewAction::FileViewed {
+                path: "src/lib.rs".into(),
+                viewed: false,
+            },
+        )
+        .unwrap();
+        let unviewed = viewed_value(unviewed);
+        assert_eq!(unviewed["viewed"], false);
+        assert_eq!(unviewed["previous_viewed"], true);
+        assert!(!state.files["src/lib.rs"].is_viewed_fingerprint("fp1"));
+    }
+
+    #[test]
+    fn file_viewed_rejects_unknown_and_stale_unview() {
+        let files = vec![file("src/lib.rs", "current")];
+        let mut state = state_with_session();
+        assert!(
+            apply_review_action(
+                &mut state,
+                context(&files),
+                ReviewAction::FileViewed {
+                    path: "missing.rs".into(),
+                    viewed: true,
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("unknown changed file")
+        );
+
+        state
+            .files
+            .entry("src/lib.rs".into())
+            .or_default()
+            .viewed_fingerprints
+            .insert("old".into());
+        assert!(
+            apply_review_action(
+                &mut state,
+                context(&files),
+                ReviewAction::FileViewed {
+                    path: "src/lib.rs".into(),
+                    viewed: false,
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("stale viewed state")
+        );
+    }
 }
 
 #[cfg(test)]

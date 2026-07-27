@@ -87,11 +87,19 @@ not post to any forge.
 
 ```sh
 gander files list [--format json|text]
+gander files set-viewed <path> [--unviewed] [--format json|text]
 gander hunks list [<path>] [--path <path>] [--format json|text]
 gander hunks show <path:index> [--format json|diff|text]
 ```
 
-These are read-only queries over the current jj diff. `hunks list` returns
+`files list` and hunk commands are read-only queries over the current jj diff.
+`files set-viewed` is the scriptable equivalent of the TUI file viewed action:
+it writes only Gander review state, requires an exact current changed-file path,
+records or removes the current diff fingerprint, and defaults to stable JSON:
+`{"path":"src/lib.rs","viewed":true,"fingerprint":"...","previous_viewed":false}`.
+Unknown paths fail; `--unviewed` also rejects stale drifted marks where only an
+older fingerprint is recorded.
+`hunks list` returns
 hunk ids suitable for `hunks show` and accepts the file as a positional or
 `--path` (`--file` remains a hidden compatibility alias). `hunks show --format diff` (alias `text`) prints a unified diff.
 

@@ -88,7 +88,7 @@ stacked PRs), `change_diff` (one change against its parent),
 `attention_set`/`attention_list`/`attention_seed_heuristics`,
 `draft_comment`, `review_disposition`, `review_disposition_set`,
 `list_reviews`, plus CLI-parity state-file tools for `reviews_*`,
-`comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
+`file_set_viewed`, `comment_*`, `action_item_*`, and `walkthrough_*`. Suggestions written through the mutating tools surface
 live in the reviewer's terminal (ordering via `A`, flags via `F`, Focus via `Z`,
 Spotlights via `Alt-N`/`Alt-P`, glance via `Alt-G`, comments via `C`, and open
 work via `X`). MCP must preserve CLI
@@ -124,6 +124,7 @@ scriptable surface.
 | `review_disposition` | `gander reviews disposition show` |
 | `review_disposition_set` | `gander reviews disposition set <state>` / `gander reviews disposition clear` |
 | `current_focus` | `gander current-focus [--format json|text]` (requires a live TUI/web peer) |
+| `file_set_viewed` | `gander files set-viewed <path> [--unviewed]` |
 | `comments` with `channel` | `gander comments list --channel onboarding|delegation|collaboration|note` |
 | `comment_add` | `gander comments add (--path <path> [--line <n>] [--end-line <n>] \| --general) --body <text> [--kind ...] [--action ...] [--state ...]` |
 | `comment_reply` | `gander comments reply <id> --body <text> [--resolve]` |

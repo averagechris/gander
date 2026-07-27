@@ -93,6 +93,19 @@ pub struct FileDiffParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileViewedParams {
+    /// Repository-relative changed file path exactly as returned by `review_files`.
+    pub path: String,
+    /// Set false to remove the current fingerprint's viewed mark.
+    #[serde(default = "default_true")]
+    pub viewed: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PresentGotoParams {
     pub index: Option<usize>,
     pub step_id: Option<String>,
@@ -450,6 +463,36 @@ impl GanderMcp {
     )]
     fn review_files(&self) -> Result<CallToolResult, McpError> {
         self.call("review/files", Value::Null)
+    }
+
+    #[tool(
+        description = "Set or clear one changed file's viewed mark. Equivalent to `gander files set-viewed <path>` or `gander files set-viewed <path> --unviewed`; timestamped viewed-state updates merge into a running TUI."
+    )]
+    fn file_set_viewed(
+        &self,
+        Parameters(params): Parameters<FileViewedParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let context = self.selected_review_context()?;
+        Self::ensure_selected_diff_file(&context, &params.path)?;
+        self.with_state_mut(|state, this| {
+            let idx = this.ensure_session_index_for_context(state, &context);
+            review::apply_review_action(
+                state,
+                review::ReviewActionContext {
+                    session_index: idx,
+                    files: &context.files,
+                    author: this.agent_identity.clone(),
+                    initial_comment_state: this.initial_comment_state,
+                    channel_policy: review::CommentChannelPolicy::StateDerived {
+                        fixed_default: this.default_comment_channel,
+                    },
+                },
+                review::ReviewAction::FileViewed {
+                    path: params.path,
+                    viewed: params.viewed,
+                },
+            )
+        })
     }
 
     #[tool(description = "Raw git-style diff for one file")]
