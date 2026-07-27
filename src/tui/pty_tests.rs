@@ -27,6 +27,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::PathBuf,
     process::{Child, Command, Stdio},
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -41,6 +42,20 @@ const EVENT_WINDOW_MS: u64 = 20_000;
 const QUERY: &[u8] = b"\x1b]11;?";
 const DA1_QUERY: &[u8] = b"\x1b[c";
 const DA1_REPLY: &[u8] = b"\x1b[?6c";
+
+/// PTY/event-reader scenarios are intentionally end-to-end and exercise a
+/// process controlling terminal plus crossterm's global event reader. Keep
+/// them module-local serial without adding a test dependency; each child still
+/// runs on its own fresh PTY, but sibling PTY tests cannot steal scheduler time
+/// from timing-sensitive idle/poll boundaries in the same test binary.
+static PTY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn pty_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    PTY_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PTY test lock poisoned")
+}
 
 // ---------------------------------------------------------------------------
 // Child probe
@@ -327,6 +342,32 @@ impl PtyProbe {
         }
     }
 
+    /// Wait for a resize event while nudging SIGWINCH delivery. On Darwin, a
+    /// signal sent immediately after the master-side size change can be lost
+    /// if the child is between crossterm polls under load; repeating the signal
+    /// keeps this as an event-driven barrier rather than a blind sleep.
+    fn wait_for_resize_event(&mut self, cols: u16, rows: u16) {
+        let prefix = format!("event=Resize({cols}, {rows})");
+        let deadline = Instant::now() + CHILD_DEADLINE;
+        loop {
+            self.drain_master();
+            if let Ok(contents) = fs::read_to_string(&self.out_path)
+                && contents.lines().any(|line| line.starts_with(&prefix))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never wrote a {prefix:?} line; out file: {:?}",
+                fs::read_to_string(&self.out_path).unwrap_or_default()
+            );
+            // SAFETY: the probe child pid is live until `finish`; SIGWINCH has
+            // its normal terminal-resize meaning.
+            let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGWINCH) };
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Close the only master fd, hanging up the child's terminal.
     fn hang_up(&mut self) {
         self.master = None;
@@ -458,6 +499,7 @@ fn resize_pty(probe: &PtyProbe, cols: u16, rows: u16) {
 
 #[test]
 fn detects_bel_reply_and_preserves_unrelated_input_in_order() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(2_000, true) else {
         return;
     };
@@ -471,7 +513,12 @@ fn detects_bel_reply_and_preserves_unrelated_input_in_order() {
     probe.write_master(b"\x1b[15~");
     probe.write_master(b"\x1bx");
     probe.write_master(b"\x1b");
-    std::thread::sleep(Duration::from_millis(120));
+    // A bare ESC is only unrelated input after crossterm's escape-sequence
+    // ambiguity window closes. Synchronize on the child recording that event
+    // instead of relying on the parent getting scheduled again after a short
+    // sleep; otherwise a busy full-suite run can append the following arrow
+    // bytes early enough for crossterm to merge them into one sequence.
+    probe.wait_for_out_line("event=Key(KeyEvent { code: Esc");
     probe.write_master(b"\x1b[A");
     probe.write_master(&[0xC3]);
     std::thread::sleep(Duration::from_millis(80));
@@ -483,7 +530,7 @@ fn detects_bel_reply_and_preserves_unrelated_input_in_order() {
     // Do not race the terminating `Z` against crossterm's SIGWINCH delivery
     // under a busy parallel test runner. The resize is part of this scenario's
     // contract, so wait until the child has observed it before stopping.
-    probe.wait_for_out_line("event=Resize(100, 40)");
+    probe.wait_for_resize_event(100, 40);
     probe.write_master(b"q");
     probe.write_master(b"Z");
 
@@ -518,6 +565,7 @@ fn detects_bel_reply_and_preserves_unrelated_input_in_order() {
 
 #[test]
 fn st_reply_fragmented_at_every_significant_boundary_still_detects() {
+    let _pty_test_guard = pty_test_lock();
     let reply = b"\x1b]11;rgb:aaaa/bbbb/cccc\x1b\\";
     // After ESC; after "]"; after "]11;"; after "rgb:"; inside an RGB
     // component; before the ST backslash (between its ESC and '\').
@@ -563,6 +611,7 @@ fn st_reply_fragmented_at_every_significant_boundary_still_detects() {
 
 #[test]
 fn esc_only_fragment_times_out_unsupported_and_headless_tail_never_dispatches() {
+    let _pty_test_guard = pty_test_lock();
     // The nastiest colorsaurus edge: a reply fragmented immediately after
     // its leading ESC. The reader consumes the ESC, misclassifies the
     // terminal as unsupported when nothing else arrives, and the *plain*
@@ -594,6 +643,7 @@ fn esc_only_fragment_times_out_unsupported_and_headless_tail_never_dispatches() 
 
 #[test]
 fn da1_only_terminal_is_conclusively_unsupported_and_input_flows() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(2_000, true) else {
         return;
     };
@@ -613,6 +663,7 @@ fn da1_only_terminal_is_conclusively_unsupported_and_input_flows() {
 
 #[test]
 fn silent_terminal_times_out_and_full_late_reply_never_dispatches() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(250, true) else {
         return;
     };
@@ -638,6 +689,7 @@ fn silent_terminal_times_out_and_full_late_reply_never_dispatches() {
 
 #[test]
 fn late_tail_of_partially_consumed_reply_never_dispatches() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(250, true) else {
         return;
     };
@@ -665,6 +717,7 @@ fn late_tail_of_partially_consumed_reply_never_dispatches() {
 
 #[test]
 fn malformed_then_valid_reply_never_reaches_dispatch() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(2_000, true) else {
         return;
     };
@@ -693,6 +746,7 @@ fn malformed_then_valid_reply_never_reaches_dispatch() {
 
 #[test]
 fn multiple_replies_are_consumed_without_leaking() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(2_000, true) else {
         return;
     };
@@ -718,6 +772,7 @@ fn multiple_replies_are_consumed_without_leaking() {
 
 #[test]
 fn oversized_late_reply_is_discarded_and_input_still_flows() {
+    let _pty_test_guard = pty_test_lock();
     let Some(mut probe) = spawn_probe(250, true) else {
         return;
     };
@@ -745,6 +800,7 @@ fn oversized_late_reply_is_discarded_and_input_still_flows() {
 
 #[test]
 fn pty_hangup_during_query_fails_fast_without_spinning() {
+    let _pty_test_guard = pty_test_lock();
     // A real hangup also delivers SIGHUP, which terminates the app outright
     // (covered implicitly: the process dies instead of spinning). Here we
     // ignore SIGHUP in the child so the query's zero-byte-read/EOF path
