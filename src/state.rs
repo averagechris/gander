@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
+    io::Write,
     marker::PhantomData,
     path::{Path, PathBuf},
     rc::Rc,
@@ -899,6 +900,12 @@ impl ReviewState {
             return Ok(Self::default());
         }
         let contents = fs::read_to_string(path)?;
+        ensure_supported_schema(
+            &contents,
+            path,
+            u64::from(REVIEW_STATE_SCHEMA_VERSION),
+            "review state",
+        )?;
         let mut state: Self = serde_json::from_str(&contents)?;
         state.normalize_legacy_file_state();
         state.normalize_action_items();
@@ -911,6 +918,11 @@ impl ReviewState {
     }
 
     fn save_locked(&self, path: &Path) -> Result<()> {
+        ensure_existing_schema_supported(
+            path,
+            u64::from(REVIEW_STATE_SCHEMA_VERSION),
+            "review state",
+        )?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -925,9 +937,11 @@ impl ReviewState {
         for comment in &persisted.comments {
             comment.validate_annotation_fields()?;
         }
-        fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        atomic_replace(
+            path,
+            &tmp,
+            serde_json::to_string_pretty(&persisted)?.as_bytes(),
+        )
     }
 
     /// Apply only changes made since `base` to the latest state on disk.
@@ -975,6 +989,80 @@ impl ReviewState {
         apply_tombstones(&mut latest, tombstones);
         latest
     }
+}
+
+pub(crate) fn ensure_existing_schema_supported(
+    path: &Path,
+    supported: u64,
+    label: &str,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(path)?;
+    ensure_supported_schema(&contents, path, supported, label)
+}
+
+pub(crate) fn ensure_supported_schema(
+    contents: &str,
+    path: &Path,
+    supported: u64,
+    label: &str,
+) -> Result<()> {
+    let raw: serde_json::Value = serde_json::from_str(contents)?;
+    let version = raw
+        .get("meta")
+        .and_then(|meta| meta.get("version"))
+        .or_else(|| raw.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if version > supported {
+        return Err(eyre!(
+            "cannot read or write {label} {}: schema version {version} is newer than supported version {supported}; upgrade gander",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Durably replace `path` with bytes written to a sibling temporary file.
+///
+/// The old mode is copied before publication, file contents are synced before
+/// rename, and Unix directory metadata is synced after rename. Every failure
+/// before publication removes the temporary file without touching `path`.
+pub(crate) fn atomic_replace(path: &Path, tmp: &Path, bytes: &[u8]) -> Result<()> {
+    let result = (|| -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        let mut file = options.open(tmp)?;
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(tmp, path)?;
+        sync_parent_directory(path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn merge_file_changes(current: &mut FileState, base: &FileState, local: &FileState) {
@@ -1712,6 +1800,46 @@ mod tests {
         assert!(loaded.files["src/main.rs"].viewed);
         assert_eq!(loaded.meta.version, REVIEW_STATE_SCHEMA_VERSION);
         assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[test]
+    fn future_review_schema_is_rejected_and_left_byte_for_byte_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let future = br#"{
+  "meta": { "version": 99, "future_meta": true },
+  "future_root": { "must_survive": [1, 2, 3] }
+}
+"#;
+        fs::write(&path, future).unwrap();
+
+        let load_error = ReviewState::load_or_default(&path).unwrap_err().to_string();
+        assert!(load_error.contains("schema version 99"));
+        assert!(load_error.contains("upgrade gander"));
+        assert_eq!(fs::read(&path).unwrap(), future);
+
+        let save_error = ReviewState::default().save(&path).unwrap_err().to_string();
+        assert!(save_error.contains("newer than supported"));
+        assert_eq!(fs::read(&path).unwrap(), future);
+        assert!(!path.with_extension("json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_state_replacement_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        ReviewState::default().save(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        ReviewState::default().save(&path).unwrap();
+
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
     }
 
     #[test]

@@ -741,6 +741,8 @@ pub mod socket {
         pub fn process_pending(&mut self, session: &mut ReviewSession, state_path: &Path) -> bool {
             let (overlay_changed, _had_requests, commands, mutations) =
                 self.drain_ui_commands(session);
+            let mut live_state =
+                crate::review::LiveStateHandle::new(state_path.to_path_buf(), session.to_state());
             for command in commands {
                 command.respond(Err((
                     -32000,
@@ -751,9 +753,7 @@ pub mod socket {
                 let result = crate::tui::persist_acp_review_mutation(
                     request.mutation.clone(),
                     session,
-                    state_path,
-                    None,
-                    &crate::state::ReviewStateTombstones::default(),
+                    &mut live_state,
                 )
                 .map_err(|error| (-32000, error.to_string()));
                 request.respond(result);

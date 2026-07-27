@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Hardened live review persistence with synced temp-file and directory-backed
+  atomic publication (including review-state permissions and agent overlays),
+  raw forward-schema rejection that leaves newer JSON byte-for-byte untouched,
+  and a `LiveStateHandle` that structurally owns baseline/current/path/
+  tombstone merge discipline across TUI, web, and embedded ACP writes.
 - Fixed the remaining M16 web correctness audit gaps: SSE-only tab liveness and
   ordered interaction reports, race-safe full fragments, accessible bulk skim/
   Spotlight/salience controls, centralized anti-referrer/frame headers, and

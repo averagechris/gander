@@ -28,11 +28,20 @@ none of them fetches from or posts to a forge.
   bump the relevant generation; stream and owner-lookup caches validate those
   counters rather than hashing the session each frame.
 - `src/review.rs` owns review-state file transaction seams. Short-lived
-  CLI/MCP/ACP writers lock across reload/mutate/atomic-save; live instances
-  retain a last-persisted baseline and merge only their changed fields over the
-  latest locked snapshot. Stable-id children merge independently, append-only
+  CLI/MCP/ACP writers lock across reload/mutate/atomic-save. Every TUI, web, or
+  embedded ACP live path uses `LiveStateHandle`, which owns its path, current
+  snapshot, last-persisted baseline, tombstones, locked reload, and merge save;
+  whole-snapshot live saves are therefore not available by convention alone.
+  Stable-id children merge independently, append-only
   fingerprinted attention history unions, explicit deletions remain deleted,
   and unchanged stale state is never replayed.
+- `src/state.rs` checks the raw schema version before typed deserialization or
+  mutation. State from a newer Gander is rejected without rewriting unknown
+  fields, while older additive schemas still migrate through serde-compatible
+  defaults. Atomic state and agent-overlay publication preserves existing file
+  permissions, syncs the complete sibling temp file before rename, and syncs
+  containing-directory metadata on supported platforms before acknowledging a
+  save.
 - `src/app/stream.rs` materializes expensive syntax/folding rows only for the
   bounded visible window. Callers must mutate through the established service
   or app seams so cache invalidation remains correct.
@@ -122,3 +131,8 @@ Persisted fields start in `src/state.rs` with serde defaults, then flow through
 also need an explicit generation bump and projection/card coverage. Keep review
 state writes separate from code-workspace mutation, as required by
 [vision.md](vision.md).
+
+Schema bumps must retain the raw-version guard: an older binary may migrate an
+older document, but it must never deserialize and rewrite a newer document.
+Live adapters must carry state through `LiveStateHandle`; direct `ReviewState`
+saves are reserved for the locked short-lived transaction seam and tests.

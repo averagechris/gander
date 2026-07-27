@@ -134,10 +134,15 @@ Concurrent instances (a TUI and a web server on one workspace) mirror each
 other through durable-state watching, the same way a TUI mirrors external CLI
 writes today. M16 Phase 0a completed the prerequisite M14 autosave-race fix:
 short-lived CLI/MCP/ACP mutations are locked transactions, while each live
-instance saves only changes since its last persisted baseline over the latest
-locked state. A stale instance therefore cannot replay unchanged comments,
+instance carries a `LiveStateHandle` that owns its current state, last persisted
+baseline, path, tombstones, locked reload, and merge save. It saves only changes
+since that baseline over the latest locked state. A stale instance therefore cannot replay unchanged comments,
 sessions, viewed marks, or fingerprinted attention progress over another
-writer.
+writer. State and overlay publication syncs the sibling temp file before atomic
+rename and syncs containing-directory metadata where supported. Raw schema
+versions are checked before deserialization, so a web process fails clearly
+rather than rewriting state produced by a newer Gander and dropping unknown
+fields.
 
 ## Reading experience: attention-first, full review always
 

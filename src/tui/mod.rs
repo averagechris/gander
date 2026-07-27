@@ -55,6 +55,7 @@ use ratatui::{
     layout::Rect,
 };
 
+use crate::state::ReviewState;
 use crate::{
     app::{CommentSelection, Focus, NavigationPlacement, ReviewSession, SkimAcknowledgeResult},
     artifact::{
@@ -66,8 +67,8 @@ use crate::{
     diff::DiffSet,
     generated::GeneratedMatcher,
     jj::{JjBackend, JjChangeSummary, ReviewTarget},
-    review,
-    state::{AuthorKind, Channel, ReviewState, ReviewStateTombstones, WalkthroughStep},
+    review::{self, LiveStateHandle},
+    state::{AuthorKind, Channel, WalkthroughStep},
 };
 use serde_json::{Value, json};
 
@@ -202,11 +203,9 @@ struct TuiState {
     /// every tick.
     overlay_mtime: Option<std::time::SystemTime>,
     state_mtime: Option<std::time::SystemTime>,
-    /// Exact durable snapshot this live instance last loaded or persisted.
-    /// Autosave computes a delta from this baseline instead of writing the
-    /// whole in-memory snapshot back over concurrent writers.
-    last_persisted_state: Option<ReviewState>,
-    state_tombstones: ReviewStateTombstones,
+    /// Owns the current snapshot, disk baseline, path, and deletion markers so
+    /// every live reload/save is structurally merge-aware.
+    live_state: Option<LiveStateHandle>,
     /// Where the agent overlay lives, for writing draft dispositions back.
     agent_overlay_path: Option<PathBuf>,
     /// The live ACP bridge has handled at least one agent/harness request for
@@ -260,8 +259,7 @@ impl Default for TuiState {
             last_autosave_generation: None,
             overlay_mtime: None,
             state_mtime: None,
-            last_persisted_state: None,
-            state_tombstones: ReviewStateTombstones::default(),
+            live_state: None,
             agent_overlay_path: None,
             agent_contacted: false,
             instance_registration: None,
@@ -696,7 +694,9 @@ pub fn run(
         last_autosave_generation: Some(session.durable_state_generation()),
         agent_overlay_path: agent_overlay_path.clone(),
         state_mtime: state_path.as_deref().and_then(state_file_mtime),
-        last_persisted_state: Some(session.to_state()),
+        live_state: state_path
+            .clone()
+            .map(|path| LiveStateHandle::new(path, session.to_state())),
         terminal_size: initial_terminal_size,
         theme: app_theme,
         osc_guard,
@@ -1393,8 +1393,19 @@ fn maybe_reload_review_state(
     if mtime.is_none() || mtime == tui_state.state_mtime {
         return;
     }
-    match ReviewState::load_or_default(state_path) {
-        Ok(external) => {
+    if tui_state.live_state.is_none() {
+        tui_state.live_state = Some(LiveStateHandle::new(
+            state_path.to_path_buf(),
+            ReviewState::default(),
+        ));
+    }
+    let handle = tui_state
+        .live_state
+        .as_mut()
+        .expect("live state initialized");
+    handle.replace_current(session.to_state());
+    match handle.reload().cloned() {
+        Ok(merged) => {
             let transition = tui_state
                 .diff_viewport
                 .transition_snapshot(session, current_diff_inner(session, tui_state));
@@ -1403,15 +1414,6 @@ fn maybe_reload_review_state(
                 .iter()
                 .map(|comment| comment.id.clone())
                 .collect();
-            let local = session.to_state();
-            let fallback = ReviewState::default();
-            let base = tui_state.last_persisted_state.as_ref().unwrap_or(&fallback);
-            let merged = ReviewState::merge_changes_since(
-                external,
-                base,
-                local,
-                &tui_state.state_tombstones,
-            );
             let added_comments = merged
                 .comments
                 .iter()
@@ -1425,7 +1427,6 @@ fn maybe_reload_review_state(
             );
             reconcile_present_spotlight(session, tui_state);
             tui_state.state_mtime = mtime;
-            tui_state.last_persisted_state = Some(merged);
             tui_state.last_autosave_generation = Some(session.durable_state_generation());
             if notify && added_comments > 0 {
                 tui_state.notice = Some(UiNotice {
@@ -2100,11 +2101,18 @@ fn persist_review_state(
     let transition = tui_state
         .diff_viewport
         .transition_snapshot(session, current_diff_inner(session, tui_state));
-    let local = session.to_state();
-    let fallback = ReviewState::default();
-    let base = tui_state.last_persisted_state.as_ref().unwrap_or(&fallback);
-    let state =
-        crate::review::merge_live_state_file(state_path, base, local, &tui_state.state_tombstones)?;
+    if tui_state.live_state.is_none() {
+        tui_state.live_state = Some(LiveStateHandle::new(
+            state_path.to_path_buf(),
+            ReviewState::default(),
+        ));
+    }
+    let handle = tui_state
+        .live_state
+        .as_mut()
+        .expect("live state initialized");
+    handle.replace_current(session.to_state());
+    let state = handle.save()?.clone();
     session.apply_review_state(state.clone());
     tui_state.diff_viewport.finish_transition(
         transition,
@@ -2112,8 +2120,6 @@ fn persist_review_state(
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
-    tui_state.last_persisted_state = Some(state);
-    tui_state.state_tombstones = ReviewStateTombstones::default();
     tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(())
 }
@@ -2136,9 +2142,10 @@ fn apply_acp_review_mutation(
     let result = persist_acp_review_mutation(
         mutation,
         session,
-        state_path,
-        tui_state.last_persisted_state.as_ref(),
-        &tui_state.state_tombstones,
+        tui_state
+            .live_state
+            .as_mut()
+            .ok_or_else(|| color_eyre::eyre::eyre!("durable live state handle unavailable"))?,
     )?;
     tui_state.diff_viewport.finish_transition(
         transition,
@@ -2146,8 +2153,6 @@ fn apply_acp_review_mutation(
         current_diff_inner(session, tui_state),
     );
     tui_state.state_mtime = state_file_mtime(state_path);
-    tui_state.last_persisted_state = Some(session.to_state());
-    tui_state.state_tombstones = ReviewStateTombstones::default();
     tui_state.last_autosave_generation = Some(session.durable_state_generation());
     Ok(result)
 }
@@ -2156,9 +2161,7 @@ fn apply_acp_review_mutation(
 pub(crate) fn persist_acp_review_mutation(
     mutation: crate::acp::ReviewMutation,
     session: &mut ReviewSession,
-    state_path: &Path,
-    baseline: Option<&ReviewState>,
-    tombstones: &crate::state::ReviewStateTombstones,
+    live_state: &mut LiveStateHandle,
 ) -> Result<serde_json::Value> {
     let before = session.to_state();
     let result = match mutation {
@@ -2167,14 +2170,9 @@ pub(crate) fn persist_acp_review_mutation(
             .map(|comment| serde_json::json!({ "id": comment.id }))
             .ok_or_else(|| color_eyre::eyre::eyre!("draft body must contain non-whitespace text")),
     }?;
-    let fallback = ReviewState::default();
-    let merged = match crate::review::merge_live_state_file(
-        state_path,
-        baseline.unwrap_or(&fallback),
-        session.to_state(),
-        tombstones,
-    ) {
-        Ok(merged) => merged,
+    live_state.replace_current(session.to_state());
+    let merged = match live_state.save() {
+        Ok(merged) => merged.clone(),
         Err(error) => {
             session.apply_review_state(before);
             return Err(error);
@@ -3017,7 +3015,9 @@ fn handle_normal_action(
         Action::DeleteComment => {
             if let Some(id) = session.selected_comment().map(|comment| comment.id.clone()) {
                 session.delete_comment(&id);
-                tui_state.state_tombstones.comments.insert(id);
+                if let Some(live_state) = tui_state.live_state.as_mut() {
+                    live_state.tombstones_mut().comments.insert(id);
+                }
                 tui_state.notice = Some(UiNotice {
                     level: UiNoticeLevel::Info,
                     message: "deleted comment".to_owned(),
@@ -3990,7 +3990,12 @@ fn handle_draft_list_key(
         Some(Action::DraftDiscard) => {
             let draft = list.selected_draft().cloned()?;
             session.discard_agent_draft(&draft.id);
-            tui_state.state_tombstones.comments.insert(draft.id.clone());
+            if let Some(live_state) = tui_state.live_state.as_mut() {
+                live_state
+                    .tombstones_mut()
+                    .comments
+                    .insert(draft.id.clone());
+            }
             tui_state.notice = Some(UiNotice {
                 level: UiNoticeLevel::Info,
                 message: "discarded agent draft".to_owned(),
@@ -4312,7 +4317,9 @@ fn handle_comment_list_key(
             Action::DeleteComment => {
                 if let Some(id) = list.selected_comment_id(session) {
                     session.delete_comment(&id);
-                    tui_state.state_tombstones.comments.insert(id);
+                    if let Some(live_state) = tui_state.live_state.as_mut() {
+                        live_state.tombstones_mut().comments.insert(id);
+                    }
                     list.clamp(session);
                 }
             }
@@ -8691,6 +8698,10 @@ diff --git a/b.rs b/b.rs
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
         let mut tui_state = TuiState {
             agent_overlay_path: Some(overlay_path.clone()),
+            live_state: Some(LiveStateHandle::new(
+                dir.path().join("state.json"),
+                session.to_state(),
+            )),
             ..TuiState::default()
         };
         let mut list = DraftListState::new(&session);
@@ -9162,6 +9173,10 @@ diff --git a/b.rs b/b.rs
         let (mut session, overlay_path) = draft_session_with_overlay(dir.path());
         let mut tui_state = TuiState {
             agent_overlay_path: Some(overlay_path.clone()),
+            live_state: Some(LiveStateHandle::new(
+                dir.path().join("state.json"),
+                session.to_state(),
+            )),
             ..TuiState::default()
         };
         let mut list = DraftListState::new(&session);
@@ -9177,7 +9192,15 @@ diff --git a/b.rs b/b.rs
 
         assert!(matches!(next, Some(Mode::Normal)));
         assert!(session.comments.is_empty());
-        assert!(tui_state.state_tombstones.comments.contains("draft-1"));
+        assert!(
+            tui_state
+                .live_state
+                .as_ref()
+                .unwrap()
+                .tombstones()
+                .comments
+                .contains("draft-1")
+        );
     }
 
     #[test]

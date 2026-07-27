@@ -128,11 +128,23 @@ impl AgentOverlay {
         }
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read agent overlay {}", path.display()))?;
+        crate::state::ensure_supported_schema(
+            &contents,
+            path,
+            u64::from(AGENT_OVERLAY_VERSION),
+            "agent overlay",
+        )?;
         serde_json::from_str(&contents)
             .with_context(|| format!("failed to parse agent overlay {}", path.display()))
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        let _lock = crate::state::ReviewStateFileLock::acquire(path)?;
+        crate::state::ensure_existing_schema_supported(
+            path,
+            u64::from(AGENT_OVERLAY_VERSION),
+            "agent overlay",
+        )?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -142,9 +154,11 @@ impl AgentOverlay {
         tmp.set_extension("json.tmp");
         let mut persisted = self.clone();
         persisted.version = AGENT_OVERLAY_VERSION;
-        fs::write(&tmp, serde_json::to_string_pretty(&persisted)?)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::state::atomic_replace(
+            path,
+            &tmp,
+            serde_json::to_string_pretty(&persisted)?.as_bytes(),
+        )
     }
 }
 
@@ -228,6 +242,26 @@ mod tests {
         assert_eq!(overlay.version, AGENT_OVERLAY_VERSION);
         assert!(overlay.ordering.is_empty());
         assert!(overlay.flags.is_empty());
+    }
+
+    #[test]
+    fn future_overlay_schema_is_rejected_and_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.json");
+        let future = br#"{"version":9001,"future":{"unknown":"preserve exactly"}}
+"#;
+        fs::write(&path, future).unwrap();
+
+        assert!(
+            AgentOverlay::load_or_default(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("schema version 9001")
+        );
+        assert_eq!(fs::read(&path).unwrap(), future);
+        assert!(AgentOverlay::default().save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), future);
+        assert!(!path.with_extension("json.tmp").exists());
     }
 
     #[test]

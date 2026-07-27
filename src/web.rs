@@ -54,10 +54,7 @@ use crate::{
     jj::{JjBackend, JjProcessControl},
     registry::{InstanceInfo, InstanceRegistration},
     review,
-    state::{
-        ActionIntent, Channel, CommentKind, CommentState, ReviewState, ReviewStateTombstones,
-        Salience,
-    },
+    state::{ActionIntent, Channel, CommentKind, CommentState, ReviewState, Salience},
     web_render::{
         self, COMPONENT_CSS, GuideView, PREPAINT_SCRIPT, RenderMode, RenderOptions,
         THEME_CONTROL_SCRIPT,
@@ -629,21 +626,21 @@ impl WebWatcher {
         }
     }
 
-    fn poll_files(&mut self, session: &mut ReviewSession, baseline: &mut ReviewState) {
+    fn poll_files(
+        &mut self,
+        session: &mut ReviewSession,
+        live_state: &mut review::LiveStateHandle,
+    ) {
         let state_mtime = file_mtime(&self.state_path);
-        if state_mtime.is_some()
-            && state_mtime != self.state_mtime
-            && let Ok(external) = ReviewState::load_or_default(&self.state_path)
-        {
-            let merged = ReviewState::merge_changes_since(
-                external,
-                baseline,
-                session.to_state(),
-                &ReviewStateTombstones::default(),
-            );
-            session.apply_review_state(merged.clone());
-            *baseline = merged;
-            self.state_mtime = state_mtime;
+        if state_mtime.is_some() && state_mtime != self.state_mtime {
+            live_state.replace_current(session.to_state());
+            match live_state.reload().cloned() {
+                Ok(merged) => {
+                    session.apply_review_state(merged);
+                    self.state_mtime = state_mtime;
+                }
+                Err(error) => eprintln!("gander web: review-state reload failed: {error}"),
+            }
         }
 
         let overlay_mtime = file_mtime(&self.overlay_path);
@@ -694,17 +691,10 @@ impl WebWatcher {
     fn reload_local_state(
         &mut self,
         session: &mut ReviewSession,
-        baseline: &mut ReviewState,
+        live_state: &mut review::LiveStateHandle,
     ) -> Result<()> {
-        let external = ReviewState::load_or_default(&self.state_path)?;
-        let merged = ReviewState::merge_changes_since(
-            external,
-            baseline,
-            session.to_state(),
-            &ReviewStateTombstones::default(),
-        );
-        session.apply_review_state(merged.clone());
-        *baseline = merged;
+        live_state.replace_current(session.to_state());
+        session.apply_review_state(live_state.reload()?.clone());
         self.state_mtime = file_mtime(&self.state_path);
         let overlay = crate::agent::AgentOverlay::load_or_default(&self.overlay_path)?;
         session.apply_agent_overlay(&overlay);
@@ -817,7 +807,7 @@ fn process_action(
     command: ActionCommand,
     session: &mut ReviewSession,
     state_path: &std::path::Path,
-    baseline: &mut ReviewState,
+    live_state: &mut review::LiveStateHandle,
     watcher: &mut WebWatcher,
     http: &HttpState,
 ) -> std::result::Result<ActionResult, ActionError> {
@@ -965,20 +955,13 @@ fn process_action(
         }
     }
 
-    let local = session.to_state();
-    let merged = review::merge_live_state_file(
-        state_path,
-        baseline,
-        local,
-        &ReviewStateTombstones::default(),
-    )
-    .map_err(|error| ActionError {
+    live_state.replace_current(session.to_state());
+    let merged = live_state.save().cloned().map_err(|error| ActionError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         message: format!("failed to save review action: {error}"),
         rollback_safe: false,
     })?;
     session.apply_review_state(merged.clone());
-    *baseline = merged;
     watcher.state_mtime = file_mtime(state_path);
     publish_projection(http, session);
     let generation = http
@@ -1537,7 +1520,7 @@ fn run_blocking_worker(worker: BlockingWorker) {
         http,
         shutdown,
     } = worker;
-    let mut baseline = session.to_state();
+    let mut live_state = review::LiveStateHandle::new(state_path.clone(), session.to_state());
     let mut presentation = None;
     let mut present_sequence = 0u64;
     let mut cadence = WorkerCadence::new(std::time::Instant::now());
@@ -1564,7 +1547,7 @@ fn run_blocking_worker(worker: BlockingWorker) {
                     action.command,
                     &mut session,
                     &state_path,
-                    &mut baseline,
+                    &mut live_state,
                     &mut watcher,
                     &http,
                 );
@@ -1582,15 +1565,14 @@ fn run_blocking_worker(worker: BlockingWorker) {
             process_acp_requests(
                 &mut bridge,
                 &mut session,
-                &state_path,
-                &mut baseline,
+                &mut live_state,
                 &mut watcher,
                 &mut presentation,
                 &mut present_sequence,
                 &present_tx,
                 &http,
             );
-            watcher.poll_files(&mut session, &mut baseline);
+            watcher.poll_files(&mut session, &mut live_state);
             watcher.poll_repo(&mut session);
             if reconcile_web_presentation(&session, &mut presentation) {
                 publish_present_event(
@@ -2520,8 +2502,7 @@ fn escape_to(out: &mut String, value: &str) {
 fn process_acp_requests(
     bridge: &mut AcpBridge,
     session: &mut ReviewSession,
-    state_path: &std::path::Path,
-    baseline: &mut ReviewState,
+    live_state: &mut review::LiveStateHandle,
     watcher: &mut WebWatcher,
     presentation: &mut Option<WebPresentationState>,
     present_sequence: &mut u64,
@@ -2531,17 +2512,9 @@ fn process_acp_requests(
     apply_controlling_focus(session, &state.interactions);
     let (_, _, commands, mutations) = bridge.drain_ui_commands(session);
     for request in mutations {
-        let result = crate::tui::persist_acp_review_mutation(
-            request.mutation.clone(),
-            session,
-            state_path,
-            Some(baseline),
-            &ReviewStateTombstones::default(),
-        )
-        .map_err(|error| (-32000, error.to_string()));
-        if result.is_ok() {
-            *baseline = session.to_state();
-        }
+        let result =
+            crate::tui::persist_acp_review_mutation(request.mutation.clone(), session, live_state)
+                .map_err(|error| (-32000, error.to_string()));
         request.respond(result);
     }
     for request in commands {
@@ -2550,7 +2523,7 @@ fn process_acp_requests(
             command.clone(),
             session,
             watcher,
-            baseline,
+            live_state,
             presentation,
             &state.interactions,
         );
@@ -2607,7 +2580,7 @@ fn apply_web_present_command(
     command: PresentCommand,
     session: &mut ReviewSession,
     watcher: &mut WebWatcher,
-    baseline: &mut ReviewState,
+    live_state: &mut review::LiveStateHandle,
     presentation: &mut Option<WebPresentationState>,
     interactions: &Arc<Mutex<WebInteractions>>,
 ) -> std::result::Result<Value, (i64, String)> {
@@ -2706,7 +2679,7 @@ fn apply_web_present_command(
         }
         PresentCommand::Reload => {
             watcher
-                .reload_local_state(session, baseline)
+                .reload_local_state(session, live_state)
                 .map_err(|error| (-32000, error.to_string()))?;
             reconcile_web_presentation(session, presentation);
             Ok(web_present_status(session, presentation))
@@ -3870,11 +3843,10 @@ mod tests {
             DiffSet::parse(raw).unwrap(),
             ReviewState::default(),
         );
-        let mut baseline = session.to_state();
         let dir = tempfile::tempdir().unwrap();
         let state_path = dir.path().join("state.json");
         let overlay_path = dir.path().join("agent.json");
-        let mut external = baseline.clone();
+        let mut external = session.to_state();
         external.comments.push(Comment {
             id: "external".into(),
             path: Some("a.rs".into()),
@@ -3883,6 +3855,7 @@ mod tests {
             ..Comment::default()
         });
         external.save(&state_path).unwrap();
+        let mut live_state = review::LiveStateHandle::new(state_path.clone(), session.to_state());
         let counts = Arc::new(JjCounts::default());
         let mut watcher = WebWatcher {
             state_path,
@@ -3900,7 +3873,7 @@ mod tests {
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
         };
         let before = session.stream_inputs_generation();
-        watcher.poll_files(&mut session, &mut baseline);
+        watcher.poll_files(&mut session, &mut live_state);
         assert!(session.stream_inputs_generation() > before);
         assert!(
             session
@@ -3916,7 +3889,7 @@ mod tests {
         }
         .save(&watcher.overlay_path)
         .unwrap();
-        watcher.poll_files(&mut session, &mut baseline);
+        watcher.poll_files(&mut session, &mut live_state);
         assert!(session.stream_inputs_generation() > after_state);
     }
 
@@ -4056,7 +4029,7 @@ mod tests {
 
     fn action_fixture() -> (
         ReviewSession,
-        ReviewState,
+        review::LiveStateHandle,
         tempfile::TempDir,
         WebWatcher,
         HttpState,
@@ -4088,7 +4061,8 @@ mod tests {
             generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
         };
         let http = http_state(WebReview::from_session(&session));
-        (session, baseline, dir, watcher, http)
+        let live_state = review::LiveStateHandle::new(watcher.state_path.clone(), baseline);
+        (session, live_state, dir, watcher, http)
     }
 
     #[test]
@@ -4163,7 +4137,7 @@ mod tests {
         });
         seeded.save(&watcher.state_path).unwrap();
         session.apply_review_state(seeded.clone());
-        let mut baseline = seeded;
+        let mut baseline = review::LiveStateHandle::new(watcher.state_path.clone(), seeded);
         let http = http_state(WebReview::from_session(&session));
         let generation = http.review.read().unwrap().generation;
         let state_path = watcher.state_path.clone();
@@ -4540,8 +4514,9 @@ mod tests {
             .map(|file| file.diff.raw.clone())
             .collect::<String>();
         let (mut watcher, _dir, _) = presentation_watcher(&raw);
-        let mut baseline = session.to_state();
+        let baseline = session.to_state();
         baseline.save(&watcher.state_path).unwrap();
+        let mut baseline = review::LiveStateHandle::new(watcher.state_path.clone(), baseline);
         crate::agent::AgentOverlay::default()
             .save(&watcher.overlay_path)
             .unwrap();
@@ -4550,7 +4525,7 @@ mod tests {
         let apply = |command,
                      session: &mut ReviewSession,
                      watcher: &mut WebWatcher,
-                     baseline: &mut ReviewState,
+                     baseline: &mut review::LiveStateHandle,
                      presentation: &mut Option<WebPresentationState>| {
             apply_web_present_command(
                 command,
@@ -4675,7 +4650,8 @@ mod tests {
     fn web_present_rejects_inactive_invalid_and_stale_targets_without_moving() {
         let mut session = presentation_fixture();
         let (mut watcher, _dir, _) = presentation_watcher("");
-        let mut baseline = session.to_state();
+        let mut baseline =
+            review::LiveStateHandle::new(watcher.state_path.clone(), session.to_state());
         let interactions = Arc::new(Mutex::new(WebInteractions::default()));
         let mut presentation = None;
         {
@@ -4795,7 +4771,8 @@ mod tests {
         assert_eq!(session.focus, Focus::Files);
         assert_eq!(session.selected_line_anchor().unwrap().line(), Some(3));
         let (mut watcher, _dir, _) = presentation_watcher("");
-        let mut baseline = session.to_state();
+        let mut baseline =
+            review::LiveStateHandle::new(watcher.state_path.clone(), session.to_state());
         assert_eq!(
             apply_web_present_command(
                 PresentCommand::Status,

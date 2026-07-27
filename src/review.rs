@@ -5,7 +5,7 @@
 
 use color_eyre::eyre::{Result, eyre};
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::diff::FileDiff;
 use crate::ids::{resolve_unique_prefix, shortest_unique_prefix};
@@ -458,8 +458,7 @@ pub fn apply_review_action(
 }
 
 /// Hold the review-state transaction lock across a CLI read/mutate/save
-/// sequence. Long-lived live instances must instead use [`merge_live_state_file`]
-/// for each save.
+/// sequence. Long-lived live instances must instead use [`LiveStateHandle`].
 pub(crate) fn lock_state_file(path: &Path) -> Result<ReviewStateFileLock> {
     ReviewStateFileLock::acquire(path)
 }
@@ -479,20 +478,76 @@ pub(crate) fn mutate_state_file<T>(
     Ok(result)
 }
 
-/// Merge a live instance's local delta over the latest locked disk snapshot.
-/// Unchanged values from `base` are omitted, preventing stale autosaves from
-/// overwriting writes made by another TUI, CLI, MCP, or future web instance.
-pub(crate) fn merge_live_state_file(
-    path: &Path,
-    base: &ReviewState,
-    local: ReviewState,
-    tombstones: &ReviewStateTombstones,
-) -> Result<ReviewState> {
-    let _lock = lock_state_file(path)?;
-    let latest = ReviewState::load_or_default(path)?;
-    let merged = ReviewState::merge_changes_since(latest, base, local, tombstones);
-    merged.save(path)?;
-    Ok(merged)
+/// Persistence owner for one long-lived TUI, web, or embedded ACP instance.
+///
+/// Keeping path, last disk baseline, current state, and deletion tombstones in
+/// one type makes it impossible for a live caller to accidentally perform a
+/// whole-snapshot save or update only half of the merge handshake.
+#[derive(Debug)]
+pub(crate) struct LiveStateHandle {
+    path: PathBuf,
+    baseline: ReviewState,
+    current: ReviewState,
+    tombstones: ReviewStateTombstones,
+}
+
+impl LiveStateHandle {
+    pub(crate) fn new(path: PathBuf, current: ReviewState) -> Self {
+        Self {
+            path,
+            baseline: current.clone(),
+            current,
+            tombstones: ReviewStateTombstones::default(),
+        }
+    }
+
+    pub(crate) fn replace_current(&mut self, current: ReviewState) {
+        self.current = current;
+    }
+
+    pub(crate) fn tombstones_mut(&mut self) -> &mut ReviewStateTombstones {
+        &mut self.tombstones
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tombstones(&self) -> &ReviewStateTombstones {
+        &self.tombstones
+    }
+
+    /// Merge the current local delta over the latest locked snapshot and make
+    /// the durable result both the new current state and the new baseline.
+    pub(crate) fn save(&mut self) -> Result<&ReviewState> {
+        let _lock = lock_state_file(&self.path)?;
+        let latest = ReviewState::load_or_default(&self.path)?;
+        let merged = ReviewState::merge_changes_since(
+            latest,
+            &self.baseline,
+            self.current.clone(),
+            &self.tombstones,
+        );
+        merged.save(&self.path)?;
+        self.baseline = merged.clone();
+        self.current = merged;
+        self.tombstones = ReviewStateTombstones::default();
+        Ok(&self.current)
+    }
+
+    /// Adopt external disk changes without losing an unsaved local delta.
+    /// The raw disk snapshot becomes the baseline; the merged view becomes the
+    /// current state, so a later save still carries local-only changes.
+    pub(crate) fn reload(&mut self) -> Result<&ReviewState> {
+        let _lock = lock_state_file(&self.path)?;
+        let latest = ReviewState::load_or_default(&self.path)?;
+        let merged = ReviewState::merge_changes_since(
+            latest.clone(),
+            &self.baseline,
+            self.current.clone(),
+            &self.tombstones,
+        );
+        self.baseline = latest;
+        self.current = merged;
+        Ok(&self.current)
+    }
 }
 
 /// Persist the viewed state for one exact current file fingerprint.
@@ -2010,6 +2065,44 @@ mod tests {
     }
 
     #[test]
+    fn future_schema_survives_transactions_and_concurrent_live_merges_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let future = br#"{
+  "meta": {"version": 42},
+  "comments": [],
+  "unknown_future_field": {"lossless": true}
+}
+"#;
+        std::fs::write(&path, future).unwrap();
+
+        assert!(mutate_state_file(&path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), future);
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(6));
+        let workers = (0..6)
+            .map(|index| {
+                let path = path.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let mut local = ReviewState::default();
+                    local.comments.push(Comment {
+                        id: format!("stale-{index}"),
+                        ..Comment::default()
+                    });
+                    let mut handle = LiveStateHandle::new(path, local);
+                    start.wait();
+                    assert!(handle.save().is_err());
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), future);
+    }
+
+    #[test]
     fn live_delta_saves_compose_and_do_not_resurrect_stale_objects() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
@@ -2037,8 +2130,9 @@ mod tests {
             .unwrap()
             .viewed_fingerprints
             .extend(["a.rs-fp".into(), "independent-first-fingerprint".into()]);
-        let first_saved =
-            merge_live_state_file(&path, &base, first, &ReviewStateTombstones::default()).unwrap();
+        let mut first_handle = LiveStateHandle::new(path.clone(), base.clone());
+        first_handle.replace_current(first);
+        let first_saved = first_handle.save().unwrap().clone();
 
         // An external CLI deletion lands after both live instances loaded.
         mutate_state_file(&path, |state| {
@@ -2060,8 +2154,9 @@ mod tests {
             .unwrap()
             .viewed_fingerprints
             .insert("b.rs-fp".into());
-        let merged =
-            merge_live_state_file(&path, &base, second, &ReviewStateTombstones::default()).unwrap();
+        let mut second_handle = LiveStateHandle::new(path.clone(), base);
+        second_handle.replace_current(second);
+        let merged = second_handle.save().unwrap().clone();
 
         assert!(
             first_saved.files["a.rs"]
