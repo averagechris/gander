@@ -104,13 +104,27 @@ pub fn render_html_with_profile_attention_files_and_theme(
     };
     let mut options = crate::web_render::RenderOptions::static_artifact();
     options.show_private_progress = !team;
-    let mut out = String::from(
-        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>gander review export</title><script>",
+    let artifact_style = format!(
+        "{}{}",
+        crate::web_render::render_theme_css(theme),
+        crate::web_render::COMPONENT_CSS
     );
+    let static_script = include_str!("web_static.js");
+    let artifact_csp = format!(
+        "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; font-src 'none'; img-src data:; style-src {}; script-src {} {} {}",
+        crate::web_render::script_hash_source(&artifact_style),
+        crate::web_render::script_hash_source(crate::web_render::PREPAINT_SCRIPT),
+        crate::web_render::script_hash_source(crate::web_render::THEME_CONTROL_SCRIPT),
+        crate::web_render::script_hash_source(static_script),
+    );
+    let mut out = String::from(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"",
+    );
+    out.push_str(&artifact_csp);
+    out.push_str("\"><title>gander review export</title><script>");
     out.push_str(crate::web_render::PREPAINT_SCRIPT);
     out.push_str("</script><style>");
-    out.push_str(&crate::web_render::render_theme_css(theme));
-    out.push_str(crate::web_render::COMPONENT_CSS);
+    out.push_str(&artifact_style);
     out.push_str("</style></head><body data-mode=\"guided\"><header class=\"topbar\"><div><p class=\"eyebrow\">Gander static review</p><strong>");
     esc_to(&mut out, &session.target.to_string());
     out.push_str("</strong></div><div class=\"controls\"><button class=\"theme-toggle\" type=\"button\" data-theme-toggle>Theme: <span data-theme-label>system</span></button><button id=\"mode-switch\" type=\"button\" aria-pressed=\"false\">Full review</button></div></header><div class=\"app-layout\">");
@@ -212,7 +226,7 @@ pub fn render_html_with_profile_attention_files_and_theme(
     out.push_str("</main></div><script>");
     out.push_str(crate::web_render::THEME_CONTROL_SCRIPT);
     out.push_str("</script><script>");
-    out.push_str(include_str!("web_static.js"));
+    out.push_str(static_script);
     out.push_str("</script></body></html>\n");
     out
 }
@@ -839,6 +853,42 @@ mod tests {
                 assert!(html.contains(hook), "missing static navigation hook {hook}");
             }
         }
+    }
+
+    #[test]
+    fn static_export_csp_hashes_exact_self_contained_bytes() {
+        let (session, state) = fixture();
+        let html = render_html(&session, &state);
+        let policy = html
+            .split_once("http-equiv=\"Content-Security-Policy\" content=\"")
+            .unwrap()
+            .1
+            .split_once("\">")
+            .unwrap()
+            .0;
+        assert!(!policy.contains("unsafe-inline"));
+        assert!(!policy.contains("unsafe-eval"));
+        assert!(policy.contains("default-src 'none'"));
+        assert!(policy.contains("font-src 'none'"));
+        for script in [
+            crate::web_render::PREPAINT_SCRIPT,
+            crate::web_render::THEME_CONTROL_SCRIPT,
+            include_str!("web_static.js"),
+        ] {
+            let exact = crate::web_render::script_hash_source(script);
+            assert!(policy.contains(&exact));
+            let altered = format!("{script} ");
+            assert_ne!(exact, crate::web_render::script_hash_source(&altered));
+            assert!(!policy.contains(&crate::web_render::script_hash_source(&altered)));
+        }
+        let style = html
+            .split_once("<style>")
+            .unwrap()
+            .1
+            .split_once("</style>")
+            .unwrap()
+            .0;
+        assert!(policy.contains(&crate::web_render::script_hash_source(style)));
     }
 
     #[test]

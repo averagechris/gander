@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Hardened the local web server with production-router authorization coverage,
+  strict hash/nonce-based live and artifact CSPs, a 64-socket pre-auth
+  connection cap, and coordinator panic containment that fails work, shuts down
+  HTTP/SSE, cleans advertised endpoints, and exits with a clear error.
 - Kept M16 web projection work off the current-thread reactor by blocking
   fragment snapshot/render preparation, coalescing registry heartbeats onto the
   blocking coordinator, and deriving surgical patches plus compact recovery

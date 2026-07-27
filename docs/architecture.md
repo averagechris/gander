@@ -90,7 +90,16 @@ none of them fetches from or posts to a forge.
   validates the per-process capability token, exact bound Host, and same-origin
   Origin before every route (including fragments, SSE, and assets), then adds
   no-store, nosniff, no-referrer, and frame-denial headers to successes and
-  errors alike. Phase 2
+  errors alike.
+  The same middleware emits a deny-by-default CSP: exact hashes authorize the
+  static prepaint/theme scripts, `'self'` authorizes embedded external assets,
+  and a per-process nonce authorizes only generated theme-token CSS. A
+  64-connection accept-time cap bounds even unauthenticated idle sockets; the
+  tracked socket lifetime is also the SSE permit lifetime. The blocking
+  coordinator entry is wrapped in panic containment that marks it unhealthy,
+  fails responders, signals HTTP/SSE shutdown, and lets outer endpoint guards
+  clean the registry and socket before returning an error.
+  Phase 2
   server-renders the attention overview and near-viewport reading regions from
   `src/app/reading.rs`, leaves offscreen structural skeletons, and lazily serves
   generation-checked stable-region fragments. The traditional mode expands the

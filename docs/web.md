@@ -373,6 +373,23 @@ payload, unlike the live first-paint window.
   printed URL, and required on every request including the SSE stream.
   `Origin`/`Host` are validated to block DNS-rebinding and cross-origin
   browser probes. Tokens are never written to durable state.
+- The live response policy is `default-src 'none'`, with external embedded
+  JavaScript and CSS restricted to `'self'`, `connect-src 'self'`, and exact
+  SHA-256 sources for both static inline scripts. The generated theme-token
+  style has a fresh per-process nonce. There is no `unsafe-inline`, eval, font,
+  or external-origin allowance; the hashed prepaint script still runs before
+  theme CSS to prevent a color-scheme flash. Self-contained exports emit a
+  separate CSP meta policy hashing their exact embedded style and three script
+  byte strings, with networking and forms disabled.
+- At most 64 accepted HTTP sockets exist concurrently. The cap is enforced at
+  accept time, before token/Host/Origin parsing, so idle or tokenless clients
+  cannot create unbounded descriptors or tasks. SSE holds one permit for its
+  connection and releases it on disconnect; shutdown closes every tracked
+  socket after the graceful drain.
+- The blocking coordinator entry is panic-contained. A panic marks the worker
+  unhealthy, fails queued responders (an unwound in-flight sender disconnects),
+  closes SSE and HTTP, removes the registry record and ACP socket, and returns
+  a process-level error after the bounded join instead of leaving a listener.
 - All product boundaries hold: gander reads code state and writes review
   state. No forge fetching or posting, no code-workspace mutation, no agent
   spawning, no chat UI. The web server adds no capability that lacks a CLI

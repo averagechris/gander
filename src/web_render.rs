@@ -12,10 +12,40 @@ use crate::{
     state::{AuthorKind, Channel, CommentState, Salience},
     theme::{Rgb, ThemeKind, ThemeSlots},
 };
+use sha2::{Digest, Sha256};
 
 pub const COMPONENT_CSS: &str = include_str!("web.css");
 pub const PREPAINT_SCRIPT: &str = "(()=>{try{let m=localStorage.getItem('gander.colorScheme');if(m==='light'||m==='dark')document.documentElement.dataset.colorScheme=m;}catch(e){}})();";
 pub const THEME_CONTROL_SCRIPT: &str = "(()=>{let k='gander.colorScheme',o=['system','light','dark'],q=matchMedia('(prefers-color-scheme: dark)'),b=document.querySelector('[data-theme-toggle]'),l=document.querySelector('[data-theme-label]');function g(){try{return localStorage.getItem(k)||'system'}catch(e){return 'system'}}function s(m){document.documentElement.dataset.colorScheme=(m==='light'||m==='dark')?m:'';if(l)l.textContent=m}function set(m){try{m==='system'?localStorage.removeItem(k):localStorage.setItem(k,m)}catch(e){}s(m)}if(b)b.addEventListener('click',()=>set(o[(o.indexOf(g())+1)%o.length]));q.addEventListener&&q.addEventListener('change',()=>{if(g()==='system')s('system')});s(g())})();";
+
+/// CSP hashes are over the exact UTF-8 bytes between the script tags.
+pub(crate) fn sha256_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len().div_ceil(3) * 4);
+    for chunk in digest.chunks(3) {
+        let value = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(TABLE[((value >> 18) & 63) as usize] as char);
+        out.push(TABLE[((value >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((value >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(value & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+pub(crate) fn script_hash_source(script: &str) -> String {
+    format!("'sha256-{}'", sha256_base64(script.as_bytes()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {

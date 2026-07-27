@@ -57,7 +57,7 @@ use crate::{
     state::{ActionIntent, Channel, CommentKind, CommentState, ReviewState, Salience},
     web_render::{
         self, COMPONENT_CSS, GuideView, PREPAINT_SCRIPT, RenderMode, RenderOptions,
-        THEME_CONTROL_SCRIPT,
+        THEME_CONTROL_SCRIPT, script_hash_source,
     },
 };
 
@@ -77,6 +77,9 @@ const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// dropped so endpoint and worker cleanup cannot be held hostage by a request.
 const HTTP_GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Loopback is single-user. This leaves ample room for browser parallelism and
+/// SSE while bounding unauthenticated sockets before HTTP middleware runs.
+const MAX_HTTP_CONNECTIONS: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SpotlightIdentity {
@@ -265,6 +268,9 @@ struct HttpState {
     rev: Arc<str>,
     target: Arc<str>,
     theme_css: Arc<str>,
+    style_nonce: Arc<str>,
+    content_security_policy: Arc<str>,
+    worker_healthy: Arc<AtomicBool>,
     review: Arc<RwLock<WebReview>>,
     recovery: Arc<RwLock<Arc<ProjectionEvent>>>,
     events: tokio::sync::broadcast::Sender<Arc<ProjectionEvent>>,
@@ -1295,7 +1301,11 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     let (action_tx, action_rx) = std::sync::mpsc::sync_channel(16);
     let action_rx = Arc::new(Mutex::new(action_rx));
     let (stream_shutdown_tx, stream_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let worker_failure = Arc::new(Mutex::new(None::<String>));
     let token = uuid::Uuid::new_v4().to_string();
+    let style_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let content_security_policy = live_content_security_policy(&style_nonce);
     let host = format!("127.0.0.1:{}", address.port());
     let origin = format!("http://{host}");
     let url = format!("{origin}/?token={token}");
@@ -1309,6 +1319,9 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         rev: Arc::from(params.session.target.rev.clone()),
         target: Arc::from(params.session.target.to_string()),
         theme_css: Arc::from(render_theme_css(&params.theme)),
+        style_nonce: Arc::from(style_nonce),
+        content_security_policy: Arc::from(content_security_policy),
+        worker_healthy: Arc::new(AtomicBool::new(true)),
         review,
         recovery: Arc::new(RwLock::new(initial_recovery)),
         events,
@@ -1333,33 +1346,44 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         );
     }
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let signal_worker_shutdown = worker_shutdown.clone();
     let signal_actions = action_rx.clone();
+    let signal_stream_shutdown = stream_shutdown_tx.clone();
+    let signal_http_shutdown = shutdown_tx.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         signal_worker_shutdown.store(true, Ordering::Release);
         fail_queued_actions(&signal_actions, "review action service is shutting down");
-        let _ = stream_shutdown_tx.send(true);
-        let _ = shutdown_tx.send(true);
+        let _ = signal_stream_shutdown.send(true);
+        let _ = signal_http_shutdown.send(true);
     });
     let worker_http = http_state.clone();
     let worker_flag = worker_shutdown.clone();
     let worker_session = params.session;
     let worker_state_path = params.state_path;
-    let worker = spawn_blocking_worker(BlockingWorker {
-        session: worker_session,
-        state_path: worker_state_path,
-        watcher,
-        bridge,
-        registration,
-        heartbeat,
-        rendered: initial_rendered,
-        actions: action_rx.clone(),
-        present_tx,
-        http: worker_http,
-        shutdown: worker_flag,
-    });
+    let worker = spawn_blocking_worker(
+        BlockingWorker {
+            session: worker_session,
+            state_path: worker_state_path,
+            watcher,
+            bridge,
+            registration,
+            heartbeat,
+            rendered: initial_rendered,
+            actions: action_rx.clone(),
+            present_tx,
+            http: worker_http,
+            shutdown: worker_flag,
+        },
+        WorkerFailure {
+            healthy: http_state.worker_healthy.clone(),
+            shutdown: worker_shutdown.clone(),
+            actions: action_rx.clone(),
+            stream_shutdown: stream_shutdown_tx,
+            http_shutdown: shutdown_tx,
+            error: worker_failure.clone(),
+        },
+    );
     let connections = ActiveHttpConnections::default();
     let server_result = serve_http_until_shutdown(
         listener,
@@ -1377,6 +1401,13 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     worker.shutdown();
     drop(http_state);
     server_result.wrap_err("web server failed")?;
+    if let Some(error) = worker_failure
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Err(color_eyre::eyre::eyre!(error));
+    }
     Ok(())
 }
 
@@ -1392,7 +1423,15 @@ struct ActiveHttpConnectionsInner {
 }
 
 impl ActiveHttpConnections {
-    fn track(&self, stream: TcpStream) -> io::Result<TrackedTcpStream> {
+    fn track(&self, stream: TcpStream) -> io::Result<Option<TrackedTcpStream>> {
+        {
+            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            if inner.sockets.len() >= MAX_HTTP_CONNECTIONS {
+                // Dropping the just-accepted stream immediately refuses excess
+                // clients, including clients that never send an auth token.
+                return Ok(None);
+            }
+        }
         let stream = stream.into_std()?;
         let control = stream.try_clone()?;
         let stream = TcpStream::from_std(stream)?;
@@ -1401,11 +1440,11 @@ impl ActiveHttpConnections {
         inner.next_id = inner.next_id.wrapping_add(1);
         inner.sockets.insert(id, control);
         drop(inner);
-        Ok(TrackedTcpStream {
+        Ok(Some(TrackedTcpStream {
             stream,
             id,
             connections: self.clone(),
-        })
+        }))
     }
 
     fn abort_all(&self) {
@@ -1430,7 +1469,8 @@ impl axum::serve::Listener for TrackedTcpListener {
         loop {
             match self.listener.accept().await {
                 Ok((stream, address)) => match self.connections.track(stream) {
-                    Ok(stream) => return (stream, address),
+                    Ok(Some(stream)) => return (stream, address),
+                    Ok(None) => continue,
                     Err(error) => eprintln!("gander web: failed to track HTTP connection: {error}"),
                 },
                 Err(error) => {
@@ -1558,8 +1598,41 @@ struct BlockingWorkerHandle {
     finished: BlockingReceiver<()>,
 }
 
-fn spawn_blocking_worker(worker: BlockingWorker) -> BlockingWorkerHandle {
-    spawn_blocking_task(move || run_blocking_worker(worker))
+struct WorkerFailure {
+    healthy: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    actions: Arc<Mutex<BlockingReceiver<ActionEnvelope>>>,
+    stream_shutdown: tokio::sync::watch::Sender<bool>,
+    http_shutdown: tokio::sync::watch::Sender<bool>,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+fn spawn_blocking_worker(worker: BlockingWorker, failure: WorkerFailure) -> BlockingWorkerHandle {
+    spawn_blocking_task(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_blocking_worker(worker);
+        }));
+        if let Err(payload) = outcome {
+            let detail = if let Some(message) = payload.downcast_ref::<&str>() {
+                (*message).to_owned()
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic payload".to_owned()
+            };
+            failure.healthy.store(false, Ordering::Release);
+            failure.shutdown.store(true, Ordering::Release);
+            fail_queued_actions(&failure.actions, "web coordinator panicked");
+            *failure
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(format!("web coordinator panicked: {detail}"));
+            let _ = failure.stream_shutdown.send(true);
+            let _ = failure.http_shutdown.send(true);
+            eprintln!("gander web: coordinator panicked: {detail}");
+        }
+    })
 }
 
 fn spawn_blocking_task(task: impl FnOnce() + Send + 'static) -> BlockingWorkerHandle {
@@ -1809,12 +1882,19 @@ async fn security_guard(State(state): State<HttpState>, request: Request, next: 
             Err(_) => {
                 return apply_security_headers(
                     (StatusCode::FORBIDDEN, "invalid Origin header").into_response(),
+                    &state.content_security_policy,
                 );
             }
         },
         None => None,
     };
-    let response = if let Err((status, message)) = validate_request(
+    let response = if !state.worker_healthy.load(Ordering::Acquire) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "web coordinator unavailable",
+        )
+            .into_response()
+    } else if let Err((status, message)) = validate_request(
         host,
         origin,
         request.uri().query(),
@@ -1826,10 +1906,10 @@ async fn security_guard(State(state): State<HttpState>, request: Request, next: 
     } else {
         next.run(request).await
     };
-    apply_security_headers(response)
+    apply_security_headers(response, &state.content_security_policy)
 }
 
-fn apply_security_headers(mut response: Response) -> Response {
+fn apply_security_headers(mut response: Response, content_security_policy: &str) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -1843,7 +1923,20 @@ fn apply_security_headers(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert("x-frame-options", HeaderValue::from_static("DENY"));
+    if let Ok(value) = HeaderValue::from_str(content_security_policy) {
+        response
+            .headers_mut()
+            .insert("content-security-policy", value);
+    }
     response
+}
+
+fn live_content_security_policy(style_nonce: &str) -> String {
+    format!(
+        "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; font-src 'none'; img-src 'self' data:; connect-src 'self'; style-src 'self' 'nonce-{style_nonce}'; script-src 'self' {} {}",
+        script_hash_source(PREPAINT_SCRIPT),
+        script_hash_source(THEME_CONTROL_SCRIPT),
+    )
 }
 
 fn validate_request(
@@ -2531,7 +2624,9 @@ fn render_shell(state: &HttpState) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Gander review</title><script>",
     );
     out.push_str(PREPAINT_SCRIPT);
-    out.push_str("</script><style>");
+    out.push_str("</script><style nonce=\"");
+    escape_to(&mut out, &state.style_nonce);
+    out.push_str("\">");
     out.push_str(&state.theme_css);
     out.push_str("</style><link rel=\"stylesheet\" href=\"/assets/app.css?token=");
     escape_to(&mut out, &state.token);
@@ -3120,6 +3215,66 @@ mod tests {
         })
     }
 
+    fn raw_request(address: SocketAddr, request: String) -> io::Result<String> {
+        let mut stream = StdTcpStream::connect(address)?;
+        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+        stream.write_all(request.as_bytes())?;
+        let mut response = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&buffer[..read]);
+                    if response.windows(4).any(|window| window == b"\r\n\r\n")
+                        && request.starts_with("GET /events")
+                    {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(String::from_utf8_lossy(&response).into_owned())
+    }
+
+    fn request_text(
+        method: &str,
+        path: &str,
+        host: Option<&str>,
+        origin: Option<&str>,
+        body: &str,
+    ) -> String {
+        let mut request = format!("{method} {path} HTTP/1.1\r\n");
+        if let Some(host) = host {
+            request.push_str(&format!("Host: {host}\r\n"));
+        }
+        if let Some(origin) = origin {
+            request.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        request.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ));
+        request
+    }
+
+    fn response_status(response: &str) -> u16 {
+        response
+            .split_whitespace()
+            .nth(1)
+            .and_then(|status| status.parse().ok())
+            .unwrap_or(0)
+    }
+
     fn row(id: &str, path: &str, text: &str, salience: Salience) -> ReadingRow {
         ReadingRow {
             id: id.into(),
@@ -3281,6 +3436,7 @@ mod tests {
     fn http_state(review: WebReview) -> HttpState {
         let (actions, _receiver) = std::sync::mpsc::sync_channel(1);
         let recovery = recovery_projection_event_for_view(&review);
+        let style_nonce = "test-session-nonce";
         HttpState {
             token: Arc::from("safe-token"),
             expected_host: Arc::from("127.0.0.1:8123"),
@@ -3290,6 +3446,9 @@ mod tests {
             rev: Arc::from("@"),
             target: Arc::from("main..@"),
             theme_css: Arc::from(render_theme_css(&ThemeConfig::default())),
+            style_nonce: Arc::from(style_nonce),
+            content_security_policy: Arc::from(live_content_security_policy(style_nonce)),
+            worker_healthy: Arc::new(AtomicBool::new(true)),
             review: Arc::new(RwLock::new(review)),
             recovery: Arc::new(RwLock::new(recovery)),
             events: tokio::sync::broadcast::channel(SSE_BROADCAST_CAPACITY).0,
@@ -3300,6 +3459,362 @@ mod tests {
             heartbeat: RegistryHeartbeat::default(),
             actions,
         }
+    }
+
+    #[test]
+    fn production_router_central_guard_covers_every_route_over_loopback() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let host = address.to_string();
+            let origin = format!("http://{host}");
+            let mut state = http_state(review_fixture());
+            state.expected_host = Arc::from(host.clone());
+            state.expected_origin = Arc::from(origin.clone());
+            let expected_csp = state.content_security_policy.to_string();
+            let app = router(state);
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(serve_http_until_shutdown(
+                listener,
+                app,
+                shutdown_rx,
+                ActiveHttpConnections::default(),
+                Duration::from_secs(1),
+            ));
+
+            let routes = [
+                ("GET", "/?token=safe-token", "", 200),
+                ("GET", "/assets/app.css?token=safe-token", "", 200),
+                ("GET", "/assets/app.js?token=safe-token", "", 200),
+                ("GET", "/assets/extra.css?token=safe-token", "", 404),
+                ("GET", "/events?token=safe-token&tab=router-test", "", 200),
+                (
+                    "GET",
+                    "/fragment/file-core?token=safe-token&generation=42&mode=guided",
+                    "",
+                    200,
+                ),
+                (
+                    "POST",
+                    "/interaction?token=safe-token",
+                    r#"{"tab_id":"absent","client_sequence":1}"#,
+                    204,
+                ),
+                (
+                    "POST",
+                    "/actions/file-viewed?token=safe-token",
+                    r#"{"expected_generation":42,"path":"src/lib.rs"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/file-unviewed?token=safe-token",
+                    r#"{"expected_generation":42,"path":"src/lib.rs"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/skim-acknowledge?token=safe-token",
+                    r#"{"expected_generation":42,"fold_id":"fold-1"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/skim-acknowledge-all?token=safe-token",
+                    r#"{"expected_generation":42}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/comment-add?token=safe-token",
+                    r#"{"expected_generation":42,"path":"src/lib.rs","body":"body"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/comment-edit?token=safe-token",
+                    r#"{"expected_generation":42,"id":"comment-1","body":"body"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/comment-reply?token=safe-token",
+                    r#"{"expected_generation":42,"id":"comment-1","body":"reply"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/comment-state?token=safe-token",
+                    r#"{"expected_generation":42,"id":"comment-1","state":"draft"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/draft-accept?token=safe-token",
+                    r#"{"expected_generation":42,"id":"draft-1"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/draft-discard?token=safe-token",
+                    r#"{"expected_generation":42,"id":"draft-1"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/salience-set?token=safe-token",
+                    r#"{"expected_generation":42,"target":{"path":"src/lib.rs"},"salience":"supporting"}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/salience-clear?token=safe-token",
+                    r#"{"expected_generation":42,"target":{"path":"src/lib.rs"}}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/salience-promote?token=safe-token",
+                    r#"{"expected_generation":42,"target":{"path":"src/lib.rs"}}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/salience-demote?token=safe-token",
+                    r#"{"expected_generation":42,"target":{"path":"src/lib.rs"}}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/walkthrough-next?token=safe-token",
+                    r#"{"expected_generation":42}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/walkthrough-prev?token=safe-token",
+                    r#"{"expected_generation":42}"#,
+                    500,
+                ),
+                (
+                    "POST",
+                    "/actions/walkthrough-goto?token=safe-token",
+                    r#"{"expected_generation":42,"step_id":"step-1"}"#,
+                    500,
+                ),
+                ("GET", "/missing?token=safe-token", "", 404),
+            ];
+            for (method, valid_path, body, expected) in routes {
+                let missing = valid_path.replace("?token=safe-token", "?");
+                let wrong = valid_path.replace("token=safe-token", "token=wrong");
+                for (path, request_host, request_origin, status, label, guarded) in [
+                    (
+                        missing.as_str(),
+                        Some(host.as_str()),
+                        Some(origin.as_str()),
+                        401,
+                        "missing token",
+                        true,
+                    ),
+                    (
+                        wrong.as_str(),
+                        Some(host.as_str()),
+                        Some(origin.as_str()),
+                        401,
+                        "wrong token",
+                        true,
+                    ),
+                    (
+                        valid_path,
+                        None,
+                        Some(origin.as_str()),
+                        400,
+                        "missing host",
+                        false,
+                    ),
+                    (
+                        valid_path,
+                        Some("attacker.invalid"),
+                        Some(origin.as_str()),
+                        400,
+                        "wrong host",
+                        true,
+                    ),
+                    (
+                        valid_path,
+                        Some(host.as_str()),
+                        Some("http://attacker.invalid"),
+                        403,
+                        "wrong origin",
+                        true,
+                    ),
+                    (
+                        valid_path,
+                        Some(host.as_str()),
+                        None,
+                        expected,
+                        "missing origin",
+                        true,
+                    ),
+                    (
+                        valid_path,
+                        Some(host.as_str()),
+                        Some(origin.as_str()),
+                        expected,
+                        "correct credentials",
+                        true,
+                    ),
+                ] {
+                    let request = request_text(method, path, request_host, request_origin, body);
+                    let response =
+                        tokio::task::spawn_blocking(move || raw_request(address, request))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(
+                        response_status(&response),
+                        status,
+                        "{method} {valid_path}: {label}: {response:?}"
+                    );
+                    if guarded {
+                        assert!(response.contains("cache-control: no-store"));
+                        assert!(
+                            response.contains(&format!("content-security-policy: {expected_csp}"))
+                        );
+                    }
+                }
+            }
+            shutdown_tx.send(true).unwrap();
+            server.await.unwrap().unwrap();
+        });
+    }
+
+    #[test]
+    fn live_csp_hashes_exact_emitted_scripts_and_nonces_dynamic_style() {
+        let state = http_state(review_fixture());
+        let html = render_shell(&state);
+        let policy = &state.content_security_policy;
+        assert!(!policy.contains("unsafe-inline"));
+        assert!(!policy.contains("unsafe-eval"));
+        assert!(policy.contains("font-src 'none'"));
+        assert!(policy.contains("script-src 'self'"));
+        assert!(policy.contains("style-src 'self' 'nonce-test-session-nonce'"));
+        assert!(html.contains("<style nonce=\"test-session-nonce\">"));
+        for script in [PREPAINT_SCRIPT, THEME_CONTROL_SCRIPT] {
+            assert!(html.contains(&format!(">{script}</script>")));
+            assert!(policy.contains(&script_hash_source(script)));
+            let altered = format!("{script} ");
+            assert_ne!(script_hash_source(script), script_hash_source(&altered));
+            assert!(!policy.contains(&script_hash_source(&altered)));
+        }
+    }
+
+    #[test]
+    fn accepted_connection_cap_refuses_and_releases_without_timing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let connections = ActiveHttpConnections::default();
+            let mut clients = Vec::new();
+            let mut tracked = Vec::new();
+            for _ in 0..MAX_HTTP_CONNECTIONS {
+                clients.push(TcpStream::connect(address).await.unwrap());
+                let (server, _) = listener.accept().await.unwrap();
+                tracked.push(connections.track(server).unwrap().expect("within cap"));
+            }
+            clients.push(TcpStream::connect(address).await.unwrap());
+            let (excess, _) = listener.accept().await.unwrap();
+            assert!(connections.track(excess).unwrap().is_none());
+            drop(tracked.pop());
+            clients.push(TcpStream::connect(address).await.unwrap());
+            let (replacement, _) = listener.accept().await.unwrap();
+            assert!(connections.track(replacement).unwrap().is_some());
+        });
+    }
+
+    #[test]
+    fn sse_connection_holds_and_relinquishes_accepted_slot() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let host = address.to_string();
+            let mut state = http_state(review_fixture());
+            state.expected_host = Arc::from(host.clone());
+            state.expected_origin = Arc::from(format!("http://{host}"));
+            let connections = ActiveHttpConnections::default();
+            let observed_connections = connections.clone();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(serve_http_until_shutdown(
+                listener,
+                router(state),
+                shutdown_rx,
+                connections,
+                Duration::from_secs(1),
+            ));
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let client = std::thread::spawn(move || {
+                let mut stream = StdTcpStream::connect(address).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "GET /events?token=safe-token&tab=permit-test HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 1024];
+                while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            tokio::task::spawn_blocking(move || ready_rx.recv().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                observed_connections.inner.lock().unwrap().sockets.len(),
+                1
+            );
+            release_tx.send(()).unwrap();
+            tokio::task::spawn_blocking(move || client.join().unwrap())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if observed_connections
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .sockets
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("SSE socket did not relinquish its connection slot");
+            shutdown_tx.send(true).unwrap();
+            server.await.unwrap().unwrap();
+        });
     }
 
     #[test]
@@ -4009,7 +4524,11 @@ mod tests {
         }
         fn change_fingerprint(&self, _repo: &FsPath, _target: &ReviewTarget) -> Result<String> {
             self.counts.fingerprints.fetch_add(1, Ordering::SeqCst);
-            Ok(self.fingerprint.lock().unwrap().clone())
+            let fingerprint = self.fingerprint.lock().unwrap().clone();
+            if fingerprint == "__panic__" {
+                panic!("deterministic coordinator panic");
+            }
+            Ok(fingerprint)
         }
         fn operations(&self, _repo: &FsPath) -> Result<Vec<JjOperationSummary>> {
             self.counts.operations.fetch_add(1, Ordering::SeqCst);
@@ -4066,6 +4585,56 @@ mod tests {
         assert_eq!(counts.fingerprints.load(Ordering::SeqCst), 2);
         assert_eq!(counts.diffs.load(Ordering::SeqCst), 1);
         assert_eq!(counts.operations.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn coordinator_panic_shuts_real_lifecycle_and_cleans_endpoints() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let raw = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n";
+            let dir = tempfile::tempdir().unwrap();
+            let session = ReviewSession::new(
+                dir.path().to_path_buf(),
+                ReviewTarget::trunk_to_current(),
+                DiffSet::parse(raw).unwrap(),
+                ReviewState::default(),
+            );
+            let state_path = dir.path().join("state.json");
+            session.to_state().save(&state_path).unwrap();
+            let socket_path = dir.path().join("web.sock");
+            let registry_dir = dir.path().join("registry");
+            fs::create_dir(&registry_dir).unwrap();
+            let backend = |fingerprint: &str| WatchJj {
+                counts: Arc::new(JjCounts::default()),
+                fingerprint: Arc::new(Mutex::new(fingerprint.to_owned())),
+                diff: raw.into(),
+            };
+            let result = run_async(WebParams {
+                session,
+                overlay_path: dir.path().join("agent.json"),
+                state_path,
+                socket_path: socket_path.clone(),
+                registry_dir: registry_dir.clone(),
+                workspace_root: dir.path().to_path_buf(),
+                acp_jj: Box::new(backend("healthy")),
+                watch_jj: Some(Box::new(backend("__panic__"))),
+                ignore_globs: Vec::new(),
+                generated_matcher: GeneratedMatcher::new(&Default::default()).unwrap(),
+                port: 0,
+                no_open: true,
+                theme: ThemeConfig::default(),
+                extra_css: None,
+            })
+            .await;
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("web coordinator panicked"), "{error}");
+            assert!(error.contains("deterministic coordinator panic"), "{error}");
+            assert!(!socket_path.exists());
+            assert!(crate::registry::list_instances(&registry_dir).is_empty());
+        });
     }
 
     #[test]
@@ -4221,7 +4790,7 @@ mod tests {
             ("action", Json(json!({"generation": 2})).into_response()),
         ];
         for (label, response) in responses {
-            let response = apply_security_headers(response);
+            let response = apply_security_headers(response, "default-src 'none'");
             let headers = response.headers();
             assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{label}");
             assert_eq!(
@@ -4231,6 +4800,10 @@ mod tests {
             );
             assert_eq!(headers["referrer-policy"], "no-referrer", "{label}");
             assert_eq!(headers["x-frame-options"], "DENY", "{label}");
+            assert_eq!(
+                headers["content-security-policy"], "default-src 'none'",
+                "{label}"
+            );
         }
     }
 
@@ -4662,7 +5235,7 @@ mod tests {
             .find(PREPAINT_SCRIPT)
             .expect("real shell should inline the pre-paint theme bootstrap");
         let theme_style = html
-            .find("<style>")
+            .find("<style nonce=\"test-session-nonce\">")
             .expect("real shell should inline generated theme token CSS");
         assert!(
             app_css < extra_css,
