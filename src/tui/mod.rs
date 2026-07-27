@@ -1665,29 +1665,9 @@ fn apply_present_command(
             end_line,
             note,
         } => {
-            if !session.files.iter().any(|file| file.path == path) {
-                return Err((-32602, format!("path is not in the diff: {path}")));
-            }
-            let stream = session.review_stream();
-            let row = stream.rows.iter().enumerate().find_map(|(index, row)| {
-                if row.path.as_deref() != Some(path.as_str()) {
-                    return None;
-                }
-                let anchor_line = row
-                    .anchor
-                    .as_ref()
-                    .and_then(crate::anchor::CommentAnchor::line)?;
-                let requested_end = end_line.unwrap_or(line);
-                (line <= anchor_line && anchor_line <= requested_end).then_some(index)
-            });
-            drop(stream);
-            let Some(row) = row else {
-                return Err((
-                    -32602,
-                    format!("location is not in the diff: {path}:{line}"),
-                ));
-            };
-            session.select_stream_row(row, true);
+            let target = resolve_present_focus(session, &path, line, end_line)
+                .map_err(crate::presentation::PresentError::into_rpc)?;
+            session.select_stream_row(target.stream_row, true);
             session.focus = Focus::Diff;
             transition_to_logical_selection(session, tui_state);
             if let Some(note) = note {
@@ -1696,7 +1676,7 @@ fn apply_present_command(
                     message: note,
                 });
             }
-            Ok(json!({ "ok": true, "path": path, "line": line, "end_line": end_line }))
+            serde_json::to_value(target.status).map_err(|error| (-32000, error.to_string()))
         }
         PresentCommand::Reload => {
             if let Some(state_path) = state_path {
@@ -1715,6 +1695,15 @@ fn apply_present_command(
             Ok(present_status(session, tui_state))
         }
     }
+}
+
+pub(crate) fn resolve_present_focus(
+    session: &ReviewSession,
+    path: &str,
+    line: usize,
+    end_line: Option<usize>,
+) -> Result<crate::presentation::FocusTarget, crate::presentation::PresentError> {
+    crate::presentation::resolve_focus_target(session, path, line, end_line)
 }
 
 fn present_status(session: &ReviewSession, tui_state: &TuiState) -> Value {

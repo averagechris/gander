@@ -15,6 +15,7 @@ mod ids;
 mod jj;
 mod mcp;
 mod paths;
+mod presentation;
 mod provenance;
 mod registry;
 mod review;

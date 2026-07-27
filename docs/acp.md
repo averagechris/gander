@@ -189,3 +189,14 @@ commands while the human is in a modal/editor (`user is busy: <mode>`).
   `slide_index` without changing the current target. Removed or fingerprint-stale
   identities return `current.stale=true` with that identity and no path rather
   than silently selecting the same numeric slot.
+
+### Presentation architecture seam
+
+`src/presentation.rs` is the toolkit-independent semantic boundary for live
+presentation. In particular, both TUI and web adapters resolve
+`present/focus` through the same current-diff path/range validator and consume
+the same typed target, status payload, and error taxonomy/messages. Adapters
+retain only renderer concerns: terminal viewport/notice movement for the TUI,
+and tab broadcast/DOM targeting for the web peer. The live socket and
+`gander present` remain the canonical transport and CLI surface; this seam does
+not add a protocol.

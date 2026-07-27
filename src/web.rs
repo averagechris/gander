@@ -2672,10 +2672,11 @@ fn apply_web_present_command(
             end_line,
             ..
         } => {
-            let row = validate_focus_target(session, &path, line, end_line)?;
-            session.select_stream_row(row, true);
+            let target = resolve_present_focus(session, &path, line, end_line)
+                .map_err(crate::presentation::PresentError::into_rpc)?;
+            session.select_stream_row(target.stream_row, true);
             session.focus = Focus::Diff;
-            Ok(json!({ "ok": true, "path": path, "line": line, "end_line": end_line }))
+            serde_json::to_value(target.status).map_err(|error| (-32000, error.to_string()))
         }
         PresentCommand::Reload => {
             watcher
@@ -2687,42 +2688,13 @@ fn apply_web_present_command(
     }
 }
 
-fn validate_focus_target(
+pub(crate) fn resolve_present_focus(
     session: &ReviewSession,
     path: &str,
     line: usize,
     end_line: Option<usize>,
-) -> std::result::Result<usize, (i64, String)> {
-    if !session.files.iter().any(|file| file.path == path) {
-        return Err((-32602, format!("path is not in the diff: {path}")));
-    }
-    let requested_end = end_line.unwrap_or(line);
-    if requested_end < line {
-        return Err((
-            -32602,
-            "end_line must be greater than or equal to line".to_owned(),
-        ));
-    }
-    session
-        .review_stream()
-        .rows
-        .iter()
-        .enumerate()
-        .find_map(|(index, row)| {
-            (row.path.as_deref() == Some(path)
-                && row
-                    .anchor
-                    .as_ref()
-                    .and_then(crate::anchor::CommentAnchor::line)
-                    .is_some_and(|anchor| line <= anchor && anchor <= requested_end))
-            .then_some(index)
-        })
-        .ok_or_else(|| {
-            (
-                -32602,
-                format!("location is not in the diff: {path}:{line}"),
-            )
-        })
+) -> Result<crate::presentation::FocusTarget, crate::presentation::PresentError> {
+    crate::presentation::resolve_focus_target(session, path, line, end_line)
 }
 
 fn goto_web_spotlight(
@@ -4731,6 +4703,52 @@ mod tests {
             .0,
             -32002
         );
+    }
+
+    #[test]
+    fn tui_and_web_focus_adapters_share_target_and_error_contract() {
+        let session = presentation_fixture();
+        let cases = [
+            ("a.rs", 2, Some(3), Ok(())),
+            (
+                "missing.rs",
+                1,
+                None,
+                Err((-32602, "path is not in the diff: missing.rs")),
+            ),
+            (
+                "a.rs",
+                3,
+                Some(2),
+                Err((-32602, "end_line must be greater than or equal to line")),
+            ),
+            (
+                "a.rs",
+                99,
+                None,
+                Err((-32602, "location is not in the diff: a.rs:99")),
+            ),
+        ];
+
+        for (path, line, end_line, expected) in cases {
+            let tui = crate::tui::resolve_present_focus(&session, path, line, end_line);
+            let web = resolve_present_focus(&session, path, line, end_line);
+            assert_eq!(tui, web, "adapter drift for {path}:{line}");
+            match expected {
+                Ok(()) => {
+                    let target = tui.unwrap();
+                    assert_eq!(
+                        serde_json::to_value(target.status).unwrap(),
+                        json!({"ok":true,"path":"a.rs","line":2,"end_line":3})
+                    );
+                }
+                Err((code, message)) => {
+                    let actual = tui.unwrap_err().into_rpc();
+                    assert_eq!(actual.0, code);
+                    assert_eq!(actual.1, message);
+                }
+            }
+        }
     }
 
     #[test]
