@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Kept M16 web projection work off the current-thread reactor by blocking
+  fragment snapshot/render preparation, coalescing registry heartbeats onto the
+  blocking coordinator, and deriving surgical patches plus compact recovery
+  data from one rendered snapshot per effective projection change.
 - Hardened live review persistence with synced temp-file and directory-backed
   atomic publication (including review-state permissions and agent overlays),
   raw forward-schema rejection that leaves newer JSON byte-for-byte untouched,

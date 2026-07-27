@@ -99,8 +99,15 @@ none of them fetches from or posts to a forge.
   Phase 3a's coalescing watcher applies the same merge-aware durable-state and
   overlay reload semantics as the TUI, and gives every jj poll exactly one
   deliberate snapshot followed only by `--ignore-working-copy` reads. It
-  projects and renders outside the short shared-projection lock, diffs stable
-  overview/coverage/footer/stream regions, and publishes bounded SSE updates;
+  projects and renders outside the short shared-projection lock, retains one
+  rendered snapshot so each effective change materializes common region
+  payloads once, diffs stable overview/coverage/footer/stream regions, and
+  derives compact reconnect skeletons from that snapshot before publishing
+  bounded SSE updates. Fragment handlers move lock acquisition, generation
+  validation, deep region cloning, and rendering to the blocking pool; browser
+  interaction handlers only coalesce a latest heartbeat timestamp for the
+  blocking coordinator's throttled registry writer, so neither path performs
+  projection or filesystem work on the current-thread reactor;
   lagged or stale clients recover with a full region set. Phase 4 actions enter
   the live loop through a bounded command channel, check
   the projection generation, call `src/review.rs`/shared attention services,

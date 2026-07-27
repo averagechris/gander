@@ -34,7 +34,7 @@ use axum::{
     },
     routing::{get, post},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::{Context, Result};
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,7 @@ struct HttpState {
     interactions: Arc<Mutex<WebInteractions>>,
     shutdown: tokio::sync::watch::Receiver<bool>,
     extra_css: Option<Arc<str>>,
-    registration: Arc<Mutex<InstanceRegistration>>,
+    heartbeat: RegistryHeartbeat,
     actions: SyncSender<ActionEnvelope>,
 }
 
@@ -581,6 +581,60 @@ struct ProjectionEvent {
     order: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct RenderedProjection {
+    regions: BTreeMap<String, (String, String)>,
+    recovery_patches: Vec<RegionPatch>,
+    order: Vec<String>,
+}
+
+impl RenderedProjection {
+    fn effective_content_eq(&self, other: &Self) -> bool {
+        self.order == other.order
+            && self
+                .regions
+                .iter()
+                .filter(|(id, _)| id.as_str() != "footer")
+                .eq(other
+                    .regions
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != "footer"))
+    }
+
+    fn refresh_footer(&mut self, review: &WebReview) {
+        let footer = render_footer(review);
+        self.regions
+            .insert("footer".into(), (footer.clone(), footer.clone()));
+        if let Some(patch) = self
+            .recovery_patches
+            .iter_mut()
+            .find(|patch| patch.id == "footer")
+        {
+            patch.html = Some(footer);
+        }
+    }
+}
+
+/// Latest accepted browser interaction awaiting the blocking coordinator.
+/// Replacing the timestamp makes mouse/scroll storms constant-space while the
+/// coordinator is busy with jj, projection, or rendering work.
+#[derive(Debug, Clone, Default)]
+struct RegistryHeartbeat(Arc<Mutex<Option<DateTime<Utc>>>>);
+
+impl RegistryHeartbeat {
+    fn record(&self, at: DateTime<Utc>) {
+        if let Ok(mut pending) = self.0.lock()
+            && pending.is_none_or(|current| at > current)
+        {
+            *pending = Some(at);
+        }
+    }
+
+    fn take(&self) -> Option<DateTime<Utc>> {
+        self.0.lock().ok()?.take()
+    }
+}
+
 struct ReceiverStream<T> {
     receiver: tokio::sync::mpsc::Receiver<T>,
 }
@@ -753,7 +807,11 @@ fn reload_chapter_metadata(jj: &dyn JjBackend, session: &mut ReviewSession) {
     session.touch_stream_inputs();
 }
 
-fn publish_projection(state: &HttpState, session: &ReviewSession) {
+fn publish_projection(
+    state: &HttpState,
+    session: &ReviewSession,
+    current_rendered: &mut RenderedProjection,
+) {
     // Projection and rendering happen before the short write-lock section.
     // HTTP handlers therefore never wait on jj reads or stream materialization.
     let mut next = WebReview::from_session(session);
@@ -762,12 +820,18 @@ fn publish_projection(state: &HttpState, session: &ReviewSession) {
         Err(_) => return,
     };
     next.generation = current.generation;
-    if diff_projection(&current, &next).patches.is_empty() {
+    // Materialize every guided/full payload once. The retained prior snapshot
+    // makes change detection a string comparison rather than a second render.
+    let mut next_rendered = rendered_projection(&next);
+    if current_rendered.effective_content_eq(&next_rendered) {
         return;
     }
     next.generation = current.generation.saturating_add(1);
-    let event = diff_projection(&current, &next);
-    let recovery = recovery_projection_event(&next);
+    // Generation only affects the small footer, so refresh it without
+    // re-rendering the projection after assigning the monotonic generation.
+    next_rendered.refresh_footer(&next);
+    let event = diff_projection(current_rendered, &next_rendered, next.generation);
+    let recovery = recovery_projection_event(&next_rendered, next.generation);
     let Ok(mut stored_review) = state.review.write() else {
         return;
     };
@@ -778,6 +842,7 @@ fn publish_projection(state: &HttpState, session: &ReviewSession) {
     // section. No rendering or await occurs while either lock is held.
     *stored_review = next;
     *stored_recovery = recovery;
+    *current_rendered = next_rendered;
     drop(stored_recovery);
     drop(stored_review);
     let _ = state.events.send(Arc::new(event));
@@ -809,9 +874,10 @@ fn process_action(
     state_path: &std::path::Path,
     live_state: &mut review::LiveStateHandle,
     watcher: &mut WebWatcher,
-    http: &HttpState,
+    projection: ProjectionPublisher<'_>,
 ) -> std::result::Result<ActionResult, ActionError> {
-    let current = http
+    let current = projection
+        .http
         .review
         .read()
         .map_err(|_| ActionError {
@@ -963,8 +1029,9 @@ fn process_action(
     })?;
     session.apply_review_state(merged.clone());
     watcher.state_mtime = file_mtime(state_path);
-    publish_projection(http, session);
-    let generation = http
+    publish_projection(projection.http, session, projection.rendered);
+    let generation = projection
+        .http
         .review
         .read()
         .map_err(|_| ActionError {
@@ -976,12 +1043,19 @@ fn process_action(
     Ok(ActionResult { generation, result })
 }
 
-fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
-    let previous_regions = rendered_projection(previous);
-    let next_regions = rendered_projection(next);
+struct ProjectionPublisher<'a> {
+    http: &'a HttpState,
+    rendered: &'a mut RenderedProjection,
+}
+
+fn diff_projection(
+    previous: &RenderedProjection,
+    next: &RenderedProjection,
+    generation: u64,
+) -> ProjectionEvent {
     let mut patches = Vec::new();
-    for (id, (guided, full)) in &next_regions {
-        if previous_regions.get(id) != Some(&(guided.clone(), full.clone())) {
+    for (id, (guided, full)) in &next.regions {
+        if previous.regions.get(id) != Some(&(guided.clone(), full.clone())) {
             patches.push(RegionPatch {
                 id: id.clone(),
                 html: None,
@@ -991,8 +1065,8 @@ fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
             });
         }
     }
-    for id in previous_regions.keys() {
-        if !next_regions.contains_key(id) {
+    for id in previous.regions.keys() {
+        if !next.regions.contains_key(id) {
             patches.push(RegionPatch {
                 id: id.clone(),
                 html: None,
@@ -1003,36 +1077,30 @@ fn diff_projection(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
         }
     }
     ProjectionEvent {
-        generation: next.generation,
+        generation,
         full: false,
         patches,
-        order: next
-            .projection
-            .regions
-            .iter()
-            .map(|region| region.id.clone())
-            .collect(),
+        order: next.order.clone(),
     }
 }
 
-fn rendered_projection(review: &WebReview) -> std::collections::BTreeMap<String, (String, String)> {
+fn rendered_projection(review: &WebReview) -> RenderedProjection {
+    #[cfg(test)]
+    RENDERED_PROJECTION_PASSES.with(|passes| passes.set(passes.get() + 1));
     let mut regions = std::collections::BTreeMap::new();
-    regions.insert(
-        "overview".into(),
-        (render_overview(review), render_overview(review)),
-    );
-    regions.insert(
-        "coverage".into(),
-        (render_coverage(review), render_coverage(review)),
-    );
-    regions.insert(
-        "file-tree".into(),
-        (render_file_tree_html(review), render_file_tree_html(review)),
-    );
-    regions.insert(
-        "footer".into(),
-        (render_footer(review), render_footer(review)),
-    );
+    let mut recovery_patches = Vec::new();
+    let overview = render_overview(review);
+    regions.insert("overview".into(), (overview.clone(), overview.clone()));
+    recovery_patches.push(recovery_patch("overview", overview));
+    let coverage = render_coverage(review);
+    regions.insert("coverage".into(), (coverage.clone(), coverage.clone()));
+    recovery_patches.push(recovery_patch("coverage", coverage));
+    let file_tree = render_file_tree_html(review);
+    regions.insert("file-tree".into(), (file_tree.clone(), file_tree.clone()));
+    recovery_patches.push(recovery_patch("file-tree", file_tree));
+    let footer = render_footer(review);
+    regions.insert("footer".into(), (footer.clone(), footer.clone()));
+    recovery_patches.push(recovery_patch("footer", footer));
     for region in &review.projection.regions {
         regions.insert(
             region.id.clone(),
@@ -1041,35 +1109,59 @@ fn rendered_projection(review: &WebReview) -> std::collections::BTreeMap<String,
                 render_region(region, true, RenderMode::Full),
             ),
         );
+        recovery_patches.push(recovery_patch(&region.id, render_region_skeleton(region)));
     }
-    regions
-}
-
-fn recovery_projection_event(review: &WebReview) -> Arc<ProjectionEvent> {
-    let mut patches = vec![
-        recovery_patch("overview", render_overview(review)),
-        recovery_patch("coverage", render_coverage(review)),
-        recovery_patch("file-tree", render_file_tree_html(review)),
-        recovery_patch("footer", render_footer(review)),
-    ];
-    patches.extend(
-        review
-            .projection
-            .regions
-            .iter()
-            .map(|region| recovery_patch(&region.id, render_region_skeleton(region))),
-    );
-    Arc::new(ProjectionEvent {
-        generation: review.generation,
-        full: true,
-        patches,
+    RenderedProjection {
+        regions,
+        recovery_patches,
         order: review
             .projection
             .regions
             .iter()
             .map(|region| region.id.clone())
             .collect(),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static RENDERED_PROJECTION_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_rendered_projection_passes() {
+    RENDERED_PROJECTION_PASSES.with(|passes| passes.set(0));
+}
+
+#[cfg(test)]
+fn rendered_projection_passes() -> usize {
+    RENDERED_PROJECTION_PASSES.with(std::cell::Cell::get)
+}
+
+fn recovery_projection_event(
+    rendered: &RenderedProjection,
+    generation: u64,
+) -> Arc<ProjectionEvent> {
+    Arc::new(ProjectionEvent {
+        generation,
+        full: true,
+        patches: rendered.recovery_patches.clone(),
+        order: rendered.order.clone(),
     })
+}
+
+#[cfg(test)]
+fn diff_projection_views(previous: &WebReview, next: &WebReview) -> ProjectionEvent {
+    diff_projection(
+        &rendered_projection(previous),
+        &rendered_projection(next),
+        next.generation,
+    )
+}
+
+#[cfg(test)]
+fn recovery_projection_event_for_view(review: &WebReview) -> Arc<ProjectionEvent> {
+    recovery_projection_event(&rendered_projection(review), review.generation)
 }
 
 fn recovery_patch(id: &str, html: String) -> RegionPatch {
@@ -1144,13 +1236,15 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     debug_assert_eq!(address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     // Building the shared projection can parse and materialize a large diff.
     // Do it before serving, but never on the current-thread Tokio reactor.
-    let (returned, initial_review, initial_recovery) = tokio::task::spawn_blocking(move || {
-        let review = WebReview::from_session(&params.session);
-        let recovery = recovery_projection_event(&review);
-        (params, review, recovery)
-    })
-    .await
-    .wrap_err("web projection bootstrap worker stopped")?;
+    let (returned, initial_review, initial_rendered, initial_recovery) =
+        tokio::task::spawn_blocking(move || {
+            let review = WebReview::from_session(&params.session);
+            let rendered = rendered_projection(&review);
+            let recovery = recovery_projection_event(&rendered, review.generation);
+            (params, review, rendered, recovery)
+        })
+        .await
+        .wrap_err("web projection bootstrap worker stopped")?;
     params = returned;
     let worker_shutdown = Arc::new(AtomicBool::new(false));
     let process_control = JjProcessControl::new(worker_shutdown.clone(), WATCH_JJ_TIMEOUT);
@@ -1205,6 +1299,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     let host = format!("127.0.0.1:{}", address.port());
     let origin = format!("http://{host}");
     let url = format!("{origin}/?token={token}");
+    let heartbeat = RegistryHeartbeat::default();
     let http_state = HttpState {
         token: Arc::from(token),
         expected_host: Arc::from(host),
@@ -1226,7 +1321,7 @@ async fn run_async(mut params: WebParams) -> Result<()> {
             .map(read_extra_css)
             .transpose()?
             .map(Arc::from),
-        registration: Arc::new(Mutex::new(registration)),
+        heartbeat: heartbeat.clone(),
         actions: action_tx,
     };
     let app = router(http_state.clone());
@@ -1257,6 +1352,9 @@ async fn run_async(mut params: WebParams) -> Result<()> {
         state_path: worker_state_path,
         watcher,
         bridge,
+        registration,
+        heartbeat,
+        rendered: initial_rendered,
         actions: action_rx.clone(),
         present_tx,
         http: worker_http,
@@ -1503,6 +1601,9 @@ struct BlockingWorker {
     state_path: PathBuf,
     watcher: WebWatcher,
     bridge: AcpBridge,
+    registration: InstanceRegistration,
+    heartbeat: RegistryHeartbeat,
+    rendered: RenderedProjection,
     actions: Arc<Mutex<BlockingReceiver<ActionEnvelope>>>,
     present_tx: tokio::sync::watch::Sender<Option<Arc<PresentEvent>>>,
     http: HttpState,
@@ -1515,6 +1616,9 @@ fn run_blocking_worker(worker: BlockingWorker) {
         state_path,
         mut watcher,
         mut bridge,
+        mut registration,
+        heartbeat,
+        mut rendered,
         actions,
         present_tx,
         http,
@@ -1549,7 +1653,10 @@ fn run_blocking_worker(worker: BlockingWorker) {
                     &state_path,
                     &mut live_state,
                     &mut watcher,
-                    &http,
+                    ProjectionPublisher {
+                        http: &http,
+                        rendered: &mut rendered,
+                    },
                 );
                 action.lifecycle.complete();
                 let _ = action.response.send(result);
@@ -1560,6 +1667,13 @@ fn run_blocking_worker(worker: BlockingWorker) {
         if shutdown.load(Ordering::Acquire) {
             break;
         }
+        flush_registry_heartbeat(
+            &heartbeat,
+            &mut registration,
+            &http.base,
+            &http.rev,
+            &http.summary,
+        );
         if cadence.take_due(std::time::Instant::now()) {
             let before = session.stream_inputs_generation();
             process_acp_requests(
@@ -1586,9 +1700,22 @@ fn run_blocking_worker(worker: BlockingWorker) {
                 );
             }
             if session.stream_inputs_generation() != before {
-                publish_projection(&http, &session);
+                publish_projection(&http, &session, &mut rendered);
             }
         }
+    }
+}
+
+fn flush_registry_heartbeat(
+    pending: &RegistryHeartbeat,
+    registration: &mut InstanceRegistration,
+    base: &str,
+    rev: &str,
+    summary: &str,
+) {
+    let Some(at) = pending.take() else { return };
+    if let Err(error) = registration.record_input_at(base, rev, summary, at) {
+        eprintln!("gander web: registry heartbeat failed: {error}");
     }
 }
 
@@ -1807,22 +1934,41 @@ async fn fragment(
         Some("guided") | None => RenderMode::Guided,
         Some(_) => return (StatusCode::BAD_REQUEST, "unknown fragment mode").into_response(),
     };
-    let review = match state.review.read() {
-        Ok(review) => review.clone(),
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "review projection unavailable",
-            )
-                .into_response();
+    fragment_response(state, region, requested_generation, mode, None).await
+}
+
+type FragmentRenderBarrier = Box<dyn FnOnce() + Send>;
+
+async fn fragment_response(
+    state: HttpState,
+    region_id: String,
+    requested_generation: Option<u64>,
+    mode: RenderMode,
+    barrier: Option<FragmentRenderBarrier>,
+) -> Response {
+    // Moving the state handle and request scalars into the blocking pool is the
+    // reactor's entire contribution. Lock acquisition, the potentially deep
+    // ReadingRegion clone, and rendering all happen off-thread. The guard is
+    // checked against the same locked snapshot that supplies the clone.
+    match tokio::task::spawn_blocking(move || {
+        let region = {
+            let review = state.review.read().map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "review projection unavailable",
+                )
+            })?;
+            lookup_fragment(&review, &region_id, requested_generation)?.clone()
+        };
+        if let Some(barrier) = barrier {
+            barrier();
         }
-    };
-    let region = match lookup_fragment(&review, &region, requested_generation) {
-        Ok(region) => region.clone(),
-        Err(error) => return error.into_response(),
-    };
-    match tokio::task::spawn_blocking(move || render_region(&region, true, mode)).await {
-        Ok(html) => Html(html).into_response(),
+        Ok::<_, (StatusCode, &'static str)>(render_region(&region, true, mode))
+    })
+    .await
+    {
+        Ok(Ok(html)) => Html(html).into_response(),
+        Ok(Err(error)) => error.into_response(),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "fragment render worker unavailable",
@@ -2234,9 +2380,9 @@ async fn interaction(
     match result {
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
         Ok(true) => {
-            if let Ok(mut registration) = state.registration.lock() {
-                let _ = registration.record_input(&state.base, &state.rev, &state.summary);
-            }
+            // Only publish the latest accepted input time. The blocking
+            // coordinator applies registry throttling and performs disk I/O.
+            state.heartbeat.record(Utc::now());
         }
         Ok(false) => {}
     }
@@ -3133,25 +3279,8 @@ mod tests {
     }
 
     fn http_state(review: WebReview) -> HttpState {
-        let registry_dir =
-            std::env::temp_dir().join(format!("gander-web-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&registry_dir).unwrap();
-        let registration = InstanceRegistration::register(
-            &registry_dir,
-            InstanceInfo {
-                pid: std::process::id(),
-                workspace_root: "/repo".into(),
-                base: "main".into(),
-                rev: "@".into(),
-                summary: "summary".into(),
-                socket_path: registry_dir.join("socket"),
-                started_at: Utc::now(),
-                last_input_at: Utc::now(),
-            },
-        )
-        .unwrap();
         let (actions, _receiver) = std::sync::mpsc::sync_channel(1);
-        let recovery = recovery_projection_event(&review);
+        let recovery = recovery_projection_event_for_view(&review);
         HttpState {
             token: Arc::from("safe-token"),
             expected_host: Arc::from("127.0.0.1:8123"),
@@ -3168,7 +3297,7 @@ mod tests {
             interactions: Arc::new(Mutex::new(WebInteractions::default())),
             shutdown: tokio::sync::watch::channel(false).1,
             extra_css: None,
-            registration: Arc::new(Mutex::new(registration)),
+            heartbeat: RegistryHeartbeat::default(),
             actions,
         }
     }
@@ -3229,7 +3358,7 @@ mod tests {
         next.generation += 1;
         next.projection.coverage.covered += 1;
         next.projection.regions.reverse();
-        let event = diff_projection(&review, &next);
+        let event = diff_projection_views(&review, &next);
         let patch_bytes: usize = event
             .patches
             .iter()
@@ -3244,7 +3373,7 @@ mod tests {
             patch_bytes <= 16 * 1024,
             "patch bytes {patch_bytes} > 16KiB"
         );
-        let recovery = recovery_projection_event(&next);
+        let recovery = recovery_projection_event_for_view(&next);
         let recovery_bytes = serde_json::to_vec(&projection_event_json(&recovery))
             .unwrap()
             .len();
@@ -3289,13 +3418,32 @@ mod tests {
     }
 
     #[test]
+    fn effective_projection_change_renders_one_snapshot_pass() {
+        let (mut session, _baseline, _dir, _watcher, http) = action_fixture();
+        let mut rendered = rendered_projection(&WebReview::from_session(&session));
+        let generation = http.review.read().unwrap().generation;
+        let mut events = http.events.subscribe();
+        session.files[0].viewed = true;
+        session.touch_stream_inputs();
+
+        reset_rendered_projection_passes();
+        publish_projection(&http, &session, &mut rendered);
+
+        assert_eq!(rendered_projection_passes(), 1);
+        assert_eq!(http.review.read().unwrap().generation, generation + 1);
+        let event = events.try_recv().expect("effective change publishes once");
+        assert_eq!(event.generation, generation + 1);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
     fn projection_diff_is_monotonic_surgical_and_carries_removals() {
         let previous = review_fixture();
         let mut next = review_fixture();
         next.generation = previous.generation + 1;
         next.projection.coverage.covered += 1;
         next.projection.regions.remove(1);
-        let event = diff_projection(&previous, &next);
+        let event = diff_projection_views(&previous, &next);
         assert_eq!(event.generation, 43);
         assert!(!event.full);
         assert!(
@@ -3333,7 +3481,7 @@ mod tests {
     #[test]
     fn full_projection_recovers_absent_or_dropped_generation() {
         let review = review_fixture();
-        let event = recovery_projection_event(&review);
+        let event = recovery_projection_event_for_view(&review);
         assert!(event.full);
         assert_eq!(event.generation, 42);
         assert!(event.patches.iter().any(|patch| patch.id == "overview"));
@@ -3374,7 +3522,7 @@ mod tests {
         }
         let guided = render_region(skim, true, RenderMode::Guided);
         let full = render_region(skim, true, RenderMode::Full);
-        let recovery = recovery_projection_event(&review);
+        let recovery = recovery_projection_event_for_view(&review);
         let recovery_bytes: usize = recovery
             .patches
             .iter()
@@ -3408,6 +3556,120 @@ mod tests {
         assert!(COMPONENT_JS.contains("requestedGeneration !== generation"));
         assert!(COMPONENT_JS.contains("observeLazyRegions"));
         assert!(!COMPONENT_JS.contains("return reload();\n        const replacement"));
+    }
+
+    #[test]
+    fn slow_fragment_snapshot_and_render_leave_current_thread_reactor_responsive() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let state = http_state(review_fixture());
+            let generation = state.review.read().unwrap().generation;
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+            let barrier: FragmentRenderBarrier = Box::new(move || {
+                let _ = entered_tx.send(());
+                release_rx.lock().unwrap().recv().unwrap();
+            });
+            let fragment = tokio::spawn(fragment_response(
+                state,
+                "file-core".into(),
+                Some(generation),
+                RenderMode::Full,
+                Some(barrier),
+            ));
+            tokio::time::timeout(Duration::from_secs(1), entered_rx)
+                .await
+                .expect("fragment blocking worker did not reach render barrier")
+                .unwrap();
+
+            // A timer heartbeat, lightweight asset handler, and SSE serializer
+            // all complete while the deep-cloned fragment is deliberately held.
+            tokio::time::timeout(Duration::from_millis(100), async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = stylesheet().await.into_response();
+                let event = Arc::new(ProjectionEvent {
+                    generation,
+                    full: false,
+                    patches: Vec::new(),
+                    order: Vec::new(),
+                });
+                let _ = sse_state_event_blocking(event).await;
+            })
+            .await
+            .expect("fragment work stalled the current-thread reactor");
+
+            release_tx.send(()).unwrap();
+            let response = fragment.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+    }
+
+    #[test]
+    fn registry_heartbeat_coalesces_and_writes_off_the_reactor() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let start = Utc::now() - chrono::Duration::seconds(3);
+            let mut registration = InstanceRegistration::register(
+                dir.path(),
+                InstanceInfo {
+                    pid: 91,
+                    workspace_root: "/repo".into(),
+                    base: "main".into(),
+                    rev: "@".into(),
+                    summary: "summary".into(),
+                    socket_path: dir.path().join("socket"),
+                    started_at: start,
+                    last_input_at: start,
+                },
+            )
+            .unwrap();
+            let heartbeat = RegistryHeartbeat::default();
+            let latest = start + chrono::Duration::seconds(3);
+            for offset in 1..=100 {
+                heartbeat.record(start + chrono::Duration::milliseconds(offset * 30));
+            }
+            assert_eq!(heartbeat.0.lock().unwrap().as_ref(), Some(&latest));
+
+            let worker_heartbeat = heartbeat.clone();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (written_tx, written_rx) = std::sync::mpsc::channel();
+            let registry_dir = dir.path().to_path_buf();
+            let write = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                release_rx.recv().unwrap();
+                flush_registry_heartbeat(
+                    &worker_heartbeat,
+                    &mut registration,
+                    "main",
+                    "@",
+                    "summary",
+                );
+                written_tx
+                    .send(crate::registry::list_instances(&registry_dir)[0].last_input_at)
+                    .unwrap();
+            });
+            entered_rx.await.unwrap();
+            tokio::time::timeout(Duration::from_millis(100), async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _ = stylesheet().await.into_response();
+            })
+            .await
+            .expect("registry write barrier stalled the current-thread reactor");
+            release_tx.send(()).unwrap();
+            write.await.unwrap();
+
+            assert!(heartbeat.take().is_none(), "burst should flush once");
+            assert_eq!(written_rx.recv().unwrap(), latest);
+        });
     }
 
     #[test]
@@ -4040,6 +4302,7 @@ mod tests {
     #[test]
     fn action_generation_is_preconditioned_and_merge_save_preserves_concurrent_state() {
         let (mut session, mut baseline, _dir, mut watcher, http) = action_fixture();
+        let mut rendered = rendered_projection(&WebReview::from_session(&session));
         let generation = http.review.read().unwrap().generation;
         let stale = process_action(
             generation.saturating_add(1),
@@ -4051,7 +4314,10 @@ mod tests {
             &watcher.state_path.clone(),
             &mut baseline,
             &mut watcher,
-            &http,
+            ProjectionPublisher {
+                http: &http,
+                rendered: &mut rendered,
+            },
         )
         .unwrap_err();
         assert_eq!(stale.status, StatusCode::CONFLICT);
@@ -4074,7 +4340,10 @@ mod tests {
             &state_path,
             &mut baseline,
             &mut watcher,
-            &http,
+            ProjectionPublisher {
+                http: &http,
+                rendered: &mut rendered,
+            },
         )
         .unwrap();
         assert!(result.generation > generation);
@@ -4111,6 +4380,7 @@ mod tests {
         session.apply_review_state(seeded.clone());
         let mut baseline = review::LiveStateHandle::new(watcher.state_path.clone(), seeded);
         let http = http_state(WebReview::from_session(&session));
+        let mut rendered = rendered_projection(&WebReview::from_session(&session));
         let generation = http.review.read().unwrap().generation;
         let state_path = watcher.state_path.clone();
         let action = CommentAddAction {
@@ -4132,7 +4402,10 @@ mod tests {
             &state_path,
             &mut baseline,
             &mut watcher,
-            &http,
+            ProjectionPublisher {
+                http: &http,
+                rendered: &mut rendered,
+            },
         )
         .unwrap();
         assert_eq!(result.result["source_comment_id"], "onboarding-source");

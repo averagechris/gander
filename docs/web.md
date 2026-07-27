@@ -93,6 +93,15 @@ ACP jj subprocesses have operation deadlines, observe shutdown cancellation,
 and kill/reap an active child. Registry/socket cleanup is owned outside the
 worker, and queued action responders fail explicitly, so arbitrary synchronous
 filesystem/parser code cannot hold process shutdown or endpoint ownership.
+Generation-guarded fragment requests likewise move shared-projection lock
+acquisition, region snapshot cloning, and HTML rendering together to the
+blocking pool. No projection lock crosses an await, and the current-thread
+reactor does only constant-size request dispatch. Accepted browser interaction
+reports replace one pending registry timestamp; the blocking coordinator
+coalesces bursts and applies the existing two-second heartbeat throttle and
+atomic file write, preserving the latest human-input time without a filesystem
+write per mouse, scroll, or focus report. Heartbeat failures are reported by
+the coordinator and endpoint cleanup remains independent of worker shutdown.
 SIGINT/SIGTERM also starts an independent three-second HTTP graceful-drain
 deadline. Claimed mutations may complete authoritatively during that grace
 period, but expiry shuts down every accepted socket and drops the Axum server
@@ -474,6 +483,8 @@ Demo-sized CI budgets in `src/web.rs`:
 - guarded fragment lookup returns full shared-renderer HTML for the current
   generation and rejects stale generation requests;
 - surgical patch scope stays ordered and below 16 KiB for the fixture update;
+- each effective projection change performs one instrumented rendered-snapshot
+  pass; surgical patches and compact recovery skeleton/order derive from it;
 - reconnect/lag recovery stays below 8 KiB for the fixture and remains bounded
   when thousands of generated/skim rows are hidden;
 - generation-guarded actions reject stale optimistic writes;
@@ -482,6 +493,9 @@ Demo-sized CI budgets in `src/web.rs`:
   HTTP/SSE heartbeat scheduling, endpoint cleanup, queued responder failure,
   and bounded shutdown; subprocess tests prove cancellation kills/reaps jj;
   cadence tests prove one-at-a-time polling and missed-tick coalescing;
+- deterministic fragment-clone/render and registry-write barriers prove asset,
+  SSE, and timer work remains responsive on the current-thread reactor, while
+  burst interaction timestamps coalesce to one latest throttled heartbeat;
 - duplicated-storage tab modeling proves independent leases, sequences,
   reconnects, and disconnect cleanup.
 

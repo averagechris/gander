@@ -67,7 +67,7 @@ impl InstanceRegistration {
         self.record_input_at(base, rev, summary, Utc::now())
     }
 
-    fn record_input_at(
+    pub(crate) fn record_input_at(
         &mut self,
         base: &str,
         rev: &str,
