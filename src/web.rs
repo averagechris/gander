@@ -14,6 +14,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     pin::Pin,
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -1342,10 +1343,10 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     let app = router(http_state.clone());
 
     println!("{url}");
-    if !params.no_open {
-        eprintln!(
-            "gander web: browser auto-open is unavailable; open the printed loopback URL manually"
-        );
+    if params.no_open {
+        eprintln!("not opening browser (--no-open); use the printed URL");
+    } else if let Err(error) = open_url(&url) {
+        eprintln!("warning: failed to open browser ({error}); use the printed URL");
     }
 
     let signal_worker_shutdown = worker_shutdown.clone();
@@ -1410,6 +1411,28 @@ async fn run_async(mut params: WebParams) -> Result<()> {
     {
         return Err(color_eyre::eyre::eyre!(error));
     }
+    Ok(())
+}
+
+fn open_url(url: &str) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+
+    open_url_with(program, url)
+}
+
+fn open_url_with(program: &str, url: &str) -> io::Result<()> {
+    let mut child = Command::new(program)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -3210,6 +3233,20 @@ mod tests {
         path::Path as FsPath,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn opener_uses_direct_process_and_reports_spawn_failure() {
+        let fake_opener = std::env::current_exe().unwrap();
+        open_url_with(
+            fake_opener.to_str().unwrap(),
+            "http://127.0.0.1:1/?token=gander%20web%20';%20rm%20-rf%20nope'",
+        )
+        .unwrap();
+
+        let missing =
+            open_url_with("/definitely/not/a/gander-opener", "http://127.0.0.1:1/").unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    }
 
     async fn test_action(State(state): State<HttpState>) -> Response {
         submit_action(

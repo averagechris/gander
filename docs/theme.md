@@ -51,7 +51,7 @@ after quantization, in `src/theme.rs` / `src/tui/theme.rs` tests and the rendere
 `src/tui/render.rs`) is:
 
 | combination | minimum |
-| --- | --- |
+| --- | --- | --- |
 | primary foreground vs. effective background | 7.0:1 (AAA), capped at the best physically achievable ratio for extreme detected backgrounds |
 | standard chrome text slots vs. effective background | 4.5:1 (AA) |
 | muted text and gutter bars vs. effective background | 3.0:1 |
@@ -62,7 +62,32 @@ after quantization, in `src/theme.rs` / `src/tui/theme.rs` tests and the rendere
 | colored semantic text and muted text on cursor-row and range surfaces | 3.0:1 (WCAG 1.4.11 non-text level; these are transient highlights) |
 
 Syntax-token colors are user-owned literals and are exempt: we render them
-untouched and cannot guarantee their contrast.
+  untouched and cannot guarantee their contrast.
+
+## Named theme syntax defaults
+
+`[theme] name` may select one of Gander's built-in named palettes. Each named
+theme exposes an optional Gander-owned syntax default through `gander themes
+list` (text or JSON):
+
+| palette theme | dark/auto syntax default | light syntax default |
+| --- | --- |
+| `gander` | `gander-dark` | `gander-light` |
+| `catppuccin` | `gander-dark` | `gander-dark` |
+| `gruvbox` | `gander-dark` | `gander-light` |
+| `solarized` | `gander-dark` | `gander-light` |
+| `nord` | `gander-dark` | `gander-dark` |
+| `tokyo-night` | `gander-dark` | `gander-dark` |
+| `dracula` | `gander-dark` | `gander-dark` |
+
+These names describe Gander's built-in mappings only; they are not claims of
+exact equivalence to third-party editor themes. Gander currently has only the
+`gander-dark`, `gander-light`, and `monochrome` syntax palettes available, so
+third-party-inspired palette themes intentionally map to the closest available
+Gander syntax palette. `mode = "auto"` applies the dark/default syntax choice at
+config load because runtime terminal background detection does not rewrite config
+after startup. Explicit `[syntax.theme]` values keep higher precedence and
+override the named-theme syntax default for both TUI and HTML/web highlighting.
 
 ## What background detection guarantees
 

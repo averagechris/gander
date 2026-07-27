@@ -52,6 +52,17 @@ Canonical names are `gander`, `catppuccin`, `gruvbox`, `solarized`, `nord`,
 `tokyo-night`, and `dracula`; config also accepts documented aliases after
 normalizing ASCII case and treating spaces/underscores as hyphens.
 
+`web` always prints its live capability URL to stdout and by default attempts to
+open that URL with the platform opener (`open` on macOS, `xdg-open` on supported
+Unix) without using a shell. `--no-open` suppresses only that opener attempt;
+the URL and status note are still emitted. Opener failure is a nonfatal stderr
+warning.
+
+`themes list` preserves the built-in palette list and exposes each palette's
+effective built-in syntax defaults. JSON keeps existing `name` and `aliases`
+fields and adds `syntax_default` (dark/auto compatibility value),
+`syntax_default_dark`, and `syntax_default_light`; `aliases` lists accepted
+non-canonical names.
 ## Reviews
 
 ```sh

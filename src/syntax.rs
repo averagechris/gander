@@ -184,6 +184,46 @@ impl Default for SyntaxThemeConfig {
     }
 }
 
+impl SyntaxThemeConfig {
+    pub fn gander_dark() -> Self {
+        Self::default()
+    }
+
+    pub fn gander_light() -> Self {
+        Self {
+            attribute: "magenta".to_owned(),
+            comment: "dark-gray".to_owned(),
+            constant: "blue".to_owned(),
+            function: "dark-blue".to_owned(),
+            keyword: "magenta bold".to_owned(),
+            number: "blue".to_owned(),
+            operator: "dark-gray".to_owned(),
+            property: "dark-cyan".to_owned(),
+            punctuation: "dark-gray".to_owned(),
+            string: "dark-green".to_owned(),
+            r#type: "dark-yellow".to_owned(),
+            variable: "black".to_owned(),
+        }
+    }
+
+    pub fn monochrome() -> Self {
+        Self {
+            attribute: "gray".to_owned(),
+            comment: "dark-gray italic".to_owned(),
+            constant: "white".to_owned(),
+            function: "white bold".to_owned(),
+            keyword: "white bold".to_owned(),
+            number: "white".to_owned(),
+            operator: "gray".to_owned(),
+            property: "white".to_owned(),
+            punctuation: "dark-gray".to_owned(),
+            string: "gray".to_owned(),
+            r#type: "white".to_owned(),
+            variable: "gray".to_owned(),
+        }
+    }
+}
+
 impl BuiltinLanguage {
     pub fn all_names() -> Vec<&'static str> {
         BUILTIN_LANGUAGES

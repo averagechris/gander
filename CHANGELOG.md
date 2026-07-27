@@ -64,6 +64,11 @@
 - Added deterministic browserless web performance smoke coverage for demo-sized
   M16 SSR/windowing, fragment patching, guarded action reconciliation, and
   presenter-coalescing proxy budgets.
+- Added `gander web` browser-opening semantics that always print the live local
+  capability URL, open it by default with a direct platform opener, and make
+  opener failures nonfatal.
+- Added built-in named-theme syntax defaults plus `gander themes list` output
+  exposing each theme's effective built-in syntax default.
 
 ## v0.8.1 - 2026-07-23
 

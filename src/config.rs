@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::{
     generated::{GeneratedPolicy, GeneratedPreset},
     state::{AuthorKind, Channel, CommentState, Identity},
-    syntax::SyntaxConfig,
+    syntax::{SyntaxConfig, SyntaxThemeConfig},
     theme::{BasePalette, Rgb, accepted_theme_names, builtin_theme},
 };
 
@@ -71,6 +71,8 @@ pub struct ThemeConfig {
     /// Built-in palette pair name. Accepted names are normalized lowercase with
     /// `_`/space treated as `-`; aliases resolve to their canonical name.
     pub name: String,
+    #[serde(skip)]
+    pub(crate) syntax_theme_is_explicit: bool,
     /// `auto` (default) detects light/dark from the terminal background via
     /// a one-shot OSC 11 query at TUI startup; `dark`/`light` never query.
     pub mode: ThemeModeConfig,
@@ -135,6 +137,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
             name: "gander".to_owned(),
+            syntax_theme_is_explicit: false,
             mode: ThemeModeConfig::default(),
             transparent: true,
             palette: ThemePaletteConfig::default(),
@@ -165,6 +168,121 @@ fn parse_hex_rgb(raw: &str) -> std::result::Result<Rgb, String> {
     u32::from_str_radix(value, 16)
         .map(Rgb::hex)
         .map_err(|_| format!("theme palette color {raw:?} must be #rrggbb"))
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum NamedThemeConfig {
+    #[serde(alias = "gander-dark", alias = "gander-light")]
+    Gander,
+    #[serde(alias = "mocha", alias = "latte")]
+    Catppuccin,
+    Gruvbox,
+    Solarized,
+    Nord,
+    TokyoNight,
+    Dracula,
+    Monochrome,
+}
+
+impl NamedThemeConfig {
+    pub const ALL: &'static [Self] = &[
+        Self::Gander,
+        Self::Catppuccin,
+        Self::Gruvbox,
+        Self::Solarized,
+        Self::Nord,
+        Self::TokyoNight,
+        Self::Dracula,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gander => "gander",
+            Self::Catppuccin => "catppuccin",
+            Self::Gruvbox => "gruvbox",
+            Self::Solarized => "solarized",
+            Self::Nord => "nord",
+            Self::TokyoNight => "tokyo-night",
+            Self::Dracula => "dracula",
+            Self::Monochrome => "monochrome",
+        }
+    }
+
+    pub const fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Gander => &["default", "gander-default"],
+            Self::Catppuccin => &["catppuccin-mocha", "mocha", "catppuccin-latte", "latte"],
+            Self::Gruvbox => &["gruvbox-dark", "gruvbox-light"],
+            Self::Solarized => &["solarized-dark", "solarized-light"],
+            Self::Nord => &["nordic"],
+            Self::TokyoNight => &["tokyonight", "tokyo", "tokyo-night-storm"],
+            Self::Dracula => &["dracula-pro"],
+            Self::Monochrome => &[],
+        }
+    }
+
+    pub fn from_canonical(name: &str) -> Option<Self> {
+        match name {
+            "gander" => Some(Self::Gander),
+            "catppuccin" => Some(Self::Catppuccin),
+            "gruvbox" => Some(Self::Gruvbox),
+            "solarized" => Some(Self::Solarized),
+            "nord" => Some(Self::Nord),
+            "tokyo-night" => Some(Self::TokyoNight),
+            "dracula" => Some(Self::Dracula),
+            "monochrome" => Some(Self::Monochrome),
+            _ => None,
+        }
+    }
+
+    pub const fn syntax_default_name(self, mode: ThemeModeConfig) -> Option<&'static str> {
+        match self.syntax_theme_kind(mode) {
+            Some(SyntaxThemeKind::GanderDark) => Some("gander-dark"),
+            Some(SyntaxThemeKind::GanderLight) => Some("gander-light"),
+            Some(SyntaxThemeKind::Monochrome) => Some("monochrome"),
+            None => None,
+        }
+    }
+
+    pub const fn syntax_default_dark(self) -> Option<&'static str> {
+        self.syntax_default_name(ThemeModeConfig::Dark)
+    }
+
+    pub const fn syntax_default_light(self) -> Option<&'static str> {
+        self.syntax_default_name(ThemeModeConfig::Light)
+    }
+
+    pub fn syntax_theme(self, mode: ThemeModeConfig) -> Option<SyntaxThemeConfig> {
+        match self.syntax_theme_kind(mode) {
+            Some(SyntaxThemeKind::GanderDark) => Some(SyntaxThemeConfig::gander_dark()),
+            Some(SyntaxThemeKind::GanderLight) => Some(SyntaxThemeConfig::gander_light()),
+            Some(SyntaxThemeKind::Monochrome) => Some(SyntaxThemeConfig::monochrome()),
+            None => None,
+        }
+    }
+
+    const fn syntax_theme_kind(self, mode: ThemeModeConfig) -> Option<SyntaxThemeKind> {
+        let light = matches!(mode, ThemeModeConfig::Light);
+        match self {
+            Self::Gander | Self::Solarized | Self::Gruvbox => Some(if light {
+                SyntaxThemeKind::GanderLight
+            } else {
+                SyntaxThemeKind::GanderDark
+            }),
+            Self::Catppuccin | Self::Nord | Self::TokyoNight | Self::Dracula => {
+                Some(SyntaxThemeKind::GanderDark)
+            }
+            Self::Monochrome => Some(SyntaxThemeKind::Monochrome),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyntaxThemeKind {
+    GanderDark,
+    GanderLight,
+    Monochrome,
 }
 
 /// Light/dark selection for the derived theme.
@@ -544,6 +662,8 @@ struct ConfigPatch {
     comments: CommentsConfigPatch,
     theme: ThemeConfigPatch,
     ui: UiConfigPatch,
+    #[serde(skip)]
+    syntax_theme_overridden: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -987,8 +1107,19 @@ impl Config {
 
             let contents = fs::read_to_string(&source.path)
                 .with_context(|| format!("failed to read config {}", source.path.display()))?;
+            let syntax_theme_overridden = contents
+                .parse::<toml::Value>()
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("syntax")
+                        .and_then(|syntax| syntax.get("theme"))
+                        .cloned()
+                })
+                .is_some();
             let mut patch: ConfigPatch = toml::from_str(&contents)
                 .with_context(|| format!("failed to parse config {}", source.path.display()))?;
+            patch.syntax_theme_overridden = syntax_theme_overridden;
             if let Some(field) = patch.agent.removed_field() {
                 bail!(
                     "failed to parse config {}: `[agent] {field}` was removed: gander no \
@@ -1050,8 +1181,16 @@ impl Config {
             self.generated.globs = globs;
         }
 
+        let syntax_override = patch.syntax_theme_overridden;
         if let Some(syntax) = patch.syntax {
             self.syntax = syntax;
+            self.theme.syntax_theme_is_explicit = syntax_override;
+            if !self.theme.syntax_theme_is_explicit
+                && let Some(named) = NamedThemeConfig::from_canonical(&self.theme.name)
+                && let Some(syntax_theme) = named.syntax_theme(self.theme.mode)
+            {
+                self.syntax.theme = syntax_theme;
+            }
         }
 
         if let Some(max_diff_lines) = patch.limits.max_diff_lines {
@@ -1134,6 +1273,12 @@ impl Config {
 
         if let Some(mode) = patch.theme.mode {
             self.theme.mode = mode;
+            if !self.theme.syntax_theme_is_explicit
+                && let Some(named) = NamedThemeConfig::from_canonical(&self.theme.name)
+                && let Some(syntax_theme) = named.syntax_theme(self.theme.mode)
+            {
+                self.syntax.theme = syntax_theme;
+            }
         }
         if let Some(name) = patch.theme.name {
             let normalized = crate::theme::normalize_theme_name(&name);
@@ -1144,6 +1289,12 @@ impl Config {
                 );
             };
             self.theme.name = builtin.name.to_owned();
+            if !self.theme.syntax_theme_is_explicit
+                && let Some(named) = NamedThemeConfig::from_canonical(builtin.name)
+                && let Some(syntax_theme) = named.syntax_theme(self.theme.mode)
+            {
+                self.syntax.theme = syntax_theme;
+            }
         }
         if let Some(transparent) = patch.theme.transparent {
             self.theme.transparent = transparent;
@@ -1373,6 +1524,116 @@ mod tests {
         let config = Config::load_layers(&[]).unwrap();
 
         assert_eq!(config, Config::default());
+    }
+
+    #[test]
+    fn named_themes_apply_documented_syntax_defaults() {
+        for theme in NamedThemeConfig::ALL {
+            for mode in [ThemeModeConfig::Dark, ThemeModeConfig::Light] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("theme.toml");
+                fs::write(
+                    &path,
+                    format!(
+                        "[theme]\nname = \"{}\"\nmode = \"{}\"\n",
+                        theme.name(),
+                        match mode {
+                            ThemeModeConfig::Dark => "dark",
+                            ThemeModeConfig::Light => "light",
+                            ThemeModeConfig::Auto => "auto",
+                        }
+                    ),
+                )
+                .unwrap();
+
+                let config = Config::load_layers(&[ConfigSource {
+                    path,
+                    required: true,
+                }])
+                .unwrap();
+
+                assert_eq!(config.theme.name, theme.name());
+                assert_eq!(config.syntax.theme, theme.syntax_theme(mode).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn named_theme_aliases_resolve_to_canonical_palettes() {
+        for (alias, canonical) in [
+            ("default", NamedThemeConfig::Gander),
+            ("gander-default", NamedThemeConfig::Gander),
+            ("catppuccin-mocha", NamedThemeConfig::Catppuccin),
+            ("mocha", NamedThemeConfig::Catppuccin),
+            ("catppuccin-latte", NamedThemeConfig::Catppuccin),
+            ("latte", NamedThemeConfig::Catppuccin),
+            ("gruvbox-dark", NamedThemeConfig::Gruvbox),
+            ("gruvbox-light", NamedThemeConfig::Gruvbox),
+            ("solarized-dark", NamedThemeConfig::Solarized),
+            ("solarized-light", NamedThemeConfig::Solarized),
+            ("nordic", NamedThemeConfig::Nord),
+            ("tokyonight", NamedThemeConfig::TokyoNight),
+            ("tokyo", NamedThemeConfig::TokyoNight),
+            ("tokyo-night-storm", NamedThemeConfig::TokyoNight),
+            ("dracula-pro", NamedThemeConfig::Dracula),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("theme.toml");
+            fs::write(&path, format!("[theme]\nname = \"{alias}\"\n")).unwrap();
+
+            let config = Config::load_layers(&[ConfigSource {
+                path,
+                required: true,
+            }])
+            .unwrap();
+
+            assert_eq!(config.theme.name, canonical.name());
+        }
+    }
+
+    #[test]
+    fn explicit_syntax_theme_wins_over_named_theme_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        fs::write(
+            &path,
+            "[theme]\nname = \"solarized\"\nmode = \"light\"\n\n[syntax.theme]\nkeyword = \"red bold\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_layers(&[ConfigSource {
+            path,
+            required: true,
+        }])
+        .unwrap();
+
+        assert_eq!(config.theme.name, NamedThemeConfig::Solarized.name());
+        assert_eq!(config.syntax.theme.keyword, "red bold");
+        assert_ne!(config.syntax.theme, SyntaxThemeConfig::gander_light());
+    }
+
+    #[test]
+    fn unspecified_later_syntax_config_keeps_inheriting_named_theme_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme = dir.path().join("theme.toml");
+        let syntax = dir.path().join("syntax.toml");
+        fs::write(&theme, "[theme]\nname = \"gander\"\nmode = \"light\"\n").unwrap();
+        fs::write(&syntax, "[syntax]\nenabled = false\n").unwrap();
+
+        let config = Config::load_layers(&[
+            ConfigSource {
+                path: theme,
+                required: true,
+            },
+            ConfigSource {
+                path: syntax,
+                required: true,
+            },
+        ])
+        .unwrap();
+
+        assert!(!config.syntax.enabled);
+        assert_eq!(config.syntax.theme, SyntaxThemeConfig::gander_light());
     }
 
     #[test]

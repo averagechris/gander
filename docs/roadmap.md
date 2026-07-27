@@ -20,6 +20,14 @@ north star, non-goals, and post-MVP milestone plan.
 - **Syntax awareness should help navigation.** Tree-sitter should power highlighting, symbol context, and changed-symbol outlines instead of being cosmetic only.
 - **The TUI should not trap the user.** Common operations need obvious keys, non-interactive equivalents, and plain files on disk.
 
+### User-decided deviations recorded 2026-07-27
+
+- `gander web` opens its printed local URL by default with a direct platform
+  opener invocation. `--no-open` is an opener-only suppression, not a different
+  output contract.
+- Built-in named themes carry Gander-owned syntax defaults for both TUI and web
+  highlighting; explicit `[syntax.theme]` stays the higher-precedence override.
+
 ## Milestone 1: usable local vertical slice
 
 Status: complete.

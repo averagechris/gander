@@ -518,3 +518,21 @@ Demo-sized CI budgets in `src/web.rs`:
 
 Elapsed ceilings are intentionally generous and backed by structural byte/count
 assertions so the gate is deterministic on SourceHut and local Nix runners.
+
+## Web preview
+
+`gander web` prints its live capability URL to stdout on every successful run.
+By default it also attempts to hand that URL to the dependency-free platform
+opener: `open` on macOS, `xdg-open` on supported Unix. The URL is passed as a
+process argument directly; Gander never invokes a shell or interpolates the URL
+into a command string.
+
+Use `gander web --no-open` when an agent or script wants the URL without a
+browser side effect. `--no-open` changes only the opener attempt and prints a
+truthful stderr note; URL output remains the same. If the opener cannot be
+started, the command emits a clear nonfatal stderr warning and leaves the
+printed URL usable.
+
+HTML code highlighting uses the same effective syntax theme as the TUI:
+explicit `[syntax.theme]` first, otherwise the selected `[theme] name` built-in
+syntax default, otherwise Gander's default syntax palette.

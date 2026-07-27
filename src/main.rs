@@ -50,7 +50,10 @@ use crate::{
         write_artifact_to_with_attention_files, write_artifact_with_attention_files,
     },
     clipboard::copy_to_clipboard,
-    config::{ArtifactFormatConfig, ArtifactProfileConfig, Config, TuiArtifactOnQuitConfig},
+    config::{
+        ArtifactFormatConfig, ArtifactProfileConfig, Config, NamedThemeConfig,
+        TuiArtifactOnQuitConfig,
+    },
     delegation::{DelegationSpec, build_delegation_packet, render_delegation_markdown},
     diff::DiffSet,
     generated::{GeneratedMatcher, GeneratedPolicy, GeneratedPreset},
@@ -1261,6 +1264,47 @@ fn format_user_error(error: &UserError) -> String {
     format!("error: {}\n", error)
 }
 
+fn print_themes_list(format: ListFormat) -> color_eyre::Result<()> {
+    #[derive(Serialize)]
+    struct ThemeRow {
+        name: &'static str,
+        aliases: &'static [&'static str],
+        syntax_default: Option<&'static str>,
+        syntax_default_dark: Option<&'static str>,
+        syntax_default_light: Option<&'static str>,
+    }
+    let rows: Vec<_> = NamedThemeConfig::ALL
+        .iter()
+        .map(|theme| ThemeRow {
+            name: theme.name(),
+            aliases: theme.aliases(),
+            // Compatibility/convenience field: the default for dark/auto mode.
+            syntax_default: theme.syntax_default_dark(),
+            syntax_default_dark: theme.syntax_default_dark(),
+            syntax_default_light: theme.syntax_default_light(),
+        })
+        .collect();
+    match format {
+        ListFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "themes": rows }))?
+        ),
+        ListFormat::Text => {
+            for row in rows {
+                println!(
+                    "{}\t{}\tsyntax-default={}\tsyntax-default-dark={}\tsyntax-default-light={}",
+                    row.name,
+                    row.aliases.join(","),
+                    row.syntax_default.unwrap_or("none"),
+                    row.syntax_default_dark.unwrap_or("none"),
+                    row.syntax_default_light.unwrap_or("none")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> color_eyre::Result<()> {
     color_eyre::config::HookBuilder::default()
         .display_location_section(false)
@@ -1532,6 +1576,9 @@ fn run() -> color_eyre::Result<()> {
                 )?;
                 print!("{rendered}");
             }
+        },
+        Command::Themes { command } => match command {
+            ThemesCommand::List { format } => print_themes_list(format)?,
         },
         Command::Export {
             format,
@@ -1819,7 +1866,6 @@ fn run() -> color_eyre::Result<()> {
             )?;
         }
         Command::Paths => unreachable!("handled before loading the diff"),
-        Command::Themes { .. } => unreachable!("handled before loading the diff"),
         Command::CurrentFocus { .. } => unreachable!("handled before loading the diff"),
         Command::Summary => {
             println!("Reviewing {}", session.target);
@@ -4443,25 +4489,7 @@ fn print_paths(
 
 fn handle_themes(command: &ThemesCommand) -> color_eyre::Result<()> {
     match command {
-        ThemesCommand::List { format } => match format {
-            ListFormat::Json => {
-                let themes: Vec<_> = crate::theme::BUILTIN_THEMES
-                    .iter()
-                    .map(|theme| {
-                        serde_json::json!({
-                            "name": theme.name,
-                            "aliases": theme.aliases,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::json!({ "themes": themes }));
-            }
-            ListFormat::Text => {
-                for theme in crate::theme::BUILTIN_THEMES {
-                    println!("{}\t{}", theme.name, theme.aliases.join(","));
-                }
-            }
-        },
+        ThemesCommand::List { format } => print_themes_list(*format)?,
     }
     Ok(())
 }

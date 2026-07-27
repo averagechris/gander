@@ -199,6 +199,9 @@ context-step = 10
 # gutter-added = "cyan"
 
 [theme]
+# Optional built-in named theme. `gander themes list` prints stable text/JSON
+# including each theme's built-in syntax default. Mappings are Gander-owned
+# palettes, not claims of exact third-party theme equivalence.
 # Derived TUI/future-web theme: all chrome colors are computed from a named
 # light/dark base palette pair with WCAG-contrast guarding, then quantized to xterm-256 on
 # terminals without truecolor (COLORTERM). `auto` detects light/dark from
@@ -269,6 +272,7 @@ extensions = ["custompy"]
 filenames = ["SConstruct"]
 
 [syntax.theme]
+# Explicit values here override any syntax default supplied by [theme] name.
 keyword = "magenta bold"
 function = "blue"
 string = "green"
