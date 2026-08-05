@@ -3,6 +3,12 @@
 ## Unreleased
 
 
+## v0.8.2 - 2026-08-05
+
+### Changed
+
+- Updated Cargo dependencies and refreshed the Nix flake inputs to current
+  stable compatible revisions.
 ## v0.8.1 - 2026-07-23
 
 ### Added
