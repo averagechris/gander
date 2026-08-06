@@ -26,6 +26,11 @@
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         inherit nativeBuildInputs buildInputs;
+        # The dedicated ci-test app runs the full dev-profile suite. Repeating
+        # it in buildRustPackage's release check phase compiles the very large
+        # test harness with fat LTO and can exhaust constrained release runners.
+        # The production binary remains built with the release profile below.
+        doCheck = false;
 
         meta = {
           inherit (cargoToml.package) description homepage;
