@@ -52,14 +52,16 @@ pushing. SourceHut CI (`.builds/ci.yml`) runs flake check + the same
 See [docs/release.md](docs/release.md) for the full flow. Short version:
 
 ```bash
-nix run .#release -- --version X.Y.Z [--submit-linux-build] [--skip-*]
+nix run --accept-flake-config .#release -- --version X.Y.Z --check
+nix run --accept-flake-config .#release -- --version X.Y.Z [--submit-linux-build]
 ```
 
 The release apps come from the shared fleet preset
 (`lib.fleet.presets.rust` in the averagechris.srht.site flake, via the
-`fleet` input). The orchestrator runs `prepare-release` (version bump +
-changelog + `cargo check --locked`), the `ci-*` validation apps, tags and
-pushes `vX.Y.Z`, builds the local `release-artifact` tarball, uploads it
+`fleet` input). Start from a fresh empty `@` aligned with local and remote
+`main`. The orchestrator validates the prepared tree with the `ci-*` apps and
+the evaluated release contract, verifies the reproducible artifact, then
+atomically publishes the tag and `main` under a remote-ref lease. It uploads it
 to the tag with `hut git artifact upload`, and submits the site
 `refresh-pages` trigger. Pages are published by the
 averagechris.srht.site repo, not from here; the legacy `build-pages` /
@@ -70,3 +72,7 @@ Note: the Linux release manifest intentionally lives in
 builds.sr.ht does not auto-submit it on push. Release artifacts are only
 built/uploaded on an explicit submit (`--submit-linux-build` or
 `hut builds submit`). Do not move it into `.builds/`.
+
+There are no release-stage bypass flags. Resume after a post-publication
+failure only when the requested version, tag and peeled commit, both `main`
+refs, and checkout match exactly.

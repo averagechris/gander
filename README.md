@@ -105,8 +105,14 @@ Releases are cut with Nix flake apps and published to SourceHut (canonical
 build):
 
 ```sh
-nix run .#release -- --version X.Y.Z
+nix run --accept-flake-config .#release -- --version X.Y.Z --check
+nix run --accept-flake-config .#release -- --version X.Y.Z [--submit-linux-build]
 ```
+
+Run these from a fresh empty jj working-copy commit aligned with local and
+remote `main`. The prepared tree and reproducible artifact are verified before
+atomic leased ref publication; an exact-match rerun can resume only
+post-publication work.
 
 See [docs/release.md](docs/release.md) for the full process and the individual
 `prepare-release`, `release-tag`, `release-artifact`, `build-pages`, and

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Adopted the fail-safe fleet release check, prepared-tree validation, and
+  atomic leased publication contract.
 
 ## v0.8.2 - 2026-08-05
 

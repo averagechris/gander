@@ -39,10 +39,29 @@
         };
       };
 
+      releaseContract = pkgs.writeShellApplication {
+        name = "release-contract";
+        runtimeInputs = [pkgs.gnugrep];
+        text = ''
+          help="$(${fleetApps.apps.release.program} --help)"
+          grep -Fq -- 'usage: release --version X.Y.Z [--check] [--allow-downgrade] [--submit-linux-build]' <<<"$help"
+          grep -Fq -- '--check               verify release readiness without editing files or publishing refs' <<<"$help"
+          for doc in README.md AGENTS.md docs/release.md; do
+            grep -Fq 'nix run --accept-flake-config .#release -- --version X.Y.Z --check' "$doc"
+            grep -Fq 'nix run --accept-flake-config .#release -- --version X.Y.Z' "$doc"
+            if grep -Eq -- '--(skip-(validate|tag|artifact|pages)|publish-pages)' "$doc"; then
+              printf '%s exposes an obsolete release flag\n' "$doc" >&2
+              exit 1
+            fi
+          done
+        '';
+      };
+
       fleetApps = fleet.lib.fleet.presets.rust {
         inherit pkgs self;
         srhtPackage = fleet.packages.${system}.srht;
         pname = "gander";
+        releaseValidationApps = ["release-contract"];
       };
 
       buildPagesScript = ''
@@ -581,7 +600,7 @@
     in {
       packages = {
         default = gander;
-        inherit gander build-pages publish-pages render-demo;
+        inherit gander build-pages publish-pages render-demo releaseContract;
         release-artifact = fleetApps.releaseArtifact system;
       };
 
@@ -600,6 +619,7 @@
         build-pages = mkApp build-pages;
         publish-pages = mkApp publish-pages;
         render-demo = mkApp render-demo;
+        release-contract = mkApp releaseContract;
         inherit
           (fleetApps.apps)
           prepare-release
@@ -640,6 +660,7 @@
   in {
     packages = forAllSystems (system: (perSystem system).packages);
     apps = forAllSystems (system: (perSystem system).apps);
+    checks = forAllSystems (system: {release-contract = (perSystem system).packages.releaseContract;});
     devShells = forAllSystems (system: (perSystem system).devShells);
   };
 }

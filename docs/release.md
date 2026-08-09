@@ -11,7 +11,8 @@ for the Linux x86_64 artifact.
 ## TL;DR
 
 ```sh
-nix run .#release -- --version X.Y.Z --submit-linux-build
+nix run --accept-flake-config .#release -- --version X.Y.Z --check
+nix run --accept-flake-config .#release -- --version X.Y.Z [--submit-linux-build]
 ```
 
 ## Pieces
@@ -23,7 +24,8 @@ Each stage is its own flake app so it can be run (and re-run) independently:
 | `nix run .#prepare-release -- [--version X.Y.Z]` | Writes the version into `Cargo.toml`, `Cargo.lock`, and `builds/release-linux-x86_64.yml`, converts the `## Unreleased` section of `CHANGELOG.md` into a dated `## vX.Y.Z` entry, then verifies with `cargo check --locked --workspace`. |
 | `nix run .#release-tag -- [--revision REV]` | Creates the annotated `vX.Y.Z` tag from `Cargo.toml` and pushes it to `origin`. Refuses to reuse an existing remote tag. |
 | `nix build .#release-artifact` | Builds a reproducible tarball for the current platform (`gander-vX.Y.Z-<platform>.tar.gz` containing the binary, `README.md`, `CHANGELOG.md`, and the licenses) plus a `.sha256` checksum file. |
-| `nix run .#release` | Runs it all in order: prepare, validate (`ci-fmt`/`ci-clippy`/`ci-test`), tag + push (also moves the `main` bookmark and pushes it), local artifact build, artifact upload to the tag (`hut git artifact upload`), site refresh submit, and (opt-in) Linux build submission. `--skip-validate`, `--skip-tag`, `--skip-artifact`, `--skip-upload`, `--skip-refresh` skip stages. |
+| `nix run --accept-flake-config .#release -- --version X.Y.Z --check` | Checks release readiness without changing files, jj state, or refs. |
+| `nix run --accept-flake-config .#release -- --version X.Y.Z` | Prepares and validates the tree, verifies the artifact, atomically publishes leased refs, then uploads and refreshes (with opt-in Linux submission). |
 
 Pages for gander (downloads listing, overview/example pages) are rendered and
 published by the averagechris.srht.site repo's `refresh-pages` job from the
@@ -35,10 +37,13 @@ remain for manual use during the migration.
 
 1. Land everything for the release on `main` and note changelog-worthy items
    under `## Unreleased` in `CHANGELOG.md` as you go.
-2. Run `nix run .#release -- --version X.Y.Z --submit-linux-build`. This
-   mutates `Cargo.toml`/`Cargo.lock`/`CHANGELOG.md`/`builds/…` in the working
-   copy; the changes are snapshotted into `@` by jj and included in the tagged
-   revision.
+2. From a fresh empty `@` whose parent exactly matches local `main` and
+   `main@origin`, run the two TL;DR commands. Preparation mutates
+   `Cargo.toml`/`Cargo.lock`/`CHANGELOG.md`/`builds/…`; fmt, Clippy, tests, and
+   the evaluated release contract validate that prepared tree. The
+   byte-reproducible artifact and checksum are verified before the annotated
+   tag and `main` are published atomically with a lease on the observed remote
+   ref.
 3. The builds.sr.ht job builds the Linux artifact from the pushed tag, uploads
    it to the tag, and submits another site refresh so the downloads page gains
    the Linux tarball alongside the locally built macOS one.
@@ -53,8 +58,11 @@ remain for manual use during the migration.
   `nix run .#release -- --submit-linux-build` or manually with
   `hut builds submit`).
 - Requires `hut` authenticated for tag-artifact uploads and build submission.
-- Run `jj lint` before releasing; the orchestrator's built-in validation only
-  covers the `ci-*` apps.
+- Run `jj lint` before releasing; it is broader than the deterministic release
+  gates. No release-stage bypass flags are supported.
+- A post-publication upload/build failure can be resumed only when the version,
+  tag and peeled commit, remote and local `main`, and checkout match exactly;
+  otherwise the rerun fails closed.
 - Artifact tarballs are byte-reproducible
   (`--sort=name --mtime=@1 --owner=0 --group=0`, `gzip -n`).
 - `dist/` is generated output and stays untracked.
