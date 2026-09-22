@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    fleet.url = "git+https://git.sr.ht/~averagechris/averagechris.srht.site";
+    fleet.url = "github:averagechris/fleet/b8c07239a02cceecdcb3ecb25a7041d6baf9e54e";
   };
 
   outputs = {
@@ -26,6 +26,9 @@
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         inherit nativeBuildInputs buildInputs;
+        preBuild = ''
+          export RUSTFLAGS="--remap-path-prefix=$NIX_BUILD_TOP=/build ''${RUSTFLAGS:-}"
+        '';
         # The dedicated ci-test app runs the full dev-profile suite. Repeating
         # it in buildRustPackage's release check phase compiles the very large
         # test harness with fat LTO and can exhaust constrained release runners.
@@ -44,8 +47,11 @@
         runtimeInputs = [pkgs.gnugrep];
         text = ''
           help="$(${fleetApps.apps.release.program} --help)"
-          grep -Fq -- 'usage: release --version X.Y.Z [--check] [--allow-downgrade] [--submit-linux-build]' <<<"$help"
-          grep -Fq -- '--check               verify release readiness without editing files or publishing refs' <<<"$help"
+          grep -Fq -- 'usage: release --version X.Y.Z [--check] [--allow-downgrade]' <<<"$help"
+          if grep -Fq -- '--submit-linux-build' <<<"$help"; then
+            printf '%s\n' 'GitHub release help exposes the SourceHut Linux submission flag' >&2
+            exit 1
+          fi
           for doc in README.md AGENTS.md docs/release.md; do
             grep -Fq 'nix run --accept-flake-config .#release -- --version X.Y.Z --check' "$doc"
             grep -Fq 'nix run --accept-flake-config .#release -- --version X.Y.Z' "$doc"
@@ -57,9 +63,8 @@
         '';
       };
 
-      fleetApps = fleet.lib.fleet.presets.rust {
+      fleetApps = fleet.lib.fleet.presets.gander {
         inherit pkgs self;
-        srhtPackage = fleet.packages.${system}.srht;
         pname = "gander";
         releaseValidationApps = ["release-contract"];
       };
@@ -438,7 +443,7 @@
           </div>
           <p>Take a gander at your jj changes: a fast terminal UI for reviewing changes.</p>
           <p class="page-links"><a class="page-link" href="overview.html">overview</a><a class="page-link" href="example.html">example</a></p>
-          <p><a href="https://git.sr.ht/~averagechris/gander">Source repository</a></p>
+          <p><a href="https://github.com/averagechris/gander">Source repository</a></p>
 
           <h2>What's new in {html.escape(tag)}</h2>
           {markdownish_to_html(current_changelog())}
@@ -456,8 +461,8 @@
         install -m 0755 {html.escape(latest.name.removesuffix('.tar.gz'))}/gander ~/.local/bin/gander</code></pre>
 
           <h2>Nix install</h2>
-          <pre><code>nix run sourcehut:~averagechris/gander
-        nix profile install sourcehut:~averagechris/gander</code></pre>
+          <pre><code>nix run github:averagechris/gander
+        nix profile install github:averagechris/gander</code></pre>
           <script>
         {body_script}  </script>
         </body>

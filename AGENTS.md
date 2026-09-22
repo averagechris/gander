@@ -5,7 +5,7 @@ jj-visible changes with durable review sessions, viewed-state, comments,
 walkthroughs, optional durable action items, and exportable artifacts. Rust
 (edition 2024), ratatui + crossterm UI, tree-sitter syntax highlighting, and an
 rmcp-based MCP server. Canonical repo:
-[git.sr.ht/~averagechris/gander](https://git.sr.ht/~averagechris/gander).
+[github.com/averagechris/gander](https://github.com/averagechris/gander).
 
 Product direction lives in `docs/vision.md`. Preserve these boundaries unless
 the user explicitly changes the vision:
@@ -35,8 +35,9 @@ nix flake check --accept-flake-config
 `jj lint` (from `.jj-lint.toml`) is the full pre-push gate: the three
 `ci-*` apps above plus cargo audit / deny / machete / sort, taplo,
 alejandra, statix, deadnix, typos, and `nix flake check`. Run it before
-pushing. SourceHut CI (`.builds/ci.yml`) runs flake check + the same
-`ci-*` apps on every push.
+pushing. The legacy SourceHut CI definition remains for the archived release
+line; GitHub release automation runs only for `v*` tag pushes or a manual run
+explicitly attached to that same existing tag.
 
 ## Version control
 
@@ -53,25 +54,26 @@ See [docs/release.md](docs/release.md) for the full flow. Short version:
 
 ```bash
 nix run --accept-flake-config .#release -- --version X.Y.Z --check
-nix run --accept-flake-config .#release -- --version X.Y.Z [--submit-linux-build]
+nix run --accept-flake-config .#release -- --version X.Y.Z
 ```
 
 The release apps come from the shared fleet preset
-(`lib.fleet.presets.rust` in the averagechris.srht.site flake, via the
-`fleet` input). Start from a fresh empty `@` aligned with local and remote
-`main`. The orchestrator validates the prepared tree with the `ci-*` apps and
-the evaluated release contract, verifies the reproducible artifact, then
-atomically publishes the tag and `main` under a remote-ref lease. It uploads it
-to the tag with `hut git artifact upload`, and submits the site
-`refresh-pages` trigger. Pages are published by the
-averagechris.srht.site repo, not from here; the legacy `build-pages` /
-`publish-pages` apps remain only for manual/migration use.
+(`lib.fleet.presets.gander` from the SHA-pinned
+[averagechris/fleet](https://github.com/averagechris/fleet), via the `fleet`
+input). Start from a fresh empty `@` aligned with local and remote
+`main`. `--check` is a nonmutating ref/version preflight only; it does not run
+the `ci-*` validation apps or build the release artifact. The real release
+command validates the prepared tree with the `ci-*` apps and the evaluated
+release contract, verifies the reproducible artifact, then atomically publishes
+the tag and `main` under a remote-ref lease. The
+tag-triggered GitHub workflow builds both configured archive/checksum pairs,
+publishes the GitHub release only after the complete set verifies, and then
+dispatches `pages.yml` in `averagechris/averagechris.github.io` with the
+configured GitHub App. Missing App credentials produce an explicit warning;
+they never masquerade as a successful site dispatch.
 
-Note: the Linux release manifest intentionally lives in
-`builds/release-linux-x86_64.yml` — *outside* `.builds/` — so
-builds.sr.ht does not auto-submit it on push. Release artifacts are only
-built/uploaded on an explicit submit (`--submit-linux-build` or
-`hut builds submit`). Do not move it into `.builds/`.
+The SourceHut release manifest is archival documentation for old SourceHut
+tags only. Do not use it for new releases.
 
 There are no release-stage bypass flags. Resume after a post-publication
 failure only when the requested version, tag and peeled commit, both `main`

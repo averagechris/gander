@@ -79,17 +79,18 @@
         "srht": "srht"
       },
       "locked": {
-        "lastModified": 1786310054,
-        "narHash": "sha256-6pUr4JYqW7Xf47OnM8hr3ex+1jcwwi4/tzqxXl4TQkw=",
-        "ref": "refs/heads/main",
-        "rev": "19416e3fc0c0415e39104476565ec0c375bce69b",
-        "revCount": 84,
-        "type": "git",
-        "url": "https://git.sr.ht/~averagechris/averagechris.srht.site"
+        "lastModified": 1790108618,
+        "narHash": "sha256-o3HNngqWfT6BFPS9KSrzjIBOJwNMpNil0du8TKEAXZI=",
+        "owner": "averagechris",
+        "repo": "fleet",
+        "rev": "b8c07239a02cceecdcb3ecb25a7041d6baf9e54e",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "https://git.sr.ht/~averagechris/averagechris.srht.site"
+        "owner": "averagechris",
+        "repo": "fleet",
+        "rev": "b8c07239a02cceecdcb3ecb25a7041d6baf9e54e",
+        "type": "github"
       }
     },
     "fleet_2": {

@@ -100,23 +100,24 @@ nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test
 
 ## Releases
 
-Releases are cut with Nix flake apps and published to SourceHut (canonical
-`vX.Y.Z` tags, a Pages downloads site, and an optional builds.sr.ht Linux
-build):
+Releases are cut with Nix flake apps and published from canonical annotated
+`vX.Y.Z` tags at [GitHub](https://github.com/averagechris/gander/releases).
+GitHub Actions builds macOS arm64 and Linux x86_64 archives and checksums:
 
 ```sh
 nix run --accept-flake-config .#release -- --version X.Y.Z --check
-nix run --accept-flake-config .#release -- --version X.Y.Z [--submit-linux-build]
+nix run --accept-flake-config .#release -- --version X.Y.Z
 ```
 
 Run these from a fresh empty jj working-copy commit aligned with local and
-remote `main`. The prepared tree and reproducible artifact are verified before
-atomic leased ref publication; an exact-match rerun can resume only
-post-publication work.
+remote `main`. `--check` is a nonmutating ref/version preflight only; it does
+not run validation or build the release artifact. The real release command
+prepares and fully validates the tree, verifies the reproducible artifact, and
+then publishes the leased refs. The tag-triggered workflow owns release assets
+and dispatches the website refresh after publication.
 
 See [docs/release.md](docs/release.md) for the full process and the individual
-`prepare-release`, `release-tag`, `release-artifact`, `build-pages`, and
-`publish-pages` stages.
+`prepare-release`, `release-tag`, and `release-artifact` stages.
 
 ## Usage
 
