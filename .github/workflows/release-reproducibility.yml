@@ -1,0 +1,101 @@
+name: Release reproducibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag to reproduce
+        required: true
+        default: v0.8.2
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    name: ${{ matrix.platform }} on ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: aarch64-darwin
+            machine: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out requested tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Verify runner and annotated tag identity
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_MACHINE" || {
+            echo "::error::Expected machine $EXPECTED_MACHINE, got $(uname -m)"
+            exit 1
+          }
+          test "$(git cat-file -t "refs/tags/$TAG")" = tag || {
+            echo "::error::$TAG is not an annotated tag"
+            exit 1
+          }
+          peeled_commit="$(git rev-parse "refs/tags/$TAG^{}")"
+          head_commit="$(git rev-parse HEAD)"
+          test "$peeled_commit" = "$head_commit" || {
+            echo "::error::$TAG peels to $peeled_commit, but checkout is $head_commit"
+            exit 1
+          }
+          echo "Verified annotated $TAG peels to $head_commit"
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+
+      - name: Build and compare release artifact
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          nix build .#release-artifact --out-link result-release-artifact
+
+          artifact="result-release-artifact/gander-${TAG}-${PLATFORM}.tar.gz"
+          local_sidecar="${artifact}.sha256"
+          test -f "$artifact" && test -f "$local_sidecar" || {
+            echo "::error::Expected release artifact and sidecar for $PLATFORM"
+            find result-release-artifact -maxdepth 1 -type f -print || true
+            exit 1
+          }
+          (cd "$(dirname "$artifact")" && shasum -a 256 -c "$(basename "$local_sidecar")")
+
+          published_sidecar="published-${PLATFORM}.sha256"
+          sidecar_url="https://git.sr.ht/~averagechris/gander/refs/download/${TAG}/gander-${TAG}-${PLATFORM}.tar.gz.sha256"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 60 \
+            --user-agent 'gander-release-reproducibility/1.0' \
+            --output "$published_sidecar" "$sidecar_url"
+
+          local_digest="$(awk 'NR == 1 { print $1 }' "$local_sidecar")"
+          published_digest="$(awk 'NR == 1 { print $1 }' "$published_sidecar")"
+          printf 'local=%s\npublished=%s\n' "$local_digest" "$published_digest"
+          test "$local_digest" = "$published_digest" || {
+            mkdir -p diagnostic
+            cp "$artifact" diagnostic/
+            echo "::error::Reproducibility mismatch for $TAG $PLATFORM: expected $published_digest, got $local_digest"
+            exit 1
+          }
+
+      - name: Preserve mismatched rebuilt artifact
+        if: ${{ failure() && hashFiles('diagnostic/*.tar.gz') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rebuilt-${{ inputs.tag }}-${{ matrix.platform }}
+          path: diagnostic/*.tar.gz
+          if-no-files-found: error
