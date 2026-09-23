@@ -79,17 +79,17 @@
         "srht": "srht"
       },
       "locked": {
-        "lastModified": 1790108618,
-        "narHash": "sha256-o3HNngqWfT6BFPS9KSrzjIBOJwNMpNil0du8TKEAXZI=",
+        "lastModified": 1790198485,
+        "narHash": "sha256-cNAm7PkCCAsmwlS39StdQa2fm6ZYN/hntLyxgmuZZ1A=",
         "owner": "averagechris",
         "repo": "fleet",
-        "rev": "b8c07239a02cceecdcb3ecb25a7041d6baf9e54e",
+        "rev": "56cce9d57377944d4ddc91953ccda1bceca3927d",
         "type": "github"
       },
       "original": {
         "owner": "averagechris",
         "repo": "fleet",
-        "rev": "b8c07239a02cceecdcb3ecb25a7041d6baf9e54e",
+        "rev": "56cce9d57377944d4ddc91953ccda1bceca3927d",
         "type": "github"
       }
     },

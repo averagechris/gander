@@ -48,7 +48,7 @@ jobs:
     needs: validate
     permissions:
       contents: write
-    uses: averagechris/fleet/.github/workflows/release.yml@b8c07239a02cceecdcb3ecb25a7041d6baf9e54e
+    uses: averagechris/fleet/.github/workflows/release.yml@56cce9d57377944d4ddc91953ccda1bceca3927d
     with:
       tag: ${{ needs.validate.outputs.tag }}
       platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'

@@ -3,7 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    fleet.url = "github:averagechris/fleet/b8c07239a02cceecdcb3ecb25a7041d6baf9e54e";
+    fleet.url = "github:averagechris/fleet/56cce9d57377944d4ddc91953ccda1bceca3927d";
   };
 
   outputs = {
