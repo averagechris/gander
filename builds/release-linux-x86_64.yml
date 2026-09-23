@@ -73,5 +73,5 @@ tasks:
       EOF
       srht builds submit "$manifest" --secrets --note "site refresh: gander $tag"
 artifacts:
-  - artifacts/gander-v0.8.2-x86_64-linux.tar.gz
-  - artifacts/gander-v0.8.2-x86_64-linux.tar.gz.sha256
+  - artifacts/gander-v0.8.3-x86_64-linux.tar.gz
+  - artifacts/gander-v0.8.3-x86_64-linux.tar.gz.sha256

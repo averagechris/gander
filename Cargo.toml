@@ -1,6 +1,6 @@
 [package]
 name = "gander"
-version = "0.8.2"
+version = "0.8.3"
 edition = "2024"
 description = "Local-first jj review workspace with TUI, CLI, agent handoff, skills, and exportable artifacts"
 license = "MIT OR Apache-2.0"
