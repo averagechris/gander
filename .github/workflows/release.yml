@@ -20,6 +20,7 @@ jobs:
       contents: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      mode: ${{ steps.tag.outputs.mode }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -33,19 +34,30 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "averagechris/gander" ]] || { echo 'untrusted repository' >&2; exit 1; }
           [[ "$REQUESTED_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'tag must be vX.Y.Z' >&2; exit 1; }
-          [[ "$GITHUB_REF" == "refs/tags/$REQUESTED_TAG" ]] || { echo 'manual runs must select the requested tag as the workflow ref' >&2; exit 1; }
-          [[ "$(git cat-file -t "$REQUESTED_TAG")" == tag ]] || { echo 'release tag must be annotated' >&2; exit 1; }
           remote=$(git ls-remote --tags origin "refs/tags/$REQUESTED_TAG" "refs/tags/$REQUESTED_TAG^{}")
           object=$(awk -v ref="refs/tags/$REQUESTED_TAG" '$2 == ref {print $1}' <<<"$remote")
           commit=$(awk -v ref="refs/tags/$REQUESTED_TAG^{}" '$2 == ref {print $1}' <<<"$remote")
           [[ -n "$object" && -n "$commit" ]] || { echo 'tag is absent or is not annotated on origin' >&2; exit 1; }
+          git fetch --force --no-tags origin "refs/tags/$REQUESTED_TAG:refs/tags/$REQUESTED_TAG"
+          [[ "$(git cat-file -t "$REQUESTED_TAG")" == tag ]] || { echo 'release tag must be annotated' >&2; exit 1; }
           [[ "$(git rev-parse "$REQUESTED_TAG^{tag}")" == "$object" ]] || exit 1
           [[ "$(git rev-parse "$REQUESTED_TAG^{commit}")" == "$commit" ]] || exit 1
-          [[ "$GITHUB_SHA" == "$commit" ]] || { echo 'selected workflow ref does not resolve to the tag commit' >&2; exit 1; }
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF" == "refs/tags/$REQUESTED_TAG" ]] || { echo 'tag push ref does not match requested tag' >&2; exit 1; }
+            [[ "$GITHUB_SHA" == "$commit" ]] || { echo 'tag push SHA does not resolve to the tag commit' >&2; exit 1; }
+            mode=tag-push
+          else
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main ]] || { echo 'manual recovery must run from main' >&2; exit 1; }
+            git merge-base --is-ancestor "$commit" "$GITHUB_SHA" || { echo 'tag commit is not an ancestor of the selected main commit' >&2; exit 1; }
+            echo '::warning::Manual recovery disables website dispatch; use the hourly or manual site refresh.'
+            mode=manual-main
+          fi
           echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
-  release:
+  release-tag-push:
     needs: validate
+    if: needs.validate.outputs.mode == 'tag-push'
     permissions:
       contents: write
     uses: averagechris/fleet/.github/workflows/release.yml@56cce9d57377944d4ddc91953ccda1bceca3927d
@@ -57,3 +69,13 @@ jobs:
       github_app_id: ${{ vars.WEBSITE_APP_ID }}
     secrets:
       github_app_private_key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+
+  release-manual-main:
+    needs: validate
+    if: needs.validate.outputs.mode == 'manual-main'
+    permissions:
+      contents: write
+    uses: averagechris/fleet/.github/workflows/release.yml@56cce9d57377944d4ddc91953ccda1bceca3927d
+    with:
+      tag: ${{ needs.validate.outputs.tag }}
+      platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'

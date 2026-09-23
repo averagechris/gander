@@ -32,12 +32,14 @@ release-contract gates, verifies the reproducible artifact, creates an
 annotated tag, and atomically pushes the release commit and tag. It does not
 upload assets itself; GitHub Actions is the sole release and asset writer.
 
-The workflow does not run on a `main` push. A manual retry is accepted only
-when the requested `vX.Y.Z` is the selected workflow ref in
-`averagechris/gander`, exists on `origin`, is annotated, and resolves to the
-selected commit. Unknown tags, malformed tags, forks, pull requests, and
-mismatched refs fail closed. Forks and pull requests therefore receive no
-release secrets.
+The workflow does not run on a `main` push. To recover an existing release,
+dispatch it from the default branch (for example,
+`gh workflow run release.yml --ref main -f tag=v0.8.3`). The requested tag must
+exist on `origin`, be annotated, and peel to a commit that is an ancestor of
+the selected `main` commit. This recovery mode never moves the tag and disables
+website dispatch; use the hourly or manual site refresh afterward. Tag pushes
+still require the event SHA to equal the tag's peeled commit. Unknown tags,
+malformed tags, forks, pull requests, and mismatched refs fail closed.
 
 ## Historical SourceHut releases
 
