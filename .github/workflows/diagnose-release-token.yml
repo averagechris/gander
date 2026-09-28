@@ -1,0 +1,88 @@
+name: Diagnose release token
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.repository == 'averagechris/gander' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Probe release API permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          report_gh_api() {
+            local label="$1"
+            local endpoint="$2"
+            local output
+            output="$(mktemp)"
+
+            gh api --method GET --include --silent "$endpoint" >"$output" 2>/dev/null || true
+
+            printf '%s\n' "## ${label}"
+            awk '
+              BEGIN { IGNORECASE = 1 }
+              /^HTTP\// { status = $2 }
+              /^x-accepted-github-permissions:/ { accepted = substr($0, index($0, ":") + 2); sub(/\r$/, "", accepted) }
+              /^x-github-request-id:/ { request_id = substr($0, index($0, ":") + 2); sub(/\r$/, "", request_id) }
+              /^x-ratelimit-remaining:/ { remaining = substr($0, index($0, ":") + 2); sub(/\r$/, "", remaining) }
+              /^\r?$/ { in_body = 1; next }
+              in_body { body = body $0 "\n" }
+              END {
+                printf "HTTP status: %s\n", status ? status : "missing"
+                printf "X-Accepted-GitHub-Permissions: %s\n", accepted ? accepted : "missing"
+                printf "X-GitHub-Request-Id: %s\n", request_id ? request_id : "missing"
+                printf "X-RateLimit-Remaining: %s\n", remaining ? remaining : "missing"
+                printf "%s", body
+              }
+            ' "$output" | {
+              IFS= read -r status
+              IFS= read -r accepted
+              IFS= read -r request_id
+              IFS= read -r remaining
+              body="$(cat)"
+              printf '%s\n%s\n%s\n%s\n' "$status" "$accepted" "$request_id" "$remaining"
+              count="$(jq -r 'if type == "array" then length elif type == "object" and has("id") then 1 else "n/a" end' <<<"$body" 2>/dev/null || printf 'n/a')"
+              printf 'Response item count: %s\n\n' "$count"
+            }
+            rm -f "$output"
+          }
+
+          report_gh_api \
+            'Authenticated release list' \
+            'repos/averagechris/gander/releases?per_page=100'
+          report_gh_api \
+            'Authenticated release by tag' \
+            'repos/averagechris/gander/releases/tags/v0.8.2'
+
+      - name: Probe unauthenticated public release list
+        shell: bash
+        env:
+          GH_TOKEN: ''
+        run: |
+          set -euo pipefail
+          headers="$(mktemp)"
+          body="$(mktemp)"
+          status="$(curl --silent --show-error --location \
+            --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --dump-header "$headers" --output "$body" --write-out '%{http_code}' \
+            'https://api.github.com/repos/averagechris/gander/releases?per_page=100')"
+          printf '%s\n' '## Unauthenticated public release list'
+          printf 'HTTP status: %s\n' "$status"
+          awk 'BEGIN { IGNORECASE = 1 }
+            /^x-accepted-github-permissions:/ || /^x-github-request-id:/ || /^x-ratelimit-remaining:/ {
+              sub(/\r$/, ""); print
+            }' "$headers"
+          count="$(jq -r 'if type == "array" then length else "n/a" end' "$body" 2>/dev/null || printf 'n/a')"
+          printf 'Response item count: %s\n' "$count"
+          rm -f "$headers" "$body"
