@@ -60,7 +60,7 @@ jobs:
     if: needs.validate.outputs.mode == 'tag-push'
     permissions:
       contents: write
-    uses: averagechris/fleet/.github/workflows/release.yml@418836a084a327f3fb16455f4c16c1268ff35680
+    uses: averagechris/fleet/.github/workflows/release.yml@9abfeb03cd92eb2dbea1cfc78eb79dd3eb34f16f
     with:
       tag: ${{ needs.validate.outputs.tag }}
       platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'
@@ -75,7 +75,7 @@ jobs:
     if: needs.validate.outputs.mode == 'manual-main'
     permissions:
       contents: write
-    uses: averagechris/fleet/.github/workflows/release.yml@418836a084a327f3fb16455f4c16c1268ff35680
+    uses: averagechris/fleet/.github/workflows/release.yml@9abfeb03cd92eb2dbea1cfc78eb79dd3eb34f16f
     with:
       tag: ${{ needs.validate.outputs.tag }}
       platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'
