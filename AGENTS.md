@@ -66,11 +66,10 @@ the `ci-*` validation apps or build the release artifact. The real release
 command validates the prepared tree with the `ci-*` apps and the evaluated
 release contract, verifies the reproducible artifact, then atomically publishes
 the tag and `main` under a remote-ref lease. The
-tag-triggered GitHub workflow builds both configured archive/checksum pairs,
-publishes the GitHub release only after the complete set verifies, and then
-dispatches `pages.yml` in `averagechris/averagechris.github.io` with the
-configured GitHub App. Missing App credentials produce an explicit warning;
-they never masquerade as a successful site dispatch.
+tag-triggered GitHub workflow builds both configured archive/checksum pairs as
+Actions artifacts. A green run means artifacts are ready, not that a release
+was published. An operator must verify and publish the four assets, then
+manually dispatch and verify the site, following `docs/release.md`.
 
 The SourceHut release manifest is archival documentation for old SourceHut
 tags only. Do not use it for new releases.

@@ -1,4 +1,4 @@
-name: Release
+name: Build release artifacts (manual publication required)
 
 on:
   push:
@@ -55,27 +55,24 @@ jobs:
           echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
-  release-tag-push:
+  artifacts-tag-push:
     needs: validate
     if: needs.validate.outputs.mode == 'tag-push'
     permissions:
-      contents: write
-    uses: averagechris/fleet/.github/workflows/release.yml@9abfeb03cd92eb2dbea1cfc78eb79dd3eb34f16f
+      contents: read
+    uses: averagechris/fleet/.github/workflows/release.yml@1b39d192525e2ed6bf1a4fe9d0b0f569588e1c02
     with:
       tag: ${{ needs.validate.outputs.tag }}
       platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'
-      website_repository: averagechris/averagechris.github.io
-      website_workflow: pages.yml
-      github_app_id: ${{ vars.WEBSITE_APP_ID }}
-    secrets:
-      github_app_private_key: ${{ secrets.WEBSITE_APP_PRIVATE_KEY }}
+      publish_release: false
 
-  release-manual-main:
+  artifacts-manual-main:
     needs: validate
     if: needs.validate.outputs.mode == 'manual-main'
     permissions:
-      contents: write
-    uses: averagechris/fleet/.github/workflows/release.yml@9abfeb03cd92eb2dbea1cfc78eb79dd3eb34f16f
+      contents: read
+    uses: averagechris/fleet/.github/workflows/release.yml@1b39d192525e2ed6bf1a4fe9d0b0f569588e1c02
     with:
       tag: ${{ needs.validate.outputs.tag }}
       platforms: '[{"name":"aarch64-darwin","runner":"macos-14"},{"name":"x86_64-linux","runner":"ubuntu-24.04"}]'
+      publish_release: false

@@ -100,8 +100,9 @@ nix shell nixpkgs#cargo nixpkgs#rustc -c cargo test
 
 ## Releases
 
-Releases are cut with Nix flake apps and published from canonical annotated
-`vX.Y.Z` tags at [GitHub](https://github.com/averagechris/gander/releases).
+Releases are cut with Nix flake apps from canonical annotated `vX.Y.Z` tags.
+GitHub Actions builds downloadable artifacts, but an operator publishes them at
+[GitHub](https://github.com/averagechris/gander/releases).
 GitHub Actions builds macOS arm64 and Linux x86_64 archives and checksums:
 
 ```sh
@@ -113,8 +114,9 @@ Run these from a fresh empty jj working-copy commit aligned with local and
 remote `main`. `--check` is a nonmutating ref/version preflight only; it does
 not run validation or build the release artifact. The real release command
 prepares and fully validates the tree, verifies the reproducible artifact, and
-then publishes the leased refs. The tag-triggered workflow owns release assets
-and dispatches the website refresh after publication.
+then publishes the leased refs. The tag-triggered workflow stores both platform
+archive/checksum pairs as Actions artifacts. A green run means artifacts are
+ready, not published; follow the manual publication and site-refresh runbook.
 
 See [docs/release.md](docs/release.md) for the full process and the individual
 `prepare-release`, `release-tag`, and `release-artifact` stages.
