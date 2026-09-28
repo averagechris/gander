@@ -9,9 +9,11 @@ in `.github/workflows/release.yml`; the SHA-pinned fleet workflow builds:
 - `aarch64-darwin` on `macos-14`
 - `x86_64-linux` on `ubuntu-24.04`
 
-Each platform contributes an archive and checksum to an Actions artifact named
-`release-<platform>`. A green workflow means only that all artifacts are ready;
-an operator must publish the GitHub Release and refresh the website manually.
+Each platform contributes an archive, checksum, and `release-identity-<platform>`
+file to an Actions artifact named `release-<platform>`. The identity file binds
+the build to the annotated tag object and its peeled commit. A green workflow
+means only that all six files are ready; an operator must publish the four
+archive and checksum files and refresh the website manually.
 
 ## Commands
 
@@ -43,39 +45,120 @@ malformed tags, forks, pull requests, and mismatched refs fail closed.
 After the workflow succeeds, use a locally authorized `gh` session (run
 `gh auth refresh -h github.com -s workflow` if dispatch permission is absent):
 
-```sh
+```bash
+set -euo pipefail
+
+repo=averagechris/gander
 tag=vX.Y.Z
 run_id=123456789
-rm -rf "dist/manual-$tag" && mkdir -p "dist/manual-$tag"
-gh run download "$run_id" -n release-aarch64-darwin -D "dist/manual-$tag/aarch64-darwin"
-gh run download "$run_id" -n release-x86_64-linux -D "dist/manual-$tag/x86_64-linux"
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
-remote="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
-tag_object="$(awk -v r="refs/tags/$tag" '$2 == r {print $1}' <<<"$remote")"
-commit="$(awk -v r="refs/tags/$tag^{}" '$2 == r {print $1}' <<<"$remote")"
-test -n "$tag_object" && test -n "$commit"
-test "$(git cat-file -t "$tag")" = tag
-test "$(git rev-parse "$tag^{tag}")" = "$tag_object"
-test "$(git rev-parse "$tag^{commit}")" = "$commit"
+# Accept only this repository's successful release builder. A tag push must run
+# at the tag commit. A recovery dispatch must run from this repository's main.
+run="$(gh run view "$run_id" -R "$repo" \
+  --json workflowName,conclusion,event,headBranch,headSha)"
+test "$(jq -r .workflowName <<<"$run")" = \
+  'Build release artifacts (manual publication required)'
+test "$(jq -r .conclusion <<<"$run")" = success
+event="$(jq -r .event <<<"$run")"
+run_branch="$(jq -r .headBranch <<<"$run")"
+run_sha="$(jq -r .headSha <<<"$run")"
+repo_context="$(gh repo view "$repo" --json nameWithOwner,defaultBranchRef)"
+test "$(jq -r .nameWithOwner <<<"$repo_context")" = "$repo"
+test "$(jq -r .defaultBranchRef.name <<<"$repo_context")" = main
 
-assets=()
-while IFS= read -r asset; do assets+=("$asset"); done \
-  < <(find "dist/manual-$tag" -type f -print | sort)
-test "${#assets[@]}" -eq 4
-test "$(find "dist/manual-$tag" -type f -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 2
-test "$(find "dist/manual-$tag" -type f -name '*.tar.gz.sha256' | wc -l | tr -d ' ')" -eq 2
-(cd "dist/manual-$tag/aarch64-darwin" && sha256sum -c -- *.sha256)
-(cd "dist/manual-$tag/x86_64-linux" && sha256sum -c -- *.sha256)
+resolve_remote_tag() {
+  local ref tag_data
+  ref="$(gh api "repos/$repo/git/ref/tags/$tag")"
+  test "$(jq -r .object.type <<<"$ref")" = tag
+  tag_object="$(jq -r .object.sha <<<"$ref")"
+  tag_data="$(gh api "repos/$repo/git/tags/$tag_object")"
+  test "$(jq -r .object.type <<<"$tag_data")" = commit
+  commit="$(jq -r .object.sha <<<"$tag_data")"
+  test -n "$tag_object" && test -n "$commit"
+}
+resolve_remote_tag
+case "$event" in
+  push)
+    test "$run_branch" = "$tag"
+    test "$run_sha" = "$commit"
+    ;;
+  workflow_dispatch)
+    test "$run_branch" = main
+    # The workflow validates that this main commit contains the tag commit.
+    gh api "repos/$repo/commits/$run_sha" --silent
+    ;;
+  *) exit 1 ;;
+esac
 
-gh release create "$tag" --verify-tag --draft --title "$tag" --notes-from-tag
-gh release upload "$tag" "${assets[@]}" # intentionally no --clobber
-rm -rf "dist/remote-$tag" && mkdir -p "dist/remote-$tag"
-gh release download "$tag" -D "dist/remote-$tag"
-for asset in "${assets[@]}"; do cmp "$asset" "dist/remote-$tag/$(basename "$asset")"; done
-gh release edit "$tag" --draft=false
+# Use a new directory. Never remove an existing operator directory.
+work="$(mktemp -d "${TMPDIR:-/tmp}/gander-$tag.XXXXXX")"
+mkdir "$work/aarch64-darwin" "$work/x86_64-linux"
+gh run download "$run_id" -R "$repo" -n release-aarch64-darwin \
+  -D "$work/aarch64-darwin"
+gh run download "$run_id" -R "$repo" -n release-x86_64-linux \
+  -D "$work/x86_64-linux"
+
+version="${tag#v}"
+darwin="$work/aarch64-darwin/gander-v$version-aarch64-darwin.tar.gz"
+linux="$work/x86_64-linux/gander-v$version-x86_64-linux.tar.gz"
+assets=("$darwin" "$darwin.sha256" "$linux" "$linux.sha256")
+identities=(
+  "$work/aarch64-darwin/release-identity-aarch64-darwin"
+  "$work/x86_64-linux/release-identity-x86_64-linux"
+)
+expected=("${assets[@]}" "${identities[@]}")
+for file in "${expected[@]}"; do test -f "$file"; done
+test "$(find "$work" -type f | wc -l | tr -d ' ')" -eq 6
+test "$(find "$work" -type f -print | sort)" = \
+  "$(printf '%s\n' "${expected[@]}" | sort)"
+for identity in "${identities[@]}"; do
+  test "$(wc -l <"$identity" | tr -d ' ')" -eq 2
+  test "$(sed -n '1p' "$identity")" = "$tag_object"
+  test "$(sed -n '2p' "$identity")" = "$commit"
+done
+(cd "$work/aarch64-darwin" && shasum -a 256 -c -- "$(basename "$darwin.sha256")")
+(cd "$work/x86_64-linux" && shasum -a 256 -c -- "$(basename "$linux.sha256")")
+
+# Stop if any published release or draft already uses this tag. If this finds a
+# draft from an interrupted attempt, stop creating new drafts. Inspect its
+# existing assets with `gh release view "$tag" -R "$repo" --json isDraft,assets`.
+# For each present asset, verify its bytes against the corresponding verified
+# local asset, then upload only missing expected assets without clobbering
+# existing ones. Fail and seek an operator decision for mismatched, incomplete,
+# or open assets. Only after all expected assets are complete should you resume
+# the remote four-file comparison below, and undraft the release only then.
+matches="$(gh api --paginate "repos/$repo/releases?per_page=100" \
+  --jq ".[] | select(.tag_name == \"$tag\") | .id")"
+test -z "$matches" || {
+  echo "release or draft already exists for $tag; follow the safe resume note" >&2
+  exit 1
+}
+
+# Recheck the remote tag immediately before creating the draft.
+old_tag_object="$tag_object"; old_commit="$commit"
+resolve_remote_tag
+test "$tag_object" = "$old_tag_object" && test "$commit" = "$old_commit"
+gh release create "$tag" -R "$repo" --verify-tag --draft \
+  --title "$tag" --notes-from-tag
+gh release upload "$tag" -R "$repo" "${assets[@]}" # no --clobber
+
+remote_dir="$(mktemp -d "${TMPDIR:-/tmp}/gander-$tag-remote.XXXXXX")"
+gh release download "$tag" -R "$repo" -D "$remote_dir"
+test "$(find "$remote_dir" -type f -exec basename {} \; | sort)" = \
+  "$(printf '%s\n' "${assets[@]##*/}" | sort)"
+for asset in "${assets[@]}"; do
+  cmp "$asset" "$remote_dir/$(basename "$asset")"
+done
+(cd "$remote_dir" && shasum -a 256 -c -- *.sha256)
+
+# Recheck the tag once more before making the release public.
+resolve_remote_tag
+test "$tag_object" = "$old_tag_object" && test "$commit" = "$old_commit"
+gh release edit "$tag" -R "$repo" --draft=false
 
 gh workflow run pages.yml --repo averagechris/averagechris.github.io \
-  -f tag="$tag" -f sha="$commit"
+  -f project=gander -f tag="$tag" -f sha="$commit"
 ```
 
 Do not undraft until all four remote assets compare byte-for-byte. After the
